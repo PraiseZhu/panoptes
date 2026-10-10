@@ -59,6 +59,12 @@ install -m 600 ../secrets.env.example /home/box/.config/mivo-qa/secrets.env   # 
 Requirements: Linux with **bubblewrap** (`/usr/bin/bwrap`), Node 24 via nvm (`$NVM_DIR`, default `~/.nvm`),
 `git`, `gh`, Python 3, Debian Chromium at `/usr/bin/chromium` (Mivo's browser journey).
 
+> Box note: Debian's `/etc/chromium.d/dev-shm` printed `[: …: unexpected operator` on every launch because
+> `/dev/shm` is a stacked mount there (`findmnt` returns two lines). It was patched locally to take the first line
+> and quote the variable (original kept at `$QA_HOME/.pre-panoptes/chromium.d-dev-shm.orig`). It is a dpkg conffile,
+> so upgrades keep the local edit (dpkg asks, or keeps it with `--force-confold`); if it ever comes back, reapply the
+> two-line change.
+
 Secrets (`secrets.env`, mode 0600): `GITHUB_TOKEN`, `QA_LLM_BASE_URL`, `QA_LLM_API_KEY`, optionally
 `ARGUS_TYPESAFE_API_KEY` (Jev triage), `MIVO_FEISHU_APP_ID` / `MIVO_FEISHU_APP_SECRET` (Feishu roster + DMs). See [`secrets.env.example`](secrets.env.example).
 
@@ -78,7 +84,8 @@ Environment overrides for `run-nightly.sh`:
 
 ```
 run-nightly.sh [--date YYYY-MM-DD] [--pr N ...] [--limit N] [--no-review] [--skip-step ID ...]
-               [--out PATH] [--no-reuse] [--wait-lock [SECONDS]] [--no-issues | --create-issues]
+               [--out PATH] [--no-reuse] [--wait-lock [SECONDS]] [--pr-timeout MIN] [--deadline HH:MM]
+               [--write-merged | --no-write-merged] [--no-issues | --create-issues]
 ```
 
 | Flag | Meaning |
@@ -91,6 +98,9 @@ run-nightly.sh [--date YYYY-MM-DD] [--pr N ...] [--limit N] [--no-review] [--ski
 | `--out PATH` | Write the report to PATH instead of `reports/D.json` (a daily-report filename is refused). |
 | `--no-reuse` | Re-test merged PRs even if `reports/merged/PR-N.json` already covers the same merge commit. |
 | `--wait-lock [S]` | Queue behind a running instance for up to S seconds (default 14400) instead of exiting 75. |
+| `--pr-timeout MIN` | Per-PR time budget (env `ARGUS_PR_TIMEOUT_MIN`). Every child process is capped by the remaining budget and no new step starts after it; the PR is reported `not-tested` (P2, `pr-timeout`). Default: no limit. |
+| `--deadline HH:MM` | Shanghai wall-clock deadline or ISO time (env `ARGUS_DEADLINE`). PRs not started by then → `not-tested` (P2, `deadline`); a running PR is stopped. |
+| `--write-merged` / `--no-write-merged` | Also write each actually-tested merged PR to `reports/merged/PR-N.json` (on-merge format). Default on without `--pr`, off with `--pr`. |
 | `--no-issues` | Default. Accepted for explicitness. |
 | `--create-issues` | Open issues — **only if `ARGUS_ALLOW_ISSUES=1` is also exported by the caller.** The secrets file cannot switch this on. |
 | `-h`, `--help` | Print usage. |
@@ -179,26 +189,44 @@ node scripts/send-feishu-dm.mjs --help
 - **Output:** one JSON object on stdout (`ok`, `message_id` | `skipped` | `error`/`stage`/`code`/`msg`).
   Exit `0` sent or skipped · `1` Feishu/API/network error · `2` usage/config error · `3` recipient refused.
 
+## Coverage gate / 覆盖率门禁 (white-box)
+
+The `unit` step of the tested revision's first run adds `vitest --coverage` (v8, JSON reports into the run dir; vitest's
+own thresholds are not used, so coverage never fails the unit step). Thresholds: **lines 80 · branches 70 ·
+functions 80 · new code 90**. New code = added/modified lines of `git diff base_sha..tested_sha` in non-test JS/TS
+sources, intersected with v8 statement lines; files no test loads count as uncovered. Below any threshold →
+one **P2** finding (`source: "coverage-gate"`), which by the issue rules never becomes an issue. Result in
+`prs[].coverage_gate`. `ARGUS_COVERAGE=0` turns it off.
+
 ## Report / 报告格式
+
+Full field reference (for the daily-report agent): **[`docs/report-schema.md`](docs/report-schema.md)** (copied to
+`$QA_HOME/reports/SCHEMA.md`). Key points: every `prs[]` entry has `tested_at` (ISO 8601, `+08:00`); discovered
+but untested PRs stay in `prs[]` as `verdict: "not-tested"`; `qa-error` is P2; tests and code review use the same
+commit (`tested_sha` = `reviewed_sha`); `system_health.heartbeat` and `system_health.complete`.
 
 `$QA_HOME/reports/YYYY-MM-DD.json`:
 
 ```
 { schema_version, tool, date, timezone, repo, generated_at,
-  run: { id, started_at, finished_at, duration_s, args, argus_commit, ming_qa_commit, llm_model, evidence_root },
+  run: { id, started_at, finished_at, started_at_shanghai, finished_at_shanghai, duration_s, args,
+         argus_commit, ming_qa_commit, llm_model, evidence_root },
   dimensions, severity_scale,
-  summary: { pr_count, prs_by_severity, findings_by_severity, findings_total, reused_from_on_merge },
+  summary: { pr_count, prs_by_severity, findings_by_severity, findings_total, reused_from_on_merge,
+             tested_count, not_tested[], qa_errors[] },
   prs: [ { number, title, author, url, state, draft, discovery_reason, tested_sha, base_sha,
-           risk_class, severity, verdict, outcome, outcome_reason, reused?, reused_from?,
+           reviewed_sha, review_base_sha, sha_consistent, test_started_at, tested_at,
+           risk_class, severity, verdict, outcome, outcome_reason, not_tested_code?, not_tested_reason?,
+           reused?, reused_from?,
            checks: [ { id, name, dimension, qa_dimensions, status, duration_ms, … } ],
            failed_checks: [ { check_id, dimension, test, status, severity, attribution,
                               fingerprint, pr_fingerprint, evidence{ log_tail, rerun, base_run, … } } ],
            code_review: { status, gate, summary, findings_count, file },
            findings: [ … each with source, dimension, severity, fingerprint, evidence ],
-           ai_summary, coverage, evidence_dir } ],
-  issues: { enabled, repo, labels, policy, results? },
+           ai_summary, coverage, coverage_gate, evidence_dir } ],
+  issues: { enabled, repo, labels, policy, results? }, merged_reports: [ { pr, file } ],
   system_health: { status: ok|degraded|failed, qa_tool_failures[], env_problems[], llm_errors[],
-                   environment{…}, discovery{…}, notes[] } }
+                   environment{…}, discovery{…}, notes[], heartbeat{…}, complete, all_discovered_tested } }
 ```
 
 `fingerprint` (`mq1-…`) ignores PR number, SHA, durations, temp paths and line numbers, so it deduplicates across
