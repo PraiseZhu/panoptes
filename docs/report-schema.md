@@ -178,11 +178,12 @@ Older reports without the field: treat `source == "check"` as test-backed.
 - The four metrics and thresholds are ming-qa's G2 *Unit Tests And Coverage* gate
   (`ming-qa/skills/quality-assurance-agent/references/quality-gates.md`, config `qualityGates.coverage`:
   `lines 80 · branches 70 · functions 80 · newCode 90`); `thresholds_source` names it.
-- `new_code` = ming-qa **newCode**: *line coverage of new code*. ming-qa gives no finer formula, so panoptes uses the
-  same line-coverage definition as `lines`, restricted to the PR's changed lines: lines added/modified by
-  `git diff base_sha..tested_sha` in non-test JS/TS source files; a line is executable if it starts a v8 statement
-  (istanbul's line metric uses the same rule) and covered if that statement executed. Files no test loads count their
-  code-like added lines as uncovered (`unloaded_files`). `null` / `not-evaluated` when the diff has no executable lines.
+- `new_code` = the 4th metric, ming-qa **newCode** — G2 lists it as "New-code coverage: 90" (config
+  `qualityGates.coverage.newCode: 90`) and gives no formula. panoptes measures it as line coverage restricted to the
+  PR's new code (the same line definition as `lines`): lines added/modified by `git diff base_sha..tested_sha` in
+  non-test JS/TS source files; a line is executable if it starts a v8 statement (istanbul's line metric uses the same
+  rule) and covered if that statement executed. Files no test loads count their code-like added lines as uncovered
+  (`unloaded_files`). `null` / `not-evaluated` when the diff has no executable lines. Threshold 90 (pass at ≥ 90).
 - Any metric below threshold → `status: fail` and one finding `{ source: "coverage-gate", severity: "P2" }`.
 
 ## `system_health`
