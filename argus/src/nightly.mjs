@@ -137,6 +137,11 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   const profile = baseProfile
   const common = { repo, jobId: `n${number}`, profile, extraRefspecs, keepTo: evDir }
 
+  // 覆盖率轮次：独立检出、只跑单测（带 --coverage），与首轮并行；它的通过 / 失败不参与任何判定
+  const covStep = profile.steps.find((x) => x.coverage && plan.stepIds.includes(x.id))
+  const covRun = covStep && process.env.ARGUS_COVERAGE !== '0'
+    ? ensureMirror(repo, sha, { extraRefspecs }).then(() => executeOnSha({ ...common, label: 'cov', sha, stepIds: [covStep.id] })).catch((err) => ({ error: err }))
+    : Promise.resolve(null)
   let first = await executeOnSha({ ...common, label: 'h1', sha, stepIds: plan.stepIds })
   if (setupFailed(first)) {
     health.qa_tool_failures.push({ pr: number, stage: 'setup', message: 'dependency install failed, retrying once', detail: tail(redact(first.find((r) => r.kind === 'setup')?.tail ?? ''), 600) })
@@ -149,7 +154,8 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   out.base_sha = baseSha
   // 同一份 diff（base..tested）同时给覆盖率门禁和代码审查用：审查的就是被测的那个提交
   const prDiff = await diffForReview({ repo, sha, baseSha, extraRefspecs })
-  out.coverage_gate = computeCoverageGate({ first, prDiff })
+  const cov = await covRun
+  out.coverage_gate = computeCoverageGate({ first: Array.isArray(cov) ? cov : [], prDiff, covError: cov?.error })
 
   let rerun = null, base = null, latest = null, latestIsSame = true
   const failed = failedIds(first)
@@ -320,12 +326,17 @@ export function splitDiffFiles(text) {
 }
 
 // 覆盖率门禁：取首轮里带 coverage 的步骤（单测），与 base..tested 的 diff 新增行求交
-function computeCoverageGate({ first, prDiff }) {
+function computeCoverageGate({ first, prDiff, covError = null }) {
   const r = first.find((x) => x.coverage)
-  if (!r) return coverageGate({ coverage: null })
-  if (r.coverage.status !== 'ok') return coverageGate({ coverage: r.coverage, stepId: r.id })
+  if (!r) {
+    const setup = first.find((x) => x.kind === 'setup' && !x.ok)
+    return coverageGate({ coverage: { status: 'unavailable', reason: covError ? `coverage run failed: ${redact(String(covError.message)).slice(0, 200)}` : setup ? 'coverage run: dependency install failed' : 'unit step not planned or coverage disabled' } })
+  }
+  // 覆盖率轮次里单测本身的结果只作说明（插桩可能让个别用例失败），不影响判定
+  const underCoverage = { exit_code: r.exitCode, timed_out: Boolean(r.timedOut), failed_tests: (r.failures ?? []).length, note: 'unit run under v8 coverage; its pass/fail is informational only and never used for the verdict' }
+  if (r.coverage.status !== 'ok') return { ...coverageGate({ coverage: r.coverage, stepId: r.id }), unit_run_under_coverage: underCoverage }
   const diffError = prDiff.text == null ? `new-code coverage not evaluated: ${prDiff.error}` : null
-  return coverageGate({ coverage: r.coverage, added: diffError ? null : parseAddedLines(prDiff.text), stepId: r.id, diffError })
+  return { ...coverageGate({ coverage: r.coverage, added: diffError ? null : parseAddedLines(prDiff.text), stepId: r.id, diffError }), unit_run_under_coverage: underCoverage }
 }
 
 // 三个维度各自是否真的跑了检查（pass / fail 才算跑了；unavailable / timeout 不算）

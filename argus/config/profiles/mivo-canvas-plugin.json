@@ -263,8 +263,7 @@
       "coverage": {
         "dir": "${RUN}/coverage/unit",
         "labels": [
-          "h1",
-          "h1r"
+          "cov"
         ]
       }
     },

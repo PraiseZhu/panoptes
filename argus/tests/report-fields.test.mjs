@@ -148,16 +148,17 @@ test('覆盖率门禁 P2 不会成为 issue 候选（即使作者是 PraiseZhu�
   assert.equal(selectIssueCandidates(report).candidates.length, 0)
 })
 
-test('覆盖率只在首轮开启、目录不能逃出 run 目录；读取后删掉大文件只留 summary', () => {
+test('覆盖率只在独立的 cov 轮次开启（判定轮次从不带覆盖率）、目录不能逃出 run 目录；读取后删掉大文件只留 summary', () => {
   const runDir = mkdtempSync(join(tmpdir(), 'cov-run-'))
   const step = { id: 'unit', coverage: { dir: '${RUN}/coverage/unit' } }
-  assert.equal(coverageDirFor(step, runDir, { runLabel: 'h1' }), join(runDir, 'coverage/unit'))
+  assert.equal(coverageDirFor(step, runDir, { runLabel: 'cov' }), join(runDir, 'coverage/unit'))
+  assert.equal(coverageDirFor(step, runDir, { runLabel: 'h1' }), null, 'verdict runs never carry coverage')
   assert.equal(coverageDirFor(step, runDir, { runLabel: 'h2' }), null)
   assert.equal(coverageDirFor(step, runDir, { runLabel: 'b' }), null)
   assert.equal(coverageDirFor({ id: 'lint' }, runDir, { runLabel: 'h1' }), null)
-  assert.throws(() => coverageDirFor({ id: 'u', coverage: { dir: '/etc/x' } }, runDir, { runLabel: 'h1' }))
+  assert.throws(() => coverageDirFor({ id: 'u', coverage: { dir: '/etc/x' } }, runDir, { runLabel: 'cov' }))
   process.env.ARGUS_COVERAGE = '0'
-  assert.equal(coverageDirFor(step, runDir, { runLabel: 'h1' }), null)
+  assert.equal(coverageDirFor(step, runDir, { runLabel: 'cov' }), null)
   delete process.env.ARGUS_COVERAGE
   assert.ok(vitestCoverageArgs('/x').includes('--coverage.reportsDirectory=/x'))
   assert.ok(!vitestCoverageArgs('/x').some((a) => a.includes('thresholds')), 'vitest must not fail the unit step on thresholds')

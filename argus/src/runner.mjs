@@ -360,11 +360,12 @@ export async function runSteps(profile, src, runDir, { stepIds = null, execution
   return results
 }
 
-// 覆盖率只在被测版本的首轮（h1 / 安装失败重试的 h1r）开启；重跑、基线、最新主干不需要，也不该变慢。
+// 覆盖率只在专门的覆盖率轮次（label 'cov'，与首轮并行、独立检出）开启：v8 插桩会让少数测试改变行为
+// （实测 main 上有 6 个用例只在 --coverage 下失败），所以判定用的首轮 / 重跑 / 基线都不带覆盖率。
 // ARGUS_COVERAGE=0 全局关闭。目录必须落在 run 目录内。
 export function coverageDirFor(step, runDir, execution) {
   if (!step.coverage || process.env.ARGUS_COVERAGE === '0') return null
-  const labels = step.coverage.labels ?? ['h1', 'h1r']
+  const labels = step.coverage.labels ?? ['cov']
   if (!labels.includes(execution?.runLabel)) return null
   const dir = resolve(subst(step.coverage.dir ?? `\${RUN}/coverage/${step.id}`, runDir))
   const rel = relative(resolve(runDir), dir)
