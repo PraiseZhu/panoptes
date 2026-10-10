@@ -108,12 +108,12 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   const evDir = join(evidenceRoot, `pr-${number}`)
   mkdirSync(evDir, { recursive: true })
   out.evidence_dir = evDir
-  if (!merged && pr.state !== 'open') { out.verdict = 'skipped'; out.outcome_reason = 'PR is closed without merge'; out.tested_at = toShanghaiIso(); return out }
+  if (!merged && pr.state !== 'open') { out.tested = false; out.verdict = 'skipped'; out.outcome_reason = 'PR is closed without merge'; out.tested_at = toShanghaiIso(); return out }
 
   const { riskClass, reasonZh: classReason } = classifyChange(files, baseProfile)
   out.risk_class = riskClass
   out.risk_reason = classReason
-  if (riskClass === 'A') { out.verdict = 'docs-only'; out.outcome = 'docs_only'; out.outcome_reason = classReason; out.duration_s = Math.round((Date.now() - startedAt) / 1000); out.tested_at = toShanghaiIso(); return out }
+  if (riskClass === 'A') { out.skipped_steps = baseProfile.steps.filter((x) => x.kind !== 'setup').map((x) => ({ id: x.id, nameZh: x.nameZh, reason: 'docs-only change: no checks run', dimension: toBox(x, baseProfile) })); Object.assign(out, dimensionsOf([])); out.tested = false; out.verdict = 'docs-only'; out.outcome = 'docs_only'; out.outcome_reason = classReason; out.duration_s = Math.round((Date.now() - startedAt) / 1000); out.tested_at = toShanghaiIso(); return out }
 
   // 被测版本：已合并 → merge commit；开放 → PR head（从 refs/pull/N/head 取，支持 fork）
   const sha = merged ? pr.merge_commit_sha : pr.head.sha
@@ -126,7 +126,14 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   const triage = toTriage({ profile: baseProfile, files, jev })
   if (secrets.ARGUS_TYPESAFE_API_KEY && !jev.ok) health.llm_errors.push({ pr: number, stage: 'triage(jev)', message: jev.reasonZh })
   const plan = toStepPlan({ profile: baseProfile, riskClass, triage })
-  if (opts.skipSteps?.length) plan.stepIds = plan.stepIds.filter((id) => !opts.skipSteps.includes(id))
+  for (const sk of plan.skipped) sk.reason ??= 'triage: change does not touch what this optional step covers'
+  if (opts.skipSteps?.length) {
+    for (const id of plan.stepIds.filter((x) => opts.skipSteps.includes(x))) {
+      const st = baseProfile.steps.find((x) => x.id === id)
+      plan.skipped.push({ id, nameZh: st?.nameZh, reason: 'skipped by --skip-step', reasonZh: '运行参数 --skip-step 跳过' })
+    }
+    plan.stepIds = plan.stepIds.filter((id) => !opts.skipSteps.includes(id))
+  }
   const profile = baseProfile
   const common = { repo, jobId: `n${number}`, profile, extraRefspecs, keepTo: evDir }
 
@@ -164,7 +171,15 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   out.outcome = decision.outcome
   out.outcome_reason = decision.reasonZh
   out.coverage = toCoverage({ profile, triage, results: first })
-  out.skipped_steps = plan.skipped
+  // 计划要跑却没有结果的步骤（安装失败后中止、时间预算用完等）也列进 skipped_steps
+  const ranIds = new Set(first.map((r) => r.id))
+  for (const id of plan.stepIds) {
+    if (ranIds.has(id)) continue
+    const st = profile.steps.find((x) => x.id === id)
+    if (st?.kind === 'setup') continue
+    plan.skipped.push({ id, nameZh: st?.nameZh, reason: setupFailed(first) ? 'not run: dependency install failed' : 'not run: run stopped before this step (time budget / shutdown)', reasonZh: '没跑到' })
+  }
+  out.skipped_steps = plan.skipped.map((sk) => ({ ...sk, dimension: toBox(profile.steps.find((x) => x.id === sk.id) ?? { id: sk.id }, profile) }))
 
   // 检查清单（每步带维度）
   const stepById = Object.fromEntries(profile.steps.map((s) => [s.id, s]))
@@ -259,6 +274,8 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   }
   out.findings = [...out.failed_checks.map((c) => ({ source: 'check', test_backed: true, ...c })), ...out.findings]
   out.severity = out.findings.length ? maxSev(out.findings.map((f) => f.severity)) : 'P3'
+  Object.assign(out, dimensionsOf(out.checks))
+  out.tested = true
   out.verdict = verdictOf(out)
   out.duration_s = Math.round((Date.now() - startedAt) / 1000)
   out.tested_at = toShanghaiIso()
@@ -311,11 +328,20 @@ function computeCoverageGate({ first, prDiff }) {
   return coverageGate({ coverage: r.coverage, added: diffError ? null : parseAddedLines(prDiff.text), stepId: r.id, diffError })
 }
 
-function verdictOf(pr) {
+// 三个维度各自是否真的跑了检查（pass / fail 才算跑了；unavailable / timeout 不算）
+export function dimensionsOf(checks) {
+  const run = Object.fromEntries(Object.keys(BOXES).map((b) => [b, []]))
+  for (const c of checks ?? []) if (['pass', 'fail'].includes(c.status) && c.kind !== 'setup' && run[c.dimension]) run[c.dimension].push(c.id)
+  return { dimensions_run: run, dimensions_missing: Object.keys(run).filter((b) => !run[b].length) }
+}
+
+// clean 只能在：没有发现、所有检查都跑成、三个维度都真的跑过时给出
+export function verdictOf(pr) {
   if (pr.outcome === 'infra_failed') return 'qa-env-problem'
   if (pr.findings.some((f) => ['P0', 'P1'].includes(f.severity))) return 'needs-attention'
   if (pr.findings.some((f) => f.severity === 'P2')) return 'review-suggested'
   if (pr.checks.some((c) => c.status === 'unavailable' || c.status === 'timeout')) return 'partially-verified'
+  if ((pr.dimensions_missing ?? []).length) return 'partially-verified'
   return 'clean'
 }
 
@@ -478,6 +504,12 @@ async function createIssues(report) {
   return results
 }
 
+// 发现阶段就拿得到的 PR 基本信息：没测的 / 出错的条目也带 merged_at 等字段（日报按 merged_at 换算上海时区筛选）
+export function prMeta(pr) {
+  if (!pr) return {}
+  return { title: pr.title ?? null, author: pr.user?.login ?? null, url: pr.html_url ?? null, state: pr.merged_at ? 'merged' : (pr.state ?? null), merged_at: pr.merged_at ?? null, merge_sha: pr.merge_commit_sha ?? null }
+}
+
 // test_backed：只有失败检查（source: check）佐证的发现才是 true；LLM 审查、覆盖率门禁、QA 自身出错都是 false。
 // 下游通知 / 提 issue 规则以它为准，而不是只看严重度。
 export const FINDING_SOURCES = ['check', 'code-review', 'coverage-gate', 'qa-error']
@@ -489,14 +521,16 @@ export function annotateTestBacked(prs) {
     pr.test_backed = backed.length > 0
     pr.test_backed_severity = backed.length ? maxSev(backed.map((f) => f.severity)) : null
     pr.finding_sources = [...new Set(pr.findings.map((f) => f.source))]
+    if (!('merged_at' in pr)) pr.merged_at = null
+    pr.merged_at_shanghai = pr.merged_at ? toShanghaiIso(pr.merged_at) : null
   }
   return prs
 }
 
 // 发现了但这次没测的 PR：仍进 prs[]，verdict=not-tested 并写明原因。
-// 被 --pr 主动排除 → P3（本次有意不测）；超出 --limit / 超时 / 截止时间 → P2（夜间覆盖缺口，需要关注）。
+// severity 固定为 "untested"（不是 P 级，绝不显示成 P3）；tested: false。超时 / 截止时间另记 qa_tool_failures。
 export function notTestedEntry(t, code, reason) {
-  return { number: t.number, discovery_reason: t.reason, verdict: 'not-tested', severity: code === 'excluded-by-pr-filter' ? 'P3' : 'P2', not_tested_code: code, not_tested_reason: reason, tested_at: null, findings: [], failed_checks: [], checks: [], coverage_gate: null }
+  return { number: t.number, ...(t.meta ?? {}), discovery_reason: t.reason, verdict: 'not-tested', severity: 'untested', tested: false, not_tested_code: code, not_tested_reason: reason, tested_at: null, findings: [], failed_checks: [], checks: [], coverage_gate: null }
 }
 
 // --deadline：HH:MM（上海时间，指开始之后最近的那个时刻）或完整 ISO 时间
@@ -517,8 +551,8 @@ export function parseDeadline(v, now = new Date()) {
 export function planTargets(discovered, opts = {}) {
   let targets = discovered
   if (opts.prs?.length) {
-    const byNum = Object.fromEntries(discovered.map((t) => [t.number, t.reason]))
-    targets = opts.prs.map((n) => ({ number: n, reason: byNum[n] ?? 'manual (--pr)' }))
+    const byNum = Object.fromEntries(discovered.map((t) => [t.number, t]))
+    targets = opts.prs.map((n) => ({ number: n, reason: byNum[n]?.reason ?? 'manual (--pr)', meta: byNum[n]?.meta }))
   }
   const notTested = []
   if (opts.prs?.length) for (const t of discovered) if (!opts.prs.includes(t.number)) notTested.push(notTestedEntry(t, 'excluded-by-pr-filter', 'not selected by --pr in this run'))
@@ -560,7 +594,7 @@ export async function processTargets(targets, { opts = {}, health, startedAt = n
         health.qa_tool_failures.push({ pr: t.number, stage: 'pipeline', message: redact(err.message).slice(0, 800) })
         const msg = redact(err.message).slice(0, 800)
         const fp = fingerprintOf(repo ?? '', ['qa-error', 'pipeline', msg])
-        result = { number: t.number, discovery_reason: t.reason, verdict: 'qa-error', severity: 'P2', error: msg, failed_checks: [], checks: [], coverage_gate: null, test_started_at: beat.started_at, tested_at: null,
+        result = { number: t.number, ...(t.meta ?? {}), discovery_reason: t.reason, verdict: 'qa-error', severity: 'P2', tested: false, error: msg, failed_checks: [], checks: [], coverage_gate: null, test_started_at: beat.started_at, tested_at: null,
           findings: [{ source: 'qa-error', test_backed: false, check_id: 'pipeline', dimension: null, severity: 'P2', title: 'QA pipeline error (the PR itself was not verified)', fingerprint: fp, pr_fingerprint: prFingerprint(fp, t.number), evidence: { error: msg } }] }
       }
     }
@@ -633,7 +667,7 @@ export async function runNightly(opts = {}) {
   try {
     const disc = await listNightlyPrs(repo, day)
     health.discovery = { window_start: disc.window.startIso, window_end: disc.window.endIso, found: disc.prs.map((x) => ({ number: x.pr.number, reason: x.reason })) }
-    targets = disc.prs.map((x) => ({ number: x.pr.number, reason: x.reason }))
+    targets = disc.prs.map((x) => ({ number: x.pr.number, reason: x.reason, meta: prMeta(x.pr) }))
   } catch (err) {
     health.qa_tool_failures.push({ stage: 'discovery', message: redact(err.message).slice(0, 500) })
   }
@@ -666,7 +700,7 @@ export async function runNightly(opts = {}) {
     severity_scale: { P0: 'main/release broken or data loss: introduced failure on a merged PR that still fails on latest main', P1: 'introduced, reproducible product-check failure (blocks merge) or LLM code-review P0/P1', P2: 'quality-guard regression, unverified failure, QA could not verify, or review suggestion', P3: 'pre-existing / flaky / fixed-later failure, or informational only' },
     summary: {
       pr_count: prs.length,
-      prs_by_severity: Object.fromEntries(['P0', 'P1', 'P2', 'P3'].map((s) => [s, prs.filter((p) => p.severity === s).length])),
+      prs_by_severity: Object.fromEntries(['P0', 'P1', 'P2', 'P3', 'untested'].map((s) => [s, prs.filter((p) => p.severity === s).length])),
       findings_by_severity: Object.fromEntries(['P0', 'P1', 'P2', 'P3'].map((s) => [s, allFindings.filter((f) => f.severity === s).length])),
       findings_total: allFindings.length,
       reused_from_on_merge: prs.filter((p) => p.reused).map((p) => p.number),

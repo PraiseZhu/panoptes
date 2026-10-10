@@ -1,7 +1,8 @@
 # panoptes
 
-**Mivo 夜间 QA，Linux 版。** Argus 的继任者：每天对 `xindong/mivo-canvas-plugin` 前一天合并 / 活跃的 PR，在隔离沙盒里
-真跑测试、三重确认失败归因、用 ming-qa 做白盒代码审查，最后产出一份机器可读的日报 JSON。
+**Mivo QA，Linux 版。** Argus 的继任者：`xindong/mivo-canvas-plugin` 的 PR 合并后立即（on-merge）在隔离沙盒里
+真跑测试、三重确认失败归因、用 ming-qa 做白盒代码审查，产出机器可读的 JSON（`reports/merged/PR-N.json`）；
+按天的发现运行用来补漏和覆盖开放 PR。日报按 `merged_at`（换算成上海时间）挑选 PR。
 
 *Nightly QA for Mivo on Linux — the successor to [Argus](https://github.com/PraiseZhu/project-argus). For every PR merged or
 active on a given Shanghai day it checks out the exact revision, runs the project's real test steps inside a bubblewrap
@@ -112,9 +113,9 @@ Discovery (all authors): PRs **merged** during the day, plus PRs **open** with a
 Typical calls:
 
 ```sh
-run-nightly.sh                                                      # nightly, 03:00 Shanghai
-ARGUS_ALLOW_ISSUES=1 run-nightly.sh --pr 893 --wait-lock \
-    --out "$QA_HOME/reports/merged/PR-893.json" --create-issues     # on-merge trigger
+run-nightly.sh --pr 893 --wait-lock \
+    --out "$QA_HOME/reports/merged/PR-893.json"                     # on-merge trigger (primary)
+run-nightly.sh --date 2026-10-10 --deadline 08:45                   # day-level catch-up / open PRs
 ```
 
 Nightly reuse: a merged PR whose `reports/merged/PR-N.json` has `tested_sha` = its merge commit (and a finished

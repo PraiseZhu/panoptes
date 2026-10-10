@@ -14,14 +14,14 @@ const { run, setBudget } = await import('../src/exec.mjs')
 const health = () => ({ status: 'ok', qa_tool_failures: [], env_problems: [], llm_errors: [], notes: [] })
 const disc = [{ number: 1, reason: 'merged' }, { number: 2, reason: 'merged' }, { number: 3, reason: 'open-updated' }]
 
-test('发现了但没测的 PR 仍进 prs[]：--pr 排除记 P3，超出 --limit 记 P2，都带原因', () => {
+test('发现了但没测的 PR 仍进 prs[]：severity 固定 untested（绝不是 P3）、tested=false，都带原因', () => {
   const a = planTargets(disc, { prs: [2] })
-  assert.deepEqual(a.targets, [{ number: 2, reason: 'merged' }])
-  assert.deepEqual(a.notTested.map((p) => [p.number, p.verdict, p.severity, p.not_tested_code]), [[1, 'not-tested', 'P3', 'excluded-by-pr-filter'], [3, 'not-tested', 'P3', 'excluded-by-pr-filter']])
+  assert.deepEqual(a.targets.map((t) => [t.number, t.reason]), [[2, 'merged']])
+  assert.deepEqual(a.notTested.map((p) => [p.number, p.verdict, p.severity, p.tested, p.not_tested_code]), [[1, 'not-tested', 'untested', false, 'excluded-by-pr-filter'], [3, 'not-tested', 'untested', false, 'excluded-by-pr-filter']])
   assert.ok(a.notTested.every((p) => p.not_tested_reason && Array.isArray(p.findings)))
   const b = planTargets(disc, { limit: 2 })
   assert.deepEqual(b.targets.map((t) => t.number), [1, 2])
-  assert.deepEqual(b.notTested.map((p) => [p.number, p.severity, p.not_tested_code]), [[3, 'P2', 'over-limit']])
+  assert.deepEqual(b.notTested.map((p) => [p.number, p.severity, p.not_tested_code]), [[3, 'untested', 'over-limit']])
   const c = planTargets(disc, {})
   assert.equal(c.targets.length, 3)
   assert.equal(c.notTested.length, 0)
@@ -62,7 +62,7 @@ test('complete / all_discovered_tested：--pr 排除不影响 complete，但不�
   assert.equal(h4.complete, false)
 })
 
-test('单 PR 时间预算：超时的子进程被终止，PR 记 not-tested（P2，pr-timeout），部分结果保留', async () => {
+test('单 PR 时间预算：超时的子进程被终止，PR 记 not-tested（untested，pr-timeout），部分结果保留', async () => {
   const h = health()
   const { prs } = await processTargets([{ number: 9, reason: 'merged' }, { number: 10, reason: 'merged' }], {
     health: h, opts: { prTimeoutMin: 0.01 }, // 600ms
@@ -78,7 +78,7 @@ test('单 PR 时间预算：超时的子进程被终止，PR 记 not-tested（P2
   })
   assert.equal(prs[0].verdict, 'not-tested')
   assert.equal(prs[0].not_tested_code, 'pr-timeout')
-  assert.equal(prs[0].severity, 'P2')
+  assert.equal(prs[0].severity, 'untested')
   assert.equal(prs[0].partial_result.verdict, 'review-suggested')
   assert.equal(prs[1].verdict, 'clean', 'next PR gets a fresh budget')
   assert.deepEqual(h.qa_tool_failures.map((f) => [f.pr, f.stage]), [[9, 'pr-timeout']])
@@ -133,7 +133,8 @@ test('覆盖率门禁：门槛 80/70/80/90，任一不达标 fail；拿不到覆
   const files = { 'src/a.ts': { lines: [1, 2], covered: [1, 2] } }
   const ok = coverageGate({ coverage: { status: 'ok', total: { lines: 85, branches: 72, functions: 90 }, files }, added: { 'src/a.ts': [{ line: 1, text: 'a()' }] } })
   assert.equal(ok.status, 'pass'); assert.equal(ok.pass, true); assert.equal(ok.values.new_code, 100)
-  assert.match(ok.new_code_method, /git diff -U0/)
+  assert.match(ok.new_code_method, /ming-qa newCode/)
+  assert.match(ok.thresholds_source, /ming-qa G2/)
   const bad = coverageGate({ coverage: { status: 'ok', total: { lines: 85, branches: 60, functions: 90 }, files }, added: { 'src/b.ts': [{ line: 1, text: 'b()' }] } })
   assert.equal(bad.status, 'fail'); assert.deepEqual(bad.failed, ['branches', 'new_code'])
   const noDiff = coverageGate({ coverage: { status: 'ok', total: { lines: 85, branches: 72, functions: 90 }, files }, added: null, diffError: 'base unknown' })
@@ -240,4 +241,33 @@ test('test_backed：只有失败检查佐证才是 true；每个发现都有 sou
   const { candidates, skipped } = selectIssueCandidates(report)
   assert.deepEqual(candidates.map((c) => c.fingerprint), ['y'])
   assert.match(skipped[0].reason, /not test-backed/)
+})
+
+test('诚实：三个维度有一个没真正跑过就不能是 clean；跳过的步骤都有原因', async () => {
+  const { dimensionsOf, verdictOf } = await import('../src/nightly.mjs')
+  const c = (id, dimension, status) => ({ id, dimension, status, kind: 'product' })
+  const all = [c('unit', 'white-box', 'pass'), c('api', 'gray-box', 'pass'), c('e2e', 'black-box', 'pass')]
+  const d1 = dimensionsOf(all)
+  assert.deepEqual(d1.dimensions_missing, [])
+  assert.equal(verdictOf({ findings: [], checks: all, ...d1 }), 'clean')
+  const noBlack = [c('unit', 'white-box', 'pass'), c('api', 'gray-box', 'pass'), c('e2e', 'black-box', 'unavailable')]
+  const d2 = dimensionsOf(noBlack)
+  assert.deepEqual(d2.dimensions_missing, ['black-box'])
+  assert.equal(verdictOf({ findings: [], checks: noBlack, ...d2 }), 'partially-verified')
+  const skippedBlack = [c('unit', 'white-box', 'pass'), c('api', 'gray-box', 'fail')]
+  const d3 = dimensionsOf(skippedBlack)
+  assert.deepEqual(d3.dimensions_run['gray-box'], ['api'], 'a failing check still means the dimension ran')
+  assert.equal(verdictOf({ findings: [], checks: skippedBlack, ...d3 }), 'partially-verified')
+  assert.deepEqual(dimensionsOf([]).dimensions_missing, ['white-box', 'gray-box', 'black-box'])
+})
+
+test('每个条目都有 merged_at（没测的也从发现结果带上）与 merged_at_shanghai', async () => {
+  const { prMeta, annotateTestBacked } = await import('../src/nightly.mjs')
+  const t = { number: 898, reason: 'merged', meta: prMeta({ title: 't', user: { login: 'u' }, merged_at: '2026-10-10T02:00:00Z', merge_commit_sha: 'm', state: 'closed' }) }
+  const [e] = annotateTestBacked([notTestedEntry(t, 'over-limit', 'x')])
+  assert.equal(e.merged_at, '2026-10-10T02:00:00Z')
+  assert.equal(e.merged_at_shanghai, '2026-10-10T10:00:00+08:00')
+  assert.equal(e.state, 'merged')
+  const [o] = annotateTestBacked([{ number: 1, findings: [] }])
+  assert.ok('merged_at' in o && o.merged_at === null && o.merged_at_shanghai === null)
 })

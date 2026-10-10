@@ -3,7 +3,11 @@
 import { readFileSync, existsSync, statSync, rmSync } from 'node:fs'
 import { join, relative, isAbsolute, resolve } from 'node:path'
 
+// 门槛与指标取自 ming-qa G2「Unit Tests And Coverage」（skills/quality-assurance-agent/references/quality-gates.md；
+// 配置键 qualityGates.coverage.{lines, branches, functions, newCode}）。ming-qa 把 New-code coverage 定义为
+// 新代码的（行）覆盖率、默认 90，没有给出更细的算法；这里按同一口径：PR 新增 / 修改的可执行行中被执行到的比例。
 export const COVERAGE_THRESHOLDS = Object.freeze({ lines: 80, branches: 70, functions: 80, new_code: 90 })
+export const COVERAGE_SOURCE = 'ming-qa G2 Unit Tests And Coverage (references/quality-gates.md; qualityGates.coverage lines/branches/functions/newCode)'
 
 // vitest 追加参数：只写 JSON 报告，不让 vitest 自己按阈值判失败（门禁由我们算，失败不能伪装成单测失败）
 export function vitestCoverageArgs(dir) {
@@ -99,14 +103,14 @@ export function newCodeCoverage(added, files) {
   return { pct: executable ? Math.round((covered / executable) * 10000) / 100 : null, executable_lines: executable, covered_lines: covered, unloaded_files: unloaded, files: perFile }
 }
 
-export const NEW_CODE_METHOD = 'git diff -U0 <base_sha> <tested_sha> (merged: first parent of the merge commit; open: merge-base with the target branch); '
+export const NEW_CODE_METHOD = 'ming-qa newCode = line coverage of new code. Changed lines: git diff <base_sha> <tested_sha> (merged: first parent of the merge commit; open: merge-base with the target branch); '
   + 'added/modified lines in non-test JS/TS source files are intersected with v8 statement start lines from coverage-final.json; '
   + 'lines that are not executable statements are ignored; files never loaded by the unit tests count their code-like added lines as uncovered. '
   + 'pct = covered / executable changed lines; null (not evaluated) when the diff has no executable source lines.'
 
 // 门禁结论：任何一项低于门槛 → fail（P2）；拿不到覆盖率 → unavailable（不判 fail，单独说明）
 export function coverageGate({ coverage, added, thresholds = COVERAGE_THRESHOLDS, stepId = 'unit', diffError = null }) {
-  const gate = { step: stepId, provider: 'v8 (vitest --coverage)', thresholds: { ...thresholds }, values: null, results: null, status: 'unavailable', pass: null, new_code: null, new_code_method: NEW_CODE_METHOD, reason: null }
+  const gate = { step: stepId, provider: 'v8 (vitest --coverage)', thresholds_source: COVERAGE_SOURCE, thresholds: { ...thresholds }, values: null, results: null, status: 'unavailable', pass: null, new_code: null, new_code_method: NEW_CODE_METHOD, reason: null }
   if (!coverage || coverage.status !== 'ok') { gate.reason = coverage?.reason ?? 'unit step did not run with coverage'; return gate }
   const nc = diffError || !coverage.files ? null : newCodeCoverage(added, coverage.files)
   gate.new_code = nc ?? { pct: null, reason: diffError ?? 'per-line coverage unavailable' }
