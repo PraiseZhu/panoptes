@@ -231,7 +231,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
         const severity = f.severity === 'P0' ? 'P1' : f.severity
         const fp = fingerprintOf(repo, ['code-review', f.file, f.symbol || '', f.category])
         out.findings.push({
-          source: 'code-review', check_id: 'code-review', dimension: 'white-box', severity, llm_severity: f.severity, verdict: f.verdict,
+          source: 'code-review', test_backed: false, check_id: 'code-review', dimension: 'white-box', severity, llm_severity: f.severity, verdict: f.verdict,
           category: f.category, title: f.title, file: f.file, line: f.line, symbol: f.symbol,
           fingerprint: fp, pr_fingerprint: prFingerprint(fp, number),
           evidence: { evidence: f.evidence, failure_scenario: f.failureScenario, recommendation: f.recommendation, reviewed_sha: out.reviewed_sha },
@@ -251,13 +251,13 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   if (gate?.status === 'fail') {
     const fp = fingerprintOf(repo, ['coverage-gate', gate.step, gate.failed.join(',')])
     out.findings.push({
-      source: 'coverage-gate', check_id: 'coverage-gate', dimension: 'white-box', severity: 'P2',
+      source: 'coverage-gate', test_backed: false, check_id: 'coverage-gate', dimension: 'white-box', severity: 'P2',
       title: `coverage below gate: ${gate.failed.map((k) => `${k} ${gate.values[k]}% < ${gate.thresholds[k]}%`).join(', ')}`,
       fingerprint: fp, pr_fingerprint: prFingerprint(fp, number),
       evidence: { tested_sha: sha, base_sha: baseSha, values: gate.values, thresholds: gate.thresholds, new_code_files: (gate.new_code?.files ?? []).slice(0, 20) },
     })
   }
-  out.findings = [...out.failed_checks.map((c) => ({ source: 'check', ...c })), ...out.findings]
+  out.findings = [...out.failed_checks.map((c) => ({ source: 'check', test_backed: true, ...c })), ...out.findings]
   out.severity = out.findings.length ? maxSev(out.findings.map((f) => f.severity)) : 'P3'
   out.verdict = verdictOf(out)
   out.duration_s = Math.round((Date.now() - startedAt) / 1000)
@@ -425,7 +425,8 @@ export function selectIssueCandidates(report, { authors = ISSUE_AUTHORS } = {}) 
   const skipped = []
   for (const pr of report.prs ?? []) {
     for (const f of (pr.findings ?? []).filter((x) => ['P0', 'P1'].includes(x.severity))) {
-      const why = f.source !== 'check' ? 'llm-review-only (no failing check)'
+      // 规则按 test_backed（有失败检查佐证）判断，不只看严重度；旧报告没有该字段时按 source === 'check'
+      const why = !isTestBacked(f) ? `not test-backed (source ${f.source ?? 'unknown'}; e.g. llm-review-only)`
         : !authors.includes(pr.author) ? `author ${pr.author} not in ${authors.join(',')}`
           : null
       if (why) skipped.push({ pr: pr.number, fingerprint: f.fingerprint, severity: f.severity, source: f.source, reason: why })
@@ -477,6 +478,21 @@ async function createIssues(report) {
   return results
 }
 
+// test_backed：只有失败检查（source: check）佐证的发现才是 true；LLM 审查、覆盖率门禁、QA 自身出错都是 false。
+// 下游通知 / 提 issue 规则以它为准，而不是只看严重度。
+export const FINDING_SOURCES = ['check', 'code-review', 'coverage-gate', 'qa-error']
+export const isTestBacked = (f) => (typeof f?.test_backed === 'boolean' ? f.test_backed : f?.source === 'check')
+export function annotateTestBacked(prs) {
+  for (const pr of prs) {
+    pr.findings = (pr.findings ?? []).map((f) => { const g = { ...f, source: f.source ?? 'check' }; return { ...g, test_backed: isTestBacked(g) } })
+    const backed = pr.findings.filter((f) => f.test_backed)
+    pr.test_backed = backed.length > 0
+    pr.test_backed_severity = backed.length ? maxSev(backed.map((f) => f.severity)) : null
+    pr.finding_sources = [...new Set(pr.findings.map((f) => f.source))]
+  }
+  return prs
+}
+
 // 发现了但这次没测的 PR：仍进 prs[]，verdict=not-tested 并写明原因。
 // 被 --pr 主动排除 → P3（本次有意不测）；超出 --limit / 超时 / 截止时间 → P2（夜间覆盖缺口，需要关注）。
 export function notTestedEntry(t, code, reason) {
@@ -515,7 +531,7 @@ export function planTargets(discovered, opts = {}) {
 
 // 逐个 PR 执行：每个 PR 有心跳（开始/结束/耗时）；qa-error 记 P2 并登记 qa_tool_failures；
 // 超出单 PR 时间预算或整晚截止时间 → not-tested（部分结果放 partial_result）
-export async function processTargets(targets, { opts = {}, health, startedAt = new Date(), processOne, now = () => Date.now() }) {
+export async function processTargets(targets, { opts = {}, health, startedAt = new Date(), processOne, now = () => Date.now(), repo = null }) {
   const prTimeoutMs = opts.prTimeoutMin ? opts.prTimeoutMin * 60_000 : null
   const deadlineMs = opts.deadline ? parseDeadline(opts.deadline, startedAt) : null
   const heartbeat = { run_started_at: toShanghaiIso(startedAt), run_finished_at: null, duration_s: null, last_beat_at: toShanghaiIso(startedAt), pr_timeout_min: opts.prTimeoutMin ?? null, deadline: deadlineMs ? new Date(deadlineMs).toISOString() : null, prs: [] }
@@ -542,7 +558,10 @@ export async function processTargets(targets, { opts = {}, health, startedAt = n
     } catch (err) {
       if (!overBudget()) {
         health.qa_tool_failures.push({ pr: t.number, stage: 'pipeline', message: redact(err.message).slice(0, 800) })
-        result = { number: t.number, discovery_reason: t.reason, verdict: 'qa-error', severity: 'P2', error: redact(err.message).slice(0, 800), findings: [], failed_checks: [], checks: [], coverage_gate: null, test_started_at: beat.started_at, tested_at: null }
+        const msg = redact(err.message).slice(0, 800)
+        const fp = fingerprintOf(repo ?? '', ['qa-error', 'pipeline', msg])
+        result = { number: t.number, discovery_reason: t.reason, verdict: 'qa-error', severity: 'P2', error: msg, failed_checks: [], checks: [], coverage_gate: null, test_started_at: beat.started_at, tested_at: null,
+          findings: [{ source: 'qa-error', test_backed: false, check_id: 'pipeline', dimension: null, severity: 'P2', title: 'QA pipeline error (the PR itself was not verified)', fingerprint: fp, pr_fingerprint: prFingerprint(fp, t.number), evidence: { error: msg } }] }
       }
     }
     if (overBudget()) {
@@ -620,10 +639,11 @@ export async function runNightly(opts = {}) {
   }
   const plan = planTargets(targets, opts)
   const { prs } = await processTargets(plan.targets, {
-    opts, health, startedAt,
+    opts, health, startedAt, repo,
     processOne: (t) => processPr({ repo, project, number: t.number, discovery: t.reason, secrets, db, health, evidenceRoot, opts }),
   })
   prs.push(...plan.notTested)
+  annotateTestBacked(prs)
 
   const allFindings = prs.flatMap((p) => p.findings ?? [])
   finalizeHealth(health, prs, startedAt)
@@ -653,6 +673,8 @@ export async function runNightly(opts = {}) {
       tested_count: prs.filter((p) => !['not-tested', 'qa-error'].includes(p.verdict)).length,
       not_tested: prs.filter((p) => p.verdict === 'not-tested').map((p) => ({ number: p.number, code: p.not_tested_code, reason: p.not_tested_reason })),
       qa_errors: prs.filter((p) => p.verdict === 'qa-error').map((p) => p.number),
+      test_backed_findings_by_severity: Object.fromEntries(['P0', 'P1', 'P2', 'P3'].map((s) => [s, allFindings.filter((f) => f.test_backed && f.severity === s).length])),
+      prs_test_backed: prs.filter((p) => p.test_backed).map((p) => p.number),
     },
     prs,
     issues: { enabled: false, repo: ISSUE_REPO, labels: ISSUE_LABELS, dedup: 'fingerprint marker in body, label qa-auto, open+closed', policy: 'P0/P1 findings backed by a failing check on PRs authored by PraiseZhu; system_health failures always; LLM-review-only findings never', results: [] },
@@ -688,6 +710,8 @@ export function mergedReportFor(report, pr) {
       prs_by_severity: Object.fromEntries(['P0', 'P1', 'P2', 'P3'].map((s) => [s, pr.severity === s ? 1 : 0])),
       findings_by_severity: Object.fromEntries(['P0', 'P1', 'P2', 'P3'].map((s) => [s, findings.filter((f) => f.severity === s).length])),
       findings_total: findings.length, reused_from_on_merge: [], tested_count: 1, not_tested: [], qa_errors: [],
+      test_backed_findings_by_severity: Object.fromEntries(['P0', 'P1', 'P2', 'P3'].map((s) => [s, findings.filter((f) => f.test_backed && f.severity === s).length])),
+      prs_test_backed: pr.test_backed ? [pr.number] : [],
     },
     prs: [pr],
     issues: { enabled: false, reason: 'written from a nightly run; issues are only handled by the run itself' },

@@ -215,3 +215,29 @@ test('夜间全量把每个测完的已合并 PR 写成 merged/PR-N.json（同�
   writeFileSync(join(dir, 'PR-898.json'), JSON.stringify(doc))
   assert.ok(loadMergedResult(898, 'a'.repeat(40), { mergedDir: dir }), 'nightly-written merged report is reusable')
 })
+
+test('test_backed：只有失败检查佐证才是 true；每个发现都有 source；PR 级汇总；issue 规则按 test_backed', async () => {
+  const { annotateTestBacked, isTestBacked, FINDING_SOURCES } = await import('../src/nightly.mjs')
+  assert.deepEqual(FINDING_SOURCES, ['check', 'code-review', 'coverage-gate', 'qa-error'])
+  const prs = annotateTestBacked([
+    { number: 1, findings: [{ source: 'check', severity: 'P2' }, { source: 'code-review', severity: 'P1' }, { source: 'coverage-gate', severity: 'P2' }] },
+    { number: 2, findings: [{ source: 'code-review', severity: 'P1' }] },
+    { number: 3, findings: [{ severity: 'P1', status: 'introduced' }] }, // 旧报告：没有 source 的是失败检查
+    { number: 4, verdict: 'not-tested', findings: [] },
+  ])
+  assert.deepEqual(prs[0].findings.map((f) => f.test_backed), [true, false, false])
+  assert.deepEqual([prs[0].test_backed, prs[0].test_backed_severity], [true, 'P2'])
+  assert.deepEqual([prs[1].test_backed, prs[1].test_backed_severity], [false, null])
+  assert.equal(prs[2].findings[0].source, 'check'); assert.equal(prs[2].test_backed, true)
+  assert.equal(prs[3].test_backed, false)
+  assert.equal(isTestBacked({ source: 'check', test_backed: false }), false, 'explicit flag wins')
+  // qa-error 自带 source: qa-error、test_backed: false 的发现
+  const h = health()
+  const { prs: out } = await processTargets([{ number: 7, reason: 'merged' }], { health: h, repo: 'o/r', processOne: async () => { throw new Error('crash') } })
+  assert.deepEqual(out[0].findings.map((f) => [f.source, f.test_backed, f.severity]), [['qa-error', false, 'P2']])
+  // issue：P1 但不是 test_backed → 不提
+  const report = { date: 'd', repo: 'r', prs: [{ number: 9, author: 'PraiseZhu', findings: [{ source: 'check', test_backed: false, severity: 'P1', fingerprint: 'x' }, { source: 'check', test_backed: true, severity: 'P1', fingerprint: 'y' }] }], system_health: { status: 'ok', qa_tool_failures: [], env_problems: [], llm_errors: [] } }
+  const { candidates, skipped } = selectIssueCandidates(report)
+  assert.deepEqual(candidates.map((c) => c.fingerprint), ['y'])
+  assert.match(skipped[0].reason, /not test-backed/)
+})

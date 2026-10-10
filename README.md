@@ -184,7 +184,8 @@ node scripts/send-feishu-dm.mjs --help
   `notify_via_feishu: false` are refused unless `--allow-owner`.
 - **Idempotency:** with `--dedupe-key`, a key already in `$QA_HOME/feishu-sent.json` is skipped (`skipped: true`);
   the key is recorded after a successful send. The key's sha256 is also passed as Feishu's request `uuid`, so a retry
-  within an hour is deduplicated server-side even if the local log write failed. An empty `--dedupe-key` is a usage error.
+  within an hour is deduplicated server-side even if the local log write failed. An empty `--dedupe-key` value means
+  no dedupe (original behaviour) and the result JSON carries a `warning`.
 - **Paths:** `QA_HOME` (legacy `MIVO_QA_ROOT`), or per file `MIVO_QA_AUTHOR_MAP`, `MIVO_QA_FEISHU_SENT`.
 - **Output:** one JSON object on stdout (`ok`, `message_id` | `skipped` | `error`/`stage`/`code`/`msg`).
   Exit `0` sent or skipped · `1` Feishu/API/network error · `2` usage/config error · `3` recipient refused.

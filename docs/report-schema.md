@@ -66,6 +66,8 @@ Merged reports written by nightly also carry `run.source_report` (path of the ni
 | `tested_count` | PRs with a real verdict (not `not-tested`, not `qa-error`) |
 | `not_tested` | `[{ number, code, reason }]` |
 | `qa_errors` | PR numbers whose pipeline crashed |
+| `test_backed_findings_by_severity` | `{P0..P3: count}` over findings with `test_backed: true` |
+| `prs_test_backed` | PR numbers with at least one test-backed finding |
 
 ## `prs[]`
 
@@ -90,11 +92,14 @@ Merged reports written by nightly also carry `run.source_report` (path of the ni
 | `outcome`, `outcome_reason` | engine outcome (`passed`, `defect`, `flaky`, `infra_failed`, `docs_only`, …) |
 | `not_tested_code`, `not_tested_reason` | only for `verdict: not-tested` |
 | `partial_result` | only for `not-tested` because of a time budget: `{ verdict, checks, evidence_dir }` of the interrupted run; not used for the verdict |
-| `error` | only for `qa-error` (redacted message) |
+| `error` | only for `qa-error` (redacted message); the entry also has one finding `{ source: "qa-error", test_backed: false, severity: "P2" }` |
 | `checks[]` | `{ id, name, kind, dimension, qa_dimensions, status: pass/fail/timeout/unavailable, exit_code, duration_ms, failure_count, unavailable_reason? }` |
 | `failed_checks[]` | `{ check_id, check_name, dimension, qa_dimensions, test, failure_type, status, severity, attribution, fingerprint, pr_fingerprint, evidence{ tested_sha, base_sha, exit_code, timed_out, first_run, rerun, base_run, latest_main_run?, command, log_tail, log_file } }`; `status` ∈ `introduced, pre-existing, flaky, fixed-later, unverified, timeout, setup-failed` |
 | `code_review` | `{ status, summary, gate, model, tokens, findings_count, residual_risks, file }` or `{ status, error }` |
-| `findings[]` | everything that can raise severity; `source` ∈ `check` (a failed check, same fields as `failed_checks`), `code-review` (LLM; capped at P1, original in `llm_severity`), `coverage-gate` (P2) |
+| `findings[]` | everything that can raise severity. Every finding has **`source`** ∈ `check` (a failed check, same fields as `failed_checks`), `code-review` (LLM; capped at P1, original in `llm_severity`), `coverage-gate` (P2), `qa-error` (P2, the pipeline crashed) and boolean **`test_backed`** (see *test_backed*) |
+| **`test_backed`** | PR-level: `true` if at least one finding is test-backed |
+| `test_backed_severity` | highest severity among test-backed findings, or `null` |
+| `finding_sources` | distinct `source` values of this PR's findings |
 | `coverage` | QA-dimension coverage of the matrix (`applicable`, `covered`, `missed`, `undetermined`, `passRate`, `coverage`) — *not* code coverage |
 | **`coverage_gate`** | white-box code-coverage gate, see below; `null` when no unit run happened (docs-only, not-tested, qa-error) |
 | `skipped_steps` | profile steps not run (triage / `--skip-step`) |
@@ -120,8 +125,17 @@ Severity rules: P0 introduced failure on a merged PR that still fails on latest 
 product-check failure, or LLM review P0/P1 · P2 quality guard, unverified, timeout, setup failure, review P2,
 coverage below gate, QA error, not tested (limit/timeout/deadline) · P3 pre-existing / flaky / fixed-later / nothing.
 
-Issues (only with `--create-issues` + `ARGUS_ALLOW_ISSUES=1`): only P0/P1 findings with `source: "check"` on PRs by
-PraiseZhu, plus `system_health` failures. `coverage-gate`, `code-review`-only and `not-tested` entries never become issues.
+### `test_backed` — what notification / issue rules key off
+
+`findings[].test_backed` is `true` **only** when the finding is backed by a failing check that actually ran
+(`source: "check"`). Review-only (`code-review`), `coverage-gate` and `qa-error` findings are always `false`.
+
+**Downstream notification and issue rules must key off `test_backed`, not severity alone.** A P1 with
+`test_backed: false` is an LLM opinion and must not be presented or escalated as a verified defect. Suggested rule:
+notify authors / open issues for P0/P1 only when `test_backed: true`; list `test_backed: false` items as
+"review suggestions". panoptes' own issue creation (only with `--create-issues` + `ARGUS_ALLOW_ISSUES=1`) follows
+this: P0/P1 findings with `test_backed: true` on PRs by PraiseZhu, plus `system_health` failures; nothing else.
+Older reports without the field: treat `source == "check"` as test-backed.
 
 ### `coverage_gate`
 

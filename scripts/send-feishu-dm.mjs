@@ -39,21 +39,18 @@ function out(obj, code = 0) {
 
 function parseArgs(argv) {
   const a = { allowOwner: false }
-  // A value flag with a missing/empty value is a usage error (an empty --dedupe-key must not silently disable dedupe).
-  const val = (k, i) => {
-    const v = argv[i]
-    if (v === undefined || v === '' || v.startsWith('--')) out({ ok: false, error: 'bad_args', msg: `${k} 需要一个非空值` }, 2)
-    return v
-  }
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i]
-    if (k === '--open-id') a.openId = val(k, ++i)
-    else if (k === '--text-file') a.textFile = val(k, ++i)
-    else if (k === '--dedupe-key') a.dedupeKey = val(k, ++i)
+    if (k === '--open-id') a.openId = argv[++i]
+    else if (k === '--text-file') a.textFile = argv[++i]
+    else if (k === '--dedupe-key') { a.dedupeKey = argv[++i]; a.dedupeFlagGiven = true }
     else if (k === '--allow-owner') a.allowOwner = true
     else if (k === '-h' || k === '--help') { process.stdout.write(USAGE + '\n'); process.exit(0) }
     else out({ ok: false, error: 'bad_args', msg: `未知参数：${k}` }, 2)
   }
+  // Compatible with the original CLI: an empty/missing --dedupe-key value still means "no dedupe",
+  // but the result carries a warning so callers can notice.
+  if (a.dedupeFlagGiven && !a.dedupeKey) a.warning = 'empty --dedupe-key: sent without dedupe'
   if (!a.openId || !a.textFile) out({ ok: false, error: 'bad_args', msg: '用法：--open-id <id> --text-file <path> [--dedupe-key <key>] [--allow-owner]（--help 查看说明）' }, 2)
   return a
 }
@@ -149,7 +146,7 @@ async function main() {
     sent[args.dedupeKey] = { open_id: args.openId, sent_at: new Date().toISOString(), message_id: messageId }
     saveSent(sent)
   }
-  out({ ok: true, message_id: messageId, open_id: args.openId, dedupe_key: args.dedupeKey || null })
+  out({ ok: true, message_id: messageId, open_id: args.openId, dedupe_key: args.dedupeKey || null, ...(args.warning ? { warning: args.warning } : {}) })
 }
 
 // Error messages never contain the token or app secret (they only travel in request bodies/headers).
