@@ -30,6 +30,7 @@ panoptes/
 ├── ming-qa/                submodule: code-review focus + `qa_agent.py assert-code-review` gate
 ├── mini/                   Mac mini side: cindy schedule that pulls the issue queue into lifeline
 ├── scripts/refresh-roster.py   rebuilds $QA_HOME/author-map.json (GitHub roster + Feishu open_ids)
+├── scripts/send-feishu-dm.mjs  sends one Feishu DM (P0/P1 author notification), idempotent per dedupe key
 ├── llm-models.json         models available on the gateway (reference only)
 └── secrets.env.example
 ```
@@ -43,6 +44,7 @@ Code and data are separate. Everything the pipeline writes lives in **`$QA_HOME`
 | `cache/ms-playwright/` | Playwright browsers |
 | `.venv/` | Python for ming-qa |
 | `author-map.json` | roster output of `scripts/refresh-roster.py` (personal data, never committed) |
+| `feishu-sent.json` | dedupe log of `scripts/send-feishu-dm.mjs` (`{ key: { open_id, sent_at, message_id } }`) |
 
 ## Setup / 安装
 
@@ -58,7 +60,7 @@ Requirements: Linux with **bubblewrap** (`/usr/bin/bwrap`), Node 24 via nvm (`$N
 `git`, `gh`, Python 3, Debian Chromium at `/usr/bin/chromium` (Mivo's browser journey).
 
 Secrets (`secrets.env`, mode 0600): `GITHUB_TOKEN`, `QA_LLM_BASE_URL`, `QA_LLM_API_KEY`, optionally
-`ARGUS_TYPESAFE_API_KEY` (Jev triage). See [`secrets.env.example`](secrets.env.example).
+`ARGUS_TYPESAFE_API_KEY` (Jev triage), `MIVO_FEISHU_APP_ID` / `MIVO_FEISHU_APP_SECRET` (Feishu roster + DMs). See [`secrets.env.example`](secrets.env.example).
 
 Environment overrides for `run-nightly.sh`:
 
@@ -156,6 +158,27 @@ Off unless `--create-issues` **and** `ARGUS_ALLOW_ISSUES=1`. When on:
 - Finding bodies include a ```` ```json mivo-qa-finding ```` block (`schema: mivo-qa-finding/v1`) that
   [`mini/check-queue.sh`](mini/README.md) turns into a lifeline observation on the Mac mini.
 
+## Feishu DMs / 飞书私信: `scripts/send-feishu-dm.mjs`
+
+Sends one plain-text DM from the Mivo Feishu bot, used for P0/P1 author notifications. It does not decide *whether*
+to notify — the caller does; it only sends safely and once.
+
+```sh
+node scripts/send-feishu-dm.mjs --open-id ou_xxx --text-file msg.txt [--dedupe-key KEY] [--allow-owner]
+node scripts/send-feishu-dm.mjs --help
+```
+
+- **Credentials:** `MIVO_FEISHU_APP_ID` / `MIVO_FEISHU_APP_SECRET` from the environment, else from
+  `$QA_SECRETS_FILE` (default `/home/box/.config/mivo-qa/secrets.env`). Never printed or logged.
+- **Guardrails:** the open_id must be in `$QA_HOME/author-map.json` (`mivo_authors` or `roster`); entries with
+  `notify_via_feishu: false` are refused unless `--allow-owner`.
+- **Idempotency:** with `--dedupe-key`, a key already in `$QA_HOME/feishu-sent.json` is skipped (`skipped: true`);
+  the key is recorded after a successful send. The key's sha256 is also passed as Feishu's request `uuid`, so a retry
+  within an hour is deduplicated server-side even if the local log write failed. An empty `--dedupe-key` is a usage error.
+- **Paths:** `QA_HOME` (legacy `MIVO_QA_ROOT`), or per file `MIVO_QA_AUTHOR_MAP`, `MIVO_QA_FEISHU_SENT`.
+- **Output:** one JSON object on stdout (`ok`, `message_id` | `skipped` | `error`/`stage`/`code`/`msg`).
+  Exit `0` sent or skipped · `1` Feishu/API/network error · `2` usage/config error · `3` recipient refused.
+
 ## Report / 报告格式
 
 `$QA_HOME/reports/YYYY-MM-DD.json`:
@@ -187,5 +210,10 @@ PRs and nights; `pr_fingerprint` adds `-pr<N>`. `run.argus_commit` is the panopt
 ```sh
 cd argus && npm test        # node --test tests/*.test.mjs
 ```
+
+CI (`.github/workflows/ci.yml`, push/PR to `main`, no secrets): `bash -n` + shellcheck on `run-nightly.sh` and
+`mini/check-queue.sh`, `node --check scripts/*.mjs`, `py_compile scripts/*.py`, and `npm ci && npm test` in `argus/`
+on Node 24. If the runner can't run bubblewrap, the tests run with `ARGUS_SANDBOX=none ARGUS_ALLOW_UNSANDBOXED=1`
+(the bwrap isolation test then skips itself).
 
 More detail on the port: [`argus/README-linux.md`](argus/README-linux.md). Original Argus docs: [`argus/README.md`](argus/README.md).
