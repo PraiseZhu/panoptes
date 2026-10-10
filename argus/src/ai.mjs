@@ -1,5 +1,6 @@
 // AI 只做「人话解读 + 未覆盖风险提示 + 失败解释」，不参与通过/失败判定
 import { redact, truncate, tail, toShanghaiDay } from './util.mjs'
+import { toChatCompletionsUrl } from './util.mjs'
 import { aiUsageToday, addAiUsage } from './db.mjs'
 
 const MODEL = 'openai/gpt-6-luna'
@@ -50,7 +51,7 @@ export async function analyzePr({ db, secrets, riskClass, pr, files, profile, re
 
   const started = Date.now()
   try {
-    const resp = await fetch(`${secrets.ARGUS_LLM_BASE_URL.replace(/\/$/, '')}/v1/chat/completions`, {
+    const resp = await fetch(toChatCompletionsUrl(secrets.ARGUS_LLM_BASE_URL), {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${secrets.ARGUS_LLM_API_KEY}` },
       body: JSON.stringify({

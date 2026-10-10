@@ -8,6 +8,8 @@
 //   node src/cli.mjs once                  跑完下一个排队任务即退出（手动验收）
 //   node src/cli.mjs notify --text "..."   用 Doki 给主人发一条消息
 //   node src/cli.mjs doctor                只读自检（GitHub / 模型 / 飞书 / 磁盘）
+//   node src/cli.mjs nightly [--date YYYY-MM-DD] [--pr N ...] [--limit N] [--no-review] [--skip-step ID ...] [--out PATH] [--no-reuse] [--no-issues | --create-issues]
+//                                          Linux 夜间 QA：上海时区前一天的 PR → reports/YYYY-MM-DD.json（默认不写 GitHub）
 import { mkdirSync } from 'node:fs'
 import { loadRegistry, loadSecrets } from './config.mjs'
 import { openDb, countByStatus, getMeta } from './db.mjs'
@@ -17,6 +19,7 @@ import { currentUser, appFor } from './github.mjs'
 import { probeJev } from './jev.mjs'
 import { ALL_DIRS } from './paths.mjs'
 import { OUTCOMES } from './decide.mjs'
+import { runNightly } from './nightly.mjs'
 
 const [cmd, ...rest] = process.argv.slice(2)
 const flag = (name) => rest.includes(`--${name}`)
@@ -28,6 +31,19 @@ const opt = (name, dflt = null) => {
 async function main() {
   for (const d of ALL_DIRS) mkdirSync(d, { recursive: true })
   switch (cmd) {
+    case 'nightly': {
+      const many = (name) => rest.flatMap((a, i) => (a === `--${name}` ? [rest[i + 1]] : []))
+      const date = opt('date')
+      if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('--date 需要 YYYY-MM-DD')
+      const prs = many('pr').map((n) => { const v = Number(n); if (!Number.isInteger(v) || v <= 0) throw new Error(`--pr 需要正整数：${n}`); return v })
+      if (flag('create-issues') && flag('no-issues')) throw new Error('--create-issues 与 --no-issues 不能同时使用')
+      const out = opt('out')
+      if (rest.includes('--out') && (!out || out.startsWith('--'))) throw new Error('--out 需要文件路径')
+      const { file, report } = await runNightly({ date, prs, out, reuseMerged: !flag('no-reuse'), limit: opt('limit') ? Number(opt('limit')) : null, noReview: flag('no-review'), skipSteps: many('skip-step'), createIssues: flag('create-issues') })
+      console.log(JSON.stringify({ report: file, date: report.date, prs: report.prs.map((p) => ({ number: p.number, severity: p.severity, verdict: p.verdict })), system_health: report.system_health.status }, null, 2))
+      if (report.system_health.status === 'failed') process.exitCode = 3
+      return
+    }
     case 'serve':
       return serve()
     case 'daily-report': {
@@ -92,7 +108,7 @@ async function main() {
       return
     }
     default:
-      console.error('未知命令。可用：serve | daily-report [--dry-run] | status | runs | poll-once | notify --text | doctor')
+      console.error('未知命令。可用：nightly | serve | daily-report [--dry-run] | status | runs | poll-once | notify --text | doctor')
       process.exitCode = 2
   }
 }

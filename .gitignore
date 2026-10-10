@@ -1,0 +1,27 @@
+# secrets
+secrets.env
+*.env
+.env.*
+!*.env.example
+*.pem
+*.key
+
+# runtime data (lives in $QA_HOME, never in the repo)
+.venv/
+cache/
+scratch/
+argus-root/
+reports/
+node_modules/
+*.lock
+!package-lock.json
+*.log
+logs/
+
+# private data
+author-map.json
+*-org-README.md
+
+# local
+__pycache__/
+.DS_Store

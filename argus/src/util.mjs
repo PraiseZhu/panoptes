@@ -93,3 +93,11 @@ export function tail(text, max) {
   const s = String(text ?? '')
   return s.length <= max ? s : `…（前面省略）\n${s.slice(s.length - max)}`
 }
+
+// OpenAI 兼容网关地址 → chat/completions 完整地址（与 ming-qa 的补全规则一致：/v1 结尾只补 /chat/completions）
+export function toChatCompletionsUrl(baseUrl) {
+  const base = String(baseUrl ?? '').replace(/\/+$/, '')
+  if (base.endsWith('/chat/completions')) return base
+  if (base.endsWith('/v1')) return `${base}/chat/completions`
+  return `${base}/v1/chat/completions`
+}

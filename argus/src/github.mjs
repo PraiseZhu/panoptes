@@ -215,3 +215,56 @@ export async function listQaIssues(repo, { maxPages = 5 } = {}) {
 export const reopenIssue = (repo, number) => apiSend('PATCH', `repos/${repo}/issues/${number}`, { state: 'open' })
 
 export const currentUser = () => apiGet('user')
+
+// 夜间 QA 的 PR 发现：上海时区某一天 [day 00:00, 次日 00:00)，不限作者。
+// 收两类：① 当天合并的 PR；② 当前仍开着、且当天有过更新的 PR。
+// 按 updated_at 倒序翻页到早于当天为止；开放 PR 若 updated_at 已晚于当天（之后又被更新），
+// 再看 timeline 里是否有落在当天的事件（提交、评论、评审、标签等），没有就不算。
+export function shanghaiDayWindow(day) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error(`日期格式应为 YYYY-MM-DD：${day}`)
+  const start = Date.parse(`${day}T00:00:00+08:00`)
+  return { day, startMs: start, endMs: start + 86400_000, startIso: new Date(start).toISOString(), endIso: new Date(start + 86400_000).toISOString() }
+}
+
+const inWindow = (iso, w) => { const t = Date.parse(iso ?? ''); return Number.isFinite(t) && t >= w.startMs && t < w.endMs }
+
+async function hadActivityIn(repo, n, w, { maxPages = 10 } = {}) {
+  for (let page = 1; page <= maxPages; page++) {
+    const rows = await apiGet(`repos/${repo}/issues/${n}/timeline?per_page=100&page=${page}`)
+    if (!Array.isArray(rows) || rows.length === 0) return false
+    for (const e of rows) {
+      const stamps = [e.created_at, e.submitted_at, e.updated_at, e.author?.date, e.committer?.date]
+      if (stamps.some((t) => inWindow(t, w))) return true
+    }
+    if (rows.length < 100) return false
+  }
+  return false
+}
+
+export async function listNightlyPrs(repo, day, { maxPages = 30 } = {}) {
+  const w = shanghaiDayWindow(day)
+  const found = []
+  for (let page = 1; page <= maxPages; page++) {
+    const rows = await apiGet(`repos/${repo}/pulls?state=all&sort=updated&direction=desc&per_page=100&page=${page}`)
+    if (!Array.isArray(rows)) throw new Error(`读取 ${repo} 的 PR 列表返回异常`)
+    for (const pr of rows) {
+      if (pr.merged_at && inWindow(pr.merged_at, w)) { found.push({ pr, reason: 'merged' }); continue }
+      if (pr.state !== 'open') continue
+      if (inWindow(pr.updated_at, w)) { found.push({ pr, reason: 'open-updated' }); continue }
+      if (Date.parse(pr.updated_at) >= w.endMs && Date.parse(pr.created_at) < w.endMs && await hadActivityIn(repo, pr.number, w)) found.push({ pr, reason: 'open-updated' })
+    }
+    if (rows.length < 100 || Date.parse(rows[rows.length - 1].updated_at) < w.startMs) return { window: w, prs: found }
+  }
+  throw new Error(`翻了 ${maxPages} 页仍没扫到 ${w.startIso}，PR 发现不完整`)
+}
+
+// 夜间 QA 去重：在 issue 仓里按 label + 正文指纹标记查（含已关闭），只读
+export async function findIssueByMarkerLabel(repo, label, marker, { maxPages = 10 } = {}) {
+  for (let page = 1; page <= maxPages; page++) {
+    const rows = await apiGet(`repos/${repo}/issues?state=all&labels=${encodeURIComponent(label)}&sort=created&direction=desc&per_page=100&page=${page}`)
+    const hit = (rows ?? []).find((i) => !i.pull_request && String(i.body ?? '').includes(marker))
+    if (hit) return hit
+    if (!Array.isArray(rows) || rows.length < 100) return null
+  }
+  throw new Error(`按指纹回查超过 ${maxPages} 页仍未翻完`)
+}

@@ -5,6 +5,7 @@ import { aiUsageToday, addAiUsage } from './db.mjs'
 import { globToRegExp } from './classify.mjs'
 import { toDimensionLabel } from './matrix.mjs'
 import { redact, toShanghaiDay, truncate } from './util.mjs'
+import { toChatCompletionsUrl } from './util.mjs'
 
 const MODEL = 'openai/gpt-6-luna'
 const EFFORT = { B: 'high', C: 'xhigh' }
@@ -92,7 +93,7 @@ export async function generateTargetedTests({ db, secrets, riskClass, pr, files,
     `改动内容：${buildDiff(files)}`,
   ].join('\n\n'))
   try {
-    const resp = await fetch(`${secrets.ARGUS_LLM_BASE_URL.replace(/\/$/, '')}/v1/chat/completions`, {
+    const resp = await fetch(toChatCompletionsUrl(secrets.ARGUS_LLM_BASE_URL), {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${secrets.ARGUS_LLM_API_KEY}` },
       body: JSON.stringify({ model: MODEL, reasoning_effort: EFFORT[riskClass], response_format: { type: 'json_object' }, max_completion_tokens: 16_000, messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: user }] }),

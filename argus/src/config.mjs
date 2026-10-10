@@ -22,7 +22,7 @@ export function loadRegistry() {
 
 export function loadProfile(name) {
   const path = join(PROFILES_DIR, `${name}.json`)
-  const prof = JSON.parse(readFileSync(path, 'utf8'))
+  const prof = applyPlatformOverrides(JSON.parse(readFileSync(path, 'utf8')))
   if (!Array.isArray(prof.steps) || prof.steps.length === 0) throw new Error(`profile ${name} 没有 steps`)
   for (const s of prof.steps) {
     validateTestReport(s.testReport)
@@ -38,6 +38,26 @@ export function loadProfile(name) {
   if (!prof.steps.some((s) => s.kind === 'setup')) throw new Error(`profile ${name} 缺少 setup 步骤`)
   validateDimensions(name, prof)
   return prof
+}
+
+// profile.platforms.<process.platform>：按平台覆盖。env / sandboxReadOnly 合并，steps 按 id 浅合并（值为 null 则删掉该步）。
+// 例如 Linux 上把 Mac mini 的 Ego Lite 换成 /usr/bin/google-chrome。
+export function applyPlatformOverrides(prof, platform = process.platform) {
+  const o = prof.platforms?.[platform]
+  if (!o) return prof
+  const out = { ...prof, env: { ...(prof.env ?? {}), ...(o.env ?? {}) } }
+  if (o.checkoutMode) out.checkoutMode = o.checkoutMode
+  if (o.sandboxReadOnly) out.sandboxReadOnly = [...(prof.sandboxReadOnly ?? []), ...o.sandboxReadOnly]
+  if (o.steps) {
+    out.steps = prof.steps.flatMap((s) => {
+      if (!(s.id in o.steps)) return [s]
+      const patch = o.steps[s.id]
+      if (patch === null) return []
+      return [{ ...s, ...patch, env: patch.env === undefined ? s.env : { ...(s.env ?? {}), ...patch.env } }]
+    })
+    for (const extra of o.extraSteps ?? []) out.steps.push(extra)
+  } else if (o.extraSteps) out.steps = [...prof.steps, ...o.extraSteps]
+  return out
 }
 
 export function validateTestReport(report) {
@@ -77,5 +97,12 @@ export function loadSecrets(path = SECRETS_FILE) {
     const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/)
     if (m) out[m[1]] = m[2].replace(/^["']|["']$/g, '')
   }
+  return withSecretAliases(out)
+}
+
+// Linux 夜间 QA 的凭证文件用 QA_LLM_*（与 ming-qa 共用）；映射到 Argus 内部名，已有的 ARGUS_* 优先
+const SECRET_ALIASES = { ARGUS_LLM_BASE_URL: 'QA_LLM_BASE_URL', ARGUS_LLM_API_KEY: 'QA_LLM_API_KEY' }
+export function withSecretAliases(out) {
+  for (const [argusKey, alias] of Object.entries(SECRET_ALIASES)) if (!out[argusKey] && out[alias]) out[argusKey] = out[alias]
   return out
 }

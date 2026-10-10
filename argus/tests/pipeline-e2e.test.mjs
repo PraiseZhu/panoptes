@@ -11,6 +11,8 @@ import { fileURLToPath } from 'node:url'
 const here = dirname(fileURLToPath(import.meta.url))
 const root = mkdtempSync(join(tmpdir(), 'argus-pipeline-'))
 process.env.ARGUS_ROOT = root
+// 夹具用 root 下的标记文件模拟「重跑时行为不同」；Linux 的 bwrap 默认看不到 run 目录以外的 /tmp，这里显式放行
+process.env.ARGUS_SANDBOX_EXTRA_RW = root
 process.env.ARGUS_GH_BIN = join(here, 'fixtures/argus-fake-gh.mjs')
 process.env.ARGUS_GH_RETRY_MS = '1'
 process.env.ARGUS_SECRETS_FILE = join(root, 'intentionally-no-secrets.env')

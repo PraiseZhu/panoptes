@@ -362,5 +362,79 @@
       "run",
       "{file}"
     ]
+  },
+  "boxes": {
+    "api-inproc": "gray-box",
+    "api-probe": "gray-box",
+    "e2e-browser": "black-box",
+    "playwright-smoke": "black-box",
+    "bench": "gray-box",
+    "typecheck": "white-box",
+    "plugin": "gray-box",
+    "unit": "white-box",
+    "lint": "white-box",
+    "logging": "white-box",
+    "i18n": "white-box",
+    "cycles": "white-box",
+    "structure": "white-box"
+  },
+  "platforms": {
+    "linux": {
+      "noteZh": "Linux 夜间 QA（panoptes）：浏览器换成 Debian 的 /usr/bin/chromium（Mivo 脚本在 Linux 只信任 /usr/bin/chromium 等路径），隔离用 bubblewrap；另加 Playwright 黑盒冒烟。",
+      "steps": {
+        "e2e-browser": {
+          "env": {
+            "BD2_CHROME": "/usr/bin/chromium",
+            "BD2_BROWSER_OUTER_SANDBOX": "0"
+          },
+          "requires": [
+            {
+              "file": "scripts/e2e/bug-doctor-images/browser-layer.mjs",
+              "contains": "/usr/bin/chromium",
+              "reasonZh": "这个版本的 Mivo 浏览器脚本还不支持 Linux 的 Chromium，没跑"
+            }
+          ]
+        },
+        "unit": {
+          "envUnset": [
+            "MIVO_ASSET_STORE_DIR"
+          ]
+        }
+      },
+      "extraSteps": [
+        {
+          "id": "playwright-smoke",
+          "nameZh": "Playwright 黑盒冒烟（插件构建产物）",
+          "kind": "product",
+          "optional": true,
+          "covers": [
+            "e2e",
+            "ui",
+            "visual",
+            "compatibility"
+          ],
+          "tool": "playwright-smoke",
+          "cmd": [
+            "node",
+            "${RUN}/tools/playwright-smoke.mjs",
+            "${RUN}/playwright-smoke",
+            "cindyplugin/dist",
+            "panel.html,settings.html"
+          ],
+          "env": {
+            "ARGUS_PLAYWRIGHT_MODULE": "${ARGUS_CODE}/node_modules/playwright/index.mjs"
+          },
+          "unavailableExitCodes": [
+            2
+          ],
+          "failureReport": {
+            "format": "checks",
+            "path": "${RUN}/playwright-smoke/report.json"
+          },
+          "timeoutMin": 15
+        }
+      ],
+      "checkoutMode": "clone"
+    }
   }
 }
