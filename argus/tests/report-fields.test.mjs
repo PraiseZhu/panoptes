@@ -168,3 +168,50 @@ test('覆盖率只在首轮开启、目录不能逃出 run 目录；读取后删
   assert.equal(c.status, 'ok'); assert.equal(c.total.functions, 79.9); assert.deepEqual(c.files['src/a.ts'], { lines: [1], covered: [1] })
   assert.equal(existsSync(join(dir, 'coverage-final.json')), false)
 })
+
+test('tested_at / 运行时间戳：ISO 8601 带 +08:00；not-tested 与 qa-error 的 tested_at 为 null', async () => {
+  const { toShanghaiIso } = await import('../src/util.mjs')
+  assert.equal(toShanghaiIso(new Date('2026-10-10T19:40:12.345Z')), '2026-10-11T03:40:12+08:00')
+  assert.equal(toShanghaiIso('nope'), null)
+  const e = notTestedEntry({ number: 5, reason: 'merged' }, 'over-limit', 'x')
+  assert.ok('tested_at' in e && e.tested_at === null)
+  const h = health()
+  const { prs, heartbeat } = await processTargets([{ number: 6, reason: 'merged' }], { health: h, processOne: async () => { throw new Error('x') } })
+  assert.equal(prs[0].tested_at, null)
+  assert.match(prs[0].test_started_at, /\+08:00$/)
+  assert.match(heartbeat.run_started_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+08:00$/)
+})
+
+test('审查与测试同一提交：base..tested 的 git diff 解析成 GitHub files 形状', async () => {
+  const { splitDiffFiles } = await import('../src/nightly.mjs')
+  const text = ['diff --git a/src/a.ts b/src/a.ts', 'index 1..2 100644', '--- a/src/a.ts', '+++ b/src/a.ts', '@@ -1,2 +1,3 @@', ' keep', '-old', '+new', '+more',
+    'diff --git a/src/n.ts b/src/n.ts', 'new file mode 100644', '--- /dev/null', '+++ b/src/n.ts', '@@ -0,0 +1 @@', '+x',
+    'diff --git a/img.png b/img.png', 'deleted file mode 100644', 'Binary files a/img.png and /dev/null differ'].join('\n')
+  const files = splitDiffFiles(text)
+  assert.deepEqual(files.map((f) => [f.filename, f.status, f.additions, f.deletions]), [['src/a.ts', 'modified', 2, 1], ['src/n.ts', 'added', 1, 0], ['img.png', 'removed', 0, 0]])
+  assert.match(files[0].patch, /^@@ -1,2 \+1,3 @@\n keep\n-old\n\+new\n\+more$/)
+  assert.equal(files[2].patch, null)
+  // 同一份 diff 给覆盖率用
+  assert.deepEqual(parseAddedLines(text)['src/a.ts'].map((r) => r.line), [2, 3])
+})
+
+test('夜间全量把每个测完的已合并 PR 写成 merged/PR-N.json（同格式、可被复用）；--pr 运行默认不写', async () => {
+  const { mergedReportFor, writeMergedEnabled, loadMergedResult } = await import('../src/nightly.mjs')
+  assert.equal(writeMergedEnabled({}), true)
+  assert.equal(writeMergedEnabled({ prs: [1] }), false)
+  assert.equal(writeMergedEnabled({ prs: [1], writeMerged: true }), true)
+  assert.equal(writeMergedEnabled({ writeMerged: false }), false)
+  const pr = { number: 898, state: 'merged', verdict: 'clean', severity: 'P3', tested_sha: 'a'.repeat(40), merge_sha: 'a'.repeat(40), tested_at: '2026-10-11T04:00:00+08:00', findings: [] }
+  const report = { schema_version: '1.0', date: '2026-10-10', run: { id: 'r', args: { prs: null } }, summary: {}, prs: [pr, { number: 2, state: 'open', verdict: 'clean' }],
+    system_health: { status: 'degraded', qa_tool_failures: [{ pr: 2, stage: 'x' }, { pr: 898, stage: 'y' }, { stage: 'janitor' }], env_problems: [], llm_errors: [], heartbeat: { prs: [{ number: 898 }, { number: 2 }] } } }
+  const doc = mergedReportFor(report, pr)
+  assert.equal(doc.schema_version, '1.0')
+  assert.deepEqual(doc.prs.map((p) => p.number), [898])
+  assert.equal(doc.prs[0].tested_at, '2026-10-11T04:00:00+08:00')
+  assert.deepEqual(doc.system_health.qa_tool_failures.map((f) => f.stage), ['y', 'janitor'])
+  assert.deepEqual(doc.system_health.heartbeat.prs, [{ number: 898 }])
+  assert.equal(doc.summary.pr_count, 1)
+  const dir = mkdtempSync(join(tmpdir(), 'merged-'))
+  writeFileSync(join(dir, 'PR-898.json'), JSON.stringify(doc))
+  assert.ok(loadMergedResult(898, 'a'.repeat(40), { mergedDir: dir }), 'nightly-written merged report is reusable')
+})

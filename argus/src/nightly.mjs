@@ -17,7 +17,7 @@ import { evaluateJev } from './jev.mjs'
 import { toMatrixQuestions, toMatrixState, toTriage, toStepPlan, toCoverage } from './matrix.mjs'
 import { codeReview, toBox, BOXES, LLM_MODEL, mingQaVersion, mingQaAvailable } from './mingqa.mjs'
 import { ALL_DIRS, CACHE_DIR, EVIDENCE_DIR, REPORTS_DIR, CODE_DIR } from './paths.mjs'
-import { log, redact, tail, toShanghaiDay } from './util.mjs'
+import { log, redact, tail, toShanghaiDay, toShanghaiIso } from './util.mjs'
 import { setBudget, overBudget } from './exec.mjs'
 import { coverageGate, parseAddedLines, COVERAGE_THRESHOLDS } from './coverage.mjs'
 
@@ -94,24 +94,26 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     risk_class: null, severity: 'P3', verdict: null, outcome: null, outcome_reason: null,
     checks: [], failed_checks: [], code_review: null, findings: [], ai_summary: null, coverage: null, coverage_gate: null,
     evidence_dir: null, duration_s: null,
+    // tested_at：这个 PR 得出结论的时间（上海时区 ISO 8601，带 +08:00）；test_started_at：开始处理的时间
+    test_started_at: toShanghaiIso(new Date(startedAt)), tested_at: null, reviewed_sha: null, review_base_sha: null,
   }
   // 合并即测（on-merge）已经在同一个 merge commit 上测过：直接引用它的结果，不重测
   if (merged && opts.reuseMerged !== false) {
     const reused = loadMergedResult(number, pr.merge_commit_sha, { mergedDir: opts.mergedDir, selfOut: opts.out })
     if (reused) {
       health.notes.push(`PR #${number}: reused on-merge result ${reused.file} (same merge commit ${pr.merge_commit_sha.slice(0, 12)}), not re-tested`)
-      return { ...reused.pr, discovery_reason: discovery, reused: true, reused_from: reused.file, reused_report_generated_at: reused.generatedAt, reused_report_system_health: reused.systemHealth }
+      return { ...reused.pr, tested_at: reused.pr.tested_at ?? toShanghaiIso(reused.generatedAt ?? NaN), discovery_reason: discovery, reused: true, reused_from: reused.file, reused_report_generated_at: reused.generatedAt, reused_report_system_health: reused.systemHealth }
     }
   }
   const evDir = join(evidenceRoot, `pr-${number}`)
   mkdirSync(evDir, { recursive: true })
   out.evidence_dir = evDir
-  if (!merged && pr.state !== 'open') { out.verdict = 'skipped'; out.outcome_reason = 'PR is closed without merge'; return out }
+  if (!merged && pr.state !== 'open') { out.verdict = 'skipped'; out.outcome_reason = 'PR is closed without merge'; out.tested_at = toShanghaiIso(); return out }
 
   const { riskClass, reasonZh: classReason } = classifyChange(files, baseProfile)
   out.risk_class = riskClass
   out.risk_reason = classReason
-  if (riskClass === 'A') { out.verdict = 'docs-only'; out.outcome = 'docs_only'; out.outcome_reason = classReason; out.duration_s = Math.round((Date.now() - startedAt) / 1000); return out }
+  if (riskClass === 'A') { out.verdict = 'docs-only'; out.outcome = 'docs_only'; out.outcome_reason = classReason; out.duration_s = Math.round((Date.now() - startedAt) / 1000); out.tested_at = toShanghaiIso(); return out }
 
   // 被测版本：已合并 → merge commit；开放 → PR head（从 refs/pull/N/head 取，支持 fork）
   const sha = merged ? pr.merge_commit_sha : pr.head.sha
@@ -138,7 +140,9 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   if (merged) baseSha = (await getCommit(repo, sha))?.parents?.[0]?.sha ?? null
   else { const mirror = await ensureMirror(repo, sha, { extraRefspecs }); baseSha = await mergeBase(mirror, sha, pr.base.sha) }
   out.base_sha = baseSha
-  out.coverage_gate = await computeCoverageGate({ repo, first, sha, baseSha, extraRefspecs })
+  // 同一份 diff（base..tested）同时给覆盖率门禁和代码审查用：审查的就是被测的那个提交
+  const prDiff = await diffForReview({ repo, sha, baseSha, extraRefspecs })
+  out.coverage_gate = computeCoverageGate({ first, prDiff })
 
   let rerun = null, base = null, latest = null, latestIsSame = true
   const failed = failedIds(first)
@@ -208,7 +212,13 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
 
   // ming-qa 代码审查（白盒）
   if (!opts.noReview) {
-    const cr = await codeReview({ secrets, pr, files, results: first, profile, outDir: join(evDir, 'code-review') })
+    // 审查文件来自本地镜像 base..tested 的 diff（已合并：merge-base..merge commit；开放：merge-base..head）。
+    // 本地 diff 拿不到时才退回 GitHub 的 PR 文件列表（那是 PR head 的 diff），并在 system_health.notes 里说明。
+    const reviewFiles = prDiff.files ?? files
+    out.reviewed_sha = prDiff.files ? sha : (pr.head?.sha ?? null)
+    out.review_base_sha = prDiff.files ? baseSha : (pr.base?.sha ?? null)
+    out.review_diff_source = prDiff.files ? 'local git diff base_sha..tested_sha' : `github pr files (local diff unavailable: ${prDiff.error})`
+    const cr = await codeReview({ secrets, pr, files: reviewFiles, results: first, profile, outDir: join(evDir, 'code-review') })
     if (cr.status !== 'ok') {
       health.llm_errors.push({ pr: number, stage: 'code-review', model: LLM_MODEL, ...cr.error })
       out.code_review = { status: cr.status, error: cr.error }
@@ -224,7 +234,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
           source: 'code-review', check_id: 'code-review', dimension: 'white-box', severity, llm_severity: f.severity, verdict: f.verdict,
           category: f.category, title: f.title, file: f.file, line: f.line, symbol: f.symbol,
           fingerprint: fp, pr_fingerprint: prFingerprint(fp, number),
-          evidence: { evidence: f.evidence, failure_scenario: f.failureScenario, recommendation: f.recommendation, reviewed_sha: pr.head?.sha },
+          evidence: { evidence: f.evidence, failure_scenario: f.failureScenario, recommendation: f.recommendation, reviewed_sha: out.reviewed_sha },
         })
       }
     }
@@ -251,24 +261,54 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   out.severity = out.findings.length ? maxSev(out.findings.map((f) => f.severity)) : 'P3'
   out.verdict = verdictOf(out)
   out.duration_s = Math.round((Date.now() - startedAt) / 1000)
+  out.tested_at = toShanghaiIso()
+  // 测试与审查必须是同一个提交
+  out.sha_consistent = out.reviewed_sha == null || out.reviewed_sha === out.tested_sha
+  if (!out.sha_consistent) health.notes.push(`PR #${number}: tests ran on ${String(out.tested_sha).slice(0, 12)} but code review looked at ${String(out.reviewed_sha).slice(0, 12)} (${out.review_diff_source})`)
   return out
 }
 
+// base..tested 的完整 diff：一份文本，解析出审查用的文件列表（GitHub files 形状）和覆盖率用的新增行
+async function diffForReview({ repo, sha, baseSha, extraRefspecs }) {
+  if (!baseSha) return { text: null, files: null, error: 'base revision unknown' }
+  try {
+    const mirror = await ensureMirror(repo, sha, { extraRefspecs })
+    // run() 只保留输出尾部，这里用同步调用拿全量
+    const text = execFileSync('git', ['-C', mirror, 'diff', '--no-color', '--no-ext-diff', '--no-renames', '-U3', baseSha, sha], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: 120_000 })
+    return { text, files: splitDiffFiles(text), error: null }
+  } catch (err) { return { text: null, files: null, error: String(err.message).slice(0, 200) } }
+}
+
+// `git diff` 文本 → [{ filename, status, additions, deletions, patch }]（与 GitHub PR files 接口同形）
+export function splitDiffFiles(text) {
+  const files = []
+  let cur = null
+  for (const line of String(text ?? '').split('\n')) {
+    const m = line.match(/^diff --git a\/(.+) b\/(.+)$/)
+    if (m) { cur = { filename: m[2], status: 'modified', additions: 0, deletions: 0, patch: null, _hunks: [] }; files.push(cur); continue }
+    if (!cur) continue
+    if (!cur._hunks.length) {
+      if (line.startsWith('new file mode')) cur.status = 'added'
+      else if (line.startsWith('deleted file mode')) cur.status = 'removed'
+      else if (line.startsWith('+++ /dev/null')) cur.status = 'removed'
+      else if (line.startsWith('+++ b/')) cur.filename = line.slice(6)
+      if (!line.startsWith('@@')) continue
+    }
+    cur._hunks.push(line)
+    if (line.startsWith('+') && !line.startsWith('+++')) cur.additions++
+    else if (line.startsWith('-') && !line.startsWith('---')) cur.deletions++
+  }
+  for (const f of files) { f.patch = f._hunks.length ? f._hunks.join('\n') : null; delete f._hunks }
+  return files
+}
+
 // 覆盖率门禁：取首轮里带 coverage 的步骤（单测），与 base..tested 的 diff 新增行求交
-async function computeCoverageGate({ repo, first, sha, baseSha, extraRefspecs }) {
+function computeCoverageGate({ first, prDiff }) {
   const r = first.find((x) => x.coverage)
   if (!r) return coverageGate({ coverage: null })
   if (r.coverage.status !== 'ok') return coverageGate({ coverage: r.coverage, stepId: r.id })
-  let added = null, diffError = null
-  if (!baseSha) diffError = 'base revision unknown; new-code coverage not evaluated'
-  else {
-    try {
-      const mirror = await ensureMirror(repo, sha, { extraRefspecs })
-      // 完整 diff（run() 只保留输出尾部，这里用同步调用拿全量）
-      added = parseAddedLines(execFileSync('git', ['-C', mirror, 'diff', '-U0', '--no-color', '--no-ext-diff', '--no-renames', baseSha, sha], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: 120_000 }))
-    } catch (err) { diffError = `diff unavailable: ${String(err.message).slice(0, 200)}` }
-  }
-  return coverageGate({ coverage: r.coverage, added, stepId: r.id, diffError })
+  const diffError = prDiff.text == null ? `new-code coverage not evaluated: ${prDiff.error}` : null
+  return coverageGate({ coverage: r.coverage, added: diffError ? null : parseAddedLines(prDiff.text), stepId: r.id, diffError })
 }
 
 function verdictOf(pr) {
@@ -440,7 +480,7 @@ async function createIssues(report) {
 // 发现了但这次没测的 PR：仍进 prs[]，verdict=not-tested 并写明原因。
 // 被 --pr 主动排除 → P3（本次有意不测）；超出 --limit / 超时 / 截止时间 → P2（夜间覆盖缺口，需要关注）。
 export function notTestedEntry(t, code, reason) {
-  return { number: t.number, discovery_reason: t.reason, verdict: 'not-tested', severity: code === 'excluded-by-pr-filter' ? 'P3' : 'P2', not_tested_code: code, not_tested_reason: reason, findings: [], failed_checks: [], checks: [], coverage_gate: null }
+  return { number: t.number, discovery_reason: t.reason, verdict: 'not-tested', severity: code === 'excluded-by-pr-filter' ? 'P3' : 'P2', not_tested_code: code, not_tested_reason: reason, tested_at: null, findings: [], failed_checks: [], checks: [], coverage_gate: null }
 }
 
 // --deadline：HH:MM（上海时间，指开始之后最近的那个时刻）或完整 ISO 时间
@@ -478,7 +518,7 @@ export function planTargets(discovered, opts = {}) {
 export async function processTargets(targets, { opts = {}, health, startedAt = new Date(), processOne, now = () => Date.now() }) {
   const prTimeoutMs = opts.prTimeoutMin ? opts.prTimeoutMin * 60_000 : null
   const deadlineMs = opts.deadline ? parseDeadline(opts.deadline, startedAt) : null
-  const heartbeat = { run_started_at: startedAt.toISOString(), run_finished_at: null, duration_s: null, last_beat_at: startedAt.toISOString(), pr_timeout_min: opts.prTimeoutMin ?? null, deadline: deadlineMs ? new Date(deadlineMs).toISOString() : null, prs: [] }
+  const heartbeat = { run_started_at: toShanghaiIso(startedAt), run_finished_at: null, duration_s: null, last_beat_at: toShanghaiIso(startedAt), pr_timeout_min: opts.prTimeoutMin ?? null, deadline: deadlineMs ? new Date(deadlineMs).toISOString() : null, prs: [] }
   health.heartbeat = heartbeat
   const prs = []
   for (const t of targets) {
@@ -490,7 +530,7 @@ export async function processTargets(targets, { opts = {}, health, startedAt = n
     }
     log('info', 'nightly pr start', { pr: t.number })
     process.stderr.write(`[panoptes] PR #${t.number} (${t.reason}) …\n`)
-    const beat = { number: t.number, started_at: new Date(now()).toISOString(), finished_at: null, duration_s: null, verdict: null }
+    const beat = { number: t.number, started_at: toShanghaiIso(new Date(now())), finished_at: null, duration_s: null, verdict: null }
     heartbeat.prs.push(beat)
     const t0 = now()
     const byTimeout = prTimeoutMs != null && (deadlineMs == null || t0 + prTimeoutMs <= deadlineMs)
@@ -502,7 +542,7 @@ export async function processTargets(targets, { opts = {}, health, startedAt = n
     } catch (err) {
       if (!overBudget()) {
         health.qa_tool_failures.push({ pr: t.number, stage: 'pipeline', message: redact(err.message).slice(0, 800) })
-        result = { number: t.number, discovery_reason: t.reason, verdict: 'qa-error', severity: 'P2', error: redact(err.message).slice(0, 800), findings: [], failed_checks: [], checks: [], coverage_gate: null }
+        result = { number: t.number, discovery_reason: t.reason, verdict: 'qa-error', severity: 'P2', error: redact(err.message).slice(0, 800), findings: [], failed_checks: [], checks: [], coverage_gate: null, test_started_at: beat.started_at, tested_at: null }
       }
     }
     if (overBudget()) {
@@ -515,7 +555,7 @@ export async function processTargets(targets, { opts = {}, health, startedAt = n
     }
     setBudget(null)
     prs.push(result)
-    beat.finished_at = new Date(now()).toISOString()
+    beat.finished_at = toShanghaiIso(new Date(now()))
     beat.duration_s = Math.round((now() - t0) / 1000)
     beat.verdict = result.verdict
     heartbeat.last_beat_at = beat.finished_at
@@ -534,8 +574,8 @@ export function finalizeHealth(health, prs, startedAt = new Date(), now = () => 
   const discoveryOk = !health.qa_tool_failures.some((f) => f.stage === 'discovery')
   health.complete = discoveryOk && !prs.some(unfinished)
   health.all_discovered_tested = discoveryOk && !prs.some((p) => unfinished(p) || p.verdict === 'not-tested')
-  const hb = health.heartbeat ??= { run_started_at: startedAt.toISOString(), prs: [] }
-  hb.run_finished_at = new Date(now()).toISOString()
+  const hb = health.heartbeat ??= { run_started_at: toShanghaiIso(startedAt), prs: [] }
+  hb.run_finished_at = toShanghaiIso(new Date(now()))
   hb.duration_s = Math.round((now() - startedAt.getTime()) / 1000)
   hb.last_beat_at = hb.run_finished_at
   return health
@@ -596,8 +636,9 @@ export async function runNightly(opts = {}) {
     generated_at: new Date().toISOString(),
     run: {
       id: runId, started_at: startedAt.toISOString(), finished_at: new Date().toISOString(),
+      started_at_shanghai: toShanghaiIso(startedAt), finished_at_shanghai: toShanghaiIso(),
       duration_s: Math.round((Date.now() - startedAt.getTime()) / 1000),
-      args: { date: opts.date ?? null, prs: opts.prs ?? null, out: opts.out ?? null, reuse_merged: opts.reuseMerged !== false, create_issues: Boolean(opts.createIssues), limit: opts.limit ?? null, pr_timeout_min: opts.prTimeoutMin ?? null, deadline: opts.deadline ?? null },
+      args: { date: opts.date ?? null, prs: opts.prs ?? null, out: opts.out ?? null, reuse_merged: opts.reuseMerged !== false, create_issues: Boolean(opts.createIssues), limit: opts.limit ?? null, pr_timeout_min: opts.prTimeoutMin ?? null, deadline: opts.deadline ?? null, write_merged: writeMergedEnabled(opts) },
       argus_commit: (() => { try { return execFileSync('git', ['-C', CODE_DIR, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim() } catch { return null } })(),
       ming_qa_commit: await mingQaVersion(), llm_model: LLM_MODEL, evidence_root: evidenceRoot,
     },
@@ -624,6 +665,48 @@ export async function runNightly(opts = {}) {
       catch (err) { report.issues = { enabled: true, error: redact(err.message).slice(0, 500) }; health.qa_tool_failures.push({ stage: 'issues', message: redact(err.message).slice(0, 500) }) }
     }
   }
+  report.merged_reports = writeMergedReports(report, { opts, outFile })
   const file = writeReport(report, outFile)
   return { file, report }
+}
+
+// 夜间全量（没有 --pr）默认把每个真实测完的已合并 PR 也写成 reports/merged/PR-N.json（与合并即测同格式），
+// 供日报与之后的复用读取。--no-write-merged 关闭；--write-merged 在 --pr 运行里也打开。
+export const writeMergedEnabled = (opts) => opts.writeMerged ?? !opts.prs?.length
+
+export function mergedReportFor(report, pr) {
+  const own = (list) => (list ?? []).filter((e) => e.pr == null || e.pr === pr.number)
+  const h = report.system_health
+  const findings = pr.findings ?? []
+  return {
+    ...report,
+    merged_sha: pr.merge_sha ?? pr.tested_sha ?? null,
+    written_by: 'nightly',
+    run: { ...report.run, args: { ...report.run.args, prs: [pr.number] }, source_report: null },
+    summary: {
+      pr_count: 1,
+      prs_by_severity: Object.fromEntries(['P0', 'P1', 'P2', 'P3'].map((s) => [s, pr.severity === s ? 1 : 0])),
+      findings_by_severity: Object.fromEntries(['P0', 'P1', 'P2', 'P3'].map((s) => [s, findings.filter((f) => f.severity === s).length])),
+      findings_total: findings.length, reused_from_on_merge: [], tested_count: 1, not_tested: [], qa_errors: [],
+    },
+    prs: [pr],
+    issues: { enabled: false, reason: 'written from a nightly run; issues are only handled by the run itself' },
+    system_health: { ...h, qa_tool_failures: own(h.qa_tool_failures), env_problems: own(h.env_problems), llm_errors: own(h.llm_errors),
+      heartbeat: h.heartbeat ? { ...h.heartbeat, prs: (h.heartbeat.prs ?? []).filter((b) => b.number === pr.number) } : null },
+    merged_reports: undefined,
+  }
+}
+
+function writeMergedReports(report, { opts, outFile }) {
+  if (!writeMergedEnabled(opts)) return []
+  const written = []
+  for (const pr of report.prs) {
+    if (pr.state !== 'merged' || pr.reused || !REUSABLE_VERDICTS.has(pr.verdict)) continue
+    const file = mergedReportPath(pr.number, opts.mergedDir)
+    if (resolve(file) === resolve(outFile)) continue
+    const doc = mergedReportFor(report, pr)
+    doc.run.source_report = outFile
+    try { writeReport(doc, file); written.push({ pr: pr.number, file }) } catch (err) { report.system_health.qa_tool_failures.push({ pr: pr.number, stage: 'write-merged-report', message: redact(err.message).slice(0, 300) }) }
+  }
+  return written
 }

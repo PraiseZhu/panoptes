@@ -50,6 +50,13 @@ export function sha1(text) {
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 // 上海时区的日期字符串 YYYY-MM-DD
+// ISO 8601 with an explicit +08:00 offset, e.g. 2026-10-11T03:40:12+08:00 (null-safe)
+export function toShanghaiIso(date = new Date()) {
+  const t = date instanceof Date ? date.getTime() : Date.parse(date)
+  if (!Number.isFinite(t)) return null
+  return new Date(t + 8 * 3600_000).toISOString().replace(/\.\d{3}Z$/, '+08:00')
+}
+
 export function toShanghaiDay(date = new Date()) {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(date)
 }
