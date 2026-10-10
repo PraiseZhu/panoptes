@@ -125,7 +125,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
       const baseSha = await reviewBaseSha({ repo, pr, sha, merged, extraRefspecs })
       out.base_sha = baseSha
       const prDiff = await diffForReview({ repo, sha, baseSha, extraRefspecs })
-      await runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha, results: [], profile: baseProfile, evDir, secrets, health, number })
+      await runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha, results: [], profile: baseProfile, evDir, secrets, health, number, shaField: merged ? 'merge_sha' : 'head_sha' })
       out.sha_consistent = out.reviewed_sha == null || out.reviewed_sha === sha
       if (!out.sha_consistent) health.notes.push(`PR #${number}: docs-only review looked at ${String(out.reviewed_sha).slice(0, 12)} instead of ${String(sha).slice(0, 12)} (${out.review_diff_source})`)
     }
@@ -294,11 +294,11 @@ async function reviewBaseSha({ repo, pr, sha, merged, extraRefspecs }) {
 
 // ming-qa 代码审查（白盒）。审查文件来自本地镜像 base..tested 的 diff（已合并：merge-base..merge commit；开放：merge-base..head）。
 // 本地 diff 拿不到时才退回 GitHub 的 PR 文件列表（那是 PR head 的 diff），并在 system_health.notes 里说明。
-async function runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha, results, profile, evDir, secrets, health, number }) {
+async function runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha, results, profile, evDir, secrets, health, number, shaField = 'tested_sha' }) {
   const reviewFiles = prDiff.files ?? files
   out.reviewed_sha = prDiff.files ? sha : (pr.head?.sha ?? null)
   out.review_base_sha = prDiff.files ? baseSha : (pr.base?.sha ?? null)
-  out.review_diff_source = prDiff.files ? 'local git diff base_sha..tested_sha' : `github pr files (local diff unavailable: ${prDiff.error})`
+  out.review_diff_source = prDiff.files ? `local git diff base_sha..${shaField}` : `github pr files (local diff unavailable: ${prDiff.error})`
   const cr = await codeReview({ secrets, pr, files: reviewFiles, results, profile, outDir: join(evDir, 'code-review') })
   if (cr.status !== 'ok') {
     health.llm_errors.push({ pr: number, stage: 'code-review', model: LLM_MODEL, ...cr.error })

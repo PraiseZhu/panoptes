@@ -10,8 +10,10 @@ merge commit and writes `merged/PR-N.json` for every merged PR it had to test it
 | File | Written by |
 |---|---|
 | `$QA_HOME/reports/merged/PR-N.json` | on-merge run for PR N, or a day-level run that tested PR N itself (`written_by: "nightly"`) |
+| `$QA_HOME/reports/open/PR-N.json` | a run with `--write-open`: one file per **open** PR of the run, tested or not (`not-tested` entries carry `not_tested_code` / `not_tested_reason`; PRs excluded by `--pr` are not written) |
 | `$QA_HOME/reports/YYYY-MM-DD.json` | day-level discovery run for Shanghai day `YYYY-MM-DD` |
-| any `--out PATH` | manual / ad-hoc runs (e.g. `reports/full-2026-10-10.json`) |
+| any `--out PATH` | manual / ad-hoc runs |
+| `$QA_HOME/reports/full-YYYY-MM-DD.json` | combined day report assembled from the per-PR files (merged + open); carries `assembled_from` (see *Combined reports*) |
 
 **The daily report selects PRs by `prs[].merged_at` converted to Asia/Shanghai** (`prs[].merged_at_shanghai` has
 it pre-converted): "merged yesterday" = `merged_at_shanghai` falls on yesterday's Shanghai date. `merged_at` is present
@@ -49,7 +51,8 @@ Reports written before 2026-10-11 (commit `78184f9`) do not have `tested_at`; fa
 | `repo` | string | `xindong/mivo-canvas-plugin` |
 | `generated_at` | ISO UTC | |
 | `merged_sha` | string | only in `reports/merged/PR-N.json` written by nightly: the merge commit |
-| `written_by` | `"nightly"` | only in merged reports written by a nightly run |
+| `head_sha` | string | only in `reports/open/PR-N.json`: the PR head that was tested (`null` when not tested) |
+| `written_by` | string | only in per-PR files: `"nightly"` (written by a multi-PR run) or `"backfill (panoptes processPr)"` (one PR re-run through the same pipeline function) |
 | `run` | object | see below |
 | `dimensions` | object | `white-box` / `gray-box` / `black-box` → description |
 | `severity_scale` | object | `P0`…`P3` → description |
@@ -57,12 +60,13 @@ Reports written before 2026-10-11 (commit `78184f9`) do not have `tested_at`; fa
 | `prs` | array | one entry per discovered (or `--pr`-requested) PR, see below |
 | `issues` | object | issue creation result (off by default) |
 | `merged_reports` | array | `[{ pr, file }]` merged PR reports this run wrote (empty for `--pr` runs) |
+| `open_reports` | array | only with `--write-open`: `[{ pr, file }]` open PR reports this run wrote |
 | `system_health` | object | see below |
 
 ### `run`
 
 `id` (uuid), `started_at`, `finished_at`, `started_at_shanghai`, `finished_at_shanghai`, `duration_s`,
-`args` (`date`, `prs`, `out`, `reuse_merged`, `create_issues`, `limit`, `pr_timeout_min`, `deadline`, `write_merged`),
+`args` (`date`, `prs`, `out`, `reuse_merged`, `create_issues`, `limit`, `pr_timeout_min`, `deadline`, `write_merged`, `write_open`),
 `argus_commit` (panoptes commit), `ming_qa_commit`, `llm_model`, `evidence_root`.
 Merged reports written by nightly also carry `run.source_report` (path of the nightly report).
 
@@ -93,8 +97,8 @@ Merged reports written by nightly also carry `run.source_report` (path of the ni
 | `latest_main_sha` | only when a merged PR's failure was re-checked on latest main |
 | **`reviewed_sha`** | commit the LLM code review looked at — equals `tested_sha` |
 | `review_base_sha` | base of the reviewed diff (= `base_sha`) |
-| `review_diff_source` | `local git diff base_sha..tested_sha`, or a GitHub fallback with the reason |
-| `sha_consistent` | `true` when `reviewed_sha` is null or equals `tested_sha`; `false` also adds a `system_health.notes` entry |
+| `review_diff_source` | `local git diff base_sha..tested_sha` (docs-only: `base_sha..merge_sha` / `base_sha..head_sha`), or a GitHub fallback with the reason |
+| `sha_consistent` | `true` when `reviewed_sha` is null or equals `tested_sha` (docs-only, where nothing is tested: equals `merge_sha` for merged / `head_sha` for open PRs); `false` also adds a `system_health.notes` entry |
 | `test_started_at`, **`tested_at`** | see *Timestamps* |
 | `changed_files`, `additions`, `deletions` | |
 | `risk_class` (`A` docs-only / `B` / `C` high-risk), `risk_reason` | |
@@ -108,14 +112,14 @@ Merged reports written by nightly also carry `run.source_report` (path of the ni
 | `partial_result` | only for `not-tested` because of a time budget: `{ verdict, checks, evidence_dir }` of the interrupted run; not used for the verdict |
 | `error` | only for `qa-error` (redacted message); the entry also has one finding `{ source: "qa-error", test_backed: false, severity: "P2" }` |
 | `checks[]` | `{ id, name, kind, dimension, qa_dimensions, status: pass/fail/timeout/unavailable, exit_code, duration_ms, failure_count, unavailable_reason? }` |
-| `failed_checks[]` | `{ check_id, check_name, dimension, qa_dimensions, test, failure_type, status, severity, attribution, fingerprint, pr_fingerprint, evidence{ tested_sha, base_sha, exit_code, timed_out, first_run, rerun, base_run, latest_main_run?, command, log_tail, log_file } }`; `status` ∈ `introduced, pre-existing, flaky, fixed-later, unverified, timeout, setup-failed` |
-| `code_review` | `{ status, summary, gate, model, tokens, findings_count, residual_risks, file }` or `{ status, error }` |
+| `failed_checks[]` | `{ check_id, check_name, dimension, qa_dimensions, test, failure_type, status, severity, attribution, fingerprint, pr_fingerprint, evidence{ tested_sha, base_sha, exit_code, timed_out, first_run, rerun, base_run, latest_main_run?, command, log_tail, log_file } }`; `status` ∈ `introduced, pre-existing, flaky, fixed-later, unverified, timeout, setup-failed`; also boolean **`flaky`** (`true` iff `status: "flaky"`), `related_to_pr: false` for flaky entries, and `reclassified { at, from, reason }` when a stored report was re-classified after the fact |
+| `code_review` | `{ status, summary, gate, model, tokens, findings_count, residual_risks, file }` or `{ status, error }`. **Also present for docs-only PRs** (reviewed on the same commit: merged → `base_sha` (first parent = merge-base) `..merge_sha`); `null` only with `--no-review` |
 | `findings[]` | everything that can raise severity. Every finding has **`source`** ∈ `check` (a failed check, same fields as `failed_checks`), `code-review` (LLM; capped at P1, original in `llm_severity`), `coverage-gate` (P2), `qa-error` (P2, the pipeline crashed) and boolean **`test_backed`** (see *test_backed*) |
 | **`test_backed`** | PR-level: `true` if at least one finding is test-backed |
 | `test_backed_severity` | highest severity among test-backed findings, or `null` |
 | `finding_sources` | distinct `source` values of this PR's findings |
 | `coverage` | QA-dimension coverage of the matrix (`applicable`, `covered`, `missed`, `undetermined`, `passRate`, `coverage`) — *not* code coverage |
-| **`coverage_gate`** | white-box code-coverage gate, see below; `null` when no unit run happened (docs-only, not-tested, qa-error) |
+| **`coverage_gate`** | white-box code-coverage gate, see below; **docs-only: `{ status: "not-applicable", reason: "docs-only change" }`**; `null` when no unit run happened for another reason (not-tested, qa-error) |
 | **`skipped_steps`** | **every** profile step that did not run, each `{ id, nameZh, reason, reasonZh?, dimension }`; reasons: `triage: …` (optional step not relevant to the change), `skipped by --skip-step`, `not run: dependency install failed`, `not run: run stopped before this step …`, `docs-only change: no checks run` |
 | `ai_summary` | `{ summary, risks, suspect, failure_explanation }` |
 | `evidence_dir`, `duration_s` | |
@@ -130,26 +134,39 @@ Merged reports written by nightly also carry `run.source_report` (path of the ni
 | `needs-attention` | P0/P1 | at least one P0/P1 finding |
 | `partially-verified` | P3 | nothing found, but some checks were unavailable / timed out **or a dimension did not run** (`dimensions_missing`) |
 | `qa-env-problem` | per findings | the environment failed (e.g. install failed twice) |
-| `docs-only` | P3 | only docs changed; no checks run |
+| `docs-only` | P3 (or the highest code-review finding) | only docs changed; no checks run, `tested: false`, `tested_sha: null`; the ming-qa code review still runs on the merge commit / head (`code_review`, `reviewed_sha`), `coverage_gate.status: "not-applicable"`. Review findings are `test_backed: false`. |
 | `skipped` | P3 | closed without merge |
 | `not-tested` | **`untested`** | discovered but not tested in this run (`tested: false`, `tested_at: null`); `not_tested_code` ∈ `excluded-by-pr-filter` (deliberate `--pr`), `over-limit`, `pr-timeout`, `deadline`. Time-budget cases are also in `system_health.qa_tool_failures`. Look for this PR's own `merged/PR-N.json` before concluding it was never tested. |
 | `qa-error` | **P2** | the QA pipeline itself crashed for this PR; also listed in `system_health.qa_tool_failures` (`stage: "pipeline"`) |
 
 Severity rules: P0 introduced failure on a merged PR that still fails on latest main · P1 introduced reproducible
-product-check failure, or LLM review P0/P1 · P2 quality guard, unverified, timeout, setup failure, review P2,
-coverage below gate, QA error · P3 pre-existing / flaky / fixed-later / nothing · `untested` not tested at all.
+product-check failure, or LLM review P0/P1 · P2 quality guard, unverified, timeout, setup failure, **flaky (unstable)**,
+review P2, coverage below gate, QA error · P3 pre-existing / fixed-later / nothing · `untested` not tested at all.
+
+### Flaky (unstable) failures
+
+A failed check is **`status: "flaky"`** when it failed on the first run and the **same test passed on a clean rerun of
+the same commit** (per-test evidence: the step's JSON test report; the `bench` step writes one since 2026-10-11).
+It is reported as **P2 "unstable"** (worth fixing the test / budget), but it is **not attributed to the PR**
+(`related_to_pr: false`, PR `outcome: "flaky"` when nothing else failed) and **`test_backed: false`** with `flaky: true`:
+a failure that did not reproduce is not a verified defect and must **never** trigger author notifications or issues.
+Example: 2026-10-10 `bench` › `shadowRoundTrip` 20k round-trip hit vitest's 5000 ms test timeout on #892 and #898 and
+passed on the rerun (4.8 s / 4.9 s).
+If the rerun has no per-test result for the failing test (no JSON report), the failure stays `unverified` (P2,
+`test_backed: true`) — panoptes does not guess.
 
 ### `test_backed` — what notification / issue rules key off
 
 `findings[].test_backed` is `true` **only** when the finding is backed by a failing check that actually ran
-(`source: "check"`). Review-only (`code-review`), `coverage-gate` and `qa-error` findings are always `false`.
+(`source: "check"`) **and was not `flaky`**. Flaky checks (failed, then passed on the rerun), review-only
+(`code-review`), `coverage-gate` and `qa-error` findings are always `false`.
 
 **Downstream notification and issue rules must key off `test_backed`, not severity alone.** A P1 with
 `test_backed: false` is an LLM opinion and must not be presented or escalated as a verified defect. Suggested rule:
 notify authors / open issues for P0/P1 only when `test_backed: true`; list `test_backed: false` items as
 "review suggestions". panoptes' own issue creation (only with `--create-issues` + `ARGUS_ALLOW_ISSUES=1`) follows
 this: P0/P1 findings with `test_backed: true` on PRs by PraiseZhu, plus `system_health` failures; nothing else.
-Older reports without the field: treat `source == "check"` as test-backed.
+Older reports without the field: treat `source == "check"` and `status != "flaky"` as test-backed.
 
 ### `coverage_gate`
 
@@ -168,7 +185,8 @@ Older reports without the field: treat `source == "check"` as test-backed.
 ```
 
 - `status`: `pass` | `fail` | `unavailable` (unit step failed to produce coverage, timed out, or coverage disabled —
-  `reason` says why; **unavailable is not a failure**).
+  `reason` says why; **unavailable is not a failure**) | `not-applicable` (docs-only PR: the object is exactly
+  `{ "status": "not-applicable", "reason": "docs-only change" }`; not a failure, no finding).
 - `values.*` come from a **dedicated coverage run** of the tested revision (label `cov`: own checkout, unit step only,
   `vitest --coverage` v8, run in parallel with the first verdict run). Verdict runs (first / rerun / base / latest)
   never carry coverage, because v8 instrumentation changes the behaviour of a few Mivo tests.
@@ -193,7 +211,7 @@ Older reports without the field: treat `source == "check"` as test-backed.
 | `status` | `ok` · `degraded` (any qa_tool_failures / env_problems / llm_errors) · `failed` (discovery failed or any `qa-error`) |
 | **`complete`** | `true` when discovery worked and every PR this run set out to test has a final verdict (no `qa-error`, no `pr-timeout` / `deadline`). `--pr` exclusions don't make it false. |
 | `all_discovered_tested` | `true` when additionally every discovered PR was tested (no `not-tested` at all) |
-| `qa_tool_failures[]` | `{ pr?, stage, message, dimension?, detail? }`; stages include `pipeline` (qa-error), `setup`, `<check id>` (unavailable / timeout), `pr-timeout`, `deadline`, `discovery`, `janitor`, `issues`, `write-merged-report`, `ming-qa assert-code-review` |
+| `qa_tool_failures[]` | `{ pr?, stage, message, dimension?, detail? }`; stages include `pipeline` (qa-error), `setup`, `<check id>` (unavailable / timeout), `pr-timeout`, `deadline`, `discovery`, `janitor`, `issues`, `write-merged-report`, `write-open-report`, `ming-qa assert-code-review` |
 | `env_problems[]` | `{ pr?, message }` |
 | `llm_errors[]` | `{ pr, stage, model, … }` |
 | `environment` | `{ host, platform, node, sandbox, bwrap, chromium, playwright, python, disk_free_gb }` |
@@ -212,3 +230,13 @@ Older reports without the field: treat `source == "check"` as test-backed.
 ```
 
 One entry per PR the run started, in order (not-tested PRs that never started are absent; see `summary.not_tested`).
+
+## Combined reports (`reports/full-YYYY-MM-DD.json`)
+
+Same top-level shape as a day report, assembled from per-PR files instead of one run: `prs[]` holds each PR's entry
+from `reports/merged/PR-N.json` / `reports/open/PR-N.json` unchanged; `summary` is recomputed over those entries;
+`system_health` is aggregated — `status` = worst of the sources (`failed` > `degraded` > `ok`), `qa_tool_failures`,
+`env_problems`, `llm_errors` and `notes` concatenated (each item keeps or gains `pr`), `heartbeat.prs` concatenated,
+`complete` = every source complete, `all_discovered_tested` = no `not-tested` entry. Extra fields:
+`assembled_from: [{ pr, file, generated_at, run_id, system_health }]` and `run.kind: "assembled"`.
+

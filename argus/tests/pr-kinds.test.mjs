@@ -121,7 +121,8 @@ test('docs-only：仍做代码审查（merge-base..merge commit 的本地 diff�
   assert.deepEqual(out.coverage_gate, { status: 'not-applicable', reason: 'docs-only change' })
   assert.equal(out.reviewed_sha, mergeSha, 'review looks at the merge commit')
   assert.equal(out.review_base_sha, baseSha, 'diff base = first parent (merge-base)')
-  assert.equal(out.review_diff_source, 'local git diff base_sha..tested_sha')
+  assert.equal(out.review_diff_source, 'local git diff base_sha..merge_sha')
+  assert.equal(out.tested_sha, null, 'nothing was tested')
   assert.equal(out.sha_consistent, true)
   assert.equal(out.code_review.status, 'unavailable', 'review attempted (no LLM configured in tests)')
   assert.deepEqual(h.llm_errors.map((e) => e.stage), ['code-review'])
@@ -140,4 +141,33 @@ test('复用：旧的 docs-only 结果没有代码审查 → 审查开着时不�
   assert.ok(N.loadMergedResult(897, sha, { mergedDir: dir, requireReview: false }))
   writeFileSync(join(dir, 'PR-897.json'), JSON.stringify(doc({ status: 'passed' })))
   assert.ok(N.loadMergedResult(897, sha, { mergedDir: dir, requireReview: true }))
+})
+
+test('assemble：后来源覆盖同号 PR、summary 重算、system_health 取最差并只保留被采用条目的问题', async () => {
+  const { assembleReport } = await import('../src/assemble.mjs')
+  const batch = { tool: 't', repo: 'o/r', run: { id: 'b' }, generated_at: 'g1', prs: [
+    { number: 1, state: 'merged', verdict: 'review-suggested', severity: 'P2', findings: [{ source: 'check', status: 'flaky', test_backed: false, severity: 'P2' }] },
+    { number: 2, state: 'merged', verdict: 'docs-only', severity: 'P3', findings: [] },
+    { number: 3, state: 'open', verdict: 'not-tested', severity: 'untested', not_tested_code: 'excluded-by-pr-filter', findings: [] },
+  ], system_health: { status: 'ok', complete: true, qa_tool_failures: [{ pr: 2, stage: 'old' }], env_problems: [], llm_errors: [], notes: ['n1'], heartbeat: { prs: [{ number: 1 }, { number: 2 }] } } }
+  const doc897 = { run: { id: 'x' }, prs: [{ number: 2, state: 'merged', verdict: 'docs-only', severity: 'P3', code_review: { status: 'passed' }, findings: [] }], system_health: { status: 'ok', complete: true, qa_tool_failures: [], env_problems: [], llm_errors: [], notes: ['n2'], heartbeat: { prs: [{ number: 2 }] } } }
+  const open3 = { run: { id: 'o' }, prs: [{ number: 3, state: 'open', verdict: 'needs-attention', severity: 'P1', findings: [{ source: 'check', status: 'introduced', test_backed: true, severity: 'P1' }] }], system_health: { status: 'degraded', complete: true, qa_tool_failures: [{ pr: 3, stage: 'e2e-browser' }], env_problems: [], llm_errors: [], notes: [], heartbeat: { prs: [{ number: 3 }] } } }
+  const r = assembleReport({ date: '2026-10-10', sources: [{ file: 'b', doc: batch }, { file: 'm2', doc: doc897 }, { file: 'o3', doc: open3 }] })
+  assert.deepEqual(r.prs.map((p) => p.verdict), ['review-suggested', 'docs-only', 'needs-attention'])
+  assert.deepEqual(r.prs[1].code_review, { status: 'passed' })
+  assert.deepEqual(r.assembled_from.map((a) => a.file), ['b', 'm2', 'o3'])
+  assert.equal(r.system_health.status, 'degraded')
+  assert.deepEqual(r.system_health.qa_tool_failures.map((f) => f.stage), ['e2e-browser'], 'batch issue of the replaced #2 entry dropped')
+  assert.deepEqual(r.system_health.heartbeat.prs.map((b) => b.number), [1, 2, 3])
+  assert.deepEqual(r.system_health.notes, ['n1', 'n2'])
+  assert.equal(r.system_health.complete, true)
+  assert.equal(r.system_health.all_discovered_tested, true)
+  assert.deepEqual(r.summary.prs_test_backed, [3], 'flaky finding is not test-backed')
+  assert.deepEqual(r.summary.test_backed_findings_by_severity, { P0: 0, P1: 1, P2: 0, P3: 0 })
+  assert.deepEqual(r.summary.prs_by_severity, { P0: 0, P1: 1, P2: 1, P3: 1, untested: 0 })
+  // deadline 未测 → complete=false
+  const late = { ...open3, prs: [{ number: 3, state: 'open', verdict: 'not-tested', severity: 'untested', not_tested_code: 'deadline', findings: [] }] }
+  const r2 = assembleReport({ date: '2026-10-10', sources: [{ file: 'b', doc: batch }, { file: 'o3', doc: late }] })
+  assert.equal(r2.system_health.complete, false)
+  assert.throws(() => assembleReport({ date: 'd', sources: [{ file: 'b', doc: batch }], order: [1, 9] }), /PR 9/)
 })

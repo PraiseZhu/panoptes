@@ -41,7 +41,7 @@ Code and data are separate. Everything the pipeline writes lives in **`$QA_HOME`
 | `$QA_HOME/…` | What |
 |---|---|
 | `argus-root/` | `ARGUS_ROOT`: `app/` (sqlite ledger, evidence), `cache/` (git mirrors, npm/uv caches, run dirs), `logs/`, `nightly.lock` |
-| `reports/YYYY-MM-DD.json`, `reports/merged/PR-N.json` | nightly and on-merge reports |
+| `reports/YYYY-MM-DD.json`, `reports/merged/PR-N.json`, `reports/open/PR-N.json` | nightly, on-merge and open-PR (`--write-open`) reports |
 | `cache/ms-playwright/` | Playwright browsers |
 | `.venv/` | Python for ming-qa |
 | `author-map.json` | roster output of `scripts/refresh-roster.py` (personal data, never committed) |
@@ -92,7 +92,7 @@ Environment overrides for `run-nightly.sh`:
 ```
 run-nightly.sh [--date YYYY-MM-DD] [--pr N ...] [--limit N] [--no-review] [--skip-step ID ...]
                [--out PATH] [--no-reuse] [--wait-lock [SECONDS]] [--pr-timeout MIN] [--deadline HH:MM]
-               [--write-merged | --no-write-merged] [--no-issues | --create-issues]
+               [--write-merged | --no-write-merged] [--write-open] [--no-issues | --create-issues]
 ```
 
 | Flag | Meaning |
@@ -108,6 +108,7 @@ run-nightly.sh [--date YYYY-MM-DD] [--pr N ...] [--limit N] [--no-review] [--ski
 | `--pr-timeout MIN` | Per-PR time budget (env `ARGUS_PR_TIMEOUT_MIN`). Every child process is capped by the remaining budget and no new step starts after it; the PR is reported `not-tested` (P2, `pr-timeout`). Default: no limit. |
 | `--deadline HH:MM` | Shanghai wall-clock deadline or ISO time (env `ARGUS_DEADLINE`). PRs not started by then → `not-tested` (P2, `deadline`); a running PR is stopped. |
 | `--write-merged` / `--no-write-merged` | Also write each actually-tested merged PR to `reports/merged/PR-N.json` (on-merge format). Default on without `--pr`, off with `--pr`. |
+| `--write-open` | Also write each **open** PR of the run to `reports/open/PR-N.json` (same per-PR format; untested ones too, with `not_tested_code` / reason). Default off. |
 | `--no-issues` | Default. Accepted for explicitness. |
 | `--create-issues` | Open issues — **only if `ARGUS_ALLOW_ISSUES=1` is also exported by the caller.** The secrets file cannot switch this on. |
 | `-h`, `--help` | Print usage. |
@@ -124,12 +125,22 @@ run-nightly.sh --pr 893 --wait-lock \
 run-nightly.sh --date 2026-10-10 --deadline 08:45                   # day-level catch-up / open PRs
 ```
 
+Combined day report from per-PR files (later `--from` wins for the same PR; `summary` recomputed, `system_health`
+aggregated, see `docs/report-schema.md` › *Combined reports*):
+
+```sh
+cd argus && node src/cli.mjs assemble --date 2026-10-10 --out "$QA_HOME/reports/full-2026-10-10.json" \
+    --from "$QA_HOME/reports/merged-batch-2026-10-10.json" --from "$QA_HOME/reports/merged/PR-897.json" \
+    --from "$QA_HOME/reports/open/PR-878.json" --from "$QA_HOME/reports/open/PR-888.json" --from "$QA_HOME/reports/open/PR-731.json"
+```
+
 Nightly reuse: a merged PR whose `reports/merged/PR-N.json` has `tested_sha` = its merge commit (and a finished
 verdict) is not re-tested; the entry is copied with `reused: true` and listed in `summary.reused_from_on_merge`.
 
 ## Per-PR pipeline / 单个 PR 的流程
 
-1. Classify the change (docs-only PRs skip tests); optional Jev triage.
+1. Classify the change (docs-only PRs skip tests but still get the ming-qa code review on the merge commit,
+   `coverage_gate: {status: "not-applicable"}`); optional Jev triage.
 2. Fresh git worktree from a local bare mirror: merged → merge commit, open → `refs/pull/N/head`.
 3. Run the profile steps (`argus/config/profiles/mivo-canvas-plugin.json`) inside the sandbox.
 4. Triple-check failures: clean rerun → base revision → latest main (merged PRs). Status per failure:
@@ -142,7 +153,9 @@ probe, plugin build, perf bench) · **black-box** (Mivo CDP browser journey, Pla
 
 Severity: **P0** introduced failure on a merged PR that still fails on latest main · **P1** introduced reproducible
 product-check failure on an open PR, or LLM review P0/P1 (LLM-only capped at P1) · **P2** quality-guard failure,
-unverified, timeout, setup failure, review P2 · **P3** pre-existing / flaky / fixed-later, or nothing found.
+unverified, timeout, setup failure, flaky (unstable), review P2 · **P3** pre-existing / fixed-later, or nothing found.
+Flaky = failed, then the same test passed on a clean rerun of the same commit: P2 "unstable", not attributed to the PR,
+`test_backed: false` — it never triggers notifications or issues.
 
 ## Sandbox / 沙盒: bubblewrap
 

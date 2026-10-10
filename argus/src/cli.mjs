@@ -10,6 +10,7 @@
 //   node src/cli.mjs doctor                只读自检（GitHub / 模型 / 飞书 / 磁盘）
 //   node src/cli.mjs nightly [--date YYYY-MM-DD] [--pr N ...] [--limit N] [--no-review] [--skip-step ID ...] [--out PATH] [--no-reuse] [--pr-timeout MIN] [--deadline HH:MM] [--write-merged | --no-write-merged] [--write-open] [--no-issues | --create-issues]
 //                                          Linux 夜间 QA：上海时区前一天的 PR → reports/YYYY-MM-DD.json（默认不写 GitHub）
+//   node src/cli.mjs assemble --date D --out PATH --from FILE ... [--order N,N]   多份报告合成 full-D.json
 import { mkdirSync } from 'node:fs'
 import { loadRegistry, loadSecrets } from './config.mjs'
 import { openDb, countByStatus, getMeta } from './db.mjs'
@@ -20,6 +21,7 @@ import { probeJev } from './jev.mjs'
 import { ALL_DIRS } from './paths.mjs'
 import { OUTCOMES } from './decide.mjs'
 import { runNightly } from './nightly.mjs'
+import { assembleFiles } from './assemble.mjs'
 import { killAllActive } from './exec.mjs'
 
 const [cmd, ...rest] = process.argv.slice(2)
@@ -48,6 +50,16 @@ async function main() {
       const { file, report } = await runNightly({ date, prs, out, reuseMerged: !flag('no-reuse'), limit: opt('limit') ? Number(opt('limit')) : null, noReview: flag('no-review'), skipSteps: many('skip-step'), createIssues: flag('create-issues'), writeMerged: flag('write-merged') ? true : flag('no-write-merged') ? false : undefined, writeOpen: flag('write-open'), prTimeoutMin: prTimeout != null ? Number(prTimeout) : null, deadline })
       console.log(JSON.stringify({ report: file, date: report.date, prs: report.prs.map((p) => ({ number: p.number, severity: p.severity, verdict: p.verdict })), system_health: report.system_health.status }, null, 2))
       if (report.system_health.status === 'failed') process.exitCode = 3
+      return
+    }
+    case 'assemble': {
+      // assemble --date D --out PATH --from FILE [--from FILE ...] [--order 1,2,3]：后面的 --from 覆盖前面同号 PR
+      const files = rest.flatMap((a, i) => (a === '--from' ? [rest[i + 1]] : []))
+      const date = opt('date'); const out = opt('out')
+      if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !out || !files.length) throw new Error('assemble 需要 --date YYYY-MM-DD --out PATH --from FILE ...')
+      const order = opt('order') ? opt('order').split(',').map(Number) : null
+      const doc = assembleFiles({ date, files, out, order })
+      console.log(JSON.stringify({ out, prs: doc.prs.map((p) => ({ number: p.number, verdict: p.verdict, severity: p.severity })), system_health: doc.system_health.status, complete: doc.system_health.complete }, null, 2))
       return
     }
     case 'serve':
@@ -114,7 +126,7 @@ async function main() {
       return
     }
     default:
-      console.error('未知命令。可用：nightly | serve | daily-report [--dry-run] | status | runs | poll-once | notify --text | doctor')
+      console.error('未知命令。可用：nightly | assemble | serve | daily-report [--dry-run] | status | runs | poll-once | notify --text | doctor')
       process.exitCode = 2
   }
 }

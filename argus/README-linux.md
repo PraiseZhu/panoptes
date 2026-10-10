@@ -89,9 +89,9 @@ Each check additionally lists the ming-qa 29-dimension keys it covers (`qa_dimen
 * **P0** – introduced, reproducible product-check failure on a *merged* PR that still fails on latest main.
 * **P1** – introduced, reproducible product-check failure on an open PR; LLM code-review P0/P1
   (LLM-only findings are capped at P1; the original level is kept in `llm_severity`).
-* **P2** – introduced quality-guard failure, unverified failure, timeout, setup failure, review P2,
+* **P2** – introduced quality-guard failure, unverified failure, timeout, setup failure, flaky (unstable; `test_backed: false`), review P2,
   trial checks (bench) at most P2.
-* **P3** – pre-existing / flaky / fixed-later failures, review P3, or nothing found.
+* **P3** – pre-existing / fixed-later failures, review P3, or nothing found.
 * PR severity = most severe finding (P3 when there are none; `verdict` says `clean`).
 
 ### Fingerprints
