@@ -25,3 +25,9 @@ author-map.json
 # local
 __pycache__/
 .DS_Store
+
+# agent scratch / worktrees
+.worktrees/
+.cindy-worktrees/
+_tmp/
+feishu-sent.json
