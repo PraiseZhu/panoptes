@@ -707,7 +707,7 @@ export async function runNightly(opts = {}) {
       id: runId, started_at: startedAt.toISOString(), finished_at: new Date().toISOString(),
       started_at_shanghai: toShanghaiIso(startedAt), finished_at_shanghai: toShanghaiIso(),
       duration_s: Math.round((Date.now() - startedAt.getTime()) / 1000),
-      args: { date: opts.date ?? null, prs: opts.prs ?? null, out: opts.out ?? null, reuse_merged: opts.reuseMerged !== false, create_issues: Boolean(opts.createIssues), limit: opts.limit ?? null, pr_timeout_min: opts.prTimeoutMin ?? null, deadline: opts.deadline ?? null, write_merged: writeMergedEnabled(opts) },
+      args: { date: opts.date ?? null, prs: opts.prs ?? null, out: opts.out ?? null, reuse_merged: opts.reuseMerged !== false, create_issues: Boolean(opts.createIssues), limit: opts.limit ?? null, pr_timeout_min: opts.prTimeoutMin ?? null, deadline: opts.deadline ?? null, write_merged: writeMergedEnabled(opts), write_open: writeOpenEnabled(opts) },
       argus_commit: (() => { try { return execFileSync('git', ['-C', CODE_DIR, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim() } catch { return null } })(),
       ming_qa_commit: await mingQaVersion(), llm_model: LLM_MODEL, evidence_root: evidenceRoot,
     },
@@ -736,7 +736,8 @@ export async function runNightly(opts = {}) {
       catch (err) { report.issues = { enabled: true, error: redact(err.message).slice(0, 500) }; health.qa_tool_failures.push({ stage: 'issues', message: redact(err.message).slice(0, 500) }) }
     }
   }
-  report.merged_reports = writeMergedReports(report, { opts, outFile })
+  report.merged_reports = writePerPrReports(report, { opts, outFile, kind: 'merged' })
+  if (writeOpenEnabled(opts)) report.open_reports = writePerPrReports(report, { opts, outFile, kind: 'open' })
   const file = writeReport(report, outFile)
   return { file, report }
 }
@@ -744,21 +745,30 @@ export async function runNightly(opts = {}) {
 // 夜间全量（没有 --pr）默认把每个真实测完的已合并 PR 也写成 reports/merged/PR-N.json（与合并即测同格式），
 // 供日报与之后的复用读取。--no-write-merged 关闭；--write-merged 在 --pr 运行里也打开。
 export const writeMergedEnabled = (opts) => opts.writeMerged ?? !opts.prs?.length
+// --write-open：同样的单 PR 格式写 reports/open/PR-N.json。开放 PR 无论结果都写（含 not-tested / qa-error，
+// 带具体原因），这样 deadline 截断的 PR 也有文件。默认关。
+export const writeOpenEnabled = (opts) => Boolean(opts.writeOpen)
+export const openReportsDir = () => process.env.ARGUS_OPEN_REPORTS_DIR ?? join(REPORTS_DIR, 'open')
+export const openReportPath = (n, dir = openReportsDir()) => join(dir, `PR-${n}.json`)
 
-export function mergedReportFor(report, pr) {
+const UNTESTED_VERDICTS = new Set(['not-tested', 'qa-error'])
+export function mergedReportFor(report, pr, { kind = 'merged' } = {}) {
   const own = (list) => (list ?? []).filter((e) => e.pr == null || e.pr === pr.number)
   const h = report.system_health
   const findings = pr.findings ?? []
+  const untested = UNTESTED_VERDICTS.has(pr.verdict)
   return {
     ...report,
-    merged_sha: pr.merge_sha ?? pr.tested_sha ?? null,
+    ...(kind === 'merged' ? { merged_sha: pr.merge_sha ?? pr.tested_sha ?? null } : { head_sha: pr.tested_sha ?? pr.head_sha ?? null }),
     written_by: 'nightly',
     run: { ...report.run, args: { ...report.run.args, prs: [pr.number] }, source_report: null },
     summary: {
       pr_count: 1,
-      prs_by_severity: Object.fromEntries(['P0', 'P1', 'P2', 'P3'].map((s) => [s, pr.severity === s ? 1 : 0])),
+      prs_by_severity: Object.fromEntries(['P0', 'P1', 'P2', 'P3', 'untested'].map((s) => [s, pr.severity === s ? 1 : 0])),
       findings_by_severity: Object.fromEntries(['P0', 'P1', 'P2', 'P3'].map((s) => [s, findings.filter((f) => f.severity === s).length])),
-      findings_total: findings.length, reused_from_on_merge: [], tested_count: 1, not_tested: [], qa_errors: [],
+      findings_total: findings.length, reused_from_on_merge: pr.reused ? [pr.number] : [], tested_count: untested ? 0 : 1,
+      not_tested: pr.verdict === 'not-tested' ? [{ number: pr.number, code: pr.not_tested_code, reason: pr.not_tested_reason }] : [],
+      qa_errors: pr.verdict === 'qa-error' ? [pr.number] : [],
       test_backed_findings_by_severity: Object.fromEntries(['P0', 'P1', 'P2', 'P3'].map((s) => [s, findings.filter((f) => f.test_backed && f.severity === s).length])),
       prs_test_backed: pr.test_backed ? [pr.number] : [],
     },
@@ -767,19 +777,27 @@ export function mergedReportFor(report, pr) {
     system_health: { ...h, qa_tool_failures: own(h.qa_tool_failures), env_problems: own(h.env_problems), llm_errors: own(h.llm_errors),
       heartbeat: h.heartbeat ? { ...h.heartbeat, prs: (h.heartbeat.prs ?? []).filter((b) => b.number === pr.number) } : null },
     merged_reports: undefined,
+    open_reports: undefined,
   }
 }
 
-function writeMergedReports(report, { opts, outFile }) {
-  if (!writeMergedEnabled(opts)) return []
+// 单 PR 文件的选择规则：merged → 真实测完且非复用；open → 所有开放 PR（未测的也写，带原因）
+const PER_PR_KINDS = {
+  merged: { enabled: writeMergedEnabled, path: (n, opts) => mergedReportPath(n, opts.mergedDir), select: (pr) => pr.state === 'merged' && !pr.reused && REUSABLE_VERDICTS.has(pr.verdict) },
+  open: { enabled: writeOpenEnabled, path: (n, opts) => openReportPath(n, opts.openDir), select: (pr) => pr.state === 'open' && pr.not_tested_code !== 'excluded-by-pr-filter' },
+}
+
+export function writePerPrReports(report, { opts, outFile, kind }) {
+  const k = PER_PR_KINDS[kind]
+  if (!k.enabled(opts)) return []
   const written = []
   for (const pr of report.prs) {
-    if (pr.state !== 'merged' || pr.reused || !REUSABLE_VERDICTS.has(pr.verdict)) continue
-    const file = mergedReportPath(pr.number, opts.mergedDir)
+    if (!k.select(pr)) continue
+    const file = k.path(pr.number, opts)
     if (resolve(file) === resolve(outFile)) continue
-    const doc = mergedReportFor(report, pr)
+    const doc = mergedReportFor(report, pr, { kind })
     doc.run.source_report = outFile
-    try { writeReport(doc, file); written.push({ pr: pr.number, file }) } catch (err) { report.system_health.qa_tool_failures.push({ pr: pr.number, stage: 'write-merged-report', message: redact(err.message).slice(0, 300) }) }
+    try { writeReport(doc, file); written.push({ pr: pr.number, file }) } catch (err) { report.system_health.qa_tool_failures.push({ pr: pr.number, stage: `write-${kind}-report`, message: redact(err.message).slice(0, 300) }) }
   }
   return written
 }
