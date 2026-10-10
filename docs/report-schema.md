@@ -169,8 +169,12 @@ Older reports without the field: treat `source == "check"` as test-backed.
 
 - `status`: `pass` | `fail` | `unavailable` (unit step failed to produce coverage, timed out, or coverage disabled —
   `reason` says why; **unavailable is not a failure**).
-- `values.*` are percentages from the unit run of the **tested revision** (first run only; reruns/base runs don't
-  collect coverage). Global metrics cover the files the unit tests load (vitest v8 default scope).
+- `values.*` come from a **dedicated coverage run** of the tested revision (label `cov`: own checkout, unit step only,
+  `vitest --coverage` v8, run in parallel with the first verdict run). Verdict runs (first / rerun / base / latest)
+  never carry coverage, because v8 instrumentation changes the behaviour of a few Mivo tests.
+  `unit_run_under_coverage` `{ exit_code, timed_out, failed_tests, note }` records how the unit suite did under
+  instrumentation — informational only, never part of the verdict. Global metrics cover the files the unit tests
+  load (vitest v8 default scope).
 - The four metrics and thresholds are ming-qa's G2 *Unit Tests And Coverage* gate
   (`ming-qa/skills/quality-assurance-agent/references/quality-gates.md`, config `qualityGates.coverage`:
   `lines 80 · branches 70 · functions 80 · newCode 90`); `thresholds_source` names it.

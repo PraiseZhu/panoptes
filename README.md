@@ -193,8 +193,9 @@ node scripts/send-feishu-dm.mjs --help
 
 ## Coverage gate / 覆盖率门禁 (white-box)
 
-The `unit` step of the tested revision's first run adds `vitest --coverage` (v8, JSON reports into the run dir; vitest's
-own thresholds are not used, so coverage never fails the unit step). Thresholds: **lines 80 · branches 70 ·
+A dedicated coverage run (`cov`: own checkout of the tested revision, unit step only, in parallel with the first
+verdict run) adds `vitest --coverage` (v8, JSON reports). Verdict runs never carry coverage — v8 instrumentation makes
+a few Mivo tests fail — and the coverage run's own pass/fail never affects the verdict. Thresholds: **lines 80 · branches 70 ·
 functions 80 · new code 90**. New code = added/modified lines of `git diff base_sha..tested_sha` in non-test JS/TS
 sources, intersected with v8 statement lines; files no test loads count as uncovered. Below any threshold →
 one **P2** finding (`source: "coverage-gate"`), which by the issue rules never becomes an issue. Result in
