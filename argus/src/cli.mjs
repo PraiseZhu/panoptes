@@ -8,7 +8,7 @@
 //   node src/cli.mjs once                  跑完下一个排队任务即退出（手动验收）
 //   node src/cli.mjs notify --text "..."   用 Doki 给主人发一条消息
 //   node src/cli.mjs doctor                只读自检（GitHub / 模型 / 飞书 / 磁盘）
-//   node src/cli.mjs nightly [--date YYYY-MM-DD] [--pr N ...] [--limit N] [--no-review] [--skip-step ID ...] [--out PATH] [--no-reuse] [--no-issues | --create-issues]
+//   node src/cli.mjs nightly [--date YYYY-MM-DD] [--pr N ...] [--limit N] [--no-review] [--skip-step ID ...] [--out PATH] [--no-reuse] [--pr-timeout MIN] [--deadline HH:MM] [--no-issues | --create-issues]
 //                                          Linux 夜间 QA：上海时区前一天的 PR → reports/YYYY-MM-DD.json（默认不写 GitHub）
 import { mkdirSync } from 'node:fs'
 import { loadRegistry, loadSecrets } from './config.mjs'
@@ -39,7 +39,10 @@ async function main() {
       if (flag('create-issues') && flag('no-issues')) throw new Error('--create-issues 与 --no-issues 不能同时使用')
       const out = opt('out')
       if (rest.includes('--out') && (!out || out.startsWith('--'))) throw new Error('--out 需要文件路径')
-      const { file, report } = await runNightly({ date, prs, out, reuseMerged: !flag('no-reuse'), limit: opt('limit') ? Number(opt('limit')) : null, noReview: flag('no-review'), skipSteps: many('skip-step'), createIssues: flag('create-issues') })
+      const prTimeout = opt('pr-timeout') ?? process.env.ARGUS_PR_TIMEOUT_MIN ?? null
+      if (prTimeout != null && !(Number(prTimeout) > 0)) throw new Error(`--pr-timeout 需要正数分钟：${prTimeout}`)
+      const deadline = opt('deadline') ?? process.env.ARGUS_DEADLINE ?? null
+      const { file, report } = await runNightly({ date, prs, out, reuseMerged: !flag('no-reuse'), limit: opt('limit') ? Number(opt('limit')) : null, noReview: flag('no-review'), skipSteps: many('skip-step'), createIssues: flag('create-issues'), prTimeoutMin: prTimeout != null ? Number(prTimeout) : null, deadline })
       console.log(JSON.stringify({ report: file, date: report.date, prs: report.prs.map((p) => ({ number: p.number, severity: p.severity, verdict: p.verdict })), system_health: report.system_health.status }, null, 2))
       if (report.system_health.status === 'failed') process.exitCode = 3
       return

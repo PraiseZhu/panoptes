@@ -2,13 +2,14 @@
 import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync, statSync, lstatSync, realpathSync, cpSync } from 'node:fs'
 import { join, dirname, basename, resolve, relative, isAbsolute } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
-import { run, isStopping } from './exec.mjs'
+import { run, isStopping, overBudget } from './exec.mjs'
 import { RUNS_DIR, MIRRORS_DIR, NPM_CACHE_DIR, UV_CACHE_DIR, UV_PYTHON_DIR, CACHE_DIR, CODE_DIR } from './paths.mjs'
 import { log, sleep, toPlainZh } from './util.mjs'
 import { gitTokenFor } from './github.mjs'
 import { fileURLToPath } from 'node:url'
 import { validateTestReport } from './config.mjs'
 import { normalizeTestOutcomes } from './test-outcomes.mjs'
+import { vitestCoverageArgs, readCoverageDir } from './coverage.mjs'
 
 const PROBE_SCRIPT = fileURLToPath(new URL('./probe-run.mjs', import.meta.url))
 const AI_TEST_SCRIPT = fileURLToPath(new URL('./ai-test-run.mjs', import.meta.url))
@@ -322,7 +323,7 @@ export async function runSteps(profile, src, runDir, { stepIds = null, execution
   const vars = needsBase ? { BASE_SHA: await toParentSha(src) } : {}
   const results = []
   for (const step of profile.steps) {
-    if (isStopping()) break
+    if (isStopping() || overBudget()) break
     if (stepIds && step.kind !== 'setup' && !stepIds.includes(step.id)) continue
     const stepVarsForReport = prepareTestReport(step, runDir)
     const stepSubstitutions = { ...vars, ...stepVarsForReport }
@@ -335,7 +336,10 @@ export async function runSteps(profile, src, runDir, { stepIds = null, execution
     }
     if (step.probe || step.aiTest || step.tool) prepareTool(step, runDir, vars)
     const logFile = join(runDir, 'logs', `${step.id}.log`)
-    const argv = sandboxed(step.cmd.map((a) => subst(a, runDir, stepSubstitutions)), runDir, profile)
+    const covDir = coverageDirFor(step, runDir, execution)
+    const cmd = step.cmd.map((a) => subst(a, runDir, stepSubstitutions))
+    if (covDir) { rmSync(covDir, { recursive: true, force: true }); mkdirSync(dirname(covDir), { recursive: true }); cmd.push(...vitestCoverageArgs(covDir)) }
+    const argv = sandboxed(cmd, runDir, profile)
     const stepVars = Object.fromEntries(Object.entries(step.env ?? {}).map(([k, v]) => [k, subst(v, runDir, vars)]))
     // step.envUnset：这一步不要继承的公共变量（例如单测要求 MIVO_ASSET_STORE_DIR 未设置）
     const stepEnvBase = { ...env }
@@ -348,11 +352,24 @@ export async function runSteps(profile, src, runDir, { stepIds = null, execution
     toStepOutcome(step, result, runDir)
     Object.assign(result, readTestReport(step, result, src, runDir, stepVarsForReport, execution))
     if (disturbed) result.disturbedDesktop = true
+    if (covDir) result.coverage = res.timedOut ? { status: 'unavailable', reason: 'unit step timed out' } : readCoverageDir(covDir, src)
     results.push(result)
     log('info', 'step done', { ...execution, step: step.id, ok: result.ok, unavailable: Boolean(result.unavailable), exitCode: res.exitCode, ms: res.durationMs })
     if (step.kind === 'setup' && !res.ok) break
   }
   return results
+}
+
+// 覆盖率只在被测版本的首轮（h1 / 安装失败重试的 h1r）开启；重跑、基线、最新主干不需要，也不该变慢。
+// ARGUS_COVERAGE=0 全局关闭。目录必须落在 run 目录内。
+export function coverageDirFor(step, runDir, execution) {
+  if (!step.coverage || process.env.ARGUS_COVERAGE === '0') return null
+  const labels = step.coverage.labels ?? ['h1', 'h1r']
+  if (!labels.includes(execution?.runLabel)) return null
+  const dir = resolve(subst(step.coverage.dir ?? `\${RUN}/coverage/${step.id}`, runDir))
+  const rel = relative(resolve(runDir), dir)
+  if (!rel || rel.startsWith('..') || isAbsolute(rel)) throw new Error('coverage dir escapes run directory')
+  return dir
 }
 
 // 步骤约定的「没跑成」退出码（例如浏览器或服务起不来）不算失败也不算通过；报告文件里的失败项覆盖从输出认出的用例名

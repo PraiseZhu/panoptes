@@ -4,6 +4,7 @@
 #   run-nightly.sh [--date YYYY-MM-DD] [--pr N ...] [--limit N]
 #                  [--no-review] [--skip-step ID ...]
 #                  [--out PATH] [--no-reuse] [--wait-lock [SECONDS]]
+#                  [--pr-timeout MIN] [--deadline HH:MM]
 #                  [--no-issues | --create-issues]
 #
 #   --date        Asia/Shanghai calendar day to report on (default: yesterday in Shanghai)
@@ -16,6 +17,10 @@
 #                 daily report file). On-merge trigger: --pr N --out $QA_HOME/reports/merged/PR-N.json
 #   --no-reuse    re-test merged PRs even if reports/merged/PR-N.json exists for the same merge commit
 #   --wait-lock [SECONDS]  queue behind a running instance (default 14400 = 4h) instead of exit 75
+#   --pr-timeout MIN  per-PR time budget; a PR that exceeds it is stopped and reported as not-tested (P2)
+#                 (env ARGUS_PR_TIMEOUT_MIN; default: no limit)
+#   --deadline HH:MM  Asia/Shanghai wall-clock deadline (or ISO time); PRs not started by then are
+#                 reported as not-tested (P2) and a running PR is stopped (env ARGUS_DEADLINE)
 #   --no-issues   default behaviour; accepted for explicitness
 #   --create-issues  OFF by default. Only acts when ARGUS_ALLOW_ISSUES=1 is also set.
 #   -h, --help    print this help

@@ -158,6 +158,12 @@ export function createFailureParser() {
 let stopping = false
 export const isStopping = () => stopping
 
+// 单个 PR 的时间预算（nightly 的 --pr-timeout / --deadline）：设置后每个子进程的超时不超过剩余预算，
+// 预算用完后新进程立即以超时返回，runner 不再开始新步骤。null = 不限。
+let budgetEnd = null
+export function setBudget(endMs) { budgetEnd = Number.isFinite(endMs) ? endMs : null }
+export const overBudget = () => budgetEnd != null && Date.now() >= budgetEnd
+
 export function killAllActive() {
   stopping = true
   for (const child of active) killGroup(child)
@@ -168,6 +174,12 @@ function killGroup(child, signal = 'SIGTERM') {
 }
 
 export function run(cmd, args, { cwd, env, timeoutMs = 10 * 60_000, logFile, input } = {}) {
+  let budgetCut = false
+  if (budgetEnd != null) {
+    const left = budgetEnd - Date.now()
+    if (left <= 0) return Promise.resolve({ ok: false, exitCode: null, timedOut: true, budgetExceeded: true, durationMs: 0, tail: 'PR time budget exhausted; not started', failures: [], failureDetails: [], failureParseStatus: 'incomplete' })
+    if (left < timeoutMs) { timeoutMs = left; budgetCut = true }
+  }
   return new Promise((resolve) => {
     const started = Date.now()
     let out = ''
@@ -213,7 +225,7 @@ export function run(cmd, args, { cwd, env, timeoutMs = 10 * 60_000, logFile, inp
       const durationMs = Date.now() - started
       logStream?.end(`\n[exit ${exitCode}${timedOut ? ' timeout' : ''} ${durationMs}ms]\n`)
       const tailText = (out.length > TAIL_BYTES ? out.slice(out.length - TAIL_BYTES) : out) + extra
-      resolve({ ok: exitCode === 0 && !timedOut, exitCode, timedOut, durationMs, tail: tailText, ...parser.finish() })
+      resolve({ ok: exitCode === 0 && !timedOut, exitCode, timedOut, ...(timedOut && budgetCut ? { budgetExceeded: true } : {}), durationMs, tail: tailText, ...parser.finish() })
     }
     child.on('error', (err) => finish(null, `\n进程错误：${err.message}`))
     child.on('close', (code) => finish(code))

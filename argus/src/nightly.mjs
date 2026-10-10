@@ -18,6 +18,8 @@ import { toMatrixQuestions, toMatrixState, toTriage, toStepPlan, toCoverage } fr
 import { codeReview, toBox, BOXES, LLM_MODEL, mingQaVersion, mingQaAvailable } from './mingqa.mjs'
 import { ALL_DIRS, CACHE_DIR, EVIDENCE_DIR, REPORTS_DIR, CODE_DIR } from './paths.mjs'
 import { log, redact, tail, toShanghaiDay } from './util.mjs'
+import { setBudget, overBudget } from './exec.mjs'
+import { coverageGate, parseAddedLines, COVERAGE_THRESHOLDS } from './coverage.mjs'
 
 const SCHEMA_VERSION = '1.0'
 const SEV_RANK = { P0: 0, P1: 1, P2: 2, P3: 3 }
@@ -90,7 +92,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     base_ref: pr.base?.ref, head_sha: pr.head?.sha, merge_sha: pr.merge_commit_sha ?? null, tested_sha: null, base_sha: null,
     changed_files: files.length, additions: pr.additions, deletions: pr.deletions,
     risk_class: null, severity: 'P3', verdict: null, outcome: null, outcome_reason: null,
-    checks: [], failed_checks: [], code_review: null, findings: [], ai_summary: null, coverage: null,
+    checks: [], failed_checks: [], code_review: null, findings: [], ai_summary: null, coverage: null, coverage_gate: null,
     evidence_dir: null, duration_s: null,
   }
   // 合并即测（on-merge）已经在同一个 merge commit 上测过：直接引用它的结果，不重测
@@ -136,6 +138,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   if (merged) baseSha = (await getCommit(repo, sha))?.parents?.[0]?.sha ?? null
   else { const mirror = await ensureMirror(repo, sha, { extraRefspecs }); baseSha = await mergeBase(mirror, sha, pr.base.sha) }
   out.base_sha = baseSha
+  out.coverage_gate = await computeCoverageGate({ repo, first, sha, baseSha, extraRefspecs })
 
   let rerun = null, base = null, latest = null, latestIsSame = true
   const failed = failedIds(first)
@@ -233,11 +236,39 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     else if (ai.status === 'error') health.llm_errors.push({ pr: number, stage: 'pr-summary', model: LLM_MODEL, message: `${ai.reasonZh} ${ai.detail ?? ''}`.trim() })
   }
 
+  // 覆盖率门禁不达标 → P2 建议复查（source: coverage-gate，不是失败的检查，按规则永远不会单独开 issue）
+  const gate = out.coverage_gate
+  if (gate?.status === 'fail') {
+    const fp = fingerprintOf(repo, ['coverage-gate', gate.step, gate.failed.join(',')])
+    out.findings.push({
+      source: 'coverage-gate', check_id: 'coverage-gate', dimension: 'white-box', severity: 'P2',
+      title: `coverage below gate: ${gate.failed.map((k) => `${k} ${gate.values[k]}% < ${gate.thresholds[k]}%`).join(', ')}`,
+      fingerprint: fp, pr_fingerprint: prFingerprint(fp, number),
+      evidence: { tested_sha: sha, base_sha: baseSha, values: gate.values, thresholds: gate.thresholds, new_code_files: (gate.new_code?.files ?? []).slice(0, 20) },
+    })
+  }
   out.findings = [...out.failed_checks.map((c) => ({ source: 'check', ...c })), ...out.findings]
   out.severity = out.findings.length ? maxSev(out.findings.map((f) => f.severity)) : 'P3'
   out.verdict = verdictOf(out)
   out.duration_s = Math.round((Date.now() - startedAt) / 1000)
   return out
+}
+
+// 覆盖率门禁：取首轮里带 coverage 的步骤（单测），与 base..tested 的 diff 新增行求交
+async function computeCoverageGate({ repo, first, sha, baseSha, extraRefspecs }) {
+  const r = first.find((x) => x.coverage)
+  if (!r) return coverageGate({ coverage: null })
+  if (r.coverage.status !== 'ok') return coverageGate({ coverage: r.coverage, stepId: r.id })
+  let added = null, diffError = null
+  if (!baseSha) diffError = 'base revision unknown; new-code coverage not evaluated'
+  else {
+    try {
+      const mirror = await ensureMirror(repo, sha, { extraRefspecs })
+      // 完整 diff（run() 只保留输出尾部，这里用同步调用拿全量）
+      added = parseAddedLines(execFileSync('git', ['-C', mirror, 'diff', '-U0', '--no-color', '--no-ext-diff', '--no-renames', baseSha, sha], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: 120_000 }))
+    } catch (err) { diffError = `diff unavailable: ${String(err.message).slice(0, 200)}` }
+  }
+  return coverageGate({ coverage: r.coverage, added, stepId: r.id, diffError })
 }
 
 function verdictOf(pr) {
@@ -406,6 +437,110 @@ async function createIssues(report) {
   return results
 }
 
+// 发现了但这次没测的 PR：仍进 prs[]，verdict=not-tested 并写明原因。
+// 被 --pr 主动排除 → P3（本次有意不测）；超出 --limit / 超时 / 截止时间 → P2（夜间覆盖缺口，需要关注）。
+export function notTestedEntry(t, code, reason) {
+  return { number: t.number, discovery_reason: t.reason, verdict: 'not-tested', severity: code === 'excluded-by-pr-filter' ? 'P3' : 'P2', not_tested_code: code, not_tested_reason: reason, findings: [], failed_checks: [], checks: [], coverage_gate: null }
+}
+
+// --deadline：HH:MM（上海时间，指开始之后最近的那个时刻）或完整 ISO 时间
+export function parseDeadline(v, now = new Date()) {
+  const m = String(v).match(/^(\d{1,2}):(\d{2})$/)
+  if (m) {
+    const day = toShanghaiDay(now)
+    let t = Date.parse(`${day}T${m[1].padStart(2, '0')}:${m[2]}:00+08:00`)
+    if (t <= now.getTime()) t += 24 * 3600_000
+    return t
+  }
+  const t = Date.parse(v)
+  if (!Number.isFinite(t)) throw new Error(`--deadline 需要 HH:MM 或 ISO 时间：${v}`)
+  return t
+}
+
+// 发现结果 → 本次要测的目标 + 发现了但不测的 PR（not-tested，带原因）
+export function planTargets(discovered, opts = {}) {
+  let targets = discovered
+  if (opts.prs?.length) {
+    const byNum = Object.fromEntries(discovered.map((t) => [t.number, t.reason]))
+    targets = opts.prs.map((n) => ({ number: n, reason: byNum[n] ?? 'manual (--pr)' }))
+  }
+  const notTested = []
+  if (opts.prs?.length) for (const t of discovered) if (!opts.prs.includes(t.number)) notTested.push(notTestedEntry(t, 'excluded-by-pr-filter', 'not selected by --pr in this run'))
+  if (opts.limit && targets.length > opts.limit) {
+    for (const t of targets.slice(opts.limit)) notTested.push(notTestedEntry(t, 'over-limit', `beyond --limit ${opts.limit}`))
+    targets = targets.slice(0, opts.limit)
+  }
+  return { targets, notTested }
+}
+
+// 逐个 PR 执行：每个 PR 有心跳（开始/结束/耗时）；qa-error 记 P2 并登记 qa_tool_failures；
+// 超出单 PR 时间预算或整晚截止时间 → not-tested（部分结果放 partial_result）
+export async function processTargets(targets, { opts = {}, health, startedAt = new Date(), processOne, now = () => Date.now() }) {
+  const prTimeoutMs = opts.prTimeoutMin ? opts.prTimeoutMin * 60_000 : null
+  const deadlineMs = opts.deadline ? parseDeadline(opts.deadline, startedAt) : null
+  const heartbeat = { run_started_at: startedAt.toISOString(), run_finished_at: null, duration_s: null, last_beat_at: startedAt.toISOString(), pr_timeout_min: opts.prTimeoutMin ?? null, deadline: deadlineMs ? new Date(deadlineMs).toISOString() : null, prs: [] }
+  health.heartbeat = heartbeat
+  const prs = []
+  for (const t of targets) {
+    if (deadlineMs && now() >= deadlineMs) {
+      const e = notTestedEntry(t, 'deadline', `run deadline ${new Date(deadlineMs).toISOString()} reached before this PR started`)
+      prs.push(e)
+      health.qa_tool_failures.push({ pr: t.number, stage: 'deadline', message: e.not_tested_reason })
+      continue
+    }
+    log('info', 'nightly pr start', { pr: t.number })
+    process.stderr.write(`[panoptes] PR #${t.number} (${t.reason}) …\n`)
+    const beat = { number: t.number, started_at: new Date(now()).toISOString(), finished_at: null, duration_s: null, verdict: null }
+    heartbeat.prs.push(beat)
+    const t0 = now()
+    const byTimeout = prTimeoutMs != null && (deadlineMs == null || t0 + prTimeoutMs <= deadlineMs)
+    const budget = Math.min(prTimeoutMs ? t0 + prTimeoutMs : Infinity, deadlineMs ?? Infinity)
+    setBudget(Number.isFinite(budget) ? budget : null)
+    let result = null
+    try {
+      result = await processOne(t)
+    } catch (err) {
+      if (!overBudget()) {
+        health.qa_tool_failures.push({ pr: t.number, stage: 'pipeline', message: redact(err.message).slice(0, 800) })
+        result = { number: t.number, discovery_reason: t.reason, verdict: 'qa-error', severity: 'P2', error: redact(err.message).slice(0, 800), findings: [], failed_checks: [], checks: [], coverage_gate: null }
+      }
+    }
+    if (overBudget()) {
+      const code = byTimeout ? 'pr-timeout' : 'deadline'
+      const why = byTimeout ? `per-PR time budget of ${opts.prTimeoutMin} min exceeded` : `run deadline ${new Date(deadlineMs).toISOString()} reached`
+      const e = notTestedEntry(t, code, why)
+      if (result) e.partial_result = { verdict: result.verdict, checks: result.checks, evidence_dir: result.evidence_dir ?? null }
+      health.qa_tool_failures.push({ pr: t.number, stage: code, message: why })
+      result = e
+    }
+    setBudget(null)
+    prs.push(result)
+    beat.finished_at = new Date(now()).toISOString()
+    beat.duration_s = Math.round((now() - t0) / 1000)
+    beat.verdict = result.verdict
+    heartbeat.last_beat_at = beat.finished_at
+    process.stderr.write(`[panoptes] PR #${t.number} done: ${result.verdict} ${result.severity ?? ''} (${beat.duration_s}s)\n`)
+  }
+  return { prs, heartbeat }
+}
+
+// status / complete / all_discovered_tested / 心跳收尾
+export function finalizeHealth(health, prs, startedAt = new Date(), now = () => Date.now()) {
+  health.status = health.qa_tool_failures.some((f) => ['discovery', 'pipeline'].includes(f.stage)) || prs.some((p) => p.verdict === 'qa-error') ? 'failed'
+    : (health.qa_tool_failures.length || health.env_problems.length || health.llm_errors.length) ? 'degraded' : 'ok'
+  // complete：发现成功，且本次要测的每个 PR 都有最终结论（没有 qa-error，没有因超时 / 截止时间而没测）。
+  // all_discovered_tested：当天发现的每个 PR 都有最终结论（--pr / --limit 排除的也算没测）。
+  const unfinished = (p) => p.verdict === 'qa-error' || (p.verdict === 'not-tested' && ['pr-timeout', 'deadline'].includes(p.not_tested_code))
+  const discoveryOk = !health.qa_tool_failures.some((f) => f.stage === 'discovery')
+  health.complete = discoveryOk && !prs.some(unfinished)
+  health.all_discovered_tested = discoveryOk && !prs.some((p) => unfinished(p) || p.verdict === 'not-tested')
+  const hb = health.heartbeat ??= { run_started_at: startedAt.toISOString(), prs: [] }
+  hb.run_finished_at = new Date(now()).toISOString()
+  hb.duration_s = Math.round((now() - startedAt.getTime()) / 1000)
+  hb.last_beat_at = hb.run_finished_at
+  return health
+}
+
 // ── 入口 ──────────────────────────────────────────────
 export async function runNightly(opts = {}) {
   for (const d of ALL_DIRS) mkdirSync(d, { recursive: true })
@@ -413,6 +548,7 @@ export async function runNightly(opts = {}) {
   const day = opts.date ?? previousShanghaiDay(startedAt)
   shanghaiDayWindow(day)
   const outFile = resolveOutPath(opts.out, day)
+  if (opts.deadline) parseDeadline(opts.deadline, startedAt) // 参数错误在任何工作开始前报出
   const health = { status: 'ok', qa_tool_failures: [], env_problems: [], llm_errors: [], environment: envSnapshot(), discovery: null, notes: [] }
   const reg = loadRegistry()
   const repo = opts.repo ?? 'xindong/mivo-canvas-plugin'
@@ -442,28 +578,15 @@ export async function runNightly(opts = {}) {
   } catch (err) {
     health.qa_tool_failures.push({ stage: 'discovery', message: redact(err.message).slice(0, 500) })
   }
-  if (opts.prs?.length) {
-    const byNum = Object.fromEntries(targets.map((t) => [t.number, t.reason]))
-    targets = opts.prs.map((n) => ({ number: n, reason: byNum[n] ?? 'manual (--pr)' }))
-  }
-  if (opts.limit) targets = targets.slice(0, opts.limit)
-
-  const prs = []
-  for (const t of targets) {
-    log('info', 'nightly pr start', { pr: t.number })
-    process.stderr.write(`[panoptes] PR #${t.number} (${t.reason}) …\n`)
-    try {
-      prs.push(await processPr({ repo, project, number: t.number, discovery: t.reason, secrets, db, health, evidenceRoot, opts }))
-    } catch (err) {
-      health.qa_tool_failures.push({ pr: t.number, stage: 'pipeline', message: redact(err.message).slice(0, 800) })
-      prs.push({ number: t.number, discovery_reason: t.reason, verdict: 'qa-error', severity: null, error: redact(err.message).slice(0, 800), findings: [], failed_checks: [], checks: [] })
-    }
-    process.stderr.write(`[panoptes] PR #${t.number} done: ${prs.at(-1).verdict} ${prs.at(-1).severity ?? ''}\n`)
-  }
+  const plan = planTargets(targets, opts)
+  const { prs } = await processTargets(plan.targets, {
+    opts, health, startedAt,
+    processOne: (t) => processPr({ repo, project, number: t.number, discovery: t.reason, secrets, db, health, evidenceRoot, opts }),
+  })
+  prs.push(...plan.notTested)
 
   const allFindings = prs.flatMap((p) => p.findings ?? [])
-  health.status = health.qa_tool_failures.some((f) => ['discovery', 'pipeline'].includes(f.stage)) || prs.some((p) => p.verdict === 'qa-error') ? 'failed'
-    : (health.qa_tool_failures.length || health.env_problems.length || health.llm_errors.length) ? 'degraded' : 'ok'
+  finalizeHealth(health, prs, startedAt)
   const report = {
     schema_version: SCHEMA_VERSION,
     tool: 'panoptes (argus + ming-qa)',
@@ -474,7 +597,7 @@ export async function runNightly(opts = {}) {
     run: {
       id: runId, started_at: startedAt.toISOString(), finished_at: new Date().toISOString(),
       duration_s: Math.round((Date.now() - startedAt.getTime()) / 1000),
-      args: { date: opts.date ?? null, prs: opts.prs ?? null, out: opts.out ?? null, reuse_merged: opts.reuseMerged !== false, create_issues: Boolean(opts.createIssues), limit: opts.limit ?? null },
+      args: { date: opts.date ?? null, prs: opts.prs ?? null, out: opts.out ?? null, reuse_merged: opts.reuseMerged !== false, create_issues: Boolean(opts.createIssues), limit: opts.limit ?? null, pr_timeout_min: opts.prTimeoutMin ?? null, deadline: opts.deadline ?? null },
       argus_commit: (() => { try { return execFileSync('git', ['-C', CODE_DIR, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim() } catch { return null } })(),
       ming_qa_commit: await mingQaVersion(), llm_model: LLM_MODEL, evidence_root: evidenceRoot,
     },
@@ -486,6 +609,9 @@ export async function runNightly(opts = {}) {
       findings_by_severity: Object.fromEntries(['P0', 'P1', 'P2', 'P3'].map((s) => [s, allFindings.filter((f) => f.severity === s).length])),
       findings_total: allFindings.length,
       reused_from_on_merge: prs.filter((p) => p.reused).map((p) => p.number),
+      tested_count: prs.filter((p) => !['not-tested', 'qa-error'].includes(p.verdict)).length,
+      not_tested: prs.filter((p) => p.verdict === 'not-tested').map((p) => ({ number: p.number, code: p.not_tested_code, reason: p.not_tested_reason })),
+      qa_errors: prs.filter((p) => p.verdict === 'qa-error').map((p) => p.number),
     },
     prs,
     issues: { enabled: false, repo: ISSUE_REPO, labels: ISSUE_LABELS, dedup: 'fingerprint marker in body, label qa-auto, open+closed', policy: 'P0/P1 findings backed by a failing check on PRs authored by PraiseZhu; system_health failures always; LLM-review-only findings never', results: [] },
