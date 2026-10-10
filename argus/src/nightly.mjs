@@ -357,13 +357,17 @@ export function verdictOf(pr) {
 }
 
 // ── 系统健康 ──────────────────────────────────────────
+// Linux browser for Mivo's journey: the local wrapper (scripts/chromium-linux.sh → /usr/local/bin/chromium) when installed,
+// otherwise Debian's launcher. Must match the profile's linux BD2_CHROME.
+const LINUX_CHROMIUM = existsSync('/usr/local/bin/chromium') ? '/usr/local/bin/chromium' : '/usr/bin/chromium'
+
 function envSnapshot() {
   const ver = (cmd, args) => { try { return execFileSync(cmd, args, { encoding: 'utf8', timeout: 15_000 }).trim().split('\n')[0] } catch { return null } }
   let free = null
   try { const s = statfsSync(CACHE_DIR); free = Math.round((s.bavail * s.bsize) / 1024 ** 3) } catch { /* ignore */ }
   return {
     host: hostname(), platform: process.platform, node: process.version,
-    sandbox: sandboxMode({}), bwrap: ver('bwrap', ['--version']), chromium: ver('/usr/bin/chromium', ['--version']),
+    sandbox: sandboxMode({}), bwrap: ver('bwrap', ['--version']), chromium: ver(LINUX_CHROMIUM, ['--version']), chromium_path: LINUX_CHROMIUM,
     playwright: (() => { try { return JSON.parse(readFileSync(join(CODE_DIR, 'node_modules/playwright/package.json'), 'utf8')).version } catch { return null } })(),
     python: ver(process.env.ARGUS_PYTHON ?? 'python3', ['--version']), disk_free_gb: free,
   }
@@ -665,7 +669,7 @@ export async function runNightly(opts = {}) {
   if (!mingQaAvailable()) health.env_problems.push({ message: 'ming-qa qa_agent.py not found; code-review gate unavailable' })
   const env = health.environment
   if (env.sandbox !== 'bwrap') health.env_problems.push({ message: `sandbox mode is '${env.sandbox}' (expected bwrap)` })
-  if (!env.chromium) health.env_problems.push({ message: '/usr/bin/chromium missing: browser E2E will be unavailable' })
+  if (!env.chromium) health.env_problems.push({ message: `${LINUX_CHROMIUM} missing: browser E2E will be unavailable` })
   if (env.disk_free_gb != null && env.disk_free_gb < 12) health.env_problems.push({ message: `low disk: ${env.disk_free_gb} GB free` })
   const db = openDb()
   const runId = randomUUID()

@@ -58,13 +58,19 @@ install -m 600 ../secrets.env.example /home/box/.config/mivo-qa/secrets.env   # 
 ```
 
 Requirements: Linux with **bubblewrap** (`/usr/bin/bwrap`), Node 24 via nvm (`$NVM_DIR`, default `~/.nvm`),
-`git`, `gh`, Python 3, Debian Chromium at `/usr/bin/chromium` (Mivo's browser journey).
+`git`, `gh`, Python 3, Debian Chromium (`apt install chromium`) plus the panoptes launcher for Mivo's browser journey:
 
-> Box note: Debian's `/etc/chromium.d/dev-shm` printed `[: …: unexpected operator` on every launch because
-> `/dev/shm` is a stacked mount there (`findmnt` returns two lines). It was patched locally to take the first line
-> and quote the variable (original kept at `$QA_HOME/.pre-panoptes/chromium.d-dev-shm.orig`). It is a dpkg conffile,
-> so upgrades keep the local edit (dpkg asks, or keeps it with `--force-confold`); if it ever comes back, reapply the
-> two-line change.
+```sh
+sudo install -m 755 scripts/chromium-linux.sh /usr/local/bin/chromium   # profile linux BD2_CHROME points here
+```
+
+> Why a wrapper: Debian's `/etc/chromium.d/dev-shm` (sourced by `/usr/bin/chromium`) runs `[ $shm_avail -lt … ]` on
+> raw `findmnt` output, which has one line per mount when `/dev/shm` is stacked (inside bubblewrap `--dev /dev`), and
+> prints `/usr/bin/chromium: 9: [: …: unexpected operator`. `scripts/chromium-linux.sh` does what the Debian launcher
+> does (sources `/etc/chromium.d/*`, same flags, execs `/usr/lib/chromium/chromium`) but runs a fixed `/dev/shm`
+> check instead of `dev-shm`. Debian's package files stay untouched. `/usr/local/bin/chromium` is a path Mivo's
+> `browser-layer.mjs` trusts (program `chromium` under `/usr/bin` or `/usr/local/bin`). Without the wrapper, panoptes
+> falls back to `/usr/bin/chromium` (works, but logs the warning).
 
 Secrets (`secrets.env`, mode 0600): `GITHUB_TOKEN`, `QA_LLM_BASE_URL`, `QA_LLM_API_KEY`, optionally
 `ARGUS_TYPESAFE_API_KEY` (Jev triage), `MIVO_FEISHU_APP_ID` / `MIVO_FEISHU_APP_SECRET` (Feishu roster + DMs). See [`secrets.env.example`](secrets.env.example).

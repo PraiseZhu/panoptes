@@ -46,8 +46,9 @@ jobs:
         run: |
           bash -n run-nightly.sh
           bash -n mini/check-queue.sh
+          sh -n scripts/chromium-linux.sh
           shellcheck --version | head -2
-          shellcheck run-nightly.sh mini/check-queue.sh
+          shellcheck run-nightly.sh mini/check-queue.sh scripts/chromium-linux.sh
 
       - name: Script syntax
         run: |

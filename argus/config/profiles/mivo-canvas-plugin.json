@@ -386,11 +386,11 @@
   },
   "platforms": {
     "linux": {
-      "noteZh": "Linux 夜间 QA（panoptes）：浏览器换成 Debian 的 /usr/bin/chromium（Mivo 脚本在 Linux 只信任 /usr/bin/chromium 等路径），隔离用 bubblewrap；另加 Playwright 黑盒冒烟。",
+      "noteZh": "Linux 夜间 QA（panoptes）：浏览器换成 /usr/local/bin/chromium（panoptes 的 scripts/chromium-linux.sh，包装 Debian Chromium 并修掉 /dev/shm 检查的告警；Mivo 脚本在 Linux 信任 /usr/bin、/usr/local/bin 下名为 chromium 的程序），隔离用 bubblewrap；另加 Playwright 黑盒冒烟。",
       "steps": {
         "e2e-browser": {
           "env": {
-            "BD2_CHROME": "/usr/bin/chromium",
+            "BD2_CHROME": "/usr/local/bin/chromium",
             "BD2_BROWSER_OUTER_SANDBOX": "0"
           },
           "requires": [
