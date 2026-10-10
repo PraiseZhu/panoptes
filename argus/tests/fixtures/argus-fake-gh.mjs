@@ -11,7 +11,7 @@ state.calls.push(route)
 writeFileSync(file, JSON.stringify(state))
 if (!route || args.includes('-X')) throw new Error('E2E 禁止未声明的 GitHub 写请求')
 let out
-if (/\/pulls\/\d+\/files\?/.test(route)) out = [{ filename: 'value.mjs', additions: 1, deletions: 1, patch: '+value' }]
+if (/\/pulls\/\d+\/files\?/.test(route)) out = state.files ?? [{ filename: 'value.mjs', additions: 1, deletions: 1, patch: '+value' }]
 else if (/\/pulls\/\d+$/.test(route)) out = state.pr
 else if (/\/commits\//.test(route)) out = { parents: [{ sha: state.baseSha }], commit: { message: `fixture (#${state.pr.number})` } }
 else if (/\/branches\//.test(route) || /\/git\/ref\//.test(route)) out = { commit: { sha: state.pr.merge_commit_sha }, object: { sha: state.pr.merge_commit_sha } }

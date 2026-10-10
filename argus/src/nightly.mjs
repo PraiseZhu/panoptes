@@ -45,7 +45,7 @@ function wholeStepSignature(r) {
 function classifyKey(key, { first, rerun, base, latest, latestIsSame }) {
   if (!rerun) return { status: 'unverified', why: 'no rerun available' }
   const vsRerun = compareKey(key, rerun, first)
-  if (vsRerun === 'absent') return { status: 'flaky', why: 'failed once, passed on a clean rerun' }
+  if (vsRerun === 'absent') return { status: 'flaky', why: 'unstable: failed once, passed on a clean rerun of the same commit; not attributed to this PR' }
   if (vsRerun === 'unknown') return { status: 'unverified', why: 'rerun result incomplete or failure type not comparable' }
   if (!base) return { status: 'unverified', why: 'reproduced, but the base revision could not be run for comparison' }
   const vsBase = compareKey(key, base, first)
@@ -61,11 +61,12 @@ function classifyKey(key, { first, rerun, base, latest, latestIsSame }) {
 
 // 严重度规则（文档见 README-linux.md）：
 //  introduced：产品类检查（构建/类型/单测/接口/E2E）→ P1；若是已合并 PR 且最新主干仍失败 → P0（主干已坏）；质量守卫类 → P2
-//  unverified / setup 失败 → P2；pre-existing / flaky / fixed-later → P3；试运行检查（trialOnly）最高 P2
-function severityFor({ status, step, merged }) {
+//  unverified / setup 失败 / flaky（不稳定：首跑失败、同一提交干净重跑通过）→ P2；pre-existing / fixed-later → P3；
+//  试运行检查（trialOnly）最高 P2。flaky 与 PR 无关，test_backed=false（不是测试佐证的缺陷，不触发通知 / issue）
+export function severityFor({ status, step, merged }) {
   let sev
   if (status === 'introduced') sev = step.kind === 'quality' ? 'P2' : merged ? 'P0' : 'P1'
-  else if (status === 'unverified' || status === 'setup-failed' || status === 'timeout') sev = 'P2'
+  else if (['unverified', 'setup-failed', 'timeout', 'flaky'].includes(status)) sev = 'P2'
   else sev = 'P3'
   if (step.trialOnly && SEV_RANK[sev] < SEV_RANK.P2) sev = 'P2'
   return sev
@@ -99,7 +100,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   }
   // 合并即测（on-merge）已经在同一个 merge commit 上测过：直接引用它的结果，不重测
   if (merged && opts.reuseMerged !== false) {
-    const reused = loadMergedResult(number, pr.merge_commit_sha, { mergedDir: opts.mergedDir, selfOut: opts.out })
+    const reused = loadMergedResult(number, pr.merge_commit_sha, { mergedDir: opts.mergedDir, selfOut: opts.out, requireReview: !opts.noReview })
     if (reused) {
       health.notes.push(`PR #${number}: reused on-merge result ${reused.file} (same merge commit ${pr.merge_commit_sha.slice(0, 12)}), not re-tested`)
       return { ...reused.pr, tested_at: reused.pr.tested_at ?? toShanghaiIso(reused.generatedAt ?? NaN), discovery_reason: discovery, reused: true, reused_from: reused.file, reused_report_generated_at: reused.generatedAt, reused_report_system_health: reused.systemHealth }
@@ -113,7 +114,25 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   const { riskClass, reasonZh: classReason } = classifyChange(files, baseProfile)
   out.risk_class = riskClass
   out.risk_reason = classReason
-  if (riskClass === 'A') { out.skipped_steps = baseProfile.steps.filter((x) => x.kind !== 'setup').map((x) => ({ id: x.id, nameZh: x.nameZh, reason: 'docs-only change: no checks run', dimension: toBox(x, baseProfile) })); Object.assign(out, dimensionsOf([])); out.tested = false; out.verdict = 'docs-only'; out.outcome = 'docs_only'; out.outcome_reason = classReason; out.duration_s = Math.round((Date.now() - startedAt) / 1000); out.tested_at = toShanghaiIso(); return out }
+  if (riskClass === 'A') {
+    out.skipped_steps = baseProfile.steps.filter((x) => x.kind !== 'setup').map((x) => ({ id: x.id, nameZh: x.nameZh, reason: 'docs-only change: no checks run', dimension: toBox(x, baseProfile) }))
+    Object.assign(out, dimensionsOf([])); out.tested = false; out.verdict = 'docs-only'; out.outcome = 'docs_only'; out.outcome_reason = classReason
+    // 文档改动也做代码审查（同一提交规则：merged → merge-base..merge commit；open → merge-base..head）；不跑测试，覆盖率门禁不适用
+    out.coverage_gate = DOCS_ONLY_COVERAGE_GATE()
+    if (!opts.noReview) {
+      const sha = merged ? pr.merge_commit_sha : pr.head.sha
+      const extraRefspecs = merged ? [] : [`+refs/pull/${number}/head:refs/pull/${number}/head`]
+      const baseSha = await reviewBaseSha({ repo, pr, sha, merged, extraRefspecs })
+      out.base_sha = baseSha
+      const prDiff = await diffForReview({ repo, sha, baseSha, extraRefspecs })
+      await runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha, results: [], profile: baseProfile, evDir, secrets, health, number })
+      out.sha_consistent = out.reviewed_sha == null || out.reviewed_sha === sha
+      if (!out.sha_consistent) health.notes.push(`PR #${number}: docs-only review looked at ${String(out.reviewed_sha).slice(0, 12)} instead of ${String(sha).slice(0, 12)} (${out.review_diff_source})`)
+    }
+    out.severity = out.findings.length ? maxSev(out.findings.map((f) => f.severity)) : 'P3'
+    out.duration_s = Math.round((Date.now() - startedAt) / 1000); out.tested_at = toShanghaiIso()
+    return out
+  }
 
   // 被测版本：已合并 → merge commit；开放 → PR head（从 refs/pull/N/head 取，支持 fork）
   const sha = merged ? pr.merge_commit_sha : pr.head.sha
@@ -148,9 +167,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     first = await executeOnSha({ ...common, label: 'h1r', sha, stepIds: plan.stepIds })
   }
   // 对照版本：已合并 → merge commit 的第一个父提交；开放 → PR head 与目标分支的 merge-base
-  let baseSha = null
-  if (merged) baseSha = (await getCommit(repo, sha))?.parents?.[0]?.sha ?? null
-  else { const mirror = await ensureMirror(repo, sha, { extraRefspecs }); baseSha = await mergeBase(mirror, sha, pr.base.sha) }
+  const baseSha = await reviewBaseSha({ repo, pr, sha, merged, extraRefspecs })
   out.base_sha = baseSha
   // 同一份 diff（base..tested）同时给覆盖率门禁和代码审查用：审查的就是被测的那个提交
   const prDiff = await diffForReview({ repo, sha, baseSha, extraRefspecs })
@@ -221,7 +238,8 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     const compareOn = (results) => { const x = results?.find((y) => y.id === stepId); return x ? (x.unavailable ? 'unavailable' : x.ok ? 'pass' : (named ? (x.failures?.includes(test) ? 'fail' : 'not-failing') : 'fail')) : 'not-run' }
     out.failed_checks.push({
       check_id: stepId, check_name: r?.nameZh, dimension: toBox(step, profile), qa_dimensions: step.covers ?? [],
-      test: named ? test : null, failure_type: type, status, severity: severityFor({ status, step, merged }), attribution: why,
+      test: named ? test : null, failure_type: type, status, flaky: status === 'flaky', related_to_pr: status === 'flaky' ? false : undefined,
+      severity: severityFor({ status, step, merged }), attribution: why,
       fingerprint: fp, pr_fingerprint: prFingerprint(fp, number),
       evidence: {
         tested_sha: sha, base_sha: baseSha, exit_code: r?.exitCode, timed_out: Boolean(r?.timedOut),
@@ -232,34 +250,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   }
 
   // ming-qa 代码审查（白盒）
-  if (!opts.noReview) {
-    // 审查文件来自本地镜像 base..tested 的 diff（已合并：merge-base..merge commit；开放：merge-base..head）。
-    // 本地 diff 拿不到时才退回 GitHub 的 PR 文件列表（那是 PR head 的 diff），并在 system_health.notes 里说明。
-    const reviewFiles = prDiff.files ?? files
-    out.reviewed_sha = prDiff.files ? sha : (pr.head?.sha ?? null)
-    out.review_base_sha = prDiff.files ? baseSha : (pr.base?.sha ?? null)
-    out.review_diff_source = prDiff.files ? 'local git diff base_sha..tested_sha' : `github pr files (local diff unavailable: ${prDiff.error})`
-    const cr = await codeReview({ secrets, pr, files: reviewFiles, results: first, profile, outDir: join(evDir, 'code-review') })
-    if (cr.status !== 'ok') {
-      health.llm_errors.push({ pr: number, stage: 'code-review', model: LLM_MODEL, ...cr.error })
-      out.code_review = { status: cr.status, error: cr.error }
-    } else {
-      if (cr.gateError) health.qa_tool_failures.push({ pr: number, stage: 'ming-qa assert-code-review', message: cr.gateError.message })
-      out.code_review = { status: cr.doc.status, summary: cr.doc.summary, gate: cr.gate, model: cr.model, tokens: cr.tokens, findings_count: cr.doc.findings.length, residual_risks: cr.doc.residualRisks, file: cr.reviewPath }
-      for (const f of cr.doc.findings) {
-        if (f.verdict === 'REJECTED') continue
-        // LLM 单独给出的结论最高记 P1：P0 需要真实执行的失败作证（原始等级保留在 llm_severity）
-        const severity = f.severity === 'P0' ? 'P1' : f.severity
-        const fp = fingerprintOf(repo, ['code-review', f.file, f.symbol || '', f.category])
-        out.findings.push({
-          source: 'code-review', test_backed: false, check_id: 'code-review', dimension: 'white-box', severity, llm_severity: f.severity, verdict: f.verdict,
-          category: f.category, title: f.title, file: f.file, line: f.line, symbol: f.symbol,
-          fingerprint: fp, pr_fingerprint: prFingerprint(fp, number),
-          evidence: { evidence: f.evidence, failure_scenario: f.failureScenario, recommendation: f.recommendation, reviewed_sha: out.reviewed_sha },
-        })
-      }
-    }
-  }
+  if (!opts.noReview) await runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha, results: first, profile, evDir, secrets, health, number })
   // 人话摘要（Argus 原有 AI 解读，可选）
   if (!opts.noReview) {
     const ai = await analyzePr({ db, secrets, riskClass, pr, files, profile, results: first, outcome: decision.outcome })
@@ -278,7 +269,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
       evidence: { tested_sha: sha, base_sha: baseSha, values: gate.values, thresholds: gate.thresholds, new_code_files: (gate.new_code?.files ?? []).slice(0, 20) },
     })
   }
-  out.findings = [...out.failed_checks.map((c) => ({ source: 'check', test_backed: true, ...c })), ...out.findings]
+  out.findings = [...out.failed_checks.map((c) => ({ source: 'check', test_backed: checkIsTestBacked(c), ...c })), ...out.findings]
   out.severity = out.findings.length ? maxSev(out.findings.map((f) => f.severity)) : 'P3'
   Object.assign(out, dimensionsOf(out.checks))
   out.tested = true
@@ -289,6 +280,45 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   out.sha_consistent = out.reviewed_sha == null || out.reviewed_sha === out.tested_sha
   if (!out.sha_consistent) health.notes.push(`PR #${number}: tests ran on ${String(out.tested_sha).slice(0, 12)} but code review looked at ${String(out.reviewed_sha).slice(0, 12)} (${out.review_diff_source})`)
   return out
+}
+
+// 文档改动（risk A）的覆盖率门禁：没有单测运行，不是失败也不是 unavailable
+export const DOCS_ONLY_COVERAGE_GATE = () => ({ status: 'not-applicable', reason: 'docs-only change' })
+
+// 对照版本：已合并 → merge commit 的第一个父提交；开放 → PR head 与目标分支的 merge-base
+async function reviewBaseSha({ repo, pr, sha, merged, extraRefspecs }) {
+  if (merged) return (await getCommit(repo, sha))?.parents?.[0]?.sha ?? null
+  const mirror = await ensureMirror(repo, sha, { extraRefspecs })
+  return mergeBase(mirror, sha, pr.base.sha)
+}
+
+// ming-qa 代码审查（白盒）。审查文件来自本地镜像 base..tested 的 diff（已合并：merge-base..merge commit；开放：merge-base..head）。
+// 本地 diff 拿不到时才退回 GitHub 的 PR 文件列表（那是 PR head 的 diff），并在 system_health.notes 里说明。
+async function runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha, results, profile, evDir, secrets, health, number }) {
+  const reviewFiles = prDiff.files ?? files
+  out.reviewed_sha = prDiff.files ? sha : (pr.head?.sha ?? null)
+  out.review_base_sha = prDiff.files ? baseSha : (pr.base?.sha ?? null)
+  out.review_diff_source = prDiff.files ? 'local git diff base_sha..tested_sha' : `github pr files (local diff unavailable: ${prDiff.error})`
+  const cr = await codeReview({ secrets, pr, files: reviewFiles, results, profile, outDir: join(evDir, 'code-review') })
+  if (cr.status !== 'ok') {
+    health.llm_errors.push({ pr: number, stage: 'code-review', model: LLM_MODEL, ...cr.error })
+    out.code_review = { status: cr.status, error: cr.error }
+    return
+  }
+  if (cr.gateError) health.qa_tool_failures.push({ pr: number, stage: 'ming-qa assert-code-review', message: cr.gateError.message })
+  out.code_review = { status: cr.doc.status, summary: cr.doc.summary, gate: cr.gate, model: cr.model, tokens: cr.tokens, findings_count: cr.doc.findings.length, residual_risks: cr.doc.residualRisks, file: cr.reviewPath }
+  for (const f of cr.doc.findings) {
+    if (f.verdict === 'REJECTED') continue
+    // LLM 单独给出的结论最高记 P1：P0 需要真实执行的失败作证（原始等级保留在 llm_severity）
+    const severity = f.severity === 'P0' ? 'P1' : f.severity
+    const fp = fingerprintOf(repo, ['code-review', f.file, f.symbol || '', f.category])
+    out.findings.push({
+      source: 'code-review', test_backed: false, check_id: 'code-review', dimension: 'white-box', severity, llm_severity: f.severity, verdict: f.verdict,
+      category: f.category, title: f.title, file: f.file, line: f.line, symbol: f.symbol,
+      fingerprint: fp, pr_fingerprint: prFingerprint(fp, number),
+      evidence: { evidence: f.evidence, failure_scenario: f.failureScenario, recommendation: f.recommendation, reviewed_sha: out.reviewed_sha },
+    })
+  }
 }
 
 // base..tested 的完整 diff：一份文本，解析出审查用的文件列表（GitHub files 形状）和覆盖率用的新增行
@@ -380,7 +410,7 @@ export const mergedReportPath = (n, dir = mergedReportsDir()) => join(dir, `PR-$
 const REUSABLE_VERDICTS = new Set(['clean', 'review-suggested', 'needs-attention', 'partially-verified', 'docs-only'])
 
 // 只复用「同一个 merge commit、真实跑完」的结果；PR 号对不上、测的不是这个提交、或上次自身出错的都不复用
-export function loadMergedResult(number, mergeSha, { mergedDir, selfOut } = {}) {
+export function loadMergedResult(number, mergeSha, { mergedDir, selfOut, requireReview = false } = {}) {
   const file = mergedReportPath(number, mergedDir)
   if (selfOut && resolve(selfOut) === resolve(file)) return null
   if (!mergeSha || !existsSync(file)) return null
@@ -388,6 +418,8 @@ export function loadMergedResult(number, mergeSha, { mergedDir, selfOut } = {}) 
   try { doc = JSON.parse(readFileSync(file, 'utf8')) } catch { return null }
   const pr = (doc.prs ?? []).find((p) => p.number === number)
   if (!pr || pr.state !== 'merged' || !REUSABLE_VERDICTS.has(pr.verdict)) return null
+  // 旧的 docs-only 结果没有代码审查：审查开着时重做（文档改动也要审查同一个 merge commit）
+  if (requireReview && pr.verdict === 'docs-only' && !pr.code_review) return null
   const tested = pr.verdict === 'docs-only' ? (doc.merged_sha ?? pr.merge_sha ?? null) : pr.tested_sha
   if (!tested || tested !== mergeSha) return null
   return { file, pr, generatedAt: doc.generated_at ?? null, systemHealth: doc.system_health?.status ?? null }
@@ -528,7 +560,9 @@ export function prMeta(pr) {
 // test_backed：只有失败检查（source: check）佐证的发现才是 true；LLM 审查、覆盖率门禁、QA 自身出错都是 false。
 // 下游通知 / 提 issue 规则以它为准，而不是只看严重度。
 export const FINDING_SOURCES = ['check', 'code-review', 'coverage-gate', 'qa-error']
-export const isTestBacked = (f) => (typeof f?.test_backed === 'boolean' ? f.test_backed : f?.source === 'check')
+// flaky（重跑通过）的失败检查不算测试佐证：它没有重现，不能当成缺陷去通知
+export const checkIsTestBacked = (c) => c?.status !== 'flaky' && c?.flaky !== true
+export const isTestBacked = (f) => (typeof f?.test_backed === 'boolean' ? f.test_backed : f?.source === 'check' && checkIsTestBacked(f))
 export function annotateTestBacked(prs) {
   for (const pr of prs) {
     pr.findings = (pr.findings ?? []).map((f) => { const g = { ...f, source: f.source ?? 'check' }; return { ...g, test_backed: isTestBacked(g) } })
@@ -712,7 +746,7 @@ export async function runNightly(opts = {}) {
       ming_qa_commit: await mingQaVersion(), llm_model: LLM_MODEL, evidence_root: evidenceRoot,
     },
     dimensions: BOXES,
-    severity_scale: { P0: 'main/release broken or data loss: introduced failure on a merged PR that still fails on latest main', P1: 'introduced, reproducible product-check failure (blocks merge) or LLM code-review P0/P1', P2: 'quality-guard regression, unverified failure, QA could not verify, or review suggestion', P3: 'pre-existing / flaky / fixed-later failure, or informational only' },
+    severity_scale: { P0: 'main/release broken or data loss: introduced failure on a merged PR that still fails on latest main', P1: 'introduced, reproducible product-check failure (blocks merge) or LLM code-review P0/P1', P2: 'quality-guard regression, unverified failure, unstable (flaky: failed then passed on rerun; not test-backed), QA could not verify, or review suggestion', P3: 'pre-existing / fixed-later failure, or informational only' },
     summary: {
       pr_count: prs.length,
       prs_by_severity: Object.fromEntries(['P0', 'P1', 'P2', 'P3', 'untested'].map((s) => [s, prs.filter((p) => p.severity === s).length])),
