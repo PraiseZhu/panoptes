@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: argus/package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # The real pipeline refuses to test without bubblewrap. Try to provide it; if the runner
+      # cannot create user namespaces, fall back to the explicit unsandboxed mode for the test suite only.
+      - name: Sandbox (bubblewrap)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap >/dev/null || true
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 >/dev/null 2>&1 || true
+          if bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid true 2>/dev/null; then
+            echo "bwrap works"
+          else
+            echo "bwrap unusable on this runner; tests run with ARGUS_SANDBOX=none ARGUS_ALLOW_UNSANDBOXED=1"
+            echo "ARGUS_SANDBOX=none" >> "$GITHUB_ENV"
+            echo "ARGUS_ALLOW_UNSANDBOXED=1" >> "$GITHUB_ENV"
+          fi
+
+      - name: Shell syntax
+        run: |
+          bash -n run-nightly.sh
+          bash -n mini/check-queue.sh
+          shellcheck --version | head -2
+          shellcheck run-nightly.sh mini/check-queue.sh
+
+      - name: Script syntax
+        run: |
+          for f in scripts/*.mjs; do node --check "$f"; done
+          python -m py_compile scripts/*.py
+
+      - name: argus tests
+        working-directory: argus
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+        run: |
+          npm ci
+          npm test

@@ -74,7 +74,10 @@ node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 24 ? 0 : 1)
 [[ -r "$SECRETS" ]] || { echo "missing secrets file $SECRETS" >&2; exit 1; }
 chmod 600 "$SECRETS" 2>/dev/null || true
 # gh/git read access for the target repo comes from GITHUB_TOKEN in the secrets file
-set -a; . "$SECRETS"; set +a
+set -a
+# shellcheck source=/dev/null
+. "$SECRETS"
+set +a
 for v in GITHUB_TOKEN QA_LLM_BASE_URL QA_LLM_API_KEY; do
   [[ -n "${!v:-}" ]] || { echo "missing required variable $v in $SECRETS" >&2; exit 1; }
 done
