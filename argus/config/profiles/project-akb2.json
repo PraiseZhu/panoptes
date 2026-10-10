@@ -1,0 +1,184 @@
+{
+  "version": 2,
+  "intentZh": "AKB2 是个人 AI 知识库的工程根：负责资料导入（intake）、质量门（lint / gate）、检索 MCP 包装和评测，不含知识库正文。关键不变量：未通过质量门的笔记不能进入主链路；检索只返回已升格（promoted）的笔记；只读工具不写文件、不写库、不调网络；导入失败不能留下半写入的笔记。",
+  "aPaths": [
+    "**/*.md",
+    "docs/**",
+    "plans/**",
+    "reports/**",
+    "LICENSE"
+  ],
+  "cPaths": [
+    "src/**/gate*",
+    "src/**/promot*",
+    "src/**/intake/**",
+    "src/**/*schema*",
+    "schema/**",
+    "src/**/mcp*"
+  ],
+  "pathPrepend": [
+    "${RUN}/tools/node_modules/.bin"
+  ],
+  "env": {
+    "VAULT_ROOT": "${RUN}/vault",
+    "PYTHONDONTWRITEBYTECODE": "1"
+  },
+  "steps": [
+    {
+      "id": "venv",
+      "nameZh": "准备 Python 环境",
+      "kind": "setup",
+      "cmd": [
+        "uv",
+        "venv",
+        "--python",
+        "3.11",
+        ".venv"
+      ],
+      "timeoutMin": 20
+    },
+    {
+      "id": "install",
+      "nameZh": "安装依赖",
+      "kind": "setup",
+      "cmd": [
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        ".venv/bin/python",
+        "-e",
+        ".[dev]"
+      ],
+      "timeoutMin": 40
+    },
+    {
+      "id": "tools",
+      "nameZh": "安装测试工具",
+      "kind": "setup",
+      "cmd": [
+        "npm",
+        "install",
+        "--prefix",
+        "${RUN}/tools",
+        "--no-audit",
+        "--no-fund",
+        "defuddle-cli@0.7.0"
+      ],
+      "timeoutMin": 15
+    },
+    {
+      "id": "prep",
+      "nameZh": "准备测试目录",
+      "kind": "setup",
+      "cmd": [
+        "/bin/sh",
+        "-c",
+        "mkdir -p \"$VAULT_ROOT\" && git config --global init.defaultBranch main"
+      ],
+      "timeoutMin": 2
+    },
+    {
+      "id": "api",
+      "nameZh": "接口测试",
+      "kind": "product",
+      "optional": true,
+      "covers": [
+        "api",
+        "api-oracle"
+      ],
+      "cmd": [
+        ".venv/bin/python",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "-o",
+        "faulthandler_timeout=300",
+        "tests/retrieval/test_http_server.py",
+        "tests/mcp_servers",
+        "--ignore",
+        "tests/mcp_servers/test_run_doc_examples.py"
+      ],
+      "timeoutMin": 15,
+      "noteZh": "不含 test_run_doc_examples：它调用系统 python3 跑文档命令，不走测试环境，属于环境问题；单元测试步骤仍会跑它"
+    },
+    {
+      "id": "unit",
+      "nameZh": "单元测试",
+      "kind": "product",
+      "cmd": [
+        ".venv/bin/python",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "-o",
+        "faulthandler_timeout=300",
+        "--deselect",
+        "tests/quality/test_f19_fallback_render_quality.py::TestDeterministicFallbackVacuousClaims::test_fallback_skips_vacuous_claims_c234"
+      ],
+      "timeoutMin": 75,
+      "covers": [
+        "unit",
+        "functional",
+        "regression",
+        "integration"
+      ]
+    },
+    {
+      "id": "lint",
+      "nameZh": "代码规范检查",
+      "kind": "quality",
+      "cmd": [
+        ".venv/bin/ruff",
+        "check",
+        "src",
+        "tests"
+      ],
+      "timeoutMin": 10
+    }
+  ],
+  "hostDataNoteZh": "部分测试在找得到本机真实知识库（/Volumes/AKB2）时会去读它；Mini 上挂着真实知识库，读取会卡住，这类测试在 CI 上本来就会跳过，所以这里排除。",
+  "notApplicable": {
+    "money-reward-settlement": "不是游戏或结算业务",
+    "provably-fair": "不是游戏或抽奖业务",
+    "visual": "命令行和服务端项目，没有界面",
+    "ui": "命令行和服务端项目，没有界面"
+  },
+  "pathHints": {
+    "src/akb2/retrieval/**": [
+      "api",
+      "api-oracle"
+    ],
+    "src/**/mcp*": [
+      "api",
+      "api-oracle"
+    ],
+    "src/**/gate*": [
+      "business-rule",
+      "negative-path"
+    ],
+    "src/**/*schema*": [
+      "data",
+      "compatibility"
+    ]
+  },
+  "aiTests": {
+    "frameworkZh": "pytest（Python 3.11），测试函数以 test_ 开头，从 akb2 包导入被测代码",
+    "pathGlobs": [
+      "tests/argus/test_*.py"
+    ],
+    "run": [
+      ".venv/bin/python",
+      "-m",
+      "pytest",
+      "-q",
+      "-p",
+      "no:cacheprovider",
+      "{file}"
+    ]
+  }
+}

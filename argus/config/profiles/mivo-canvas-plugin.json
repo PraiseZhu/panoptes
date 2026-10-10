@@ -1,0 +1,366 @@
+{
+  "version": 2,
+  "intentZh": "Mivo 是桌面式 AI 艺术画布，本仓以 Cindy 插件形态为主（网页入口已下线，网页与插件共用 src/ 共享层）：无限画布、FigJam 风格标注、AI 生图工作流。关键不变量：用户导入或生成的图片归用户资产，删除原始文件不影响编辑，关闭重开后画布和资产都能恢复；失败或取消不能留下半成品；所有会改状态、加载数据、执行工作流、跳过或失败的操作都要写 Debug Log，需要即时反馈的要弹提示；插件形态依赖 Cindy 宿主的存储与生命周期。非目标：本系统目前不验证 Cindy 宿主内的真实使用、Windows 原生和真实 GPU。",
+  "sourceOfSteps": "对齐 origin/main 的 .github/workflows/ci.yml（build-and-test、structure-guard、cindyplugin-build、linux-unit-shards）；接口测试与浏览器端到端来自仓内已有测试和脚本，不在 CI 里，浏览器用 Ego Lite 无头实例",
+  "aPaths": [
+    "**/*.md",
+    "docs/**",
+    "LICENSE",
+    "public/changelog.json"
+  ],
+  "cPaths": [
+    "shared/**",
+    "server/**",
+    "cindyplugin/**",
+    "src/**/*persist*",
+    "src/**/*Persist*",
+    "src/**/*store*",
+    "src/**/*Store*",
+    "src/**/*asset*/**",
+    "src/**/*Asset*",
+    "src/**/*migrat*",
+    "src/**/library/**",
+    "src/**/*idb*",
+    "src/**/*IDB*"
+  ],
+  "env": {
+    "MIVO_PLUGIN_BUILD_CONTEXT": "ci",
+    "MIVO_DEBUG_INGEST_TOKEN": "__INJECTION_CANARY__"
+  },
+  "steps": [
+    {
+      "id": "install",
+      "nameZh": "安装依赖",
+      "kind": "setup",
+      "cmd": [
+        "npm",
+        "ci",
+        "--no-audit",
+        "--no-fund",
+        "--prefer-offline"
+      ],
+      "timeoutMin": 30
+    },
+    {
+      "id": "api-inproc",
+      "nameZh": "接口测试（进程内）",
+      "kind": "product",
+      "optional": true,
+      "covers": [
+        "api",
+        "api-oracle",
+        "permission",
+        "negative-path"
+      ],
+      "cmd": [
+        "node",
+        "scripts/run-vitest.mjs",
+        "run",
+        "server",
+        "--reporter=default",
+        "--reporter=json",
+        "--outputFile=${TEST_REPORT}"
+      ],
+      "timeoutMin": 15,
+      "testReport": {
+        "format": "vitest-json",
+        "path": "${RUN}/reports/api-inproc.json"
+      }
+    },
+    {
+      "id": "api-probe",
+      "nameZh": "接口测试（真起服务）",
+      "kind": "product",
+      "optional": true,
+      "covers": [
+        "api",
+        "api-oracle",
+        "permission",
+        "negativeAssertions"
+      ],
+      "unavailableExitCodes": [
+        2
+      ],
+      "timeoutMin": 5,
+      "probe": {
+        "start": [
+          "node",
+          "server/index.ts"
+        ],
+        "portEnv": "MIVO_PORT",
+        "env": {
+          "MIVO_ASSET_STORE_DIR": "${RUN}/asset-store"
+        },
+        "ready": {
+          "path": "/healthz",
+          "timeoutSec": 30
+        },
+        "requests": [
+          {
+            "name": "健康检查",
+            "method": "GET",
+            "path": "/healthz",
+            "expect": {
+              "status": 200,
+              "json": {
+                "ok": true
+              }
+            }
+          },
+          {
+            "name": "配方菜单",
+            "method": "GET",
+            "path": "/api/mivo/recipes",
+            "expect": {
+              "status": 200,
+              "nonEmptyArray": "projects"
+            }
+          },
+          {
+            "name": "未登录不能读项目",
+            "method": "GET",
+            "path": "/api/projects",
+            "expect": {
+              "status": 401
+            }
+          },
+          {
+            "name": "未登录不能读资产",
+            "method": "GET",
+            "path": "/api/assets/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "expect": {
+              "status": 401
+            }
+          },
+          {
+            "name": "未知配方返回找不到",
+            "method": "POST",
+            "path": "/api/mivo/recipes/resolve",
+            "body": {
+              "recipeId": "ro/poster"
+            },
+            "expect": {
+              "status": 404
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "e2e-browser",
+      "nameZh": "浏览器端到端",
+      "kind": "product",
+      "optional": true,
+      "covers": [
+        "e2e",
+        "ui",
+        "data",
+        "sideEffects",
+        "visual"
+      ],
+      "cmd": [
+        "node",
+        "scripts/e2e/bug-doctor-images/run.mjs",
+        "--layer",
+        "browser",
+        "--base",
+        "${BASE_SHA}",
+        "--out",
+        "${RUN}/e2e-browser"
+      ],
+      "env": {
+        "BD2_CHROME": "/Applications/ego lite.app/Contents/MacOS/ego lite",
+        "BD2_BROWSER_OUTER_SANDBOX": "1"
+      },
+      "requires": [
+        {
+          "file": "scripts/e2e/bug-doctor-images/browser-layer.mjs",
+          "contains": "BD2_BROWSER_OUTER_SANDBOX",
+          "reasonZh": "这个版本的 Mivo 浏览器脚本还不支持 Ego Lite，没跑（不会改用 Chrome）"
+        }
+      ],
+      "unavailableExitCodes": [
+        2
+      ],
+      "failureReport": {
+        "format": "checks",
+        "path": "${RUN}/e2e-browser/report.browser.json"
+      },
+      "timeoutMin": 10,
+      "silentCheck": true
+    },
+    {
+      "id": "bench",
+      "nameZh": "性能基准",
+      "kind": "product",
+      "optional": true,
+      "trialOnly": true,
+      "covers": [
+        "performance"
+      ],
+      "cmd": [
+        "node",
+        "scripts/run-vitest.mjs",
+        "run",
+        "--config",
+        "vitest.bench.config.ts"
+      ],
+      "timeoutMin": 15,
+      "noteZh": "用仓里已有的性能测试和它们自带的阈值，不另编阈值；共享机器上耗时有波动，试运行期只记拿不准"
+    },
+    {
+      "id": "typecheck",
+      "nameZh": "类型检查",
+      "kind": "product",
+      "cmd": [
+        "npx",
+        "tsc",
+        "-b"
+      ],
+      "timeoutMin": 30,
+      "covers": [
+        "regression"
+      ]
+    },
+    {
+      "id": "plugin",
+      "nameZh": "插件打包",
+      "kind": "product",
+      "cmd": [
+        "bash",
+        "cindyplugin/build.sh"
+      ],
+      "timeoutMin": 30,
+      "covers": [
+        "compatibility",
+        "regression"
+      ]
+    },
+    {
+      "id": "unit",
+      "nameZh": "单元测试",
+      "kind": "product",
+      "cmd": [
+        "npm",
+        "run",
+        "test:unit",
+        "--",
+        "--reporter=default",
+        "--reporter=json",
+        "--outputFile=${TEST_REPORT}"
+      ],
+      "timeoutMin": 60,
+      "covers": [
+        "unit",
+        "functional",
+        "regression",
+        "data"
+      ],
+      "testReport": {
+        "format": "vitest-json",
+        "path": "${RUN}/reports/unit.json"
+      }
+    },
+    {
+      "id": "lint",
+      "nameZh": "代码规范检查",
+      "kind": "quality",
+      "cmd": [
+        "npm",
+        "run",
+        "lint"
+      ],
+      "timeoutMin": 20
+    },
+    {
+      "id": "logging",
+      "nameZh": "日志规范自检",
+      "kind": "quality",
+      "cmd": [
+        "npm",
+        "run",
+        "verify:logging"
+      ],
+      "timeoutMin": 10
+    },
+    {
+      "id": "i18n",
+      "nameZh": "多语言文案自检",
+      "kind": "quality",
+      "cmd": [
+        "npm",
+        "run",
+        "verify:i18n"
+      ],
+      "timeoutMin": 10
+    },
+    {
+      "id": "cycles",
+      "nameZh": "循环依赖检查",
+      "kind": "quality",
+      "cmd": [
+        "node",
+        "scripts/ci/cycle-guard.mjs"
+      ],
+      "timeoutMin": 10
+    },
+    {
+      "id": "structure",
+      "nameZh": "目录结构守卫",
+      "kind": "quality",
+      "cmd": [
+        "node",
+        "scripts/ci/structure-guard.mjs"
+      ],
+      "timeoutMin": 10
+    }
+  ],
+  "notApplicable": {
+    "money-reward-settlement": "不是游戏或结算业务",
+    "provably-fair": "不是游戏或抽奖业务"
+  },
+  "pathHints": {
+    "server/**": [
+      "api",
+      "api-oracle"
+    ],
+    "src/**/components/**": [
+      "ui",
+      "e2e"
+    ],
+    "src/**/*.tsx": [
+      "ui"
+    ],
+    "src/**/*persist*": [
+      "data",
+      "data-consistency"
+    ],
+    "src/**/*store*": [
+      "data",
+      "state-transition"
+    ],
+    "cindyplugin/**": [
+      "integration",
+      "compatibility"
+    ],
+    "src/render/**": [
+      "performance",
+      "ui"
+    ]
+  },
+  "aiTests": {
+    "frameworkZh": "vitest（TypeScript），用 describe/it/expect，从 vitest 导入",
+    "pathGlobs": [
+      "src/**/*.argus.test.ts",
+      "src/**/*.argus.test.tsx",
+      "server/**/*.argus.test.ts",
+      "shared/**/*.argus.test.ts"
+    ],
+    "run": [
+      "node",
+      "scripts/run-vitest.mjs",
+      "run",
+      "{file}"
+    ]
+  }
+}

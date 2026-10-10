@@ -1,0 +1,90 @@
+// 接口探针与步骤扩展：真起服务逐条比对；服务起不来记没跑成；不留子进程；前提不满足不跑；基线提交变量
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { spawnSync, execFileSync } from 'node:child_process'
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const here = dirname(fileURLToPath(import.meta.url))
+process.env.ARGUS_ROOT = mkdtempSync(join(tmpdir(), 'argus-probe-'))
+const { toMismatch } = await import('../src/probe-run.mjs')
+const { runSteps, newRunDir } = await import('../src/runner.mjs')
+
+const PROBE = join(here, '..', 'src', 'probe-run.mjs')
+const FAKE = join(here, 'fixtures', 'probe-server.mjs')
+const requests = [
+  { name: '健康检查', path: '/healthz', expect: { status: 200, json: { ok: true } } },
+  { name: '列表非空', path: '/items', expect: { status: 200, nonEmptyArray: 'items' } },
+  { name: '未登录被拒', path: '/secret', expect: { status: 401 } },
+]
+function runProbe(mode, extra = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'argus-p-'))
+  const pidFile = join(dir, 'pid')
+  const spec = { start: ['node', FAKE], portEnv: 'PORT', env: { FAKE_MODE: mode, FAKE_PID_FILE: pidFile }, ready: { path: '/healthz', timeoutSec: 3 }, requests, ...extra }
+  writeFileSync(join(dir, 'spec.json'), JSON.stringify(spec))
+  const r = spawnSync(process.execPath, [PROBE, join(dir, 'spec.json')], { cwd: dir, encoding: 'utf8', timeout: 30_000 })
+  let pid = null
+  try { pid = Number(readFileSync(pidFile, 'utf8')) } catch { /* 没起来 */ }
+  return { ...r, pid }
+}
+const gone = (pid) => { try { process.kill(pid, 0); return false } catch (e) { return e.code === 'ESRCH' } }
+
+test('期望比对：状态码、JSON 字段、非空数组', () => {
+  assert.deepEqual(toMismatch({ status: 200, json: { ok: true } }, 200, '{"ok":true}'), [])
+  assert.match(toMismatch({ status: 401 }, 200, 'x')[0], /期望 401，实际 200/)
+  assert.match(toMismatch({ json: { ok: true } }, 200, 'nope')[0], /不是/)
+  assert.match(toMismatch({ nonEmptyArray: 'items' }, 200, '{"items":[]}')[0], /非空数组/)
+})
+
+test('全部通过退出 0；结束后服务进程不在了', () => {
+  const r = runProbe('ok')
+  assert.equal(r.status, 0, r.stdout)
+  assert.equal(r.stdout.match(/✔/g).length, 3)
+  assert.ok(r.pid && gone(r.pid), '探针结束后假服务必须被关掉')
+})
+
+test('返回不符时逐条列出 ✖ 和期望实际，退出 1', () => {
+  const r = runProbe('wrong')
+  assert.equal(r.status, 1)
+  assert.match(r.stdout, /✖ 列表非空\n.*非空数组/)
+  assert.match(r.stdout, /✖ 未登录被拒\n.*期望 401，实际 200/)
+  assert.ok(r.stdout.includes('✔ 健康检查'))
+  assert.ok(gone(r.pid))
+})
+
+test('服务一直不就绪：退出 2（没跑成），并关掉服务', () => {
+  const r = runProbe('never-ready')
+  assert.equal(r.status, 2)
+  assert.match(r.stdout, /没有就绪/)
+  assert.ok(gone(r.pid))
+})
+
+test('runSteps：前提不满足的步骤不跑、记没跑成；探针步骤自动准备；${BASE_SHA} 是被测提交的父提交', async () => {
+  const runDir = newRunDir(1, 'steps')
+  const src = join(runDir, 'src')
+  mkdirSync(src, { recursive: true })
+  const git = (...a) => execFileSync('git', ['-C', src, '-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { encoding: 'utf8' }).trim()
+  git('init', '-q')
+  writeFileSync(join(src, 'a.txt'), '1'); git('add', '.'); git('commit', '-qm', 'one')
+  const parent = git('rev-parse', 'HEAD')
+  writeFileSync(join(src, 'a.txt'), '2'); git('commit', '-qam', 'two')
+  const profile = {
+    sandbox: false,
+    steps: [
+      { id: 'install', kind: 'setup', nameZh: '准备', cmd: ['node', '-e', ''] },
+      { id: 'base', kind: 'product', nameZh: '基线', cmd: ['node', '-e', 'console.log("base=" + process.argv[1])', '${BASE_SHA}'] },
+      { id: 'needs', kind: 'product', nameZh: '要新脚本', cmd: ['node', '-e', 'process.exit(1)'], requires: [{ file: 'a.txt', contains: 'NEW_FLAG', reasonZh: '脚本还不支持' }] },
+      { id: 'probe', kind: 'product', nameZh: '接口', unavailableExitCodes: [2], cmd: ['node', '${RUN}/tools/probe-run.mjs', '${RUN}/probe-probe.json'], probe: { start: ['node', FAKE], portEnv: 'PORT', env: { FAKE_MODE: 'ok' }, ready: { path: '/healthz', timeoutSec: 5 }, requests } },
+      { id: 'envstep', kind: 'product', nameZh: '步骤环境', env: { STEP_ONLY: 'yes' }, cmd: ['node', '-e', 'process.exit(process.env.STEP_ONLY === "yes" ? 0 : 1)'] },
+    ],
+  }
+  const results = await runSteps(profile, src, runDir)
+  const by = Object.fromEntries(results.map((r) => [r.id, r]))
+  assert.ok(by.base.tail.includes(`base=${parent}`), by.base.tail)
+  assert.equal(by.needs.unavailable, true)
+  assert.equal(by.needs.unavailableReasonZh, '脚本还不支持')
+  assert.equal(by.probe.ok, true, by.probe.tail)
+  assert.equal(by.envstep.ok, true)
+})

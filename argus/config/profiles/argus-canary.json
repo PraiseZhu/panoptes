@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "intentZh": "金丝雀项目只有一个 sum(a, b) 函数，必须返回两数之和。它只用于验证 Argus 自身的全链路。",
+  "aPaths": [
+    "**/*.md"
+  ],
+  "cPaths": [],
+  "steps": [
+    {
+      "id": "install",
+      "nameZh": "安装依赖",
+      "kind": "setup",
+      "cmd": [
+        "npm",
+        "ci",
+        "--no-audit",
+        "--no-fund"
+      ],
+      "timeoutMin": 10
+    },
+    {
+      "id": "unit",
+      "nameZh": "单元测试",
+      "kind": "product",
+      "cmd": [
+        "npm",
+        "test",
+        "--",
+        "--test-reporter=spec",
+        "--test-reporter=${NODE_TEST_REPORTER}",
+        "--test-reporter-destination=stdout",
+        "--test-reporter-destination=${TEST_REPORT}"
+      ],
+      "timeoutMin": 10,
+      "covers": [
+        "unit",
+        "functional",
+        "regression"
+      ],
+      "testReport": {
+        "format": "node-events",
+        "path": "${RUN}/reports/unit.jsonl"
+      }
+    }
+  ],
+  "notApplicable": {
+    "money-reward-settlement": "不是游戏或结算业务",
+    "provably-fair": "不是游戏或抽奖业务",
+    "visual": "只有命令行，没有界面",
+    "ui": "只有命令行，没有界面",
+    "e2e": "只有一个小函数库，没有使用流程",
+    "api": "没有对外接口",
+    "api-oracle": "没有对外接口"
+  },
+  "aiTests": {
+    "frameworkZh": "node:test（ESM），用 import test from 'node:test' 和 node:assert/strict",
+    "pathGlobs": [
+      "*.argus.test.mjs"
+    ],
+    "run": [
+      "node",
+      "--test",
+      "{file}"
+    ]
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "argus",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "个人 PR 合并后自动 QA agent（Mini 后台服务）",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "test": "node --disable-warning=ExperimentalWarning --test tests/*.test.mjs",
+    "start": "node --disable-warning=ExperimentalWarning src/cli.mjs serve"
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "owner": {
+    "login": "PraiseZhu",
+    "id": 290989140
+  },
+  "issueRepo": "PraiseZhu/pr-qa-agent-deploy",
+  "enabledSince": "2026-09-23T00:00:00+08:00",
+  "projects": [
+    {
+      "repo": "xindong/mivo-canvas-plugin",
+      "displayName": "Mivo 插件",
+      "profile": "mivo-canvas-plugin"
+    },
+    {
+      "repo": "PraiseZhu/project-akb2",
+      "displayName": "AKB2 知识库",
+      "profile": "project-akb2"
+    },
+    {
+      "repo": "PraiseZhu/argus-canary",
+      "displayName": "Argus 金丝雀",
+      "profile": "argus-canary",
+      "canary": true
+    },
+    {
+      "repo": "makecindy/cindy",
+      "displayName": "Cindy",
+      "profile": "cindy"
+    },
+    {
+      "repo": "xindong/mivo-canvas",
+      "displayName": "Mivo 主站",
+      "profile": null,
+      "notEnrolledReasonZh": "跟随仓，还没配置测试"
+    },
+    {
+      "repo": "PraiseZhu/project-mivosentry",
+      "displayName": "MivoSentry",
+      "profile": null,
+      "notEnrolledReasonZh": "还没配置测试"
+    },
+    {
+      "repo": "PraiseZhu/project-gameweb",
+      "displayName": "Gameweb",
+      "profile": null,
+      "notEnrolledReasonZh": "还没配置测试"
+    },
+    {
+      "repo": "PraiseZhu/project-skills",
+      "displayName": "Skills",
+      "profile": null,
+      "notEnrolledReasonZh": "还没配置测试"
+    },
+    {
+      "repo": "xindong/XDMaker",
+      "displayName": "XDMaker",
+      "profile": null,
+      "notEnrolledReasonZh": "还没配置测试"
+    }
+  ]
+}

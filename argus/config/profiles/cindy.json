@@ -1,0 +1,279 @@
+{
+  "version": 3,
+  "intentZh": "Cindy 是桌面端 AI 助手客户端（Electron 桌面 + 移动端 + 共享包），负责会话、插件（Ghost）、宿主能力（文件、Library、浏览器、调度等）与账号接入。关键不变量：本地数据库迁移只能向前兼容，不能丢用户数据；插件只能通过声明的能力访问宿主，越权访问必须被拒绝；只读能力不能产生写入；多语言文案键在各语言间保持一致；调度与后台任务不能在用户不知情时执行外部动作。非目标：不做 Cindy 宿主真实使用（不在真实窗口里装插件、点界面、冷启、导出）；不验证 iOS / 安卓和 Windows。",
+  "sourceOfSteps": "对齐 origin/main 的 .github/workflows/ci.yml（verify-checks、linux-unit-shards、git-integration），去掉需要 Linux 系统包、真实设备或 PR 基线参数的步骤",
+  "lfs": true,
+  "aPaths": [
+    "**/*.md",
+    "docs/**",
+    "LICENSE",
+    "NOTICE",
+    "DCO"
+  ],
+  "cPaths": [
+    "apps/desktop/src/main/localDb/**",
+    "**/migrations/**",
+    "**/*migrat*",
+    "packages/**/ghost*/**",
+    "apps/desktop/src/main/**/ghost*",
+    "apps/desktop/src/main/**/library*/**",
+    "apps/desktop/src/main/**/scheduler*/**",
+    "**/*permission*",
+    "**/*auth*"
+  ],
+  "pathPrepend": [
+    "${RUN}/tools/node_modules/.bin"
+  ],
+  "env": {
+    "XDT_SKIP_AGENT_BIN_INSTALL": "1",
+    "ELECTRON_SKIP_BINARY_DOWNLOAD": "1",
+    "ELECTRON_OVERRIDE_DIST_PATH": "${SRC}/.electron-stub-dist",
+    "NODE_OPTIONS": "--max-old-space-size=8192",
+    "XDT_MIGRATION_BASE_REF": "HEAD^",
+    "npm_config_store_dir": "${CACHE}/pnpm-store",
+    "PNPM_HOME": "${RUN}/tools/pnpm-home",
+    "XDT_DEVICE_ID_OVERRIDE": "argus-qa-test-device"
+  },
+  "steps": [
+    {
+      "id": "tools",
+      "nameZh": "准备包管理工具",
+      "kind": "setup",
+      "cmd": [
+        "npm",
+        "install",
+        "--prefix",
+        "${RUN}/tools",
+        "--no-audit",
+        "--no-fund",
+        "pnpm@10.33.2"
+      ],
+      "timeoutMin": 10
+    },
+    {
+      "id": "install",
+      "nameZh": "安装依赖",
+      "kind": "setup",
+      "cmd": [
+        "pnpm",
+        "install",
+        "--frozen-lockfile",
+        "--store-dir",
+        "${CACHE}/pnpm-store"
+      ],
+      "timeoutMin": 45
+    },
+    {
+      "id": "ripgrep",
+      "nameZh": "准备搜索工具",
+      "kind": "setup",
+      "cmd": [
+        "pnpm",
+        "install:ripgrep"
+      ],
+      "timeoutMin": 10
+    },
+    {
+      "id": "runner",
+      "nameZh": "测试框架自检",
+      "kind": "product",
+      "cmd": [
+        "pnpm",
+        "test:runner"
+      ],
+      "timeoutMin": 20,
+      "covers": [
+        "regression"
+      ]
+    },
+    {
+      "id": "typecheck-desktop",
+      "nameZh": "桌面端类型检查",
+      "kind": "product",
+      "cmd": [
+        "pnpm",
+        "--filter",
+        "desktop",
+        "typecheck"
+      ],
+      "timeoutMin": 30,
+      "covers": [
+        "regression",
+        "compatibility"
+      ]
+    },
+    {
+      "id": "typecheck-mobile",
+      "nameZh": "移动端类型检查",
+      "kind": "product",
+      "cmd": [
+        "pnpm",
+        "--filter",
+        "mobile",
+        "typecheck"
+      ],
+      "timeoutMin": 30,
+      "covers": [
+        "regression",
+        "compatibility"
+      ]
+    },
+    {
+      "id": "db",
+      "nameZh": "数据库迁移校验",
+      "kind": "product",
+      "cmd": [
+        "pnpm",
+        "--filter",
+        "desktop",
+        "db:validate"
+      ],
+      "timeoutMin": 15,
+      "covers": [
+        "data",
+        "data-consistency",
+        "db"
+      ]
+    },
+    {
+      "id": "unit",
+      "nameZh": "单元测试",
+      "kind": "product",
+      "cmd": [
+        "pnpm",
+        "run",
+        "test:workspaces",
+        "--tier",
+        "unit"
+      ],
+      "timeoutMin": 90,
+      "covers": [
+        "unit",
+        "functional",
+        "regression"
+      ]
+    },
+    {
+      "id": "git-integration",
+      "nameZh": "git 集成测试",
+      "kind": "product",
+      "cmd": [
+        "pnpm",
+        "test:git-integration"
+      ],
+      "timeoutMin": 40,
+      "covers": [
+        "integration",
+        "sideEffects"
+      ]
+    },
+    {
+      "id": "i18n",
+      "nameZh": "多语言文案自检",
+      "kind": "quality",
+      "cmd": [
+        "pnpm",
+        "check:i18n"
+      ],
+      "timeoutMin": 10
+    },
+    {
+      "id": "glossary",
+      "nameZh": "术语表自检",
+      "kind": "quality",
+      "cmd": [
+        "pnpm",
+        "check:i18n-glossary"
+      ],
+      "timeoutMin": 10
+    },
+    {
+      "id": "endpoints",
+      "nameZh": "接口地址自检",
+      "kind": "quality",
+      "cmd": [
+        "pnpm",
+        "check:endpoints"
+      ],
+      "timeoutMin": 10
+    },
+    {
+      "id": "brand",
+      "nameZh": "品牌用词自检",
+      "kind": "quality",
+      "cmd": [
+        "pnpm",
+        "check:brand-terminology"
+      ],
+      "timeoutMin": 10
+    },
+    {
+      "id": "design-inventory",
+      "nameZh": "设计清单自检",
+      "kind": "quality",
+      "cmd": [
+        "pnpm",
+        "check:design-inventory"
+      ],
+      "timeoutMin": 10
+    },
+    {
+      "id": "scheduler",
+      "nameZh": "调度架构守卫",
+      "kind": "quality",
+      "cmd": [
+        "pnpm",
+        "ci:scheduler-guard"
+      ],
+      "timeoutMin": 10
+    }
+  ],
+  "baseRefNoteZh": "迁移校验要和「这次合并之前」的版本比较，所以用被测版本的上一个提交（HEAD^），不能用最新主干，否则测旧版本时会误报「迁移被删」。",
+  "notApplicable": {
+    "money-reward-settlement": "不是游戏或结算业务",
+    "provably-fair": "不是游戏或抽奖业务",
+    "e2e": "不做 Cindy 宿主真实使用：不在真实窗口里装插件、冷启、导出",
+    "visual": "不做 Cindy 宿主真实使用，不看真实窗口长什么样",
+    "ui": "不做 Cindy 宿主真实使用，不以真实窗口上的结果为准"
+  },
+  "pathHints": {
+    "**/migrations/**": [
+      "data",
+      "db",
+      "data-consistency"
+    ],
+    "apps/desktop/src/main/**/scheduler*/**": [
+      "async-callback-retry",
+      "concurrency",
+      "state-transition"
+    ],
+    "**/*permission*": [
+      "permission",
+      "permission-boundary"
+    ],
+    "**/*auth*": [
+      "security",
+      "permission"
+    ]
+  },
+  "aiTests": {
+    "frameworkZh": "vitest（TypeScript，桌面端 apps/desktop），用 describe/it/expect，从 vitest 导入；测试文件放在对应源码旁的 __tests__ 目录",
+    "pathGlobs": [
+      "apps/desktop/src/main/**/__tests__/*.argus.test.ts",
+      "apps/desktop/src/shared/__tests__/*.argus.test.ts",
+      "apps/desktop/src/renderer/**/__tests__/*.argus.test.ts"
+    ],
+    "run": [
+      "pnpm",
+      "--dir",
+      "apps/desktop",
+      "exec",
+      "vitest",
+      "run",
+      "--project",
+      "standard",
+      "{file}"
+    ],
+    "runFileStrip": "apps/desktop/"
+  }
+}
