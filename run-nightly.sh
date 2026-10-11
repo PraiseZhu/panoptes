@@ -3,7 +3,7 @@
 #
 #   run-nightly.sh --catch-up [--wait-lock SECONDS]
 #   run-nightly.sh [--date YYYY-MM-DD] [--pr N ...] [--limit N]
-#                  [--no-review] [--skip-step ID ...]
+#                  [--no-review] [--no-ai-tests] [--skip-step ID ...]
 #                  [--out PATH] [--no-reuse] [--wait-lock [SECONDS]]
 #                  [--pr-timeout MIN] [--deadline HH:MM] [--write-merged | --no-write-merged] [--write-open]
 #                  [--no-issues | --create-issues]
@@ -20,6 +20,8 @@
 #                 open PRs updated that day + PRs merged that day (all authors)
 #   --limit N     test at most N discovered PRs
 #   --no-review   skip the ming-qa LLM code review
+#   --no-ai-tests skip AI-generated tests for uncovered applicable dimensions (env ARGUS_AITESTS=0 does the same;
+#                 caps per PR: ARGUS_AITEST_MAX_CALLS (2), ARGUS_AITEST_MAX_MIN (25), ARGUS_AITEST_MAX_TESTS per call (3))
 #   --skip-step ID  skip a profile step (repeatable)
 #   --out PATH    write the report here instead of $QA_HOME/reports/YYYY-MM-DD.json (refuses to target a
 #                 daily report file). On-merge trigger: --pr N --out $QA_HOME/reports/merged/PR-N.json

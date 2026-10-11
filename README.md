@@ -221,11 +221,10 @@ Off unless `--create-issues` **and** `ARGUS_ALLOW_ISSUES=1`. When on:
   the report. Skipped candidates are listed with a reason.
 - **system_health:** QA tool failures, environment problems and LLM errors always become issues (any author), with a
   ```` ```json mivo-qa-health ```` block.
-- **Dedup:** key = fingerprint + merge commit. Each body carries `<!-- mivo-qa-fingerprint: mq1-… -->` and
-  `<!-- mivo-qa-dedup: mq1-…@<merge sha> -->`. An **open** `qa-auto` issue with the same fingerprint → skipped; a
-  **closed** one → skipped only for the same merge commit; the same problem recurring on a new merge commit after the
-  issue was closed opens a new issue (`created-recurred`). No comments, no reopening. Code-review fingerprints include
-  a hash of the normalized finding title.
+- **Dedup and recurrence** (as in argus's publisher): dedup by the body marker `<!-- mivo-qa-fingerprint: mq1-… -->`
+  over `qa-auto` issues, open and closed. Open issue with the same fingerprint → comment with the new evidence (once
+  per run × PR); closed as fixed → reopen + comment; closed as won't-fix (`state_reason: not_planned` or a `wontfix`
+  label) → stay silent; none → create. Code-review fingerprints include a hash of the normalized finding title.
 - Finding bodies include a ```` ```json mivo-qa-finding ```` block (`schema: mivo-qa-finding/v1`) that
   [`mini/check-queue.sh`](mini/README.md) turns into a lifeline observation on the Mac mini.
 

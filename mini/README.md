@@ -31,8 +31,8 @@ stdout (cindy appends it to the agent prompt as untrusted data): line 1 is the o
 `MIVO_QA_OBSERVATION=`, `MIVO_QA_EVIDENCE=`, `MIVO_QA_ISSUE=`, `MIVO_QA_ISSUE_URL=`, `MIVO_QA_FINGERPRINT=`,
 `MIVO_QA_DEDUP_KEY=`, `MIVO_QA_LIFELINE_CONFIG=`, `MIVO_QA_QUEUE_DEPTH=`, (`MIVO_QA_SKIPPED_UNPARSEABLE=`), `CINDY_PRECHECK_OK`.
 
-`MIVO_QA_DEDUP_KEY` is the finding block's `dedup_key` (`<fingerprint>@<merge commit>`, issues since 2026-10-11) or,
-for older issues without it, the fingerprint itself. A present but malformed `dedup_key` (not
+`MIVO_QA_DEDUP_KEY` is the finding block's optional `dedup_key` when present, otherwise the fingerprint (panoptes
+dedups issues by fingerprint only, so for current issues it always equals `MIVO_QA_FINGERPRINT`). A present but malformed `dedup_key` (not
 `<fingerprint>@[A-Za-z0-9:-]+`) makes that issue unusable (`bad-dedup-key`). The observation file is unchanged.
 
 Exit codes: `0` an issue is ready (run) · `2` queue empty (skip) · `3` gh failed (not installed, not logged in, network or API error) ·

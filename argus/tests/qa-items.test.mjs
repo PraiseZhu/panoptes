@@ -144,31 +144,32 @@ test('代码审查指纹含归一化标题哈希：同文件同类别不同问�
   assert.match(nightly.titleHash('x'), /^[0-9a-f]{12}$/)
 })
 
-test('issue 去重：开放的同指纹去重；关闭的只对同一合并提交去重；新提交上复发 → 新开', () => {
+test('复发判定（按指纹）：开放 → 评论；修好关闭 → 重开；not_planned / wontfix 标签 → 沉默；没有 → 新开', () => {
   const fp = 'mq1-aaa'
-  const c1 = { fingerprint: fp, dedup_key: nightly.dedupKeyOf(fp, 'sha1') }
-  const c2 = { fingerprint: fp, dedup_key: nightly.dedupKeyOf(fp, 'sha2') }
-  const body = (k) => `${nightly.fingerprintMarker(fp)}\n${k ? nightly.dedupMarker(k) : ''}`
-  assert.equal(nightly.dedupDecision([], c1).action, 'create')
-  assert.equal(nightly.dedupDecision([{ state: 'open', body: body(c1.dedup_key), html_url: 'u1' }], c2).action, 'exists')
-  assert.equal(nightly.dedupDecision([{ state: 'closed', body: body(c1.dedup_key), html_url: 'u1' }], c1).action, 'exists')
-  const re = nightly.dedupDecision([{ state: 'closed', body: body(c1.dedup_key), html_url: 'u1' }], c2)
-  assert.equal(re.action, 'create'); assert.equal(re.recurred, true); assert.deepEqual(re.previous, ['u1'])
-  // 旧 issue（只有指纹标记）：开放的仍去重，关闭的不挡新开
-  assert.equal(nightly.dedupDecision([{ state: 'open', body: body(null) }], c1).action, 'exists')
-  assert.equal(nightly.dedupDecision([{ state: 'closed', body: body(null) }], c1).action, 'create')
+  const c = { fingerprint: fp }
+  const body = nightly.fingerprintMarker(fp)
+  assert.equal(nightly.recurrenceDecision([], c).action, 'create')
+  assert.equal(nightly.recurrenceDecision([{ number: 1, state: 'open', body }], c).action, 'comment')
+  assert.equal(nightly.recurrenceDecision([{ number: 1, state: 'closed', state_reason: 'completed', body }], c).action, 'reopen')
+  assert.equal(nightly.recurrenceDecision([{ number: 1, state: 'closed', state_reason: null, body }], c).action, 'reopen')
+  assert.equal(nightly.recurrenceDecision([{ number: 1, state: 'closed', state_reason: 'not_planned', body }], c).action, 'suppressed')
+  assert.equal(nightly.recurrenceDecision([{ number: 1, state: 'closed', state_reason: 'completed', labels: [{ name: 'wontfix' }], body }], c).action, 'suppressed')
+  // 开放的优先；都关闭时看最新那条
+  assert.equal(nightly.recurrenceDecision([{ number: 1, state: 'open', body }, { number: 2, state: 'closed', state_reason: 'not_planned', body }], c).issue.number, 1)
+  assert.equal(nightly.recurrenceDecision([{ number: 1, state: 'closed', state_reason: 'not_planned', body }, { number: 2, state: 'closed', state_reason: 'completed', body }], c).action, 'reopen')
+  // 别的指纹不算
+  assert.equal(nightly.recurrenceDecision([{ number: 1, state: 'open', body: nightly.fingerprintMarker('mq1-other') }], c).action, 'create')
 })
 
-test('issue 正文：带指纹与去重两个标记，finding 块带 dedup_key / merge_sha；已合并用 merge commit，开放用 head', () => {
+test('issue 正文：带指纹标记，finding 块带 merge_sha；不再有合并提交去重键', () => {
   const report = { date: '2026-10-10', repo: 'xindong/mivo-canvas-plugin', run: { id: 'r' } }
   const pr = { number: 9, title: 't', author: 'PraiseZhu', url: 'u', state: 'merged', merge_sha: 'm'.repeat(40), tested_sha: 'm'.repeat(40) }
   const f = { source: 'check', check_id: 'unit', severity: 'P0', fingerprint: 'mq1-x', pr_fingerprint: 'mq1-x-pr9', dimension: 'gray-box' }
   const { body } = nightly.buildIssuePayload(report, pr, f)
   assert.ok(body.includes('<!-- mivo-qa-fingerprint: mq1-x -->'))
-  assert.ok(body.includes(`<!-- mivo-qa-dedup: mq1-x@${'m'.repeat(40)} -->`))
+  assert.ok(!body.includes('mivo-qa-dedup'))
   const block = JSON.parse(body.match(/```json mivo-qa-finding\n([\s\S]*?)\n```/)[1])
-  assert.equal(block.dedup_key, `mq1-x@${'m'.repeat(40)}`); assert.equal(block.merge_sha, 'm'.repeat(40))
-  assert.equal(nightly.findingDedupKey({ state: 'open', tested_sha: 'h1' }, f), 'mq1-x@h1')
+  assert.equal(block.merge_sha, 'm'.repeat(40)); assert.equal(block.dedup_key, undefined)
 })
 
 // ── 报告保留 ─────────────────────────────────────────────
@@ -286,6 +287,51 @@ test('legacy-migration journey: a revision without the migration code is unavail
   assert.match(r.stdout + r.stderr, /persistIdbStorage/)
 })
 
+// ── AI 补测（夜间）──────────────────────────────────────
+const ai = await import('../src/aitests.mjs')
+
+test('AI 补测缺口：只取 Jev 判为适用、在补测维度清单里、且没有已跑成的检查覆盖的维度', () => {
+  const profile = { steps: [{ id: 'unit', covers: ['unit'] }, { id: 'api-probe', covers: ['permission-boundary'] }, { id: 'e2e', covers: ['db'] }] }
+  const applicability = { applicable: ['unit', 'boundary', 'permission-boundary', 'db', 'visual', 'concurrency'] }
+  const results = [{ id: 'unit', ok: true }, { id: 'api-probe', ok: false }, { id: 'e2e', unavailable: true }]
+  assert.deepEqual(ai.toAiGaps({ applicability, profile, results }), ['boundary', 'db', 'concurrency'])
+  assert.equal(ai.AI_GAP_DIMENSIONS.length, 12)
+})
+
+test('AI 补测上限：默认 2 次模型调用 / 25 分钟 / 每次 3 个，可用环境变量改；ARGUS_AITESTS=0 关闭', () => {
+  assert.deepEqual(ai.aiTestCaps({}), { enabled: true, maxCalls: 2, maxWallMin: 25, maxTestsPerCall: 3 })
+  assert.deepEqual(ai.aiTestCaps({ ARGUS_AITEST_MAX_CALLS: '1', ARGUS_AITEST_MAX_MIN: '10', ARGUS_AITEST_MAX_TESTS: '2', ARGUS_AITESTS: '0' }), { enabled: false, maxCalls: 1, maxWallMin: 10, maxTestsPerCall: 2 })
+  assert.equal(ai.aiTestCaps({ ARGUS_AITEST_MAX_CALLS: 'x' }).maxCalls, 2)
+})
+
+test('AI 补测判定：通过且植入错误被发现 → kept；植入错误无效 / 没法跑 → discarded；当前代码失败 → fails-on-current', () => {
+  assert.equal(ai.toAiTestResult({ ok: true }).result, 'kept')
+  assert.equal(ai.toAiTestResult({ ok: false, unavailable: true, exitCode: 4 }).result, 'discarded')
+  assert.equal(ai.toAiTestResult({ ok: false, unavailable: true, exitCode: 2, unavailableReasonZh: '重名' }).result, 'discarded')
+  assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1 }).result, 'fails-on-current')
+  assert.equal(ai.toAiTestResult(null).result, 'discarded')
+  assert.equal(ai.toAiTestResult({ timedOut: true }).result, 'discarded')
+})
+
+test('AI 补测步骤编号可接着上一轮编；每次调用的测试数上限生效', () => {
+  const profile = { aiTests: { run: ['x', '{file}'], pathGlobs: ['src/**/*.argus.test.ts'] } }
+  const t = { kind: 'coverage', purposeZh: 'p', covers: ['boundary'], filePath: 'src/a.argus.test.ts', content: 'x', mutation: { file: 'src/a.ts', find: 'a', replace: 'b' } }
+  assert.deepEqual(ai.toAiTestSteps([t, t], profile, { offset: 3 }).map((s) => s.id), ['ai-test-4', 'ai-test-5'])
+  assert.equal(ai.toValidTests({ tests: [t, t, t, t] }, { profile, gaps: ['boundary'], maxTests: 3 }).length, 3)
+})
+
+test('coverage.dimension_status：applicable_total / covered_total，检查覆盖、AI 补测覆盖、缺口、不适用', () => {
+  const triage = { dimensions: { unit: { applicability: 'applicable' }, boundary: { applicability: 'applicable' }, db: { applicability: 'applicable' }, visual: { applicability: 'not-applicable' } } }
+  const profile = { steps: [{ id: 'unit', covers: ['unit'] }] }
+  const aiRes = { tests: [{ id: 'ai-test-1', result: 'kept', covers: ['boundary'] }, { id: 'ai-test-2', result: 'discarded', covers: ['db'] }] }
+  const c = nightly.withDimensionStatus({ covered: ['unit'] }, triage, aiRes, profile, [{ id: 'unit', ok: true }])
+  assert.equal(c.applicable_total, 3); assert.equal(c.covered_total, 2)
+  assert.deepEqual(c.covered, ['unit'], 'existing field kept as is')
+  assert.equal(c.dimension_status.unit.status, 'covered'); assert.equal(c.dimension_status.boundary.status, 'covered-by-ai-test')
+  assert.equal(c.dimension_status.db.status, 'gap'); assert.equal(c.dimension_status.visual.status, 'not-applicable')
+  assert.deepEqual(c.ai_covered, ['boundary']); assert.deepEqual(c.gaps, ['db'])
+})
+
 test('appliesIf：被测版本没有检查对象（如 index.html）→ 不适用（不是没跑成，也不进 checks）', async () => {
   const { toNotApplicable } = await import('../src/runner.mjs')
   const src = mkdtempSync(join(tmpdir(), 'na-'))
@@ -296,4 +342,17 @@ test('appliesIf：被测版本没有检查对象（如 index.html）→ 不适�
   const p = loadProfile('mivo-canvas-plugin')
   assert.deepEqual(p.steps.find((s) => s.id === 'web-build').appliesIf.map((r) => r.file), ['index.html'])
   assert.deepEqual(p.steps.find((s) => s.id === 'host-locale').appliesIf.map((r) => r.file), ['cindyplugin/check-host-locale.mjs'])
+})
+
+// ── 不稳定失败与合并前版本对比 ────────────────────────────
+test('flaky 的 base 对比：没对比时写「未与合并前版本对比」；对比了记基线结果，严重度仍是 P2', () => {
+  const none = nightly.flakyBaseComparison({ baseSha: 'b'.repeat(40), baseRun: 'not-run' })
+  assert.equal(none.compared, false); assert.ok(none.note.includes('未与合并前版本对比')); assert.ok(none.note_zh.startsWith('未与合并前版本对比'))
+  assert.ok(nightly.flakyBaseComparison({ baseSha: null, baseRun: 'not-run' }).note.includes('base revision unknown'))
+  assert.equal(nightly.flakyBaseComparison({ baseSha: 'b', baseRun: 'timeout' }).compared, false)
+  const fails = nightly.flakyBaseComparison({ baseSha: 'b', baseRun: 'fail' })
+  assert.equal(fails.result, 'also-fails-on-base'); assert.ok(!fails.note.includes('未与合并前版本对比'))
+  assert.equal(nightly.flakyBaseComparison({ baseSha: 'b', baseRun: 'pass' }).result, 'passes-on-base')
+  assert.equal(nightly.flakyBaseComparison({ baseSha: 'b', baseRun: 'not-failing' }).result, 'passes-on-base')
+  assert.equal(nightly.severityFor({ status: 'flaky', step: { kind: 'product' }, merged: true }), 'P2')
 })

@@ -125,13 +125,14 @@ Merged reports written by nightly also carry `run.source_report` (path of the ni
 | `partial_result` | only for `not-tested` because of a time budget: `{ verdict, checks, evidence_dir }` of the interrupted run; not used for the verdict |
 | `error` | only for `qa-error` (redacted message); the entry also has one finding `{ source: "qa-error", test_backed: false, severity: "P2" }` |
 | `checks[]` | `{ id, name, kind, dimension, qa_dimensions, status: pass/fail/timeout/unavailable, exit_code, duration_ms, failure_count, unavailable_reason?, sub_checks? }`; `sub_checks` only for probe steps (`api-probe`): `{ total, passed, failed, skipped, auth: { account, account_via, host_exchange } }` — `status: pass` means every probe that **ran** passed; skipped probes are listed in `skipped_steps`, never counted as passed |
-| `failed_checks[]` | `{ check_id, check_name, dimension, qa_dimensions, test, failure_type, status, severity, attribution, fingerprint, pr_fingerprint, evidence{ tested_sha, base_sha, exit_code, timed_out, first_run, rerun, base_run, latest_main_run?, command, log_tail, log_file } }`; `status` ∈ `introduced, pre-existing, flaky, fixed-later, unverified, timeout, setup-failed`; also boolean **`flaky`** (`true` iff `status: "flaky"`), `related_to_pr: false` for flaky entries, and, in reports written before 2026-10-11 only, `reclassified { at, from, reason }` (legacy in-place re-classification; no longer done — see *Report preservation*) |
+| `failed_checks[]` | `{ check_id, check_name, dimension, qa_dimensions, test, failure_type, status, severity, attribution, fingerprint, pr_fingerprint, evidence{ tested_sha, base_sha, exit_code, timed_out, first_run, rerun, base_run, latest_main_run?, command, log_tail, log_file } }`; `status` ∈ `introduced, pre-existing, flaky, fixed-later, unverified, timeout, setup-failed`; also boolean **`flaky`** (`true` iff `status: "flaky"`), `related_to_pr: false` and **`base_comparison`** (see *Flaky*) for flaky entries, `evidence.base_log_file?` when base ran, and, in reports written before 2026-10-11 only, `reclassified { at, from, reason }` (legacy in-place re-classification; no longer done — see *Report preservation*) |
 | `code_review` | `{ status, summary, gate, model, tokens, findings_count, residual_risks, file }` or `{ status, error }`. **Also present for docs-only PRs** (reviewed on the same commit: merged → `base_sha` (first parent = merge-base) `..merge_sha`); `null` only with `--no-review` |
-| `findings[]` | everything that can raise severity. Every finding has **`source`** ∈ `check` (a failed check, same fields as `failed_checks`), `code-review` (LLM; capped at P1, original in `llm_severity`), `coverage-gate` (P2), `qa-error` (P2, the pipeline crashed) and boolean **`test_backed`** (see *test_backed*) |
+| `findings[]` | everything that can raise severity. Every finding has **`source`** ∈ `check` (a failed check, same fields as `failed_checks`), `code-review` (LLM; capped at P1, original in `llm_severity`), `coverage-gate` (P2), `qa-error` (P2, the pipeline crashed), `ai-test` (P2, an AI-generated test that fails on the tested commit; `test_backed: false`, `status: "unconfirmed"`, `reproduced`) and boolean **`test_backed`** (see *test_backed*) |
 | **`test_backed`** | PR-level: `true` if at least one finding is test-backed |
 | `test_backed_severity` | highest severity among test-backed findings, or `null` |
 | `finding_sources` | distinct `source` values of this PR's findings |
-| `coverage` | QA-dimension coverage of the matrix (`applicable`, `covered`, `missed`, `undetermined`, `passRate`, `coverage`) — *not* code coverage |
+| `coverage` | QA-dimension coverage of the matrix (`applicable`, `covered`, `missed`, `undetermined`, `passRate`, `coverage`) — *not* code coverage. Since 2026-10-11 also, based on `triage`: **`applicable_total`**, **`covered_total`**, `covered_dimensions`, `ai_covered`, `gaps`, and **`dimension_status`** `{ <key>: { applicability, status: covered \| covered-by-ai-test \| gap \| not-applicable \| undetermined, checks: [step ids], ai_tests: [ai-test ids] } }` for all 29 dimensions (`covered` keeps its old meaning: the array of applicable dimensions covered by checks under the older p ≥ 0.7 rule) |
+| **`ai_tests`** | AI-generated tests for this PR, see *AI tests* |
 | **`coverage_gate`** | white-box code-coverage gate, see below; **docs-only: `{ status: "not-applicable", reason: "docs-only change" }`**; `null` when no unit run happened for another reason (not-tested, qa-error) |
 | **`skipped_steps`** | **every** profile step that did not run, each `{ id, nameZh, reason, reasonZh?, dimension }`; reasons: `triage: …` (optional step not relevant to the change), `skipped by --skip-step`, `not run: dependency install failed`, `not run: run stopped before this step …`, `docs-only change: no checks run`, `not applicable to this revision: …` (the profile step's `appliesIf` file is absent, e.g. `web-build` when the revision has no web entry `index.html`, or a dist scan whose script the revision does not have yet — neither a pass nor an unavailable check). **Sub-probes of a probe step that did not run** are listed too, as `{ id: "api-probe/<probe id>", nameZh, reason, parent_step: "api-probe", dimension }` — e.g. reason `no test account` for signed-in probes when neither local sign-in nor `MIVO_QA_TEST_*` is available |
 | **`triage`** | dimension applicability for this PR, see *Triage* |
@@ -169,11 +170,25 @@ passed on the rerun (4.8 s / 4.9 s).
 If the rerun has no per-test result for the failing test (no JSON report), the failure stays `unverified` (P2,
 `test_backed: true`) — panoptes does not guess.
 
+**Base comparison (since 2026-10-11).** Every step that failed on the first run — including the ones that then passed on
+the rerun — is also run once on the base (pre-merge / merge-base) revision in the same `b` round. Each flaky entry
+carries **`base_comparison`** `{ compared, base_sha, base_run, result, note, note_zh }`:
+
+| `result` | meaning |
+|---|---|
+| `also-fails-on-base` | the same test also failed on base in one run: the instability predates the PR |
+| `passes-on-base` | passed on base in one run; a single run cannot rule out the same instability on base |
+| `not-compared` | no base result (base unknown, base run missing / timed out / unavailable); `note` starts with **`未与合并前版本对比`** |
+
+The note is appended to `attribution`; `evidence.base_run` holds the raw result and `evidence.base_log_file` the base
+log. Status stays `flaky`, severity stays P2, `test_backed` stays false. Reports must say **未与合并前版本对比**
+whenever `base_comparison.compared` is false or the field is absent (reports written before 2026-10-11).
+
 ### `test_backed` — what notification / issue rules key off
 
 `findings[].test_backed` is `true` **only** when the finding is backed by a failing check that actually ran
 (`source: "check"`) **and was not `flaky`**. Flaky checks (failed, then passed on the rerun), review-only
-(`code-review`), `coverage-gate` and `qa-error` findings are always `false`.
+(`code-review`), `coverage-gate`, `qa-error` and `ai-test` findings are always `false`.
 
 **Downstream notification and issue rules must key off `test_backed`, not severity alone.** A P1 with
 `test_backed: false` is an LLM opinion and must not be presented or escalated as a verified defect. Suggested rule:
@@ -257,17 +272,58 @@ Every tested PR carries an explicit decision for each of the 29 QA dimensions of
   `system_health.llm_errors` (`stage: "triage(jev)"`) and `system_health.triage.failed`.
 - Which optional checks run still follows the conservative step plan (anything not clearly unrelated runs).
 
-## Issue dedup (`--create-issues` only)
+### AI tests (`prs[].ai_tests`)
 
-Issue bodies carry `<!-- mivo-qa-fingerprint: <fp> -->` and, since 2026-10-11, `<!-- mivo-qa-dedup: <fp>@<sha> -->`;
-the ```` ```json mivo-qa-finding ```` block gains `dedup_key` and `merge_sha`. Dedup key = fingerprint + merge commit
-(open PRs: tested head; `system_health` issues: `day:<date>`). An **open** issue with the same fingerprint always
-dedups; a **closed** one dedups only for the same key, so a problem that recurs on a new merge commit after its issue
-was closed opens a new issue (`action: "created-recurred"`, `previous_issues`). Old issues without the dedup marker
-behave as "commit unknown". Code-review fingerprints include a 12-hex hash of the normalized finding title, so two
-different findings on the same file / symbol / category no longer collide. `mini/check-queue.sh` validates
-`dedup_key` when present (must be `<fingerprint>@[A-Za-z0-9:-]+`) and prints `MIVO_QA_DEDUP_KEY=` (falls back to the
-fingerprint for old issues).
+For B/C PRs with a decided triage, panoptes asks the model (argus `src/aitests.mjs`, `openai/gpt-6-luna`) for vitest
+cases for the **gap dimensions**: Jev says applicable, the dimension is in the AI-test set (`integration, boundary,
+exception, security, permission-boundary, state-transition, async-callback-retry, data-consistency, concurrency,
+business-rule, privacy, db`), and no check that ran declares it in `covers`. High-risk (class-C path) files are listed
+first. Each case comes with an injected bug (a one-occurrence text replacement in a source file) and runs in its own
+sandboxed run (`ai1`, `ai2`, …, never part of the verdict runs). **Mutation discipline:** a case is **kept** only if it
+passes on the tested commit **and** fails with the injected bug; otherwise it is **discarded**. A case that fails on
+the tested commit is re-run once (`reproduced`) and becomes a `source: "ai-test"` finding: always P2,
+`test_backed: false`; it is only upgraded by a person after the failure is reproduced and confirmed. Generated files
+are deleted after the run; nothing is written to the target repo.
+
+```json
+{
+  "status": "ok", "reason": null, "model": "openai/gpt-6-luna",
+  "caps": { "max_model_calls": 2, "max_wall_min": 25, "max_tests_per_call": 3 },
+  "model_calls": 2, "wall_s": 610, "gaps": ["boundary", "exception"],
+  "generated": 5, "kept": 2, "discarded": 3, "fails_on_current": 0, "newly_covered": ["boundary"],
+  "tests": [{ "id": "ai-test-1", "round": 1, "kind": "coverage", "purpose": "…", "covers": ["boundary"], "file": "src/x.argus.test.ts",
+              "mutation_file": "src/x.ts", "result": "kept | discarded | fails-on-current", "reason": "…", "exit_code": 0, "duration_ms": 41000, "log_tail": "…", "reproduced": null }],
+  "rounds": [{ "round": 1, "gaps": ["boundary", "exception"], "status": "ok", "offered": 3, "rejected_by_validation": 0, "tokens": 23000, "tests": ["ai-test-1", "…"] }]
+}
+```
+
+- `status`: `ok` · `empty` (model wrote nothing usable) · `error` (gateway error, also in `system_health.llm_errors`
+  stage `ai-tests`) · `skipped` (no gap, triage not decided, no `aiTests` profile config, install failed, …) ·
+  `disabled` (`--no-ai-tests` / `ARGUS_AITESTS=0`).
+- Caps per PR (env): `ARGUS_AITEST_MAX_CALLS` (default 2 model calls), `ARGUS_AITEST_MAX_MIN` (default 25 min wall time
+  for generation + execution), `ARGUS_AITEST_MAX_TESTS` (default 3 per call); plus the existing daily call cap
+  `ARGUS_AITEST_DAILY_CAP` (20). Round 2 only targets dimensions round 1 did not cover and gets round 1's discard reasons.
+  Actuals: `model_calls`, `wall_s`. `run.args.ai_test_caps` records the caps of the run.
+- Each test also appears in `checks[]` with `source: "ai-test"`, `dimension: "white-box"`, `status` `pass` (kept) /
+  `fail` (fails on current) / `discarded`, `ai_result`, `ai_reason`.
+
+## Issues: dedup and recurrence (`--create-issues` only)
+
+Issue bodies carry `<!-- mivo-qa-fingerprint: <fp> -->`; dedup is by fingerprint only (open **and** closed
+`qa-auto` issues). Recurrence follows argus's own publisher (`argus/src/publish.mjs`):
+
+| Existing issue with the same fingerprint | Action (`issues.results[].action`) |
+|---|---|
+| none | `created` |
+| open | `commented` — a comment with the new evidence (date, PR, tested/base sha, status, runs, log tail), once per run × PR (`<!-- mivo-qa-observation: <run id>/pr<N> -->`) |
+| closed as fixed (`state_reason` `completed` / null) | `reopened` — reopened plus the same evidence comment |
+| closed as won't-fix (`state_reason: not_planned`, or a `wontfix` / `won't fix` label) | `suppressed` — no comment, no reopen, no new issue |
+
+The ```` ```json mivo-qa-finding ```` block carries `merge_sha`. Code-review fingerprints include a 12-hex hash of the
+normalized finding title, so different findings on the same file / symbol / category no longer collide.
+(An intermediate design keyed issues on fingerprint + merge commit; it was never used to create issues and is
+replaced by the rules above. `mini/check-queue.sh` still accepts an optional `dedup_key` in old blocks and prints
+`MIVO_QA_DEDUP_KEY=`, which equals the fingerprint for all current issues.)
 
 ## Catch-up (`run-nightly.sh --catch-up`)
 

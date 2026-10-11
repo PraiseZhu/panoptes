@@ -226,7 +226,7 @@ test('夜间全量把每个测完的已合并 PR 写成 merged/PR-N.json（同�
 
 test('test_backed：只有失败检查佐证才是 true；每个发现都有 source；PR 级汇总；issue 规则按 test_backed', async () => {
   const { annotateTestBacked, isTestBacked, FINDING_SOURCES } = await import('../src/nightly.mjs')
-  assert.deepEqual(FINDING_SOURCES, ['check', 'code-review', 'coverage-gate', 'qa-error'])
+  assert.deepEqual(FINDING_SOURCES, ['check', 'code-review', 'coverage-gate', 'qa-error', 'ai-test'])
   const prs = annotateTestBacked([
     { number: 1, findings: [{ source: 'check', severity: 'P2' }, { source: 'code-review', severity: 'P1' }, { source: 'coverage-gate', severity: 'P2' }] },
     { number: 2, findings: [{ source: 'code-review', severity: 'P1' }] },
