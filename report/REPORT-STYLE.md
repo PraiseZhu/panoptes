@@ -54,7 +54,8 @@
      不稳定测试要按 `base_comparison` 写和合并前代码的对比结果，不能自己下结论：
      `result:"also-fails-on-base"` → 「合并前的代码上也会失败，是这个测试本身不稳定，跟 PR 无关」；
      `result:"passes-on-base"` → 「在合并前的代码上跑了一次是过的，单跑一次说明不了它不会偶发失败」；
-     `compared:false` 或没有 `base_comparison`（旧报告）→ 必须写「未与合并前版本对比」，不写「跟 PR 无关」。
+     `compared:false` 或没有 `base_comparison`（旧报告）→ 必须写「未与合并前版本对比」，不写「跟 PR 无关」；
+     `base_comparison.reason:"report predates feature"` → 照 `note_zh` 写「未与合并前版本对比（该报告早于此功能生成）」。
 5. **系统状态**：一句大白话。`system_health.status` ok 且 complete → "N 个都测完了，测试系统本身运行正常"；否则如实说哪类问题（如"有 1 个没测完"），不贴细节。
 6. **未合并（顺带）**：可选，一行带过，同样用大白话（如"有一个性能测试没过，但它改之前就不过，不是它导致的"）。
 7. **分级说明**（末行，固定文案；post 不支持小字号，单独一行放最后）：
@@ -92,6 +93,7 @@
 - 禁止出现：原始 JSON、日志/证据路径、sha、fingerprint、飞书 open_id / chat_id、派活 issue 与私有仓
   PraiseZhu/pr-qa-agent-deploy 链接、新旧系统对照、密钥/配置细节、文件:行号。这些只进给 Praise 的私下补充。
 - 数据只从 `reports/merged/PR-N.json`、`reports/open/PR-N.json`、`feishu-sent.json` 取，不编造；拿不到就写"未知"或省略该节。
+  **只读 `reports/merged/PR-<数字>.json`（正则 `^PR-\d+\.json$`，不递归）**；`reports/merged/history/` 里是被取代的旧版本（`PR-N.vN.json`），绝不从里面选 PR 或取结论。`previous_version`（如 `history/PR-902.v1.json`）只用于追溯，不进群。
 - 手机好读：每行一件事，小节加粗标题，正文不超过约 30 行。
 
 ## 怎么读 `ai_tests` 和 `dimension_status`（写「测试覆盖情况」一节用）

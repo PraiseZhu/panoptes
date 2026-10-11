@@ -15,7 +15,7 @@ merge commit and writes `merged/PR-N.json` for every merged PR it had to test it
 | any `--out PATH` | manual / ad-hoc runs |
 | `$QA_HOME/reports/catch-up/PR-N.json` | `run-nightly.sh --catch-up` child run for PR N (it also writes `merged/PR-N.json` via `--write-merged`) |
 | `$QA_HOME/reports/catch-up/run-<ts>.json` | one catch-up invocation that had work to do (`schema: "mivo-qa-catch-up/v1"`, `trigger`, `create_issues`, see *Catch-up*); `catch-up/state.json` holds attempt counters |
-| `<name>.vN.json` next to any of the above | the **original** of a report that was later re-written by a re-run (see *Report preservation*) |
+| `history/<name>.vN.json` under the directory of any of the above (e.g. `reports/merged/history/PR-902.v1.json`) | the **original** of a report that was later re-written by a re-run or re-store (see *Report preservation*). Before 2026-10-11 these sat next to the current file; all were moved into `history/` |
 | `$QA_HOME/reports/full-YYYY-MM-DD.json` | combined day report assembled from the per-PR files (merged + open); carries `assembled_from` (see *Combined reports*) |
 
 **The daily report selects PRs by `prs[].merged_at` converted to Asia/Shanghai** (`prs[].merged_at_shanghai` has
@@ -30,11 +30,17 @@ removed, so readers must ignore unknown fields. Canonical copy: `docs/report-sch
 
 A report that has been written is never edited in place, and never "fixed up" with an ad-hoc script.
 **Re-classification means a re-run** of the same pipeline (`run-nightly.sh --pr N …`); when the re-run writes to a
-path that already exists, panoptes first renames the existing file to `<name>.vN.json` (next free `N`:
-`PR-902.v1.json`, `PR-902.v2.json`, …) and then writes the new file, which records `previous_version`
-(file name of the kept original). This applies to every writer (nightly, per-PR files, `--out`, `assemble`).
-Readers that glob a directory must match `PR-<n>.json` exactly (`^PR-\d+\.json$`) so kept originals are not read
-as current results. The 2026-10-10 reports are left as they are (not retroactively patched).
+path that already exists, panoptes first moves the existing file to **`history/<name>.vN.json`** in the same directory
+(next free `N`: `reports/merged/history/PR-902.v1.json`, `…v2.json`, …) and then writes the new file, which records
+**`previous_version`** = the kept original's path **relative to the directory of the current file**
+(`"history/PR-902.v1.json"`; the same string is used inside history files, so `reports/merged/` + `previous_version`
+always resolves). This applies to every writer (nightly, per-PR files, `--out`, `assemble`, `store-merged`, `normalize`).
+
+**Read rule: readers read only `reports/merged/PR-<digits>.json` (`^PR-\d+\.json$`, not recursive)** — likewise
+`reports/open/PR-<digits>.json`. `history/` holds superseded versions only; never select PRs from it. Older files may
+have `previous_version` as a bare name or `run.source_report` pointing at the old flat location; the 2026-10-11
+migration (`cli.mjs migrate-history --dir reports/merged`) moved every `*.vN.json` into `history/` and rewrote only
+those two path fields.
 
 **Storing a re-run as the current per-PR result.** A re-run written elsewhere (e.g. `--pr N --out scratch/…`) becomes
 the current `reports/merged/PR-N.json` through the same writer the nightly uses, never by copying or editing:
@@ -44,6 +50,14 @@ the current `reports/merged/PR-N.json` through the same writer the nightly uses,
 `--write-merged`, which does the same at the end of the run. `--from` may also be the current
 `reports/merged/PR-N.json` itself (re-store it in single-PR form: only PR N, `date` = its Shanghai merge day); the
 original is kept as `PR-N.vN.json` and `run.source_report` points at that kept file.
+
+**Normalization on re-store.** `store-merged` and `cli.mjs normalize --file REPORT` (for day / `full-` /
+`merged-batch-` files) re-store a report through the same writer and apply one normalization: a `flaky` entry without
+`base_comparison` (written before the base comparison existed) gets
+`{ compared: false, result: "not-compared", reason: "report predates feature", note_zh: "未与合并前版本对比（该报告早于此功能生成）", base_sha, base_run }`.
+The change is listed in the new file's **`normalized[]`** `[{ at, by, changes: [{ pr, field, check_id, test, change }] }]`;
+the original stays in `history/`. Applied on 2026-10-11 to `merged/PR-892.json`, `full-2026-10-10.json` and
+`merged-batch-2026-10-10.json` (the only current reports with such entries).
 
 ### Older reports (fields that did not exist yet)
 
@@ -205,7 +219,9 @@ carries **`base_comparison`** `{ compared, base_sha, base_run, result, note, not
 
 The note is appended to `attribution`; `evidence.base_run` holds the raw result and `evidence.base_log_file` the base
 log. Status stays `flaky`, severity stays P2, `test_backed` stays false. Reports must say **未与合并前版本对比**
-whenever `base_comparison.compared` is false or the field is absent (reports written before 2026-10-11).
+whenever `base_comparison.compared` is false or the field is absent (reports written before 2026-10-11). Normalized
+pre-feature entries have `base_comparison.reason: "report predates feature"` and `note_zh`
+**未与合并前版本对比（该报告早于此功能生成）** — use that text.
 
 ### `test_backed` — what notification / issue rules key off
 

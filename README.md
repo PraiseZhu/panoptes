@@ -303,8 +303,9 @@ becomes an issue. Result in
 ## Report / 报告格式
 
 **Produced reports are never rewritten.** Re-classification = a re-run; when a run writes to an existing report path
-the old file is kept as `<name>.vN.json` (e.g. `PR-902.v1.json`) and the new one records `previous_version`. Do not
-patch reports with ad-hoc scripts (the 2026-10-10 reports stay as produced).
+the old file is moved to `history/<name>.vN.json` in the same directory (e.g. `reports/merged/history/PR-902.v1.json`)
+and the new one records `previous_version: "history/PR-902.v1.json"`. Readers read only `reports/merged/PR-<digits>.json`.
+Do not patch reports with ad-hoc scripts; `store-merged` / `normalize` re-store through the same writer.
 
 Full field reference (for the daily-report agent): **[`docs/report-schema.md`](docs/report-schema.md)** (copied to
 `$QA_HOME/reports/SCHEMA.md`). Key points: every `prs[]` entry has `tested_at` (ISO 8601, `+08:00`); discovered
