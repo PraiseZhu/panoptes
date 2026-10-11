@@ -92,9 +92,10 @@ MISSING=$(check_all) && { log "everything present"; exit 0; }
 log "missing before install:"; printf '%s\n' "$MISSING" | sed 's/^/[bootstrap]   /' >&2
 FAILED=()
 SUDO=""; [[ $(id -u) -ne 0 ]] && SUDO="sudo -n"
-has() { grep -q "^missing: $1" <<<"$MISSING"; }
+# exact item match ("chromium" must not match "chromium-wrapper"); "apt" matches every "apt:<pkg>"
+has() { grep -Eq "^missing: $1([: ]|\$)" <<<"$MISSING"; }
 
-if has 'apt:' || has bwrap || has chromium; then
+if has apt || has bwrap || has chromium; then
   log "apt: installing ${APT_PKGS[*]}"
   if $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null \
      && $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "${APT_PKGS[@]}" >/dev/null; then :
@@ -105,7 +106,7 @@ if has chromium-wrapper || has chromium; then
     $SUDO install -m 755 "$WRAPPER_SRC" "$WRAPPER" || FAILED+=("chromium wrapper install")
   else FAILED+=("chromium wrapper: Debian chromium not installed"); fi
 fi
-if has node; then
+if has "node$NODE_MAJOR"; then
   if [[ ! -s "$NVM_DIR/nvm.sh" ]]; then
     log "nvm $NVM_VERSION → $NVM_DIR"
     rm -rf "$NVM_DIR.partial"

@@ -1119,6 +1119,44 @@
             "requires": "account"
           },
           {
+            "id": "user-state-list",
+            "name": "登录：列出自己的用户状态（GET /api/user-state）",
+            "method": "GET",
+            "path": "/api/user-state",
+            "expect": {
+              "status": 200,
+              "types": {
+                "entries": "object"
+              },
+              "json": {
+                "entries.argus-qa-key.key": "argus-qa-key",
+                "entries.argus-qa-key.value": {
+                  "a": 1
+                },
+                "entries.argus-qa-key.revision": 1
+              }
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "user-state-list-cross-user",
+            "name": "登录：另一个用户列出的用户状态里没有别人的键",
+            "method": "GET",
+            "path": "/api/user-state",
+            "expect": {
+              "status": 200,
+              "types": {
+                "entries": "object"
+              },
+              "absent": [
+                "entries.argus-qa-key"
+              ]
+            },
+            "auth": "account-b",
+            "requires": "account-b"
+          },
+          {
             "id": "user-state-get-cross-owner",
             "name": "登录：读不到别人的用户状态",
             "method": "GET",

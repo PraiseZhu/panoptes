@@ -88,3 +88,25 @@ test('runSteps：前提不满足的步骤不跑、记没跑成；探针步骤自
   assert.equal(by.probe.ok, true, by.probe.tail)
   assert.equal(by.envstep.ok, true)
 })
+
+test('探测期望 absent：键必须不存在（跨用户列表里不能出现别人的键）', () => {
+  const body = JSON.stringify({ entries: { mine: { value: 1 } } })
+  assert.deepEqual(toMismatch({ status: 200, absent: ['entries.argus-qa-key'] }, 200, body), [])
+  const leaked = JSON.stringify({ entries: { 'argus-qa-key': { value: { a: 1 } } } })
+  assert.match(toMismatch({ status: 200, absent: ['entries.argus-qa-key'] }, 200, leaked)[0], /entries\.argus-qa-key 期望不存在/)
+  assert.match(toMismatch({ absent: ['x'] }, 200, 'not json')[0], /期望返回 JSON/)
+})
+
+test('api-probe：登录态 GET /api/user-state（account 看得到自己的键，account-b 看不到）', async () => {
+  const { loadProfile } = await import('../src/config.mjs')
+  const p = loadProfile('mivo-canvas-plugin')
+  const all = p.steps.find((s) => s.id === 'api-probe').probe.requests
+  const ids = all.map((r) => r.id)
+  const mine = all.find((r) => r.id === 'user-state-list'), other = all.find((r) => r.id === 'user-state-list-cross-user')
+  assert.ok(mine && other, 'both list probes exist')
+  assert.equal(mine.method, 'GET'); assert.equal(mine.path, '/api/user-state'); assert.equal(mine.auth, 'account')
+  assert.deepEqual(mine.expect.json['entries.argus-qa-key.value'], { a: 1 })
+  assert.equal(other.auth, 'account-b'); assert.equal(other.requires, 'account-b'); assert.deepEqual(other.expect.absent, ['entries.argus-qa-key'])
+  // 顺序：先写入、再列出（两个用户）、再删除
+  assert.ok(ids.indexOf('user-state-put') < ids.indexOf('user-state-list') && ids.indexOf('user-state-list-cross-user') < ids.indexOf('user-state-delete'))
+})

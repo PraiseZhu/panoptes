@@ -49,7 +49,8 @@ function stopGroup(child) {
 const getPath = (obj, path) => String(path).split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj)
 
 // 期望：status 精确相等 / json 逐键精确相等（键可写 a.b）/ error = json.error / nonEmptyArray 指定键是非空数组 /
-// types { 键: 'string'|'number'|'boolean'|'array'|'object' } / header { 名: 值 }（值以 ~ 开头表示包含）
+// types { 键: 'string'|'number'|'boolean'|'array'|'object' } / header { 名: 值 }（值以 ~ 开头表示包含）/
+// absent [键]：这些键在返回的 JSON 里必须不存在（例如跨用户列表里不能出现别人的键）
 export function toMismatch(expect, status, body, headers = null) {
   const problems = []
   if (expect.status != null) {
@@ -57,12 +58,15 @@ export function toMismatch(expect, status, body, headers = null) {
     if (!ok) problems.push(`状态码期望 ${Array.isArray(expect.status) ? expect.status.join('/') : expect.status}，实际 ${status}`)
   }
   let json = null
-  if (expect.json || expect.nonEmptyArray || expect.error || expect.types) {
+  if (expect.json || expect.nonEmptyArray || expect.error || expect.types || expect.absent) {
     try { json = JSON.parse(body) } catch { problems.push('期望返回 JSON，实际不是') }
   }
   if (json && expect.error && json.error !== expect.error) problems.push(`错误码期望 ${expect.error}，实际 ${JSON.stringify(json.error)}`)
   if (json && expect.json) {
     for (const [k, v] of Object.entries(expect.json)) if (JSON.stringify(getPath(json, k)) !== JSON.stringify(v)) problems.push(`字段 ${k} 期望 ${JSON.stringify(v)}，实际 ${JSON.stringify(getPath(json, k))}`)
+  }
+  if (json && expect.absent) {
+    for (const k of expect.absent) if (getPath(json, k) !== undefined) problems.push(`字段 ${k} 期望不存在，实际 ${JSON.stringify(getPath(json, k)).slice(0, 200)}`)
   }
   if (json && expect.nonEmptyArray && !(Array.isArray(getPath(json, expect.nonEmptyArray)) && getPath(json, expect.nonEmptyArray).length > 0)) problems.push(`字段 ${expect.nonEmptyArray} 期望是非空数组`)
   if (json && expect.types) {
