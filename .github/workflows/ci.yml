@@ -53,6 +53,8 @@ jobs:
       - name: Script syntax
         run: |
           for f in scripts/*.mjs; do node --check "$f"; done
+          for f in report/*.mjs; do node --check "$f"; done
+          node -e 'JSON.parse(require("fs").readFileSync("report/allowed-chats.example.json","utf8"))'
           python -m py_compile scripts/*.py
 
       - name: argus tests

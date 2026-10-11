@@ -31,3 +31,11 @@ __pycache__/
 .cindy-worktrees/
 _tmp/
 feishu-sent.json
+
+# Feishu daily report: real recipient allow-list and send log stay in the data dir, never in git
+report/allowed-chats.json
+feishu-sent.json
+report/content-*.json
+report/mentions-*.json
+report/sample-*.json
+report/sample-*.txt
