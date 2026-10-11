@@ -449,12 +449,14 @@ Target: about 20 code PRs merged overnight, all tested before **08:30 Asia/Shang
    shard report makes the merged report absent, i.e. `testOutcomeStatus: incomplete` (never guessed as passed).
 2. **Step-result reuse.** Before a step runs in the first run (`h1`), the coverage run (`cov`) or the latest-main
    recheck (`l`), panoptes computes a key from the step definition, the substitution variables it uses (e.g.
-   `DIFF_BASE_SHA` for `design`), the Node major, the panoptes commit for steps with bundled tools (api-probe, journeys),
+   `DIFF_BASE_SHA` for `design`), the Node major, **the browser versions** (system Chromium `--version` of the panoptes
+   launcher, the Playwright version in `argus/node_modules` and its bundled Chromium version / revision — since 2026-10-11;
+   a browser upgrade invalidates every cached step), the panoptes commit for steps with bundled tools (api-probe, journeys),
    and the **git tree / blob hashes of the step's input paths plus `package-lock.json`** in the tested commit (profile
    `inputs`, e.g. `api-inproc` / `api-probe`: `server`, `shared`, `src`, `public`, configs; default: the whole tree).
    If a passing result with the same key exists (`$ARGUS_ROOT/cache/step-results/`, 14 days), it is reused instead of
    re-run: `checks[].reused: true`, **`checks[].reused_from`** `{ job: "n<PR>", label, sha, run_dir, stored_at, key,
-   original_duration_ms }`, `duration_ms: 0`. Only passing, complete results are stored (coverage run: complete coverage
+   original_duration_ms, browser? }` (`browser` = `{ chromium, playwright, playwright_chromium }` the result was produced with), `duration_ms: 0`. Only passing, complete results are stored (coverage run: complete coverage
    data); failures always re-run and go through rerun / base / latest-main. Never reused: reruns (`h2`), base runs (`b`),
    AI tests, `bench` (`cache: false`). `--no-step-cache` (or `ARGUS_STEP_CACHE=0`) turns step reuse off (`--no-reuse` only concerns reusing whole `merged/PR-N.json` results);
    `run.args.step_cache` records it. Typical hits: an open PR tested at its head and later merged with the identical

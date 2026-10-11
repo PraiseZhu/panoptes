@@ -122,3 +122,33 @@ test('--burst-cutoff：到点未开始的 PR → not-tested（burst-cutoff，说
   assert.match(prs[1].not_tested_reason, /burst cutoff 08:30 Asia\/Shanghai .*catch-up/)
   assert.deepEqual(h.qa_tool_failures.map((f) => [f.pr, f.stage]), [[2, 'burst-cutoff']])
 })
+
+test('step-cache key includes the browser versions (system Chromium + Playwright and its Chromium): a browser upgrade → no reuse', () => {
+  process.env.ARGUS_STEP_CACHE_DIR = mkdtempSync(join(tmpdir(), 'step-cache-br-'))
+  const repo = gitRepo({ 'src/a.ts': '1', 'package-lock.json': '{}' })
+  const journey = { id: 'browser-journey', cmd: ['node', 'journey.mjs'] }
+  const b1 = { chromium: 'Chromium 154.0.8037.92 built on Debian', playwright: '1.64.0', playwright_chromium: '156.0.8078.4 (r1248)' }
+  const k1 = cache.stepCacheKey({ step: journey, label: 'h1', src: repo.dir, browser: b1 })
+  assert.equal(cache.stepCacheKey({ step: journey, label: 'h1', src: repo.dir, browser: { ...b1 } }).key, k1.key, 'same browsers → same key')
+  assert.notEqual(cache.stepCacheKey({ step: journey, label: 'h1', src: repo.dir, browser: { ...b1, chromium: 'Chromium 155.0.1.1 built on Debian' } }).key, k1.key, 'system chromium upgrade')
+  assert.notEqual(cache.stepCacheKey({ step: journey, label: 'h1', src: repo.dir, browser: { ...b1, playwright: '1.65.0' } }).key, k1.key, 'playwright upgrade')
+  assert.notEqual(cache.stepCacheKey({ step: journey, label: 'h1', src: repo.dir, browser: { ...b1, playwright_chromium: '157.0.1.0 (r1260)' } }).key, k1.key, 'playwright chromium revision')
+  // stored entry and reused_from carry the browser versions
+  assert.equal(cache.storeStepResult(k1, { id: journey.id, ok: true, exitCode: 0, timedOut: false, durationMs: 5000, failures: [], testOutcomeStatus: 'complete' }, { job: 'n1', label: 'h1', sha: 'a' }), true)
+  const r = cache.reusedResult(cache.lookupStepResult(k1), {})
+  assert.deepEqual(r.reusedFrom.browser, b1)
+  // default: computed from the real launcher / node_modules once per process
+  const d = cache.stepCacheKey({ step: journey, label: 'h1', src: repo.dir })
+  assert.deepEqual(Object.keys(d.browser), ['chromium', 'playwright', 'playwright_chromium'])
+})
+
+test('browserVersions reads chromium --version and the playwright package / browsers.json', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'br-'))
+  const bin = join(dir, 'chromium')
+  writeFileSync(bin, '#!/bin/sh\necho "Chromium 999.0.0.1 test"\n', { mode: 0o755 })
+  mkdirSync(join(dir, 'node_modules/playwright'), { recursive: true }); mkdirSync(join(dir, 'node_modules/playwright-core'), { recursive: true })
+  writeFileSync(join(dir, 'node_modules/playwright/package.json'), JSON.stringify({ version: '9.9.9' }))
+  writeFileSync(join(dir, 'node_modules/playwright-core/browsers.json'), JSON.stringify({ browsers: [{ name: 'chromium', revision: '42', browserVersion: '200.0.0.0' }] }))
+  assert.deepEqual(cache.browserVersions({ chromiumBin: bin, codeDir: dir }), { chromium: 'Chromium 999.0.0.1 test', playwright: '9.9.9', playwright_chromium: '200.0.0.0 (r42)' })
+  assert.deepEqual(cache.browserVersions({ chromiumBin: join(dir, 'missing'), codeDir: join(dir, 'none') }), { chromium: 'unavailable', playwright: 'absent', playwright_chromium: 'absent' })
+})
