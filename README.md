@@ -56,13 +56,25 @@ Code and data are separate. Everything the pipeline writes lives in **`$QA_HOME`
 
 ```sh
 git clone --recurse-submodules https://github.com/PraiseZhu/panoptes.git /workspace/panoptes
-cd /workspace/panoptes/argus && npm ci                      # Node 24 (nvm); installs playwright
-python3 -m venv "$QA_HOME/.venv"                            # ming-qa runtime is stdlib-only
-PLAYWRIGHT_BROWSERS_PATH="$QA_HOME/cache/ms-playwright" npx playwright install chromium
-install -m 600 ../secrets.env.example /home/box/.config/mivo-qa/secrets.env   # then fill it in
+/workspace/panoptes/scripts/bootstrap-box.sh                # everything below except secrets; idempotent
+install -m 600 secrets.env.example /home/box/.config/mivo-qa/secrets.env   # then fill it in
 ```
 
-Requirements: Linux with **bubblewrap** (`/usr/bin/bwrap`), Node 24 via nvm (`$NVM_DIR`, default `~/.nvm`),
+`scripts/bootstrap-box.sh` (`--check` only reports) installs whatever is missing: Node 24 via nvm in
+`/workspace/_tools/nvm`, `npm ci` for argus, Playwright Chromium in `$QA_HOME/cache/ms-playwright` plus its system
+libraries, the ming-qa venv `$QA_HOME/.venv`, and via apt (passwordless sudo) Debian `chromium`, `bubblewrap`, `jq`,
+`git`, `util-linux`, `python3-venv`, then the `/usr/local/bin/chromium` launcher below. Everything that can live under
+`/workspace` does, so a box replacement (which wipes `$HOME` and system packages) only costs the apt part.
+**`run-nightly.sh` runs the check before every run and calls the bootstrap automatically** when something is missing
+(`PANOPTES_BOOTSTRAP=0` disables that); the outcome is in `system_health.bootstrap`, unresolved gaps in
+`qa_tool_failures` (stage `bootstrap`) and `env_problems`. Without Node 24 the wrapper still writes a minimal report
+(`system_health.status: "failed"`, never over an existing file) and exits 3.
+
+Memory: the coverage round runs in parallel with the first run only when `MemAvailable` ≥
+`ARGUS_PARALLEL_MIN_FREE_GB` (default 8) and `ARGUS_MAX_PARALLEL` ≠ 1; otherwise it runs after it (`run_mode` per PR).
+Every run, including manual ones, goes through the single-run lock (`--wait-lock` to queue).
+
+Requirements: Linux with **bubblewrap** (`/usr/bin/bwrap`), Node 24 via nvm (`$PANOPTES_NVM_DIR`, default `/workspace/_tools/nvm`, fallback `~/.nvm`),
 `git`, `gh`, Python 3, Debian Chromium (`apt install chromium`) plus the panoptes launcher for Mivo's browser journey:
 
 ```sh

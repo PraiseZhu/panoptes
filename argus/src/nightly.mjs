@@ -74,6 +74,38 @@ function classifyKey(key, { first, rerun, base, latest, latestIsSame, skipLatest
 //  试运行检查（trialOnly）最高 P2。flaky 与 PR 无关，test_backed=false（不是测试佐证的缺陷，不触发通知 / issue）
 export { classifyKey }
 
+// ── 盒子自检 / 自举（run-nightly.sh 写 PANOPTES_BOOTSTRAP_STATUS）→ system_health ─────────────
+export function readBootstrapStatus(path = process.env.PANOPTES_BOOTSTRAP_STATUS) {
+  if (!path) return null
+  try { return JSON.parse(readFileSync(path, 'utf8')) } catch { return null }
+}
+export function recordBootstrap(health, st) {
+  if (!st) return
+  const before = st.missing_before ?? [], after = st.missing_after ?? []
+  health.bootstrap = { ran: Boolean(st.ran), missing_before: before, missing_after: after, log: st.log || null, checked_at: st.checked_at ?? null }
+  if (st.ran && !after.length) health.notes.push(`box self-check found missing dependencies and bootstrap-box.sh installed them: ${before.map((m) => m.replace(/^missing: /, '').split(' — ')[0]).join(', ')}`)
+  if (after.length) {
+    health.qa_tool_failures.push({ stage: 'bootstrap', message: st.ran ? `bootstrap-box.sh could not install ${after.length} dependenc${after.length === 1 ? 'y' : 'ies'}` : `${after.length} dependenc${after.length === 1 ? 'y' : 'ies'} missing (auto-install disabled)`, detail: st.log || null })
+    for (const m of after) health.env_problems.push({ message: m.replace(/^missing: /, '') })
+  }
+}
+
+// ── 内存护栏：可用内存不够时，覆盖率轮次不与首轮并行，改为排在首轮之后 ─────────────────
+export const parallelMinFreeGb = () => Number(process.env.ARGUS_PARALLEL_MIN_FREE_GB ?? 8)
+export function memAvailableGb(meminfo) {
+  try {
+    const text = meminfo ?? readFileSync('/proc/meminfo', 'utf8')
+    const kb = Number(text.match(/^MemAvailable:\s+(\d+)\s*kB/m)?.[1])
+    return Number.isFinite(kb) ? Math.round(kb / 1048576 * 10) / 10 : null
+  } catch { return null }
+}
+export function parallelDecision({ freeGb = memAvailableGb(), minGb = parallelMinFreeGb(), maxParallel = Number(process.env.ARGUS_MAX_PARALLEL ?? 2) } = {}) {
+  if (maxParallel <= 1) return { parallel: false, reason: 'ARGUS_MAX_PARALLEL=1' }
+  if (freeGb == null) return { parallel: false, reason: 'MemAvailable unknown' }
+  if (freeGb < minGb) return { parallel: false, reason: `MemAvailable ${freeGb} GB < ${minGb} GB` }
+  return { parallel: true, reason: `MemAvailable ${freeGb} GB >= ${minGb} GB` }
+}
+
 // 不稳定（flaky）失败与合并前版本（base）对比：base 上单跑一次的结果只作基线记录，不改变 flaky 的状态和 P2 严重度。
 // 没有对比结果时，文字必须写明「未与合并前版本对比」。
 export const NOT_COMPARED_ZH = '未与合并前版本对比'
@@ -190,9 +222,12 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
 
   // 覆盖率轮次：独立检出、只跑单测（带 --coverage），与首轮并行；它的通过 / 失败不参与任何判定
   const covStep = profile.steps.find((x) => x.coverage && plan.stepIds.includes(x.id))
-  const covRun = covStep && process.env.ARGUS_COVERAGE !== '0'
-    ? ensureMirror(repo, sha, { extraRefspecs }).then(() => executeOnSha({ ...common, label: 'cov', sha, stepIds: [covStep.id] })).catch((err) => ({ error: err }))
-    : Promise.resolve(null)
+  // 内存护栏：可用内存低于 ARGUS_PARALLEL_MIN_FREE_GB（默认 8）或 ARGUS_MAX_PARALLEL=1 时，覆盖率轮次排到首轮之后串行跑
+  const wantCov = Boolean(covStep) && process.env.ARGUS_COVERAGE !== '0'
+  const par = wantCov ? parallelDecision() : null
+  const startCov = () => ensureMirror(repo, sha, { extraRefspecs }).then(() => executeOnSha({ ...common, label: 'cov', sha, stepIds: [covStep.id] })).catch((err) => ({ error: err }))
+  if (par) out.run_mode = { coverage_parallel: par.parallel, reason: par.reason }
+  let covRun = wantCov && par.parallel ? startCov() : Promise.resolve(null)
   let first = await executeOnSha({ ...common, label: 'h1', sha, stepIds: plan.stepIds })
   if (setupFailed(first)) {
     health.qa_tool_failures.push({ pr: number, stage: 'setup', message: 'dependency install failed, retrying once', detail: tail(redact(first.find((r) => r.kind === 'setup')?.tail ?? ''), 600) })
@@ -203,6 +238,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   first = first.filter((x) => !x.notApplicable)
   // 同一份 diff（base..tested）同时给覆盖率门禁和代码审查用：审查的就是被测的那个提交
   const prDiff = await diffForReview({ repo, sha, baseSha, extraRefspecs })
+  if (wantCov && !par.parallel) covRun = startCov()
   const cov = await covRun
   out.coverage_gate = computeCoverageGate({ first: Array.isArray(cov) ? cov : [], prDiff, covError: cov?.error })
 
@@ -948,6 +984,7 @@ export async function runNightly(opts = {}) {
   if (env.sandbox !== 'bwrap') health.env_problems.push({ message: `sandbox mode is '${env.sandbox}' (expected bwrap)` })
   if (!env.chromium) health.env_problems.push({ message: `${LINUX_CHROMIUM} missing: browser E2E will be unavailable` })
   if (env.disk_free_gb != null && env.disk_free_gb < 12) health.env_problems.push({ message: `low disk: ${env.disk_free_gb} GB free` })
+  recordBootstrap(health, readBootstrapStatus())
   const db = openDb()
   const runId = randomUUID()
   const evidenceRoot = join(EVIDENCE_DIR, 'nightly', day, runId.slice(0, 8))

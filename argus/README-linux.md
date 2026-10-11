@@ -21,7 +21,7 @@ is explicitly enabled (see below).
 | `/workspace/mivo-qa/.venv` | Python venv for ming-qa (`pytest` for its own tests; runtime is stdlib only) |
 | `/home/box/.config/mivo-qa/secrets.env` | `GITHUB_TOKEN`, `QA_LLM_BASE_URL`, `QA_LLM_API_KEY` (0600, never copied) |
 
-Runtime: Node 24 via nvm (`~/.nvm`, the box's system Node 20 is left alone), bubblewrap 0.12,
+Runtime: Node 24 via nvm (`/workspace/_tools/nvm`, installed by `scripts/bootstrap-box.sh`; the box's system Node 20 is left alone), bubblewrap 0.12,
 Debian Chromium 154 (`/usr/bin/chromium`), Playwright (headless Chromium), Python 3.13.
 
 ## Usage

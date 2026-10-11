@@ -356,3 +356,24 @@ test('flaky 的 base 对比：没对比时写「未与合并前版本对比」�
   assert.equal(nightly.flakyBaseComparison({ baseSha: 'b', baseRun: 'not-failing' }).result, 'passes-on-base')
   assert.equal(nightly.severityFor({ status: 'flaky', step: { kind: 'product' }, merged: true }), 'P2')
 })
+
+// ── 自检 / 自举 → system_health；内存护栏 ────────────────────
+test('bootstrap 状态进 system_health：装好了记 note；装不上记 qa_tool_failures(stage bootstrap) + env_problems', () => {
+  const h = () => ({ qa_tool_failures: [], env_problems: [], notes: [] })
+  const ok = h(); nightly.recordBootstrap(ok, null); assert.equal(ok.bootstrap, undefined)
+  const clean = h(); nightly.recordBootstrap(clean, { ran: false, missing_before: [], missing_after: [] })
+  assert.equal(clean.bootstrap.ran, false); assert.equal(clean.qa_tool_failures.length, 0); assert.equal(clean.notes.length, 0)
+  const fixed = h(); nightly.recordBootstrap(fixed, { ran: true, missing_before: ['missing: node24 — x', 'missing: apt:chromium'], missing_after: [] })
+  assert.match(fixed.notes[0], /installed them: node24, apt:chromium/); assert.equal(fixed.qa_tool_failures.length, 0)
+  const broken = h(); nightly.recordBootstrap(broken, { ran: true, missing_before: ['missing: apt:chromium'], missing_after: ['missing: chromium — /usr/lib/chromium/chromium'], log: '/l' })
+  assert.equal(broken.qa_tool_failures[0].stage, 'bootstrap'); assert.equal(broken.env_problems[0].message, 'chromium — /usr/lib/chromium/chromium')
+})
+
+test('内存护栏：可用内存低于阈值或 ARGUS_MAX_PARALLEL=1 → 覆盖率轮次串行', () => {
+  assert.equal(nightly.memAvailableGb('MemTotal: 16386504 kB\nMemAvailable:    3482656 kB\n'), 3.3)
+  assert.equal(nightly.memAvailableGb('nothing'), null)
+  assert.equal(nightly.parallelDecision({ freeGb: 3.3, minGb: 8, maxParallel: 2 }).parallel, false)
+  assert.equal(nightly.parallelDecision({ freeGb: 10, minGb: 8, maxParallel: 2 }).parallel, true)
+  assert.equal(nightly.parallelDecision({ freeGb: 10, minGb: 8, maxParallel: 1 }).parallel, false)
+  assert.equal(nightly.parallelDecision({ freeGb: null, minGb: 8, maxParallel: 2 }).parallel, false)
+})

@@ -43,10 +43,19 @@
 #   QA_HOME            data dir: argus-root/, reports/, cache/ms-playwright, .venv   (default /workspace/mivo-qa)
 #   QA_SECRETS_FILE    secrets env file, see secrets.env.example        (default /home/box/.config/mivo-qa/secrets.env)
 #   PANOPTES_DIR       code dir (argus/, ming-qa/)                       (default: this script's directory)
+#   PANOPTES_NVM_DIR   nvm with Node 24                                  (default /workspace/_tools/nvm)
+#   PANOPTES_BOOTSTRAP=0  do not auto-install missing dependencies (the self-check still runs and is reported)
+#
+# Self-check: every run first runs scripts/bootstrap-box.sh --check; anything missing (Node 24, argus npm deps,
+# chromium + launcher, Playwright browsers / deps, bubblewrap, ming-qa venv) is installed by scripts/bootstrap-box.sh
+# (log: $QA_HOME/argus-root/logs/bootstrap-*.log). What was missing / installed / still missing goes into the report's
+# system_health (qa_tool_failures stage "bootstrap", env_problems). If Node 24 itself is still missing, a minimal
+# report with system_health.status "failed" is written (never over an existing report) and the exit code is 3.
 #   ARGUS_LLM_MODEL    review/summary model                              (default openai/gpt-6-luna)
 #
 # Output: $QA_HOME/reports/YYYY-MM-DD.json  (logs: $QA_HOME/argus-root/logs)
-# Exit codes: 0 ok/degraded, 3 pipeline failed (see system_health), 1 usage/config error, 75 another run active.
+# Exit codes: 0 ok/degraded, 3 pipeline failed or QA environment broken (see system_health), 1 usage/config error,
+#             75 another run active.
 set -euo pipefail
 
 PANOPTES_DIR="${PANOPTES_DIR:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)}"
@@ -84,13 +93,81 @@ ALLOW_ISSUES=""
 [[ -n "$CREATE" && "${ARGUS_ALLOW_ISSUES:-}" == "1" ]] && ALLOW_ISSUES=1
 unset ARGUS_ALLOW_ISSUES || true
 
-# Node 24 via nvm (system node stays 20 for other tools on this box)
+export ARGUS_ROOT="$QA_HOME/argus-root"
+mkdir -p "$ARGUS_ROOT/logs"
+
+# ── Self-check + bootstrap (a replaced box loses home-dir and system installs) ──────────────────
+# The result is handed to the Node CLI (PANOPTES_BOOTSTRAP_STATUS) and lands in system_health.
+BOOT_STATUS="$ARGUS_ROOT/bootstrap-status-$$.json"
+BOOT_SCRIPT="$PANOPTES_DIR/scripts/bootstrap-box.sh"
+json_list() { python3 -c 'import json,sys; print(json.dumps([l for l in sys.stdin.read().splitlines() if l.strip()]))' 2>/dev/null || echo '[]'; }
+MISSING_BEFORE=$("$BOOT_SCRIPT" --check 2>/dev/null) && BOOT_RAN=false || BOOT_RAN=true
+MISSING_AFTER="$MISSING_BEFORE"
+BOOT_LOG=""
+if [[ "$BOOT_RAN" == true ]]; then
+  if [[ "${PANOPTES_BOOTSTRAP:-1}" == "0" ]]; then
+    BOOT_RAN=false
+    echo "[panoptes] self-check: dependencies missing, auto-install disabled (PANOPTES_BOOTSTRAP=0)" >&2
+  else
+    BOOT_LOG="$ARGUS_ROOT/logs/bootstrap-$(date +%Y%m%dT%H%M%S).log"
+    echo "[panoptes] self-check: dependencies missing, running bootstrap-box.sh (log: $BOOT_LOG)" >&2
+    "$BOOT_SCRIPT" >"$BOOT_LOG" 2>&1 || true
+    MISSING_AFTER=$("$BOOT_SCRIPT" --check 2>/dev/null) || true
+  fi
+fi
+printf '{"checked_at":"%s","ran":%s,"missing_before":%s,"missing_after":%s,"log":"%s"}\n' \
+  "$(date -Is)" "$BOOT_RAN" "$(json_list <<<"$MISSING_BEFORE")" "$(json_list <<<"$MISSING_AFTER")" "$BOOT_LOG" >"$BOOT_STATUS"
+export PANOPTES_BOOTSTRAP_STATUS="$BOOT_STATUS"
+trap 'rm -f "$BOOT_STATUS"' EXIT
+
+# The QA environment is unusable without Node 24: record it as a QA system failure instead of a bare exit.
+env_failed() {
+  local why="$1" date_arg="" out_arg="" prev=""
+  # catch-up has no report of its own; its children (run-nightly.sh --pr N) record the failure per PR
+  [[ -n "$CATCH_UP" ]] && { echo "[panoptes] QA environment broken: $why" >&2; exit 3; }
+  for a in "$@"; do
+    [[ "$prev" == "--date" ]] && date_arg="$a"
+    [[ "$prev" == "--out" ]] && out_arg="$a"
+    prev="$a"
+  done
+  [[ -n "$date_arg" ]] || date_arg=$(TZ=Asia/Shanghai date -d yesterday +%F)
+  local out="${out_arg:-$QA_HOME/reports/$date_arg.json}"
+  [[ "$out" = /* ]] || out="$PWD/$out"
+  [[ -e "$out" ]] && out="${out%.json}.env-failed-$(date +%Y%m%dT%H%M%S).json"
+  mkdir -p "$(dirname "$out")"
+  WHY="$why" DATE="$date_arg" OUT="$out" ARGS_JSON="$(printf '%s\n' "${@:2}" | json_list)" MISSING_JSON="$(json_list <<<"$MISSING_AFTER")" \
+  BOOT_LOG="$BOOT_LOG" python3 - <<'PY' || echo "[panoptes] could not write the failure report either" >&2
+import json, os, datetime
+missing = json.loads(os.environ["MISSING_JSON"])
+doc = {
+  "schema_version": "1.0", "date": os.environ["DATE"], "repo": "xindong/mivo-canvas-plugin",
+  "generated_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+  "run": {"id": "env-failed-" + datetime.datetime.now().strftime("%Y%m%dT%H%M%S"), "mode": "env-failed", "args": json.loads(os.environ["ARGS_JSON"])},
+  "prs": [],
+  "system_health": {
+    "status": "failed",
+    "qa_tool_failures": [{"stage": "bootstrap", "message": os.environ["WHY"], "detail": os.environ.get("BOOT_LOG") or None}],
+    "env_problems": [{"message": m.removeprefix("missing: ")} for m in missing],
+    "llm_errors": [], "notes": ["QA environment broken: no PR was tested; the run needs to be repeated once the box is repaired"],
+  },
+}
+with open(os.environ["OUT"], "w") as f: json.dump(doc, f, ensure_ascii=False, indent=2)
+print(f"[panoptes] QA environment broken; wrote {os.environ['OUT']}", flush=True)
+PY
+  echo "[panoptes] QA environment broken: $why" >&2
+  exit 3
+}
+
+# Node 24 via nvm (system node stays 20 for other tools on this box). nvm lives under /workspace so it survives a
+# box replacement; ~/.nvm is the fallback for older setups.
 unset NPM_CONFIG_PREFIX npm_config_prefix
-export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+export NVM_DIR="${PANOPTES_NVM_DIR:-/workspace/_tools/nvm}"
+[[ -s "$NVM_DIR/nvm.sh" || ! -s "$HOME/.nvm/nvm.sh" ]] || NVM_DIR="$HOME/.nvm"
+NODE_OK=""
 # shellcheck disable=SC1091
-. "$NVM_DIR/nvm.sh" >/dev/null
-nvm use --silent 24 >/dev/null
-node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 24 ? 0 : 1)' || { echo "Node 24+ required" >&2; exit 1; }
+if [[ -s "$NVM_DIR/nvm.sh" ]] && . "$NVM_DIR/nvm.sh" --no-use >/dev/null 2>&1 && nvm use --silent 24 >/dev/null 2>&1 \
+   && node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 24 ? 0 : 1)' 2>/dev/null; then NODE_OK=1; fi
+[[ -n "$NODE_OK" ]] || env_failed "Node 24 unavailable after bootstrap (NVM_DIR=$NVM_DIR)" "$@"
 
 [[ -r "$SECRETS" ]] || { echo "missing secrets file $SECRETS" >&2; exit 1; }
 chmod 600 "$SECRETS" 2>/dev/null || true
@@ -108,7 +185,6 @@ unset ARGUS_ALLOW_ISSUES || true
 [[ -n "$ALLOW_ISSUES" ]] && export ARGUS_ALLOW_ISSUES=1
 
 [[ -f "$PANOPTES_DIR/argus/src/cli.mjs" ]] || { echo "argus code not found under $PANOPTES_DIR/argus" >&2; exit 1; }
-export ARGUS_ROOT="$QA_HOME/argus-root"
 export ARGUS_REPORTS_DIR="$QA_HOME/reports"
 export ARGUS_SECRETS_FILE="$SECRETS"
 export ARGUS_MINGQA_DIR="${ARGUS_MINGQA_DIR:-$PANOPTES_DIR/ming-qa}"

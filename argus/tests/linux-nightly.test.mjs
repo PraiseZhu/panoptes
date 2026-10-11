@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 
 process.env.ARGUS_ROOT ??= mkdtempSync(join(tmpdir(), 'argus-linux-'))
@@ -72,8 +72,11 @@ test('bwrap 隔离：/home 与 /workspace 不可见，根只读，run 目录可�
   writeFileSync(outside, 'secret')
   // ARGUS_ROOT 若在 /workspace 下，缓存目录会被挂回；除此之外 /workspace 必须为空
   const { CACHE_DIR } = await import('../src/paths.mjs')
-  const allowedWs = CACHE_DIR.startsWith('/workspace/') ? CACHE_DIR.split('/')[2] : '__none__'
-  const script = `(ls -d /home/*/.config /home/*/.ssh 2>/dev/null; ls -A /root 2>/dev/null) | wc -l; ls -A /workspace 2>/dev/null | grep -vx "${allowedWs}" | wc -l; cat ${outside} 2>&1 | head -c 200 | tr -d "\n"; echo; touch /usr/argus-probe 2>/dev/null && echo rootrw || echo rootro; touch ${runDir}/ok && echo runrw`
+  // Node 安装目录（nvm 在 /workspace/_tools/nvm 时）也只读挂回，它的顶层目录可见
+  const nodePrefix = dirname(dirname(process.execPath))
+  const allowedWs = [CACHE_DIR, nodePrefix].filter((p) => p.startsWith('/workspace/')).map((p) => p.split('/')[2])
+  const grepArgs = allowedWs.map((x) => `-e "${x}"`).join(' ') || '-e __none__'
+  const script = `(ls -d /home/*/.config /home/*/.ssh 2>/dev/null; ls -A /root 2>/dev/null) | wc -l; ls -A /workspace 2>/dev/null | grep -vx ${grepArgs} | wc -l; cat ${outside} 2>&1 | head -c 200 | tr -d "\n"; echo; touch /usr/argus-probe 2>/dev/null && echo rootrw || echo rootro; touch ${runDir}/ok && echo runrw`
   const res = spawnSync('/usr/bin/bwrap', [...bwrapArgs(runDir), '--', 'sh', '-c', script], { encoding: 'utf8' })
   // /home 下只剩只读挂回的 Node 安装目录（nvm），没有 .config / .ssh 等
   const lines = res.stdout.trim().split('\n')
