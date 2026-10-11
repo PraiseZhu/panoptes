@@ -399,7 +399,7 @@ Target: about 20 code PRs merged overnight, all tested before **08:30 Asia/Shang
    re-run: `checks[].reused: true`, **`checks[].reused_from`** `{ job: "n<PR>", label, sha, run_dir, stored_at, key,
    original_duration_ms }`, `duration_ms: 0`. Only passing, complete results are stored (coverage run: complete coverage
    data); failures always re-run and go through rerun / base / latest-main. Never reused: reruns (`h2`), base runs (`b`),
-   AI tests, `bench` (`cache: false`). `--no-reuse` (or `ARGUS_STEP_CACHE=0`) turns reuse off;
+   AI tests, `bench` (`cache: false`). `--no-step-cache` (or `ARGUS_STEP_CACHE=0`) turns step reuse off (`--no-reuse` only concerns reusing whole `merged/PR-N.json` results);
    `run.args.step_cache` records it. Typical hits: an open PR tested at its head and later merged with the identical
    tree; a re-test after a burst cutoff; a PR that only touches `cindyplugin/` reusing `api-inproc` / `api-probe`.
 3. **Cutoff.** `run-nightly.sh --burst-cutoff [HH:MM]` (default `08:30` Shanghai; env `ARGUS_BURST_CUTOFF`) works like

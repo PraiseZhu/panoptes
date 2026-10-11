@@ -1600,7 +1600,7 @@
       },
       "shard": {
         "max": 8,
-        "perShardGb": 1.5
+        "perShardGb": 1.2
       }
     },
     {

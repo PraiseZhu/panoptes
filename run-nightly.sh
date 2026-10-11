@@ -30,6 +30,7 @@
 #   --out PATH    write the report here instead of $QA_HOME/reports/YYYY-MM-DD.json (refuses to target a
 #                 daily report file). On-merge trigger: --pr N --out $QA_HOME/reports/merged/PR-N.json
 #   --no-reuse    re-test merged PRs even if reports/merged/PR-N.json exists for the same merge commit
+#   --no-step-cache  run every step even if a passing result for identical inputs (tree hashes + lockfile) is cached
 #   --wait-lock [SECONDS]  queue behind a running instance (default 14400 = 4h) instead of exit 75
 #   --pr-timeout MIN  per-PR time budget; a PR that exceeds it is stopped and reported as not-tested (P2)
 #                 (env ARGUS_PR_TIMEOUT_MIN; default: no limit)

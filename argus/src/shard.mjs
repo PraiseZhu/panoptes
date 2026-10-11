@@ -17,7 +17,7 @@ export function shardPlan(step, { freeGb = memGbFrom(), reserved = reservedGb, c
   const cfg = step?.shard
   if (!cfg) return { shards: 1, reason: 'step not shardable' }
   const max = Math.max(1, Math.min(Number(cfg.max ?? 8), cores))
-  const per = Number(env.ARGUS_SHARD_GB ?? cfg.perShardGb ?? 1.5)
+  const per = Number(env.ARGUS_SHARD_GB ?? cfg.perShardGb ?? 1.2)
   const forced = env.ARGUS_UNIT_SHARDS != null && env.ARGUS_UNIT_SHARDS !== '' ? Math.max(1, Math.floor(Number(env.ARGUS_UNIT_SHARDS)) || 1) : null
   const cap = Number(env.ARGUS_SHARD_BUDGET_GB ?? 10)
   const keep = Number(env.ARGUS_SHARD_RESERVE_GB ?? 1.5)

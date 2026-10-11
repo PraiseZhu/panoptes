@@ -3,7 +3,7 @@
 //            每个输入路径在被测提交里的 git tree / blob 哈希 + package-lock.json 的 blob 哈希)。
 // 输入路径：step.inputs（例如 api-inproc 只看 server/ shared/ src/ 和配置）；没写就是整棵树（HEAD^{tree}）。
 // 只存「通过、没超时、没有 unavailable、测试报告完整」的结果；失败永远重跑（要走重跑 / 基线三重确认）。
-// step.cache === false（bench 这类计时测试、AI 补测）不复用。ARGUS_STEP_CACHE=0 关闭（--no-reuse 也会关）。
+// step.cache === false（bench 这类计时测试、AI 补测）不复用。ARGUS_STEP_CACHE=0 / --no-step-cache 关闭。
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs'

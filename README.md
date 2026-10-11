@@ -110,7 +110,7 @@ Environment overrides for `run-nightly.sh`:
 ```
 run-nightly.sh --catch-up [--wait-lock SECONDS] [--trigger catch-up|manual] [--create-issues]
 run-nightly.sh [--trigger event|catch-up|manual] [--date YYYY-MM-DD] [--pr N ...] [--limit N] [--no-review] [--skip-step ID ...]
-               [--out PATH] [--no-reuse] [--wait-lock [SECONDS]] [--pr-timeout MIN] [--deadline HH:MM | --burst-cutoff [HH:MM]]
+               [--out PATH] [--no-reuse] [--no-step-cache] [--wait-lock [SECONDS]] [--pr-timeout MIN] [--deadline HH:MM | --burst-cutoff [HH:MM]]
                [--write-merged | --no-write-merged] [--write-open] [--no-issues | --create-issues]
 ```
 
@@ -124,7 +124,8 @@ run-nightly.sh [--trigger event|catch-up|manual] [--date YYYY-MM-DD] [--pr N ...
 | `--no-review` | Skip the ming-qa LLM code review. |
 | `--skip-step ID` | Skip one profile step (repeatable), e.g. a slow bench. |
 | `--out PATH` | Write the report to PATH instead of `reports/D.json` (a daily-report filename is refused). |
-| `--no-reuse` | Re-test merged PRs even if `reports/merged/PR-N.json` already covers the same merge commit, and do not reuse cached step results. |
+| `--no-reuse` | Re-test merged PRs even if `reports/merged/PR-N.json` already covers the same merge commit. |
+| `--no-step-cache` | Run every step even if a passing result for identical inputs is cached (see *Burst capacity*). |
 | `--wait-lock [S]` | Queue behind a running instance for up to S seconds (default 14400) instead of exiting 75. |
 | `--pr-timeout MIN` | Per-PR time budget (env `ARGUS_PR_TIMEOUT_MIN`). Every child process is capped by the remaining budget and no new step starts after it; the PR is reported `not-tested` (P2, `pr-timeout`). Default: no limit. |
 | `--burst-cutoff [HH:MM]` | Overnight burst cutoff (default `08:30` Shanghai): like `--deadline`, but untested PRs get `not_tested_code: "burst-cutoff"` and are picked up later by the catch-up timer. See `docs/report-schema.md` › *Burst capacity* (unit sharding, step-result reuse). |
