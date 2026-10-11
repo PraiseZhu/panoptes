@@ -11,6 +11,7 @@
 //   node src/cli.mjs nightly [--date YYYY-MM-DD] [--pr N ...] [--limit N] [--no-review] [--no-ai-tests] [--skip-step ID ...] [--out PATH] [--no-reuse] [--pr-timeout MIN] [--deadline HH:MM] [--write-merged | --no-write-merged] [--write-open] [--no-issues | --create-issues] [--trigger event|catch-up|manual] [--burst-cutoff [HH:MM]] [--no-step-cache]
 //                                          Linux 夜间 QA：上海时区前一天的 PR → reports/YYYY-MM-DD.json（默认不写 GitHub）
 //   node src/cli.mjs catch-up [--wait-lock S] [--repo owner/name] [--trigger catch-up|manual|event] [--create-issues]   补测昨天+今天（上海）合并但 reports/merged 缺口的 PR（由 run-nightly.sh --catch-up 调用）
+//   node src/cli.mjs store-merged --from REPORT [--pr N ...]   把 --out 运行里测完的已合并 PR 存进 reports/merged/（旧文件 → PR-N.vN.json）
 //   node src/cli.mjs assemble --date D --out PATH --from FILE ... [--order N,N]   多份报告合成 full-D.json
 import { mkdirSync } from 'node:fs'
 import { loadRegistry, loadSecrets } from './config.mjs'
@@ -27,7 +28,9 @@ import { catchUp, runNightlyFor, catchUpDir } from './catchup.mjs'
 import { LOGS_DIR } from './paths.mjs'
 import { openSync, closeSync } from 'node:fs'
 import { join } from 'node:path'
-import { writeReport, normalizeTrigger, BURST_CUTOFF_DEFAULT } from './nightly.mjs'
+import { writeReport, normalizeTrigger, BURST_CUTOFF_DEFAULT, writePerPrReports } from './nightly.mjs'
+import { readFileSync } from 'node:fs'
+import { resolve as resolvePath } from 'node:path'
 import { toShanghaiIso as shIso } from './util.mjs'
 import { killAllActive } from './exec.mjs'
 
@@ -93,6 +96,20 @@ async function main() {
       if (r.stopped) process.stdout.write(`[catch-up] stopped: ${r.stopped}; remaining gaps retry on the next invocation\n`)
       process.stdout.write(`[catch-up] result: ${file}\n`)
       if (r.system_health.status !== 'ok') process.exitCode = 3
+      return
+    }
+    case 'store-merged': {
+      // store-merged --from REPORT [--pr N ...]：把一次 --out 运行（例如 --pr N --out scratch/…）里测完的已合并 PR，
+      // 用夜间同一个写入函数存成 reports/merged/PR-N.json；已有文件按版本机制改名为 PR-N.vN.json，新文件记 previous_version。
+      const from = opt('from')
+      if (!from) throw new Error('store-merged 需要 --from REPORT')
+      const only = rest.flatMap((a, i) => (a === '--pr' ? [Number(rest[i + 1])] : []))
+      const report = JSON.parse(readFileSync(from, 'utf8'))
+      if (only.length) report.prs = report.prs.filter((p) => only.includes(p.number))
+      const written = writePerPrReports(report, { opts: { writeMerged: true }, outFile: resolvePath(from), kind: 'merged' })
+      const fails = report.system_health.qa_tool_failures.filter((f) => String(f.stage).startsWith('write-merged'))
+      console.log(JSON.stringify({ from, written, failures: fails }, null, 2))
+      if (fails.length || !written.length) process.exitCode = 3
       return
     }
     case 'assemble': {

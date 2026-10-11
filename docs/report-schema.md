@@ -36,6 +36,23 @@ path that already exists, panoptes first renames the existing file to `<name>.vN
 Readers that glob a directory must match `PR-<n>.json` exactly (`^PR-\d+\.json$`) so kept originals are not read
 as current results. The 2026-10-10 reports are left as they are (not retroactively patched).
 
+**Storing a re-run as the current per-PR result.** A re-run written elsewhere (e.g. `--pr N --out scratch/…`) becomes
+the current `reports/merged/PR-N.json` through the same writer the nightly uses, never by copying or editing:
+`cd argus && node src/cli.mjs store-merged --from <that report> --pr N` (env `ARGUS_ROOT`, `ARGUS_REPORTS_DIR` as in
+`run-nightly.sh`). The existing file becomes `PR-N.vN.json`; the new one is the per-PR form of the re-run
+(`written_by: "nightly"`, `run.source_report` = the re-run file) with `previous_version`. Alternatively re-run with
+`--write-merged`, which does the same at the end of the run.
+
+### Older reports (fields that did not exist yet)
+
+| Written | Missing fields — readers must treat them as absent, not as empty / zero |
+|---|---|
+| 2026-10-10 (all `reports/merged/PR-*.v1.json` and the 10-10 originals still current: #892, #894, #897 and the 10-10 day / `full-` / `merged-batch-` files) | `ai_tests`, `coverage.dimension_status`, `coverage.applicable_total` / `covered_total` / `gaps` / `ai_covered`, `triage.dimensions` decisions (older triage only), `failed_checks[].base_comparison` (→ say **未与合并前版本对比**), `tested_at` (before `78184f9`), `run.trigger`, `checks[].shards` / `reused` |
+| 2026-10-11 before the dimension_status-derived totals (`coverage.basis: "triage (prs[].triage)"`) | `coverage.applicable` / `covered` / `missed` / `undetermined` follow the old p ≥ 0.7 rule and may contradict `dimension_status`; use `applicable_total` / `covered_total` / `gaps` / `dimension_status` only |
+
+For a "N applicable, M covered" sentence on an old report without `applicable_total`: say the dimension statistics
+were not produced for that run; do not compute them from the legacy `coverage.applicable` list.
+
 ## Timestamps — which field to filter on
 
 | Field | Format | Meaning |
