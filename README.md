@@ -167,12 +167,12 @@ Target-CI parity (commands taken verbatim from `xindong/mivo-canvas-plugin` `.gi
 
 | Step | Command | Kind → introduced failure |
 |---|---|---|
-| `web-build` | `npm run build` (`tsc -b && vite build`) | product → P1 open / P0 merged |
+| `web-build` | `npm run build` (`tsc -b && vite build`); only applies when the revision has `index.html` — the web entry was retired and the target CI no longer runs it, so current revisions list it in `skipped_steps` as not applicable | product → P1 open / P0 merged |
 | `design` | `npm run verify:design` with `MIVO_GUARD_BASE_SHA=<base_sha>`, `MIVO_LITERAL_RATCHET_ENFORCE=1` | quality → P2 |
 | `internal-literals` | `node scripts/ci/check-internal-literals.mjs` | quality → P2 |
 | `endpoint-literals` | `node scripts/ci/check-endpoint-literals.mjs` | quality → P2 |
-| `host-locale` | `node cindyplugin/check-host-locale.mjs cindyplugin/dist` (builds dist if missing) | quality → P2 |
-| `vendor-split` | `node cindyplugin/check-vendor-split.mjs cindyplugin/dist` (builds dist if missing) | quality → P2 |
+| `host-locale` | `node cindyplugin/check-host-locale.mjs cindyplugin/dist` (builds dist if missing; not applicable to revisions without the script) | quality → P2 |
+| `vendor-split` | `node cindyplugin/check-vendor-split.mjs cindyplugin/dist` (builds dist if missing; not applicable to revisions without the script) | quality → P2 |
 | `secret-scan` | `gitleaks detect --source . [--config .gitleaks.toml] --log-opts "<base_sha>..HEAD" --no-banner --redact=100` (binary: `ARGUS_GITLEAKS_BIN`, `/usr/local/bin/gitleaks`, `/workspace/_tools/gitleaks` or PATH; missing → unavailable) | product → P1 open / P0 merged; no latest-main recheck (a leaked secret stays in history) |
 
 Diff-scoped checks (`design`, `secret-scan`) get the PR's `base_sha` as `${DIFF_BASE_SHA}` in every run (first,
