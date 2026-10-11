@@ -116,6 +116,12 @@ unset ARGUS_ALLOW_ISSUES || true
 export ARGUS_ROOT="$QA_HOME/argus-root"
 mkdir -p "$ARGUS_ROOT/logs"
 
+# /tmp sweep: leftover argus-* dirs older than 24 h, owned by us, not held by a live process (scripts/sweep-tmp.sh).
+# Runs at every start, so the catch-up cron (run-nightly.sh --catch-up) sweeps too. PANOPTES_TMP_SWEEP=0 disables.
+if [[ "${PANOPTES_TMP_SWEEP:-1}" != "0" && -x "$PANOPTES_DIR/scripts/sweep-tmp.sh" ]]; then
+  "$PANOPTES_DIR/scripts/sweep-tmp.sh" --quiet >>"$ARGUS_ROOT/logs/tmp-sweep.log" 2>&1 || true
+fi
+
 # ── Self-check + bootstrap (a replaced box loses home-dir and system installs) ──────────────────
 # The result is handed to the Node CLI (PANOPTES_BOOTSTRAP_STATUS) and lands in system_health.
 BOOT_STATUS="$ARGUS_ROOT/bootstrap-status-$$.json"
@@ -249,9 +255,16 @@ else
   flock -n 9 || { echo "another run is active (use --wait-lock to queue)" >&2; exit 75; }
 fi
 
+# Per-run temp dir: everything this run (and its node / git / test children) puts under TMPDIR lands in
+# /tmp/argus-run-XXXXXX and is removed on exit (sandboxed runs bind their own dirs explicitly, unaffected).
+RUN_TMP="$(mktemp -d "${TMPDIR:-/tmp}/argus-run-XXXXXX")"
+export TMPDIR="$RUN_TMP"
+trap 'rm -f "$BOOT_STATUS"; rm -rf --one-file-system "$RUN_TMP"' EXIT
+
 cd "$PANOPTES_DIR/argus"
 LOG="$ARGUS_ROOT/logs/nightly-$(date +%Y%m%dT%H%M%S).log"
 echo "[panoptes] code: $PANOPTES_DIR ($(git -C "$PANOPTES_DIR" rev-parse --short HEAD 2>/dev/null || echo '?'))  data: $QA_HOME  log: $LOG" >&2
 # Lower priority so the box stays responsive
 nice -n 10 node --disable-warning=ExperimentalWarning src/cli.mjs nightly "$@" 2> >(tee -a "$LOG" >&2) | tee -a "$LOG"
-exit "${PIPESTATUS[0]}"
+rc="${PIPESTATUS[0]}"
+exit "$rc"

@@ -140,6 +140,13 @@ run-nightly.sh [--trigger event|catch-up|manual] [--date YYYY-MM-DD] [--pr N ...
 
 Exit codes: `0` ok / degraded · `3` pipeline failed (see `system_health`) · `1` usage or config error · `75` another run is active.
 
+**Temp files.** Each `run-nightly.sh` run uses its own `TMPDIR=/tmp/argus-run-XXXXXX`, removed on exit (trap); `npm test`
+does the same with `/tmp/argus-testrun-XXXXXX` (`argus/run-tests.sh`). At every start (so also from the catch-up cron)
+`scripts/sweep-tmp.sh` removes leftover `/tmp/argus-*` dirs that are older than 24 h (nothing inside modified for 24 h),
+owned by the current user and not held by a live process (cwd / root / open fd); result lines in
+`$ARGUS_ROOT/logs/tmp-sweep.log` (only when something was removed). `PANOPTES_TMP_SWEEP=0` disables it;
+`scripts/sweep-tmp.sh --dry-run [--max-age-hours H]` previews.
+
 **Catch-up timer.** `scripts/bootstrap-box.sh` installs `/etc/cron.d/panoptes-catch-up` (from
 `scripts/catch-up.cron`; the box has no systemd, so it also installs and starts the `cron` daemon). Every 2 hours
 (minute 7 of even hours, box time) it runs, without any model call:
