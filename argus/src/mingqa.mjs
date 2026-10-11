@@ -3,11 +3,12 @@
 // 2) ming-qa 的独立代码审查（qa-code-reviewer）：按它的审查关注点让 gpt-6-luna 读 PR 改动，
 //    产出 ming-qa 规定格式的 code-review.json，再用 ming-qa 自己的 `qa_agent.py assert-code-review` 门禁校验。
 // LLM 只做审查提示；测试的通过/失败仍由真实执行决定。
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { execFile } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { redact, truncate, tail, toChatCompletionsUrl } from './util.mjs'
-import { CODE_DIR } from './paths.mjs'
+import { CODE_DIR, CACHE_DIR } from './paths.mjs'
 
 export const MINGQA_DIR = process.env.ARGUS_MINGQA_DIR ?? join(CODE_DIR, '..', 'ming-qa') // panoptes: submodule next to argus/
 const QA_AGENT = () => join(MINGQA_DIR, 'skills/quality-assurance-agent/scripts/qa_agent.py')
@@ -75,6 +76,9 @@ Return strict JSON only, matching:
  "residualRisks":["..."]}
 status must be "failed" if any P0/P1 finding exists, else "passed".`
 
+// 确定性参数：temperature 0 + 固定 seed（网关 2026-10-11 实测接受）。网关若以 400 拒绝这两个参数，去掉重试一次并记下 'unsupported'
+export const REVIEW_SAMPLING = { temperature: 0, seed: 20261011 }
+let samplingSupported = true
 async function chat({ secrets, messages, effort = 'high', timeoutMs = 8 * 60_000, attempts = 2 }) {
   let lastErr = null
   for (let i = 1; i <= attempts; i++) {
@@ -83,17 +87,18 @@ async function chat({ secrets, messages, effort = 'high', timeoutMs = 8 * 60_000
       const resp = await fetch(toChatCompletionsUrl(secrets.ARGUS_LLM_BASE_URL), {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${secrets.ARGUS_LLM_API_KEY}` },
-        body: JSON.stringify({ model: LLM_MODEL, reasoning_effort: effort, response_format: { type: 'json_object' }, max_completion_tokens: 16_000, messages }),
+        body: JSON.stringify({ model: LLM_MODEL, reasoning_effort: effort, response_format: { type: 'json_object' }, max_completion_tokens: 16_000, messages, ...(samplingSupported ? REVIEW_SAMPLING : {}) }),
         signal: AbortSignal.timeout(timeoutMs),
       })
       const data = await resp.json().catch(() => ({}))
       if (!resp.ok) {
         lastErr = { kind: 'http', status: resp.status, message: redact(String(data?.error?.message ?? '')).slice(0, 300) }
+        if (resp.status === 400 && samplingSupported && /temperature|seed/i.test(String(data?.error?.message ?? ''))) { samplingSupported = false; i--; continue }
         if (resp.status >= 500 || resp.status === 429) continue
         return { ok: false, error: lastErr }
       }
       const content = data.choices?.[0]?.message?.content ?? ''
-      try { return { ok: true, json: JSON.parse(content), tokens: data?.usage?.total_tokens ?? null, ms: Date.now() - started, model: data.model ?? LLM_MODEL } }
+      try { return { ok: true, json: JSON.parse(content), tokens: data?.usage?.total_tokens ?? null, ms: Date.now() - started, model: data.model ?? LLM_MODEL, sampling: samplingSupported ? REVIEW_SAMPLING : 'unsupported' } }
       catch { lastErr = { kind: 'bad_json', message: `model returned non-JSON (${content.length} chars)` } }
     } catch (err) {
       lastErr = { kind: 'network', message: redact(err.message).slice(0, 300) }
@@ -139,8 +144,39 @@ export function toCodeReviewDoc(raw, files) {
   }
 }
 
-export async function codeReview({ secrets, pr, files, results, profile, outDir }) {
+// ── 审查结论缓存（可复现）────────────────────────────────────
+// 同一提交 + 同一份 diff + 同一审查提示词 / 版本 + 同一模型 → 复用上次的审查结论，不再调模型（重跑结论一致，也不占额度）。
+// 键 = sha256(reviewed_sha, review_base_sha, diff_hash, prompt_hash, model)。diff_hash = 发给模型的 diff 文本的哈希；
+// prompt_hash = 系统提示词 + ming-qa 审查关注点 + REVIEW_PROMPT_VERSION + 推理强度 + 采样参数。
+// 只存成功的审查（status ok）；--fresh-review / ARGUS_REVIEW_CACHE=0 不读缓存（新结果照样写回，覆盖旧条目）。
+export const REVIEW_PROMPT_VERSION = 'panoptes-code-review/2'
+export const REVIEW_EFFORT = 'high'
+export const REVIEW_CACHE_DIR = () => process.env.ARGUS_REVIEW_CACHE_DIR ?? join(CACHE_DIR, 'review-verdicts')
+const sha256 = (x) => createHash('sha256').update(String(x)).digest('hex')
+export function reviewPromptHash() { return sha256(JSON.stringify({ v: REVIEW_PROMPT_VERSION, system: SYSTEM, focus: reviewFocus(), effort: REVIEW_EFFORT, sampling: REVIEW_SAMPLING })) }
+export function reviewCacheKey({ sha, baseSha, files, model = LLM_MODEL, promptHash = reviewPromptHash() }) {
+  const diffHash = sha256(buildDiff(files ?? []))
+  const parts = { reviewed_sha: sha ?? null, review_base_sha: baseSha ?? null, diff_hash: diffHash, prompt_hash: promptHash, prompt_version: REVIEW_PROMPT_VERSION, model }
+  return { key: sha256(JSON.stringify(parts)), ...parts }
+}
+export function lookupReviewVerdict(ck, { dir = REVIEW_CACHE_DIR() } = {}) {
+  if (!ck?.key) return null
+  try {
+    const doc = JSON.parse(readFileSync(join(dir, `${ck.key}.json`), 'utf8'))
+    return doc.key === ck.key && doc.doc && Array.isArray(doc.doc.findings) ? doc : null
+  } catch { return null }
+}
+export function storeReviewVerdict(ck, entry, { dir = REVIEW_CACHE_DIR() } = {}) {
+  mkdirSync(dir, { recursive: true })
+  const file = join(dir, `${ck.key}.json`)
+  writeFileSync(`${file}.tmp-${process.pid}`, JSON.stringify({ ...ck, stored_at: new Date().toISOString(), ...entry }, null, 2))
+  renameSync(`${file}.tmp-${process.pid}`, file)
+  return file
+}
+
+export async function codeReview({ secrets, pr, files, results, profile, outDir, cacheKey = null, cached = null, source = {} }) {
   mkdirSync(outDir, { recursive: true })
+  if (cached) return finishReview({ outDir, doc: cached.doc, model: cached.model, tokens: 0, ms: 0, sampling: cached.sampling ?? null, reused: true, reusedFrom: { key: cached.key.slice(0, 16), stored_at: cached.stored_at, ...(cached.source ?? {}), original_tokens: cached.tokens ?? null } })
   if (!secrets.ARGUS_LLM_BASE_URL || !secrets.ARGUS_LLM_API_KEY) return { status: 'unavailable', error: { kind: 'config', message: 'QA_LLM_BASE_URL / QA_LLM_API_KEY not configured' } }
   const testSummary = (results ?? []).filter((r) => r.kind !== 'setup').map((r) => `- ${r.id} (${r.nameZh}): ${r.unavailable ? 'unavailable' : r.ok ? 'pass' : `FAIL${r.timedOut ? ' (timeout)' : ''}${r.failures?.length ? ` — ${r.failures.slice(0, 5).join('; ')}` : ''}`}`).join('\n')
   const user = redact([
@@ -154,9 +190,15 @@ export async function codeReview({ secrets, pr, files, results, profile, outDir 
     `Review guidance from ming-qa:\n${reviewFocus().slice(0, 6000)}`,
     `Diff:\n${buildDiff(files)}`,
   ].join('\n\n'))
-  const res = await chat({ secrets, messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: user }] })
+  const res = await chat({ secrets, effort: REVIEW_EFFORT, messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: user }] })
   if (!res.ok) return { status: 'error', error: res.error }
   const doc = toCodeReviewDoc(res.json, files)
+  const out = await finishReview({ outDir, doc, model: res.model, tokens: res.tokens, ms: res.ms, sampling: res.sampling, reused: false })
+  if (cacheKey) { try { storeReviewVerdict(cacheKey, { doc, model: res.model, tokens: res.tokens, sampling: res.sampling, source: { ...source, review_file: out.reviewPath } }) } catch { /* 缓存写不进去不影响本次结果 */ } }
+  return out
+}
+
+async function finishReview({ outDir, doc, model, tokens, ms, sampling, reused, reusedFrom = null }) {
   const reviewPath = join(outDir, 'code-review.json')
   const checkPath = join(outDir, 'code-review-check.json')
   writeFileSync(reviewPath, JSON.stringify(doc, null, 2))
@@ -166,7 +208,7 @@ export async function codeReview({ secrets, pr, files, results, profile, outDir 
   try { gate = JSON.parse(readFileSync(checkPath, 'utf8')) } catch { /* gate output missing */ }
   return {
     status: 'ok',
-    model: res.model, tokens: res.tokens, ms: res.ms,
+    model, tokens, ms, sampling, reused, reused_from: reusedFrom,
     doc, reviewPath,
     gate: gate ? { status: gate.status, blockingFindings: gate.summary?.blockingFindings ?? null, problems: (gate.findings ?? []).filter((f) => f.type !== 'blocking-code-review-finding').map((f) => f.type) } : null,
     gateError: gate ? null : { exitCode: gateRun.exitCode, message: redact(tail(gateRun.stderr || gateRun.stdout || gateRun.error || '', 400)) },

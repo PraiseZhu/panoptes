@@ -148,7 +148,7 @@ Merged reports written by nightly also carry `run.source_report` (path of the ni
 | `run_mode` | `{ coverage_parallel, reason }`: whether the coverage round ran in parallel with the first run (memory guard: `MemAvailable` ≥ `ARGUS_PARALLEL_MIN_FREE_GB`, default 8, and `ARGUS_MAX_PARALLEL` ≠ 1) |
 | `checks[]` | `{ id, name, kind, dimension, qa_dimensions, status: pass/fail/timeout/unavailable, exit_code, duration_ms, failure_count, unavailable_reason?, sub_checks?, shards?, reused?, reused_from? }` (`shards` / `reused` / `reused_from`: see *Burst capacity*); `sub_checks` only for probe steps (`api-probe`): `{ total, passed, failed, skipped, auth: { account, account_via, host_exchange } }` — `status: pass` means every probe that **ran** passed; skipped probes are listed in `skipped_steps`, never counted as passed |
 | `failed_checks[]` | `{ check_id, check_name, dimension, qa_dimensions, test, failure_type, status, severity, attribution, fingerprint, pr_fingerprint, evidence{ tested_sha, base_sha, exit_code, timed_out, first_run, rerun, base_run, latest_main_run?, command, log_tail, log_file } }`; `status` ∈ `introduced, pre-existing, flaky, fixed-later, unverified, timeout, setup-failed`; also boolean **`flaky`** (`true` iff `status: "flaky"`), `related_to_pr: false` and **`base_comparison`** (see *Flaky*) for flaky entries, `evidence.base_log_file?` when base ran, and, in reports written before 2026-10-11 only, `reclassified { at, from, reason }` (legacy in-place re-classification; no longer done — see *Report preservation*) |
-| `code_review` | `{ status, summary, gate, model, tokens, findings_count, residual_risks, file }` or `{ status, error }`, or **`{ status: "capped", reason, display_zh: "额度用尽未补测" }`** when the day's ai-review quota was used up (no review happened; see *Model-call quotas*). **Also present for docs-only PRs** (reviewed on the same commit: merged → `base_sha` (first parent = merge-base) `..merge_sha`); `null` only with `--no-review` |
+| `code_review` | `{ status, summary, gate, model, tokens, findings_count, residual_risks, file, reused, reused_from, fresh_requested, sampling, cache_key, verdict }` (see *Code review reuse*) or `{ status, error }`, or **`{ status: "capped", reason, display_zh: "额度用尽未补测" }`** when the day's ai-review quota was used up (no review happened; see *Model-call quotas*). **Also present for docs-only PRs** (reviewed on the same commit: merged → `base_sha` (first parent = merge-base) `..merge_sha`); `null` only with `--no-review` |
 | `findings[]` | everything that can raise severity. Every finding has **`source`** ∈ `check` (a failed check, same fields as `failed_checks`), `code-review` (LLM; capped at P1, original in `llm_severity`), `coverage-gate` (P2), `qa-error` (P2, the pipeline crashed), `ai-test` (P2, an AI-generated test that fails on the tested commit; `test_backed: false`, `status: "unconfirmed"`, `reproduced`) and boolean **`test_backed`** (see *test_backed*) |
 | **`test_backed`** | PR-level: `true` if at least one finding is test-backed |
 | `test_backed_severity` | highest severity among test-backed findings, or `null` |
@@ -355,6 +355,28 @@ Reports written **before** this change (`basis: "triage (prs[].triage)"`) comput
   Actuals: `model_calls`, `wall_s`. `run.args.ai_test_caps` records the caps of the run.
 - Each test also appears in `checks[]` with `source: "ai-test"`, `dimension: "white-box"`, `status` `pass` (kept) /
   `fail` (fails on current) / `discarded`, `ai_result`, `ai_reason`.
+
+## Code review reuse (reproducible review, since 2026-10-11)
+
+The LLM review is not deterministic across calls (e.g. #893 got P3, P2, P3 in three runs on the same commit). So a
+review verdict is **cached** and re-runs reuse it:
+
+- Key = sha256 of `reviewed_sha`, `review_base_sha`, **`diff_hash`** (hash of the diff text sent to the model),
+  **`prompt_hash`** (system prompt + ming-qa review focus + `prompt_version` `panoptes-code-review/2` + reasoning effort
+  + sampling) and **`model`**. Cache: `$ARGUS_ROOT/cache/review-verdicts/<key>.json`; only successful reviews are stored.
+- A hit → no model call (and no `ai-review` quota): `code_review.reused: true`, **`reused_from`**
+  `{ key, stored_at, pr, run_id, reviewed_sha, reviewed_at, review_file, original_tokens }` (the run that produced the
+  verdict), `tokens: 0`. The findings, severities and fingerprints are those of the original review. ming-qa's
+  `assert-code-review` gate still runs on the reused document.
+- Miss → fresh review, stored for next time: `reused: false`, `reused_from: null`.
+- **`--fresh-review`** (or `ARGUS_REVIEW_CACHE=0`) skips the lookup and reviews afresh; the new verdict replaces the
+  cached one. `fresh_requested: true`, `run.args.fresh_review: true`.
+- Requests use `temperature: 0` and a fixed `seed` (accepted by the gateway); `code_review.sampling` records them, or
+  `"unsupported"` if the gateway rejected them and the request was repeated without.
+- `code_review.cache_key` `{ key, reviewed_sha, review_base_sha, diff_hash, prompt_hash, prompt_version, model }`
+  (hashes shortened to 16 hex) and `code_review.verdict` `{ status, max_severity, findings: [{ severity, verdict, file,
+  title_hash }] }` — compare `verdict` to check that two reports carry the same review.
+- Reports before 2026-10-11 have none of these fields (each run reviewed afresh).
 
 ## Model-call quotas (since 2026-10-11)
 

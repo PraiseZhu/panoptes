@@ -133,6 +133,7 @@ run-nightly.sh [--trigger event|catch-up|manual] [--date YYYY-MM-DD] [--pr N ...
 | `--write-merged` / `--no-write-merged` | Also write each actually-tested merged PR to `reports/merged/PR-N.json` (on-merge format). Default on without `--pr`, off with `--pr`. |
 | `--write-open` | Also write each **open** PR of the run to `reports/open/PR-N.json` (same per-PR format; untested ones too, with `not_tested_code` / reason). Default off. |
 | `--quota-pool P` | Daily model-call quota pool, `production` or `test`. Default: `--trigger manual` → `test` (manual runs, drills, acceptance reruns never consume production quota), `event` / `catch-up` → `production`. Separate daily caps per kind: ai-test 40, ai-review 70, jev 150, pr-summary 40 (`ARGUS_QUOTA_<KIND>`, `ARGUS_QUOTA_TEST_<KIND>`, or `$ARGUS_ROOT/quota.json`). A hit cap → `status: "capped"` (额度用尽未补测), see `docs/report-schema.md` › *Model-call quotas*. |
+| `--fresh-review` | Do not reuse a cached code-review verdict. By default a review of the same commit + diff + reviewer prompt/version + model is reused (`code_review.reused`, `reused_from`), so re-runs give the same review; see `docs/report-schema.md` › *Code review reuse*. |
 | `--no-issues` | Default. Accepted for explicitness. |
 | `--create-issues` | Open issues — **only if `ARGUS_ALLOW_ISSUES=1` is also exported by the caller.** The secrets file cannot switch this on. |
 | `-h`, `--help` | Print usage. |

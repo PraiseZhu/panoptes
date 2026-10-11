@@ -117,6 +117,13 @@
   审查被额度挡住时，P 级只反映真实跑过的检查，要写「代码审查额度用尽，今天没审」，不能写成「审查无问题」。
   额度池、上限、用量（`system_health.quota`）只进给 Praise 的私下补充；`system_health.status` 会因此是 degraded，系统状态一句写「有 N 个 PR 额度用尽未补测」。
 
+## 代码审查的复用（since 2026-10-11）
+
+- `code_review.reused: true` = 这次没有重新审查，沿用了同一提交、同一份改动、同一版审查提示词和模型下第一次审查的结论
+  （`reused_from` 指向那次）。结论和第一次完全一样，群里照常写，不用说明是复用的；同一 PR 在不同报告里的审查等级应当一致，
+  若不一致先看 `code_review.verdict` / `reused`，不要自己挑一个。
+- 复用来源、`cache_key`、`--fresh-review` 重审记录只进给 Praise 的私下补充。
+
 ## 仅私下给 Praise 的补充（不进群）
 
 派活 issue 链接（含 PraiseZhu/pr-qa-agent-deploy）、私信 message_id 与 open_id、P1 的具体文件:行号、fingerprint、

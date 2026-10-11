@@ -16,7 +16,7 @@ import { decideOutcome, failedIds, setupFailed, failureKeys, compareKey } from '
 import { analyzePr } from './ai.mjs'
 import { evaluateJev } from './jev.mjs'
 import { toMatrixQuestions, toMatrixState, toTriage, toStepPlan, toCoverage, toApplicability } from './matrix.mjs'
-import { codeReview, toBox, BOXES, LLM_MODEL, mingQaVersion, mingQaAvailable } from './mingqa.mjs'
+import { codeReview, toBox, BOXES, LLM_MODEL, mingQaVersion, mingQaAvailable, reviewCacheKey, lookupReviewVerdict } from './mingqa.mjs'
 import { ALL_DIRS, CACHE_DIR, EVIDENCE_DIR, REPORTS_DIR, CODE_DIR } from './paths.mjs'
 import { log, redact, tail, toShanghaiDay, toShanghaiIso } from './util.mjs'
 import { setBudget, overBudget } from './exec.mjs'
@@ -568,22 +568,30 @@ export async function runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha
   out.reviewed_sha = prDiff.files ? sha : (pr.head?.sha ?? null)
   out.review_base_sha = prDiff.files ? baseSha : (pr.base?.sha ?? null)
   out.review_diff_source = prDiff.files ? `local git diff base_sha..${shaField}` : `github pr files (local diff unavailable: ${prDiff.error})`
-  const q = quota.check('ai-review')
+  // 同一提交 + diff + 审查提示词 / 版本 + 模型已经审过 → 复用那次的结论（不调模型、不占额度）；--fresh-review 强制重审
+  const ck = (() => { try { return reviewCacheKey({ sha: out.reviewed_sha, baseSha: out.review_base_sha, files: reviewFiles }) } catch { return null } })()
+  const cached = opts.freshReview || process.env.ARGUS_REVIEW_CACHE === '0' ? null : lookupReviewVerdict(ck)
+  const q = cached ? { ok: true } : quota.check('ai-review')
   if (!q.ok) {
     // 每日 ai-review 额度用尽：不调模型，审查记 capped（显示「额度用尽未补测」）；代码审查不对应 29 个维度里的任何一个
     out.code_review = { status: 'capped', reason: `${CAPPED_ZH}: ai-review daily cap reached (${q.pool} pool ${q.used}/${q.cap})`, display_zh: CAPPED_ZH }
     out.quota_capped.push(quota.markCapped('ai-review', { pr: number }))
     return
   }
-  const cr = await codeReview({ secrets, pr, files: reviewFiles, results, profile, outDir: join(evDir, 'code-review') })
-  if (cr.status !== 'unavailable') quota.consume('ai-review', cr.tokens ?? 0)
+  const cr = await codeReview({ secrets, pr, files: reviewFiles, results, profile, outDir: join(evDir, 'code-review'), cacheKey: ck, cached,
+    source: { pr: number, run_id: opts.runId ?? null, reviewed_sha: out.reviewed_sha, reviewed_at: new Date().toISOString() } })
+  if (cr.status !== 'unavailable' && !cr.reused) quota.consume('ai-review', cr.tokens ?? 0)
   if (cr.status !== 'ok') {
     health.llm_errors.push({ pr: number, stage: 'code-review', model: LLM_MODEL, ...cr.error })
     out.code_review = { status: cr.status, error: cr.error }
     return
   }
   if (cr.gateError) health.qa_tool_failures.push({ pr: number, stage: 'ming-qa assert-code-review', message: cr.gateError.message })
-  out.code_review = { status: cr.doc.status, summary: cr.doc.summary, gate: cr.gate, model: cr.model, tokens: cr.tokens, findings_count: cr.doc.findings.length, residual_risks: cr.doc.residualRisks, file: cr.reviewPath }
+  out.code_review = { status: cr.doc.status, summary: cr.doc.summary, gate: cr.gate, model: cr.model, tokens: cr.tokens, findings_count: cr.doc.findings.length, residual_risks: cr.doc.residualRisks, file: cr.reviewPath,
+    // 可复现：reused = 这次复用了缓存的结论（reused_from 指向第一次审查）；cache_key 的组成见 docs/report-schema.md › Code review reuse
+    reused: Boolean(cr.reused), reused_from: cr.reused_from ?? null, fresh_requested: Boolean(opts.freshReview), sampling: cr.sampling ?? null,
+    cache_key: ck ? { key: ck.key.slice(0, 16), reviewed_sha: ck.reviewed_sha, review_base_sha: ck.review_base_sha, diff_hash: ck.diff_hash.slice(0, 16), prompt_hash: ck.prompt_hash.slice(0, 16), prompt_version: ck.prompt_version, model: ck.model } : null,
+    verdict: reviewVerdict(cr.doc) }
   for (const f of cr.doc.findings) {
     if (f.verdict === 'REJECTED') continue
     // LLM 单独给出的结论最高记 P1：P0 需要真实执行的失败作证（原始等级保留在 llm_severity）
@@ -596,6 +604,13 @@ export async function runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha
       evidence: { evidence: f.evidence, failure_scenario: f.failureScenario, recommendation: f.recommendation, reviewed_sha: out.reviewed_sha },
     })
   }
+}
+
+// 审查结论摘要：状态 + 每条发现的（等级 / 结论 / 文件 / 标题哈希），用来比较两次审查是否一致
+export function reviewVerdict(doc) {
+  const f = (doc?.findings ?? []).filter((x) => x.verdict !== 'REJECTED').map((x) => ({ severity: x.severity, verdict: x.verdict, file: x.file, title_hash: titleHash(x.title) }))
+  const sev = f.map((x) => (x.severity === 'P0' ? 'P1' : x.severity))
+  return { status: doc?.status ?? null, max_severity: sev.length ? maxSev(sev) : null, findings: f }
 }
 
 // base..tested 的完整 diff：一份文本，解析出审查用的文件列表（GitHub files 形状）和覆盖率用的新增行
@@ -1109,7 +1124,7 @@ export async function runNightly(opts = {}) {
   if (opts.prs?.length && health.discovery) health.discovery.excluded_by_pr_filter = plan.excluded
   const { prs } = await processTargets(plan.targets, {
     opts, health, startedAt, repo,
-    processOne: (t) => processPr({ repo, project, number: t.number, discovery: t.reason, secrets, db, health, evidenceRoot, opts, quota }),
+    processOne: (t) => processPr({ repo, project, number: t.number, discovery: t.reason, secrets, db, health, evidenceRoot, opts: { ...opts, runId }, quota }),
   })
   recordQuota(health, quota.summary())
   prs.push(...plan.notTested)
