@@ -12,6 +12,8 @@
 #   ming-qa Python venv  $QA_HOME/.venv                 (stdlib only)
 #   system (apt, sudo)   chromium, bubblewrap, jq, git, util-linux (flock), python3-venv, Playwright's chromium deps
 #   chromium launcher    /usr/local/bin/chromium  ←  scripts/chromium-linux.sh (see README "Why a wrapper")
+#   catch-up timer       /etc/cron.d/panoptes-catch-up ← scripts/catch-up.cron (every 2 h) + a running cron daemon
+#                        (the box has no systemd; PANOPTES_CATCHUP_TIMER=0 skips the timer)
 #
 # Exit codes: 0 everything present, 2 something is still missing after installing (details on stderr / stdout).
 # Never prints secrets; needs network and passwordless sudo for the system part.
@@ -27,7 +29,13 @@ export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$QA_HOME/cache/ms-p
 VENV="${ARGUS_VENV:-$QA_HOME/.venv}"
 WRAPPER_SRC="$PANOPTES_DIR/scripts/chromium-linux.sh"
 WRAPPER=/usr/local/bin/chromium
-APT_PKGS=(chromium bubblewrap jq git util-linux python3 python3-venv ca-certificates curl)
+APT_PKGS=(chromium bubblewrap jq git util-linux python3 python3-venv ca-certificates curl cron)
+CRON_SRC="$PANOPTES_DIR/scripts/catch-up.cron"
+CRON_FILE=/etc/cron.d/panoptes-catch-up
+WANT_TIMER="${PANOPTES_CATCHUP_TIMER:-1}"
+render_cron() {
+  sed -e "s#@USER@#$(id -un)#g" -e "s#@QA_HOME@#$QA_HOME#g" -e "s#@PANOPTES_DIR@#$PANOPTES_DIR#g" "$CRON_SRC"
+}
 CHECK_ONLY=""
 [[ "${1:-}" == "--check" ]] && CHECK_ONLY=1
 
@@ -66,6 +74,10 @@ check_all() {
   fi
   "$VENV/bin/python" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null \
     || { echo "missing: venv — $VENV"; bad=1; }
+  if [[ "$WANT_TIMER" != 0 ]]; then
+    cmp -s <(render_cron) "$CRON_FILE" || { echo "missing: catch-up-timer — $CRON_FILE absent or differs from scripts/catch-up.cron"; bad=1; }
+    pgrep -x cron >/dev/null || { echo "missing: cron-daemon — cron is not running"; bad=1; }
+  fi
   return $bad
 }
 
@@ -122,6 +134,15 @@ if load_node; then
     else FAILED+=("playwright CLI missing (argus npm ci failed?)"); fi
   fi
 else FAILED+=("Node $NODE_MAJOR unavailable, skipped npm / Playwright"); fi
+if has catch-up-timer; then
+  log "catch-up timer → $CRON_FILE"
+  render_cron | $SUDO tee "$CRON_FILE.tmp" >/dev/null && $SUDO chmod 644 "$CRON_FILE.tmp" && $SUDO mv "$CRON_FILE.tmp" "$CRON_FILE" \
+    || FAILED+=("catch-up timer install")
+fi
+if has cron-daemon || has catch-up-timer; then
+  # no systemd on the box: start the daemon directly (it daemonizes itself); cron re-reads /etc/cron.d every minute
+  pgrep -x cron >/dev/null || { log "starting cron"; $SUDO cron || FAILED+=("start cron"); }
+fi
 if has venv; then
   log "python venv → $VENV"
   python3 -m venv --clear "$VENV" >/dev/null 2>&1 || FAILED+=("python venv")

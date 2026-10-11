@@ -1,0 +1,7 @@
+# panoptes catch-up — installed by scripts/bootstrap-box.sh into /etc/cron.d/panoptes-catch-up (do not edit there;
+# a box replacement wipes /etc, the next bootstrap re-installs it). Pure script, no model calls: every 2 hours,
+# list PRs merged yesterday + today (Asia/Shanghai), test only those without a matching reports/merged/PR-N.json
+# (through the run lock), exit 0 within seconds when nothing is missing.
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+7 */2 * * * @USER@ ARGUS_ALLOW_ISSUES=1 QA_HOME=@QA_HOME@ @PANOPTES_DIR@/run-nightly.sh --catch-up --trigger catch-up --create-issues --wait-lock 14400 >>@QA_HOME@/argus-root/logs/catch-up-cron.log 2>&1

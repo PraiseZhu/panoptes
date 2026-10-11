@@ -14,7 +14,7 @@ merge commit and writes `merged/PR-N.json` for every merged PR it had to test it
 | `$QA_HOME/reports/YYYY-MM-DD.json` | day-level discovery run for Shanghai day `YYYY-MM-DD` |
 | any `--out PATH` | manual / ad-hoc runs |
 | `$QA_HOME/reports/catch-up/PR-N.json` | `run-nightly.sh --catch-up` child run for PR N (it also writes `merged/PR-N.json` via `--write-merged`) |
-| `$QA_HOME/reports/catch-up/run-<ts>.json` | one catch-up invocation that had work to do (`schema: "mivo-qa-catch-up/v1"`, see *Catch-up*); `catch-up/state.json` holds attempt counters |
+| `$QA_HOME/reports/catch-up/run-<ts>.json` | one catch-up invocation that had work to do (`schema: "mivo-qa-catch-up/v1"`, `trigger`, `create_issues`, see *Catch-up*); `catch-up/state.json` holds attempt counters |
 | `<name>.vN.json` next to any of the above | the **original** of a report that was later re-written by a re-run (see *Report preservation*) |
 | `$QA_HOME/reports/full-YYYY-MM-DD.json` | combined day report assembled from the per-PR files (merged + open); carries `assembled_from` (see *Combined reports*) |
 
@@ -78,7 +78,8 @@ Reports written before 2026-10-11 (commit `78184f9`) do not have `tested_at`; fa
 
 ### `run`
 
-`id` (uuid), `started_at`, `finished_at`, `started_at_shanghai`, `finished_at_shanghai`, `duration_s`,
+**`trigger`** (`event` = on-merge trigger, `catch-up` = the 2-hourly catch-up timer or `--catch-up`, `manual` = run by
+hand; default `manual`; reports before 2026-10-11 have no `trigger`), `id` (uuid), `started_at`, `finished_at`, `started_at_shanghai`, `finished_at_shanghai`, `duration_s`,
 `args` (`date`, `prs`, `out`, `reuse_merged`, `create_issues`, `limit`, `pr_timeout_min`, `deadline`, `write_merged`, `write_open`),
 `argus_commit` (panoptes commit), `ming_qa_commit`, `llm_model`, `evidence_root`.
 Merged reports written by nightly also carry `run.source_report` (path of the nightly report).
@@ -361,7 +362,9 @@ replaced by the rules above. `mini/check-queue.sh` still accepts an optional `de
 Lists PRs merged yesterday + today (Asia/Shanghai) with `gh pr list` (read-only), and treats a PR as a gap when
 `reports/merged/PR-N.json` is missing / unreadable / has no final verdict, or its `tested_sha` (docs-only:
 `merged_sha`) differs from the merge commit. Gaps are tested oldest-first via
-`run-nightly.sh --pr N --date <merge day> --write-merged --wait-lock S --no-issues --out reports/catch-up/PR-N.json`.
+`run-nightly.sh --pr N --date <merge day> --write-merged --wait-lock S --no-issues --trigger catch-up --out reports/catch-up/PR-N.json`
+(`--create-issues` instead of `--no-issues` when the catch-up itself got `--create-issues` with `ARGUS_ALLOW_ISSUES=1`,
+as the cron timer does). Timer: `/etc/cron.d/panoptes-catch-up`, every 2 hours, installed by `scripts/bootstrap-box.sh`.
 A lock timeout (exit 75) stops the invocation; the next one retries. After 3 attempts a PR is given up:
 `reports/catch-up/run-<ts>.json` has `system_health.gave_up[]` / `qa_tool_failures[]`
 (`{ pr, stage: "catch-up", merge_sha, attempts, message }`), and the next nightly report lists it in

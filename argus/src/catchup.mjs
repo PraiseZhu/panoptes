@@ -2,7 +2,7 @@
 //   1. 用 gh 列出昨天和今天（上海时区）合并进主干的 PR，按合并时间从早到晚；
 //   2. 与 reports/merged/PR-N.json 比对：缺文件、读不了、或测的不是这个 merge commit（tested_sha ≠ merge commit；
 //      docs-only 看 merged_sha）、或上次没有结论（qa-error / not-tested）都算缺口；
-//   3. 逐个缺口调用 run-nightly.sh --pr N --date <合并日> --write-merged --wait-lock S --no-issues
+//   3. 逐个缺口调用 run-nightly.sh --pr N --date <合并日> --write-merged --wait-lock S --no-issues|--create-issues --trigger catch-up
 //      --out reports/catch-up/PR-N.json（绝不碰当天的日报文件）；
 //   4. 等锁超时（exit 75）就停下，留到下一次调用再试；每个 PR 最多试 3 次，之后放弃，
 //      把放弃记录写进本次结果文件的 system_health，下一次夜间日报的 system_health 也会带上（stage 'catch-up'）。
@@ -119,10 +119,16 @@ export function recentGiveUps({ reportsDir = REPORTS_DIR, now = Date.now(), with
 }
 
 // 实际调用 run-nightly.sh（由 run-nightly.sh --catch-up 设置 PANOPTES_RUN_NIGHTLY）
-export function runNightlyFor(pr, { script = process.env.PANOPTES_RUN_NIGHTLY, waitLock = 14400, reportsDir = REPORTS_DIR, log = null } = {}) {
-  if (!script) throw new Error('PANOPTES_RUN_NIGHTLY not set (use run-nightly.sh --catch-up)')
+export function catchUpChildArgs(pr, { script, waitLock = 14400, reportsDir = REPORTS_DIR, createIssues = false, trigger = 'catch-up' } = {}) {
   const out = join(catchUpDir(reportsDir), `PR-${pr.number}.json`)
-  const args = [script, '--pr', String(pr.number), '--date', pr.day, '--write-merged', '--wait-lock', String(waitLock), '--no-issues', '--out', out]
-  const r = spawnSync('bash', args, { stdio: ['ignore', log ?? 'inherit', log ?? 'inherit'], env: { ...process.env, PANOPTES_CATCH_UP_CHILD: '1' } })
+  return [script, '--pr', String(pr.number), '--date', pr.day, '--write-merged', '--wait-lock', String(waitLock), createIssues ? '--create-issues' : '--no-issues', '--trigger', trigger, '--out', out]
+}
+export function runNightlyFor(pr, { script = process.env.PANOPTES_RUN_NIGHTLY, waitLock = 14400, reportsDir = REPORTS_DIR, log = null, createIssues = false, trigger = 'catch-up' } = {}) {
+  if (!script) throw new Error('PANOPTES_RUN_NIGHTLY not set (use run-nightly.sh --catch-up)')
+  const args = catchUpChildArgs(pr, { script, waitLock, reportsDir, createIssues, trigger })
+  // 子进程只在开 issue 时才拿到 ARGUS_ALLOW_ISSUES=1
+  const env = { ...process.env, PANOPTES_CATCH_UP_CHILD: '1' }
+  if (!createIssues) delete env.ARGUS_ALLOW_ISSUES
+  const r = spawnSync('bash', args, { stdio: ['ignore', log ?? 'inherit', log ?? 'inherit'], env })
   return r.status ?? 1
 }

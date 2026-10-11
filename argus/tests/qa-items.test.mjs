@@ -419,3 +419,21 @@ test('skipped_steps：同一步骤只出现一次，保留第一个（最具体�
   assert.match(d[1].reason, /^not applicable/)
   assert.deepEqual(nightly.dedupeSkippedSteps(undefined), [])
 })
+
+// ── 运行来源 run.trigger ────────────────────────────────
+test('run.trigger：event / catch-up / manual，默认 manual；其他值报错', () => {
+  assert.equal(nightly.normalizeTrigger(undefined), 'manual')
+  assert.equal(nightly.normalizeTrigger(''), 'manual')
+  for (const t of ['event', 'catch-up', 'manual']) assert.equal(nightly.normalizeTrigger(t), t)
+  assert.throws(() => nightly.normalizeTrigger('cron'), /--trigger must be one of/)
+})
+
+test('补测子运行：--trigger catch-up；只有 createIssues 时才带 --create-issues，否则 --no-issues', async () => {
+  const { catchUpChildArgs } = await import('../src/catchup.mjs')
+  const pr = { number: 905, day: '2026-10-11' }
+  const a = catchUpChildArgs(pr, { script: '/x/run-nightly.sh', reportsDir: '/r' })
+  assert.deepEqual(a.slice(0, 9), ['/x/run-nightly.sh', '--pr', '905', '--date', '2026-10-11', '--write-merged', '--wait-lock', '14400', '--no-issues'])
+  assert.deepEqual(a.slice(9), ['--trigger', 'catch-up', '--out', '/r/catch-up/PR-905.json'])
+  const b = catchUpChildArgs(pr, { script: '/x/run-nightly.sh', reportsDir: '/r', createIssues: true })
+  assert.ok(b.includes('--create-issues') && !b.includes('--no-issues'))
+})

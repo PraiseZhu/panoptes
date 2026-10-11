@@ -63,7 +63,8 @@ install -m 600 secrets.env.example /home/box/.config/mivo-qa/secrets.env   # the
 `scripts/bootstrap-box.sh` (`--check` only reports) installs whatever is missing: Node 24 via nvm in
 `/workspace/_tools/nvm`, `npm ci` for argus, Playwright Chromium in `$QA_HOME/cache/ms-playwright` plus its system
 libraries, the ming-qa venv `$QA_HOME/.venv`, and via apt (passwordless sudo) Debian `chromium`, `bubblewrap`, `jq`,
-`git`, `util-linux`, `python3-venv`, then the `/usr/local/bin/chromium` launcher below. Everything that can live under
+`git`, `util-linux`, `python3-venv`, `cron`, then the `/usr/local/bin/chromium` launcher below and the catch-up timer
+(`/etc/cron.d/panoptes-catch-up`, cron daemon started if not running). Everything that can live under
 `/workspace` does, so a box replacement (which wipes `$HOME` and system packages) only costs the apt part.
 **`run-nightly.sh` runs the check before every run and calls the bootstrap automatically** when something is missing
 (`PANOPTES_BOOTSTRAP=0` disables that); the outcome is in `system_health.bootstrap`, unresolved gaps in
@@ -107,8 +108,8 @@ Environment overrides for `run-nightly.sh`:
 ## Usage / 用法
 
 ```
-run-nightly.sh --catch-up [--wait-lock SECONDS]
-run-nightly.sh [--date YYYY-MM-DD] [--pr N ...] [--limit N] [--no-review] [--skip-step ID ...]
+run-nightly.sh --catch-up [--wait-lock SECONDS] [--trigger catch-up|manual] [--create-issues]
+run-nightly.sh [--trigger event|catch-up|manual] [--date YYYY-MM-DD] [--pr N ...] [--limit N] [--no-review] [--skip-step ID ...]
                [--out PATH] [--no-reuse] [--wait-lock [SECONDS]] [--pr-timeout MIN] [--deadline HH:MM]
                [--write-merged | --no-write-merged] [--write-open] [--no-issues | --create-issues]
 ```
@@ -116,6 +117,7 @@ run-nightly.sh [--date YYYY-MM-DD] [--pr N ...] [--limit N] [--no-review] [--ski
 | Flag | Meaning |
 |---|---|
 | `--catch-up` | Pure-script gap filler, safe to run from cron every few minutes (quiet and fast when there is nothing to do). Lists PRs merged yesterday + today (Shanghai) via `gh`, compares with `reports/merged/PR-N.json` (gap = missing / unfinished / `tested_sha` ≠ merge commit) and tests the gaps oldest-first with `--pr N --date <merge day> --write-merged --wait-lock S --no-issues --out reports/catch-up/PR-N.json`. A lock timeout (75) stops and retries next invocation; after **3** attempts a PR is given up and recorded in `system_health` (`reports/catch-up/run-*.json` and the next nightly report). One catch-up at a time (`catch-up.lock`). Exit `0` ok / nothing to do, `3` something still missing or given up. |
+| `--trigger T` | Who started the run, recorded as **`run.trigger`**: `event` (on-merge trigger), `catch-up`, `manual`. Default `manual`; `--catch-up` defaults to `catch-up` and passes it to its children. |
 | `--date D` | Asia/Shanghai day to report on. Default: yesterday in Shanghai. |
 | `--pr N` | Test only these PRs (repeatable). Discovery still runs and is recorded in `system_health.discovery`. |
 | `--limit N` | Test at most N discovered PRs. |
@@ -134,12 +136,25 @@ run-nightly.sh [--date YYYY-MM-DD] [--pr N ...] [--limit N] [--no-review] [--ski
 
 Exit codes: `0` ok / degraded · `3` pipeline failed (see `system_health`) · `1` usage or config error · `75` another run is active.
 
+**Catch-up timer.** `scripts/bootstrap-box.sh` installs `/etc/cron.d/panoptes-catch-up` (from
+`scripts/catch-up.cron`; the box has no systemd, so it also installs and starts the `cron` daemon). Every 2 hours
+(minute 7 of even hours, box time) it runs, without any model call:
+
+```sh
+ARGUS_ALLOW_ISSUES=1 run-nightly.sh --catch-up --trigger catch-up --create-issues --wait-lock 14400
+```
+
+With nothing missing it exits 0 in about a second (bootstrap self-check + one `gh pr list`) and writes nothing
+(output: `$QA_HOME/argus-root/logs/catch-up-cron.log`). A box replacement wipes `/etc` and the daemon; the self-check
+reports `catch-up-timer` / `cron-daemon` as missing and the next bootstrap (any `run-nightly.sh` call) reinstalls and
+restarts them. `PANOPTES_CATCHUP_TIMER=0` opts out.
+
 Discovery (all authors): PRs **merged** during the day, plus PRs **open** with activity during the day.
 
 Typical calls:
 
 ```sh
-run-nightly.sh --pr 893 --wait-lock \
+run-nightly.sh --pr 893 --trigger event --wait-lock \
     --out "$QA_HOME/reports/merged/PR-893.json"                     # on-merge trigger (primary)
 run-nightly.sh --date 2026-10-10 --deadline 08:45                   # day-level catch-up / open PRs
 ```

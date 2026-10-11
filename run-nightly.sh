@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # panoptes — Mivo QA nightly entrypoint (Linux).
 #
-#   run-nightly.sh --catch-up [--wait-lock SECONDS]
-#   run-nightly.sh [--date YYYY-MM-DD] [--pr N ...] [--limit N]
+#   run-nightly.sh --catch-up [--wait-lock SECONDS] [--trigger catch-up|manual] [--create-issues]
+#   run-nightly.sh [--trigger event|catch-up|manual] [--date YYYY-MM-DD] [--pr N ...] [--limit N]
 #                  [--no-review] [--no-ai-tests] [--skip-step ID ...]
 #                  [--out PATH] [--no-reuse] [--wait-lock [SECONDS]]
 #                  [--pr-timeout MIN] [--deadline HH:MM] [--write-merged | --no-write-merged] [--write-open]
@@ -15,6 +15,10 @@
 #                 A lock timeout (exit 75) stops and retries on the next invocation; after 3 attempts a PR is
 #                 given up and recorded in system_health (reports/catch-up/run-*.json and the next daily report).
 #                 Only one catch-up at a time (catch-up.lock; a second one exits 0 silently).
+#                 With --create-issues (and ARGUS_ALLOW_ISSUES=1 exported) the children get --create-issues instead.
+#                 Installed by scripts/bootstrap-box.sh as a cron job every 2 hours (scripts/catch-up.cron).
+#   --trigger     who started this run, recorded as run.trigger: event (on-merge trigger) | catch-up | manual.
+#                 Default: manual; --catch-up defaults to catch-up (its children get --trigger catch-up).
 #   --date        Asia/Shanghai calendar day to report on (default: yesterday in Shanghai)
 #   --pr N        test only these PRs (repeatable); otherwise discovery picks
 #                 open PRs updated that day + PRs merged that day (all authors)
@@ -66,12 +70,17 @@ SECRETS="${QA_SECRETS_FILE:-/home/box/.config/mivo-qa/secrets.env}"
 # Consumed here; everything else is passed to the Node CLI unchanged.
 WAIT_LOCK=""
 CATCH_UP=""
+TRIGGER=""
 ARGS=()
 while (( $# )); do
   case "$1" in
     -h|--help)
       sed -n '2,/^set -euo/{/^set -euo/d;s/^# \{0,1\}//;p}' "${BASH_SOURCE[0]}"; exit 0 ;;
     --catch-up) CATCH_UP=1 ;;
+    --trigger)
+      [[ -n "${2:-}" ]] || { echo "--trigger needs event, catch-up or manual" >&2; exit 1; }
+      TRIGGER="$2"; shift ;;
+    --trigger=*) TRIGGER="${1#--trigger=}" ;;
     --wait-lock)
       WAIT_LOCK=14400
       if [[ "${2:-}" =~ ^[0-9]+$ ]]; then WAIT_LOCK="$2"; shift; fi ;;
@@ -83,6 +92,9 @@ while (( $# )); do
   shift
 done
 set -- ${ARGS[@]+"${ARGS[@]}"}
+[[ -n "$TRIGGER" ]] || { [[ -n "$CATCH_UP" ]] && TRIGGER=catch-up || TRIGGER=manual; }
+case "$TRIGGER" in event|catch-up|manual) ;; *) echo "--trigger must be event, catch-up or manual (got '$TRIGGER')" >&2; exit 1 ;; esac
+export PANOPTES_TRIGGER="$TRIGGER"
 
 # Issue creation is OFF unless --create-issues is given AND ARGUS_ALLOW_ISSUES=1 is in the caller's env.
 CREATE=""
@@ -99,6 +111,13 @@ mkdir -p "$ARGUS_ROOT/logs"
 # ── Self-check + bootstrap (a replaced box loses home-dir and system installs) ──────────────────
 # The result is handed to the Node CLI (PANOPTES_BOOTSTRAP_STATUS) and lands in system_health.
 BOOT_STATUS="$ARGUS_ROOT/bootstrap-status-$$.json"
+# Leftovers of runs that were killed (or exec'ed into catch-up before 2026-10-11): remove files whose pid is gone.
+for f in "$ARGUS_ROOT"/bootstrap-status-*.json; do
+  [[ -e "$f" ]] || continue
+  pid="${f##*/bootstrap-status-}"; pid="${pid%.json}"
+  if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then continue; fi
+  rm -f "$f"
+done
 BOOT_SCRIPT="$PANOPTES_DIR/scripts/bootstrap-box.sh"
 json_list() { python3 -c 'import json,sys; print(json.dumps([l for l in sys.stdin.read().splitlines() if l.strip()]))' 2>/dev/null || echo '[]'; }
 MISSING_BEFORE=$("$BOOT_SCRIPT" --check 2>/dev/null) && BOOT_RAN=false || BOOT_RAN=true
@@ -195,13 +214,22 @@ export TZ=Asia/Shanghai
 mkdir -p "$ARGUS_ROOT/logs" "$ARGUS_REPORTS_DIR"
 
 if [[ -n "$CATCH_UP" ]]; then
-  (( $# == 0 )) || { echo "--catch-up takes no other options besides --wait-lock" >&2; exit 1; }
+  CU_ARGS=()
+  for a in "$@"; do
+    case "$a" in
+      --create-issues) [[ -n "$ALLOW_ISSUES" ]] && CU_ARGS+=(--create-issues) ;;
+      --no-issues) ;;
+      *) echo "--catch-up takes only --wait-lock, --trigger and --create-issues / --no-issues (got '$a')" >&2; exit 1 ;;
+    esac
+  done
+  # catch-up writes no report of its own: the bootstrap status file is not needed (exec would skip the EXIT trap)
+  rm -f "$BOOT_STATUS"
   # A second catch-up while one is running: nothing to add, leave quietly. The children take nightly.lock themselves.
   exec 8>"$ARGUS_ROOT/catch-up.lock"
   flock -n 8 || exit 0
   cd "$PANOPTES_DIR/argus"
   export PANOPTES_RUN_NIGHTLY="$PANOPTES_DIR/run-nightly.sh"
-  exec node --disable-warning=ExperimentalWarning src/cli.mjs catch-up --wait-lock "${WAIT_LOCK:-14400}"
+  exec node --disable-warning=ExperimentalWarning src/cli.mjs catch-up --wait-lock "${WAIT_LOCK:-14400}" --trigger "$TRIGGER" ${CU_ARGS[@]+"${CU_ARGS[@]}"}
 fi
 
 # One run at a time

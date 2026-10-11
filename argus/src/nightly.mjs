@@ -1048,6 +1048,7 @@ export async function runNightly(opts = {}) {
       id: runId, started_at: startedAt.toISOString(), finished_at: new Date().toISOString(),
       started_at_shanghai: toShanghaiIso(startedAt), finished_at_shanghai: toShanghaiIso(),
       duration_s: Math.round((Date.now() - startedAt.getTime()) / 1000),
+      trigger: normalizeTrigger(opts.trigger),
       args: { date: opts.date ?? null, prs: opts.prs ?? null, out: opts.out ?? null, reuse_merged: opts.reuseMerged !== false, create_issues: Boolean(opts.createIssues), limit: opts.limit ?? null, pr_timeout_min: opts.prTimeoutMin ?? null, deadline: opts.deadline ?? null, write_merged: writeMergedEnabled(opts), write_open: writeOpenEnabled(opts), ai_tests: !opts.noAiTests && aiTestCaps().enabled, ai_test_caps: aiTestCaps() },
       argus_commit: (() => { try { return execFileSync('git', ['-C', CODE_DIR, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim() } catch { return null } })(),
       ming_qa_commit: await mingQaVersion(), llm_model: LLM_MODEL, evidence_root: evidenceRoot,
@@ -1085,6 +1086,14 @@ export async function runNightly(opts = {}) {
 
 // 夜间全量（没有 --pr）默认把每个真实测完的已合并 PR 也写成 reports/merged/PR-N.json（与合并即测同格式），
 // 供日报与之后的复用读取。--no-write-merged 关闭；--write-merged 在 --pr 运行里也打开。
+// 运行来源：event（合并事件触发的 on-merge）· catch-up（补测，cron 每 2 小时）· manual（人手动跑，默认）
+export const TRIGGERS = ['event', 'catch-up', 'manual']
+export function normalizeTrigger(t) {
+  if (t == null || t === '') return 'manual'
+  if (!TRIGGERS.includes(t)) throw new Error(`--trigger must be one of ${TRIGGERS.join('|')}: ${t}`)
+  return t
+}
+
 export const writeMergedEnabled = (opts) => opts.writeMerged ?? !opts.prs?.length
 // --write-open：同样的单 PR 格式写 reports/open/PR-N.json。开放 PR 无论结果都写（含 not-tested / qa-error，
 // 带具体原因），这样 deadline 截断的 PR 也有文件。默认关。

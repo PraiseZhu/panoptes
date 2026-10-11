@@ -8,9 +8,9 @@
 //   node src/cli.mjs once                  跑完下一个排队任务即退出（手动验收）
 //   node src/cli.mjs notify --text "..."   用 Doki 给主人发一条消息
 //   node src/cli.mjs doctor                只读自检（GitHub / 模型 / 飞书 / 磁盘）
-//   node src/cli.mjs nightly [--date YYYY-MM-DD] [--pr N ...] [--limit N] [--no-review] [--no-ai-tests] [--skip-step ID ...] [--out PATH] [--no-reuse] [--pr-timeout MIN] [--deadline HH:MM] [--write-merged | --no-write-merged] [--write-open] [--no-issues | --create-issues]
+//   node src/cli.mjs nightly [--date YYYY-MM-DD] [--pr N ...] [--limit N] [--no-review] [--no-ai-tests] [--skip-step ID ...] [--out PATH] [--no-reuse] [--pr-timeout MIN] [--deadline HH:MM] [--write-merged | --no-write-merged] [--write-open] [--no-issues | --create-issues] [--trigger event|catch-up|manual]
 //                                          Linux 夜间 QA：上海时区前一天的 PR → reports/YYYY-MM-DD.json（默认不写 GitHub）
-//   node src/cli.mjs catch-up [--wait-lock S] [--repo owner/name]   补测昨天+今天（上海）合并但 reports/merged 缺口的 PR（由 run-nightly.sh --catch-up 调用）
+//   node src/cli.mjs catch-up [--wait-lock S] [--repo owner/name] [--trigger catch-up|manual|event] [--create-issues]   补测昨天+今天（上海）合并但 reports/merged 缺口的 PR（由 run-nightly.sh --catch-up 调用）
 //   node src/cli.mjs assemble --date D --out PATH --from FILE ... [--order N,N]   多份报告合成 full-D.json
 import { mkdirSync } from 'node:fs'
 import { loadRegistry, loadSecrets } from './config.mjs'
@@ -27,7 +27,7 @@ import { catchUp, runNightlyFor, catchUpDir } from './catchup.mjs'
 import { LOGS_DIR } from './paths.mjs'
 import { openSync, closeSync } from 'node:fs'
 import { join } from 'node:path'
-import { writeReport } from './nightly.mjs'
+import { writeReport, normalizeTrigger } from './nightly.mjs'
 import { toShanghaiIso as shIso } from './util.mjs'
 import { killAllActive } from './exec.mjs'
 
@@ -54,7 +54,8 @@ async function main() {
       const prTimeout = opt('pr-timeout') ?? process.env.ARGUS_PR_TIMEOUT_MIN ?? null
       if (prTimeout != null && !(Number(prTimeout) > 0)) throw new Error(`--pr-timeout 需要正数分钟：${prTimeout}`)
       const deadline = opt('deadline') ?? process.env.ARGUS_DEADLINE ?? null
-      const { file, report } = await runNightly({ date, prs, out, reuseMerged: !flag('no-reuse'), limit: opt('limit') ? Number(opt('limit')) : null, noReview: flag('no-review'), noAiTests: flag('no-ai-tests'), skipSteps: many('skip-step'), createIssues: flag('create-issues'), writeMerged: flag('write-merged') ? true : flag('no-write-merged') ? false : undefined, writeOpen: flag('write-open'), prTimeoutMin: prTimeout != null ? Number(prTimeout) : null, deadline })
+      const trigger = normalizeTrigger(opt('trigger') ?? process.env.PANOPTES_TRIGGER ?? null)
+      const { file, report } = await runNightly({ trigger, date, prs, out, reuseMerged: !flag('no-reuse'), limit: opt('limit') ? Number(opt('limit')) : null, noReview: flag('no-review'), noAiTests: flag('no-ai-tests'), skipSteps: many('skip-step'), createIssues: flag('create-issues'), writeMerged: flag('write-merged') ? true : flag('no-write-merged') ? false : undefined, writeOpen: flag('write-open'), prTimeoutMin: prTimeout != null ? Number(prTimeout) : null, deadline })
       console.log(JSON.stringify({ report: file, date: report.date, prs: report.prs.map((p) => ({ number: p.number, severity: p.severity, verdict: p.verdict })), system_health: report.system_health.status }, null, 2))
       if (report.system_health.status === 'failed') process.exitCode = 3
       return
@@ -63,13 +64,18 @@ async function main() {
       const waitLock = Number(opt('wait-lock', 14400))
       if (!Number.isInteger(waitLock) || waitLock < 0) throw new Error('--wait-lock 需要整秒数')
       const repo = opt('repo', 'xindong/mivo-canvas-plugin')
+      if (flag('create-issues') && flag('no-issues')) throw new Error('--create-issues 与 --no-issues 不能同时使用')
+      // 子运行带上 --create-issues 只在调用方同时导出了 ARGUS_ALLOW_ISSUES=1 时才有效（run-nightly.sh 负责把关）
+      const createIssues = flag('create-issues') && process.env.ARGUS_ALLOW_ISSUES === '1'
+      const trigger = normalizeTrigger(opt('trigger') ?? 'catch-up')
       let logFd = null
       const runOne = (pr) => {
         if (logFd == null) logFd = openSync(join(LOGS_DIR, `catch-up-${shIso().slice(0, 19).replace(/[-:]/g, '')}.log`), 'a')
         process.stdout.write(`[catch-up] PR #${pr.number} (${pr.day}, ${pr.gap.reason}) …\n`)
-        return runNightlyFor(pr, { waitLock, log: logFd })
+        return runNightlyFor(pr, { waitLock, log: logFd, createIssues, trigger })
       }
       const r = catchUp({ repo, runOne })
+      if (r.status === 'ran') { r.trigger = trigger; r.create_issues = createIssues }
       if (logFd != null) closeSync(logFd)
       if (r.status === 'nothing-to-do') return // 安静退出
       const file = writeReport(r, join(catchUpDir(), `run-${shIso().slice(0, 19).replace(/[-:]/g, '')}.json`))
