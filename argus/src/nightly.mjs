@@ -269,12 +269,13 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   // 计划要跑却没有结果的步骤（安装失败后中止、时间预算用完等）也列进 skipped_steps
   const ranIds = new Set(first.map((r) => r.id))
   for (const id of plan.stepIds) {
-    if (ranIds.has(id)) continue
+    // 已经以别的理由（不适用于这个版本、triage、--skip-step）记过的步骤不再记「没跑到」
+    if (ranIds.has(id) || plan.skipped.some((sk) => sk.id === id)) continue
     const st = profile.steps.find((x) => x.id === id)
     if (st?.kind === 'setup') continue
     plan.skipped.push({ id, nameZh: st?.nameZh, reason: setupFailed(first) ? 'not run: dependency install failed' : 'not run: run stopped before this step (time budget / shutdown)', reasonZh: '没跑到' })
   }
-  out.skipped_steps = plan.skipped.map((sk) => ({ ...sk, dimension: toBox(profile.steps.find((x) => x.id === sk.id) ?? { id: sk.id }, profile) }))
+  out.skipped_steps = dedupeSkippedSteps(plan.skipped).map((sk) => ({ ...sk, dimension: toBox(profile.steps.find((x) => x.id === sk.id) ?? { id: sk.id }, profile) }))
   // 接口探测里没跑的子用例（例如没有测试账号的登录态用例）逐条记进 skipped_steps，绝不算通过
   out.skipped_steps.push(...probeSkippedSteps(first, profile))
 
@@ -458,9 +459,33 @@ export function withDimensionStatus(cov, triage, ai, profile, results) {
       : checks.length ? 'covered' : aiIds.length ? 'covered-by-ai-test' : 'gap'
     dims[k] = { applicability: d.applicability, status, checks, ai_tests: aiIds }
   }
-  const applicable = Object.keys(dims).filter((k) => dims[k].applicability === 'applicable')
+  return { ...cov, ...coverageTotalsFrom(dims), dimension_status: dims, basis: 'dimension_status (from prs[].triage, Jev)' }
+}
+
+// 所有 coverage 汇总字段都只从 dimension_status 推出来，保证和 Jev 的结论（triage.dimensions）不矛盾：
+// applicable = applicability applicable；covered = 其中 status covered / covered-by-ai-test；missed = gaps = 其中 status gap；
+// undetermined = applicability undetermined；coverage = covered / applicable。
+export function coverageTotalsFrom(dims) {
+  const keys = Object.keys(dims ?? {})
+  const applicable = keys.filter((k) => dims[k].applicability === 'applicable')
   const covered = applicable.filter((k) => ['covered', 'covered-by-ai-test'].includes(dims[k].status))
-  return { ...cov, applicable_total: applicable.length, covered_total: covered.length, covered_dimensions: covered, gaps: applicable.filter((k) => dims[k].status === 'gap'), ai_covered: applicable.filter((k) => dims[k].status === 'covered-by-ai-test'), dimension_status: dims, basis: 'triage (prs[].triage)' }
+  const gaps = applicable.filter((k) => dims[k].status === 'gap')
+  const undetermined = keys.filter((k) => dims[k].applicability === 'undetermined')
+  return {
+    applicable, covered, missed: gaps, undetermined,
+    undeterminedMissed: undetermined.filter((k) => !(dims[k].checks?.length || dims[k].ai_tests?.length)),
+    coverage: applicable.length ? covered.length / applicable.length : null,
+    applicable_total: applicable.length, covered_total: covered.length, covered_dimensions: covered, gaps,
+    ai_covered: applicable.filter((k) => dims[k].status === 'covered-by-ai-test'),
+    not_applicable_total: keys.filter((k) => dims[k].applicability === 'not-applicable').length,
+    undetermined_total: undetermined.length,
+  }
+}
+
+// skipped_steps：每个步骤只出现一次。第一个理由最具体（not applicable / triage / --skip-step 先于「没跑到」记录），后面的同 id 条目丢弃
+export function dedupeSkippedSteps(list) {
+  const seen = new Set()
+  return (list ?? []).filter((sk) => (seen.has(sk.id) ? false : (seen.add(sk.id), true)))
 }
 
 // 文档改动（risk A）的覆盖率门禁：没有单测运行，不是失败也不是 unavailable

@@ -94,6 +94,21 @@
 - 数据只从 `reports/merged/PR-N.json`、`reports/open/PR-N.json`、`feishu-sent.json` 取，不编造；拿不到就写"未知"或省略该节。
 - 手机好读：每行一件事，小节加粗标题，正文不超过约 30 行。
 
+## 怎么读 `ai_tests` 和 `dimension_status`（写「测试覆盖情况」一节用）
+
+- **维度适用性**：`prs[].triage.dimensions.<维度>.applicability` 是 Jev 的结论（applicable / not-applicable / undetermined，各带 reason）。
+- **覆盖结果**：`prs[].coverage.dimension_status.<维度>.status`：
+  `covered`（有跑过的检查覆盖，`checks` 列出步骤）· `covered-by-ai-test`（AI 补的测试通过且能抓到植入的错误，`ai_tests` 列出编号）·
+  `gap`（适用但没有任何东西覆盖）· `not-applicable` · `undetermined`（Jev 没判定）。
+- **数字一律用 `coverage.applicable_total` / `coverage.covered_total`**，写成「N 项适用，覆盖了 M 项」；有 `coverage.gaps` 时点名缺的维度
+  （大白话：「异常处理这块没有测试覆盖」）。这两个数和 `applicable` / `covered` / `missed` / `undetermined` 都是从 `dimension_status` 数出来的，不会互相矛盾。
+  旧报告（`coverage.basis` 不是 `dimension_status …`）里的 `missed` / `undetermined` 是旧规则算的，**不要用**；10-10 的报告完全没有这些字段 → 写「当时还没做维度统计」。
+- **AI 补测**（`prs[].ai_tests`）：`kept` = 补的测试在当前代码上通过、并且能抓到故意植入的错误 → 算补上了覆盖（`newly_covered`）；
+  `discarded` = 抓不到植入的错误或跑不起来，丢弃，不算覆盖也不算问题；`fails_on_current` = 补的测试在当前代码上就失败 → 一条 P2 finding
+  （`source: "ai-test"`，`test_backed: false`，`status: "unconfirmed"`）。
+  群里写成「自动补的测试发现一处可疑行为，还没人确认」，**不能**写成"测出了 bug"、不 @ 作者催改；`reproduced: true` 只说明重跑一次还失败，仍需人确认。
+  成本（`model_calls`、`wall_s`）只进给 Praise 的私下补充。
+
 ## 仅私下给 Praise 的补充（不进群）
 
 派活 issue 链接（含 PraiseZhu/pr-qa-agent-deploy）、私信 message_id 与 open_id、P1 的具体文件:行号、fingerprint、

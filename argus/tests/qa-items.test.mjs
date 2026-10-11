@@ -326,7 +326,7 @@ test('coverage.dimension_status：applicable_total / covered_total，检查覆�
   const aiRes = { tests: [{ id: 'ai-test-1', result: 'kept', covers: ['boundary'] }, { id: 'ai-test-2', result: 'discarded', covers: ['db'] }] }
   const c = nightly.withDimensionStatus({ covered: ['unit'] }, triage, aiRes, profile, [{ id: 'unit', ok: true }])
   assert.equal(c.applicable_total, 3); assert.equal(c.covered_total, 2)
-  assert.deepEqual(c.covered, ['unit'], 'existing field kept as is')
+  assert.deepEqual(c.covered, ['unit', 'boundary'], 'covered derived from dimension_status')
   assert.equal(c.dimension_status.unit.status, 'covered'); assert.equal(c.dimension_status.boundary.status, 'covered-by-ai-test')
   assert.equal(c.dimension_status.db.status, 'gap'); assert.equal(c.dimension_status.visual.status, 'not-applicable')
   assert.deepEqual(c.ai_covered, ['boundary']); assert.deepEqual(c.gaps, ['db'])
@@ -376,4 +376,46 @@ test('内存护栏：可用内存低于阈值或 ARGUS_MAX_PARALLEL=1 → 覆盖
   assert.equal(nightly.parallelDecision({ freeGb: 10, minGb: 8, maxParallel: 2 }).parallel, true)
   assert.equal(nightly.parallelDecision({ freeGb: 10, minGb: 8, maxParallel: 1 }).parallel, false)
   assert.equal(nightly.parallelDecision({ freeGb: null, minGb: 8, maxParallel: 2 }).parallel, false)
+})
+
+// ── coverage 汇总只来自 dimension_status（#906：applicable_total=4 / covered_total=4 却列 exception 为 missed、4 个 undetermined）──
+test('coverage 汇总从 dimension_status 推出：旧规则的 applicable / missed / undetermined 被覆盖，不会和 Jev 矛盾', () => {
+  const triage = { dimensions: { unit: { applicability: 'applicable' }, exception: { applicability: 'applicable' }, data: { applicability: 'applicable' }, 'api-oracle': { applicability: 'applicable' }, visual: { applicability: 'not-applicable' } } }
+  const profile = { steps: [{ id: 'unit', covers: ['unit', 'data', 'api-oracle'] }] }
+  const aiRes = { tests: [{ id: 'ai-test-1', result: 'kept', covers: ['exception'] }] }
+  // 旧规则（p ≥ 0.7）算出来的值：和 Jev 结论矛盾
+  const legacy = { applicable: ['unit', 'exception'], covered: ['unit'], missed: ['exception'], undetermined: ['data', 'negative-path', 'api-oracle', 'sideEffects'], undeterminedMissed: [], passRate: 1, coverage: 0.5 }
+  const c = nightly.withDimensionStatus(legacy, triage, aiRes, profile, [{ id: 'unit', ok: true }])
+  assert.equal(c.applicable_total, 4); assert.equal(c.covered_total, 4)
+  assert.deepEqual(c.applicable, ['unit', 'exception', 'data', 'api-oracle'])
+  assert.deepEqual(c.covered, ['unit', 'exception', 'data', 'api-oracle'])
+  assert.deepEqual(c.missed, []); assert.deepEqual(c.gaps, []); assert.deepEqual(c.undetermined, [])
+  assert.equal(c.coverage, 1); assert.equal(c.passRate, 1, 'passRate is about checks and stays')
+  assert.equal(c.not_applicable_total, 1); assert.equal(c.undetermined_total, 0)
+  // 每个汇总都能从 dimension_status 重新数出来
+  const ds = c.dimension_status
+  for (const k of c.missed) assert.equal(ds[k].status, 'gap')
+  for (const k of c.covered) assert.ok(['covered', 'covered-by-ai-test'].includes(ds[k].status))
+  assert.equal(c.applicable_total, Object.values(ds).filter((d) => d.applicability === 'applicable').length)
+})
+
+test('coverage 汇总：Jev 没判定的维度 → undetermined（不算 applicable，也不算 missed）', () => {
+  const dims = { unit: { applicability: 'applicable', status: 'gap', checks: [], ai_tests: [] }, db: { applicability: 'undetermined', status: 'undetermined', checks: ['unit'], ai_tests: [] }, ui: { applicability: 'undetermined', status: 'undetermined', checks: [], ai_tests: [] } }
+  const t = nightly.coverageTotalsFrom(dims)
+  assert.deepEqual(t.applicable, ['unit']); assert.deepEqual(t.missed, ['unit']); assert.equal(t.covered_total, 0); assert.equal(t.coverage, 0)
+  assert.deepEqual(t.undetermined, ['db', 'ui']); assert.deepEqual(t.undeterminedMissed, ['ui']); assert.equal(t.undetermined_total, 2)
+  assert.equal(nightly.coverageTotalsFrom({}).coverage, null)
+})
+
+// ── skipped_steps 去重（#906 / #898：web-build 既是 not applicable 又是「run stopped before this step」）──
+test('skipped_steps：同一步骤只出现一次，保留第一个（最具体的）理由', () => {
+  const list = [
+    { id: 'bench', reason: 'triage: change does not touch what this optional step covers' },
+    { id: 'web-build', reason: 'not applicable to this revision: no web entry (index.html)' },
+    { id: 'web-build', reason: 'not run: run stopped before this step (time budget / shutdown)' },
+  ]
+  const d = nightly.dedupeSkippedSteps(list)
+  assert.deepEqual(d.map((x) => x.id), ['bench', 'web-build'])
+  assert.match(d[1].reason, /^not applicable/)
+  assert.deepEqual(nightly.dedupeSkippedSteps(undefined), [])
 })

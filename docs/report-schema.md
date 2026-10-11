@@ -132,10 +132,10 @@ Merged reports written by nightly also carry `run.source_report` (path of the ni
 | **`test_backed`** | PR-level: `true` if at least one finding is test-backed |
 | `test_backed_severity` | highest severity among test-backed findings, or `null` |
 | `finding_sources` | distinct `source` values of this PR's findings |
-| `coverage` | QA-dimension coverage of the matrix (`applicable`, `covered`, `missed`, `undetermined`, `passRate`, `coverage`) — *not* code coverage. Since 2026-10-11 also, based on `triage`: **`applicable_total`**, **`covered_total`**, `covered_dimensions`, `ai_covered`, `gaps`, and **`dimension_status`** `{ <key>: { applicability, status: covered \| covered-by-ai-test \| gap \| not-applicable \| undetermined, checks: [step ids], ai_tests: [ai-test ids] } }` for all 29 dimensions (`covered` keeps its old meaning: the array of applicable dimensions covered by checks under the older p ≥ 0.7 rule) |
+| `coverage` | QA-dimension coverage of the matrix — *not* code coverage. See *Reading `coverage` and `dimension_status`* below. **`dimension_status`** `{ <key>: { applicability, status: covered \| covered-by-ai-test \| gap \| not-applicable \| undetermined, checks: [step ids], ai_tests: [ai-test ids] } }` for all 29 dimensions, and every total derived from it: `applicable`, `covered`, `missed` (= `gaps`), `undetermined`, `undeterminedMissed`, `coverage`, **`applicable_total`**, **`covered_total`**, `covered_dimensions`, `ai_covered`, `not_applicable_total`, `undetermined_total`; `passRate` = share of checks that ran and passed; `basis` names the source |
 | **`ai_tests`** | AI-generated tests for this PR, see *AI tests* |
 | **`coverage_gate`** | white-box code-coverage gate, see below; **docs-only: `{ status: "not-applicable", reason: "docs-only change" }`**; `null` when no unit run happened for another reason (not-tested, qa-error) |
-| **`skipped_steps`** | **every** profile step that did not run, each `{ id, nameZh, reason, reasonZh?, dimension }`; reasons: `triage: …` (optional step not relevant to the change), `skipped by --skip-step`, `not run: dependency install failed`, `not run: run stopped before this step …`, `docs-only change: no checks run`, `not applicable to this revision: …` (the profile step's `appliesIf` file is absent, e.g. `web-build` when the revision has no web entry `index.html`, or a dist scan whose script the revision does not have yet — neither a pass nor an unavailable check). **Sub-probes of a probe step that did not run** are listed too, as `{ id: "api-probe/<probe id>", nameZh, reason, parent_step: "api-probe", dimension }` — e.g. reason `no test account` for signed-in probes when neither local sign-in nor `MIVO_QA_TEST_*` is available |
+| **`skipped_steps`** | **every** profile step that did not run — **each step id at most once** (the first, most specific reason wins: not applicable / triage / `--skip-step` before `not run: …`; reports before 2026-10-11 could list e.g. `web-build` twice), each `{ id, nameZh, reason, reasonZh?, dimension }`; reasons: `triage: …` (optional step not relevant to the change), `skipped by --skip-step`, `not run: dependency install failed`, `not run: run stopped before this step …`, `docs-only change: no checks run`, `not applicable to this revision: …` (the profile step's `appliesIf` file is absent, e.g. `web-build` when the revision has no web entry `index.html`, or a dist scan whose script the revision does not have yet — neither a pass nor an unavailable check). **Sub-probes of a probe step that did not run** are listed too, as `{ id: "api-probe/<probe id>", nameZh, reason, parent_step: "api-probe", dimension }` — e.g. reason `no test account` for signed-in probes when neither local sign-in nor `MIVO_QA_TEST_*` is available |
 | **`triage`** | dimension applicability for this PR, see *Triage* |
 | `ai_summary` | `{ summary, risks, suspect, failure_explanation }` |
 | `evidence_dir`, `duration_s` | |
@@ -298,6 +298,28 @@ are deleted after the run; nothing is written to the target repo.
 }
 ```
 
+### Reading `coverage` and `dimension_status`
+
+`prs[].triage.dimensions` is Jev's decision per dimension; `coverage.dimension_status` adds what actually covered
+each one. **Every `coverage` total is counted from `dimension_status`** (since 2026-10-11, commit after `dc0b998`), so the
+totals cannot contradict Jev:
+
+| field | = keys of `dimension_status` with |
+|---|---|
+| `applicable` / `applicable_total` | `applicability: "applicable"` |
+| `covered` / `covered_dimensions` / `covered_total` | applicable **and** `status` `covered` (a check that ran declares it in `covers`) or `covered-by-ai-test` (a **kept** AI test covers it) |
+| `ai_covered` | applicable and `status: "covered-by-ai-test"` |
+| `missed` = `gaps` | applicable and `status: "gap"` (nothing covered it) |
+| `undetermined` / `undetermined_total` | `applicability: "undetermined"` (only when Jev was not configured / failed) |
+| `coverage` | `covered_total / applicable_total` (`null` when nothing is applicable) |
+
+Report wording: "**N applicable, M covered**" = `applicable_total`, `covered_total`; name the `gaps` if any.
+Reports written **before** this change (`basis: "triage (prs[].triage)"`) computed `applicable` / `covered` / `missed`
+/ `undetermined` with an older p ≥ 0.7 rule and can disagree with `applicable_total` / `covered_total` (e.g. #906:
+`applicable_total: 4`, `covered_total: 4`, but `missed: ["exception"]` and four `undetermined`); for those, trust
+`dimension_status` and the `*_total` fields only. Reports from 2026-10-10 (written before `ai_tests` existed) have
+**no** `ai_tests`, `dimension_status`, `applicable_total` or `covered_total` at all (see *Older reports*).
+
 - `status`: `ok` · `empty` (model wrote nothing usable) · `error` (gateway error, also in `system_health.llm_errors`
   stage `ai-tests`) · `skipped` (no gap, triage not decided, no `aiTests` profile config, install failed, …) ·
   `disabled` (`--no-ai-tests` / `ARGUS_AITESTS=0`).
@@ -311,7 +333,15 @@ are deleted after the run; nothing is written to the target repo.
 ## Issues: dedup and recurrence (`--create-issues` only)
 
 Issue bodies carry `<!-- mivo-qa-fingerprint: <fp> -->`; dedup is by fingerprint only (open **and** closed
-`qa-auto` issues). Recurrence follows argus's own publisher (`argus/src/publish.mjs`):
+`qa-auto` issues).
+
+**Fingerprints exclude the commit on purpose.** `fingerprint` (`mq1-…`) hashes repo, check / step, test name (or a
+normalized failure signature) and, for code review, file / symbol / category / title hash — never the PR number, the
+tested / merge / base SHA, durations, temp paths or line numbers. The same defect therefore gets the same fingerprint
+on every PR and every night it shows up, which is what cross-PR de-duplication and recurrence (comment / reopen /
+suppress) key off. The commit is **not lost**: every issue body and every evidence comment records `tested_sha`,
+`base_sha` and `merge_sha` (also in the ```` ```json mivo-qa-finding ```` block), and `pr_fingerprint` (`<fp>-pr<N>`)
+is available when a per-PR key is needed. Recurrence follows argus's own publisher (`argus/src/publish.mjs`):
 
 | Existing issue with the same fingerprint | Action (`issues.results[].action`) |
 |---|---|
