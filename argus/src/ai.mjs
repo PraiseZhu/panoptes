@@ -31,11 +31,15 @@ function buildDiff(files) {
   return truncate(out, DIFF_CHAR_CAP)
 }
 
-export async function analyzePr({ db, secrets, riskClass, pr, files, profile, results, outcome }) {
+export async function analyzePr({ db, secrets, riskClass, pr, files, profile, results, outcome, quota = null }) {
   if (riskClass !== 'B' && riskClass !== 'C') return { status: 'skipped' }
   if (!secrets.ARGUS_LLM_BASE_URL || !secrets.ARGUS_LLM_API_KEY) return { status: 'unavailable', reasonZh: '模型凭证没配置' }
   const day = toShanghaiDay()
-  if (aiUsageToday(db, day).calls >= DAILY_CALL_CAP) return { status: 'budget', reasonZh: `今天 AI 调用已到上限 ${DAILY_CALL_CAP} 次` }
+  // 夜间流程：quota（pr-summary 种类，生产 / 测试池分开）；Mac 流程：旧的单一日上限
+  if (quota) {
+    const q = quota.check('pr-summary')
+    if (!q.ok) return { status: 'capped', reasonZh: `pr-summary daily cap reached (${q.pool} pool ${q.used}/${q.cap})`, quota: q }
+  } else if (aiUsageToday(db, day).calls >= DAILY_CALL_CAP) return { status: 'budget', reasonZh: `今天 AI 调用已到上限 ${DAILY_CALL_CAP} 次` }
 
   const testSummary = results.map((r) => `${r.nameZh}：${r.ok ? '通过' : `失败${r.timedOut ? '（超时）' : ''}`}${r.ok ? '' : `\n失败输出尾部：\n${tail(r.tail, 3000)}`}`).join('\n')
   const user = redact([
@@ -65,7 +69,8 @@ export async function analyzePr({ db, secrets, riskClass, pr, files, profile, re
     })
     const data = await resp.json().catch(() => ({}))
     const tokens = data?.usage?.total_tokens ?? 0
-    addAiUsage(db, day, tokens)
+    if (quota) quota.consume('pr-summary', tokens)
+    else addAiUsage(db, day, tokens)
     if (!resp.ok) return { status: 'error', reasonZh: `模型网关返回 ${resp.status}`, detail: redact(String(data?.error?.message ?? '').slice(0, 300)) }
     const parsed = JSON.parse(data.choices?.[0]?.message?.content ?? '{}')
     return {

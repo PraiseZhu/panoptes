@@ -76,13 +76,17 @@ export function toAiTestSteps(tests, profile, { offset = 0 } = {}) {
   } })
 }
 
-export async function generateTargetedTests({ db, secrets, riskClass, pr, files, profile, gaps, now = new Date(), maxTests = MAX_TESTS, highRiskFiles = [], feedback = [], timeoutMs = 8 * 60_000 }) {
+export async function generateTargetedTests({ db, secrets, riskClass, pr, files, profile, gaps, now = new Date(), maxTests = MAX_TESTS, highRiskFiles = [], feedback = [], timeoutMs = 8 * 60_000, quota = null }) {
   if (!profile.aiTests) return { status: 'skipped', reasonZh: '这个项目还没配置 AI 补测', tests: [] }
   if (riskClass !== 'B' && riskClass !== 'C') return { status: 'skipped', reasonZh: '只改文档', tests: [] }
   if (!gaps.length) return { status: 'skipped', reasonZh: '涉及的方面现有检查都覆盖了', tests: [] }
   if (!secrets.ARGUS_LLM_BASE_URL || !secrets.ARGUS_LLM_API_KEY) return { status: 'skipped', reasonZh: '模型凭证没配置', tests: [] }
   const day = `gen:${toShanghaiDay(now)}`
-  if (aiUsageToday(db, day).calls >= DAILY_CAP) return { status: 'skipped', reasonZh: `今天的 AI 补测额度（${DAILY_CAP} 次）用完了`, tests: [] }
+  // 夜间流程传 quota（按种类 / 池子分开计数，见 quota.mjs）；Mac 流程（control.mjs）沿用旧的单一日上限
+  if (quota) {
+    const q = quota.check('ai-test')
+    if (!q.ok) return { status: 'capped', reasonZh: `ai-test daily cap reached (${q.pool} pool ${q.used}/${q.cap})`, quota: q, tests: [] }
+  } else if (aiUsageToday(db, day).calls >= DAILY_CAP) return { status: 'skipped', reasonZh: `今天的 AI 补测额度（${DAILY_CAP} 次）用完了`, tests: [] }
   const user = redact([
     `项目：${profile.displayName ?? ''}`,
     `产品意图：${profile.intentZh ?? '（没写）'}`,
@@ -103,7 +107,8 @@ export async function generateTargetedTests({ db, secrets, riskClass, pr, files,
       signal: AbortSignal.timeout(Math.max(30_000, timeoutMs)),
     })
     const data = await resp.json().catch(() => ({}))
-    addAiUsage(db, day, data?.usage?.total_tokens ?? 0)
+    if (quota) quota.consume('ai-test', data?.usage?.total_tokens ?? 0)
+    else addAiUsage(db, day, data?.usage?.total_tokens ?? 0)
     if (!resp.ok) return { status: 'error', reasonZh: `模型网关返回 ${resp.status}`, tests: [] }
     const raw = JSON.parse(data.choices?.[0]?.message?.content ?? '{}')
     const tests = toValidTests(raw, { profile, gaps, maxTests })

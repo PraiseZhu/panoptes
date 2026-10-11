@@ -6,7 +6,7 @@
 #                  [--no-review] [--no-ai-tests] [--skip-step ID ...]
 #                  [--out PATH] [--no-reuse] [--wait-lock [SECONDS]]
 #                  [--pr-timeout MIN] [--deadline HH:MM | --burst-cutoff [HH:MM]] [--write-merged | --no-write-merged] [--write-open]
-#                  [--no-issues | --create-issues]
+#                  [--no-issues | --create-issues] [--quota-pool test|production] [--fresh-review]
 #
 #   --catch-up    pure-script gap filler (cron-safe, quiet when there is nothing to do): list PRs merged
 #                 yesterday + today (Asia/Shanghai) via gh, compare with $QA_HOME/reports/merged/PR-N.json
@@ -42,6 +42,11 @@
 #                 $QA_HOME/reports/merged/PR-N.json (same format as on-merge). Default: on without --pr, off with --pr
 #   --write-open  also write every open PR of the run (tested or not, with reasons) to
 #                 $QA_HOME/reports/open/PR-N.json (same per-PR format). Default: off
+#   --quota-pool P  daily model-call quota pool: production | test. Default: --trigger manual → test (manual runs,
+#                 drills, acceptance reruns never consume production quota), event / catch-up → production.
+#                 Caps per kind and pool: ARGUS_QUOTA_{AI_TEST,JEV,AI_REVIEW,PR_SUMMARY} (40/150/70/40) and
+#                 ARGUS_QUOTA_TEST_* for the test pool, or $ARGUS_ROOT/quota.json (env ARGUS_QUOTA_FILE)
+#   --fresh-review  do not reuse a cached code-review verdict (commit + diff + prompt + model); review afresh
 #   --no-issues   default behaviour; accepted for explicitness
 #   --create-issues  OFF by default. Only acts when ARGUS_ALLOW_ISSUES=1 is also set.
 #   -h, --help    print this help

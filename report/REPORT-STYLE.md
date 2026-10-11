@@ -99,7 +99,10 @@
 - **维度适用性**：`prs[].triage.dimensions.<维度>.applicability` 是 Jev 的结论（applicable / not-applicable / undetermined，各带 reason）。
 - **覆盖结果**：`prs[].coverage.dimension_status.<维度>.status`：
   `covered`（有跑过的检查覆盖，`checks` 列出步骤）· `covered-by-ai-test`（AI 补的测试通过且能抓到植入的错误，`ai_tests` 列出编号）·
-  `gap`（适用但没有任何东西覆盖）· `not-applicable` · `undetermined`（Jev 没判定）。
+  `gap`（适用但没有任何东西覆盖）· `not-applicable` · `undetermined`（Jev 没判定）·
+  **`capped`（额度用尽未补测）**：当天的模型调用额度用完了，这个维度没去补测（`capped_by: "ai-test"`）或没做适用性判定（`capped_by: "jev"`）。
+  它**不是** gap：群里写「额度用尽未补测」（可加大白话「今天自动补测的次数用完了，这几项没补」），不要写成"没有测试覆盖"，也不算这个 PR 的问题。
+  数字：`coverage.capped` / `coverage.capped_total`；`gaps` 里不含 capped 的维度（适用的 = 覆盖 + gaps + capped）。
 - **数字一律用 `coverage.applicable_total` / `coverage.covered_total`**，写成「N 项适用，覆盖了 M 项」；有 `coverage.gaps` 时点名缺的维度
   （大白话：「异常处理这块没有测试覆盖」）。这两个数和 `applicable` / `covered` / `missed` / `undetermined` 都是从 `dimension_status` 数出来的，不会互相矛盾。
   旧报告（`coverage.basis` 不是 `dimension_status …`）里的 `missed` / `undetermined` 是旧规则算的，**不要用**；10-10 的报告完全没有这些字段 → 写「当时还没做维度统计」。
@@ -108,6 +111,11 @@
   （`source: "ai-test"`，`test_backed: false`，`status: "unconfirmed"`）。
   群里写成「自动补的测试发现一处可疑行为，还没人确认」，**不能**写成"测出了 bug"、不 @ 作者催改；`reproduced: true` 只说明重跑一次还失败，仍需人确认。
   成本（`model_calls`、`wall_s`）只进给 Praise 的私下补充。
+- **额度用尽**（since 2026-10-11）：`ai_tests.status: "capped"`（一次都没补就被额度挡住；做了一部分时 `ai_tests.capped: true` +
+  `capped_gaps`）、`code_review.status: "capped"`（当天没做代码审查）、`ai_summary.status: "capped"`、`triage.status: "capped"`（Jev 没跑）。
+  每个 PR 的汇总在 `prs[].quota_capped[]`（`kind`、`dimensions`）。群里统一写「额度用尽未补测」，和"测了没覆盖"分开说；
+  审查被额度挡住时，P 级只反映真实跑过的检查，要写「代码审查额度用尽，今天没审」，不能写成「审查无问题」。
+  额度池、上限、用量（`system_health.quota`）只进给 Praise 的私下补充；`system_health.status` 会因此是 degraded，系统状态一句写「有 N 个 PR 额度用尽未补测」。
 
 ## 仅私下给 Praise 的补充（不进群）
 

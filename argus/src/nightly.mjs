@@ -24,6 +24,7 @@ import { coverageGate, parseAddedLines, COVERAGE_THRESHOLDS } from './coverage.m
 import { recentGiveUps } from './catchup.mjs'
 import { generateTargetedTests, toAiTestSteps, toAiGaps, toAiTestResult, aiTestCaps } from './aitests.mjs'
 import { globToRegExp } from './classify.mjs'
+import { createQuota, memoryQuota, resolvePool, CAPPED_ZH } from './quota.mjs'
 
 const SCHEMA_VERSION = '1.0'
 const SEV_RANK = { P0: 0, P1: 1, P2: 2, P3: 3 }
@@ -130,7 +131,7 @@ function evidenceTail(r, name) {
 }
 
 // ── 单个 PR ───────────────────────────────────────────
-export async function processPr({ repo, project, number, discovery, secrets, db, health, evidenceRoot, opts }) {
+export async function processPr({ repo, project, number, discovery, secrets, db, health, evidenceRoot, opts, quota = memoryQuota() }) {
   const startedAt = Date.now()
   const baseProfile = { ...project.profileData, displayName: project.displayName }
   const pr = await getPull(repo, number)
@@ -147,6 +148,8 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     evidence_dir: null, duration_s: null,
     // tested_at：这个 PR 得出结论的时间（上海时区 ISO 8601，带 +08:00）；test_started_at：开始处理的时间
     test_started_at: toShanghaiIso(new Date(startedAt)), tested_at: null, reviewed_sha: null, review_base_sha: null,
+    // 因每日模型额度用尽而没做的事（Jev 分诊 / AI 补测 / 代码审查 / 摘要），每项 { kind, pool, cap, used, dimensions, message }
+    quota_capped: [],
   }
   // 合并即测（on-merge）已经在同一个 merge commit 上测过：直接引用它的结果，不重测
   if (merged && opts.reuseMerged !== false) {
@@ -176,7 +179,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
       const baseSha = await reviewBaseSha({ repo, pr, sha, merged, extraRefspecs })
       out.base_sha = baseSha
       const prDiff = await diffForReview({ repo, sha, baseSha, extraRefspecs })
-      await runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha, results: [], profile: baseProfile, evDir, secrets, health, number, shaField: merged ? 'merge_sha' : 'head_sha' })
+      await runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha, results: [], profile: baseProfile, evDir, secrets, health, number, shaField: merged ? 'merge_sha' : 'head_sha', quota, opts })
       out.sha_consistent = out.reviewed_sha == null || out.reviewed_sha === sha
       if (!out.sha_consistent) health.notes.push(`PR #${number}: docs-only review looked at ${String(out.reviewed_sha).slice(0, 12)} instead of ${String(sha).slice(0, 12)} (${out.review_diff_source})`)
     }
@@ -194,9 +197,17 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   const jevConfigured = Boolean(secrets.ARGUS_TYPESAFE_API_KEY)
   let jev = { ok: false, reasonZh: '没有配置 Jev 的 key（ARGUS_TYPESAFE_API_KEY），可选检查全部执行' }
   const jevT0 = Date.now()
-  if (jevConfigured) jev = await evaluateJev({ state: toMatrixState({ pr, files, profile: baseProfile }), questions: toMatrixQuestions(baseProfile), secrets })
+  if (jevConfigured) {
+    const q = quota.check('jev')
+    if (!q.ok) {
+      jev = { ok: false, capped: true, reasonZh: `${CAPPED_ZH}: jev daily cap reached (${q.pool} pool ${q.used}/${q.cap})` }
+    } else {
+      jev = await evaluateJev({ state: toMatrixState({ pr, files, profile: baseProfile }), questions: toMatrixQuestions(baseProfile), secrets })
+      quota.consume('jev', (jev.usage?.input_tokens ?? 0) + (jev.usage?.output_tokens ?? 0))
+    }
+  }
   const triage = toTriage({ profile: baseProfile, files, jev })
-  triage.jevStatus = jev.ok ? 'ok' : jevConfigured ? 'failed' : 'not-configured'
+  triage.jevStatus = jev.ok ? 'ok' : jev.capped ? 'capped' : jevConfigured ? 'failed' : 'not-configured'
   out.triage = { ...toApplicability(triage), duration_ms: jevConfigured ? Date.now() - jevT0 : null, usage: jev.usage ?? null }
   recordTriage(health, number, out.triage)
   const plan = toStepPlan({ profile: baseProfile, riskClass, triage })
@@ -331,15 +342,19 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
 
   // AI 补测：Jev 判为适用、但没有检查覆盖的维度 → 生成 vitest 用例，经「当前通过 + 植入错误失败」验证后才保留。
   // 独立的执行轮次（ai1、ai2…），结果不参与 outcome 判定；在当前代码上失败的只记 P2、test_backed=false。
-  if (!opts.noAiTests) await runAiTests({ out, repo, pr, files, profile, riskClass, sha, common, db, secrets, health, number, results: first })
+  if (!opts.noAiTests) await runAiTests({ out, repo, pr, files, profile, riskClass, sha, common, db, secrets, health, number, results: first, quota })
   out.coverage = withDimensionStatus(out.coverage, out.triage, out.ai_tests, profile, first)
+  // Jev 因额度没跑：没判定的维度记 capped；AI 补测因额度没做完：剩下的缺口维度记 capped（不是普通 gap）
+  if (out.triage?.status === 'capped') out.quota_capped.push(quota.markCapped('jev', { pr: number, dimensions: out.coverage?.capped ?? out.triage.undetermined }))
+  if (out.ai_tests?.capped) out.quota_capped.push(quota.markCapped('ai-test', { pr: number, dimensions: out.ai_tests.capped_gaps }))
 
   // ming-qa 代码审查（白盒）
-  if (!opts.noReview) await runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha, results: first, profile, evDir, secrets, health, number })
+  if (!opts.noReview) await runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha, results: first, profile, evDir, secrets, health, number, quota, opts })
   // 人话摘要（Argus 原有 AI 解读，可选）
   if (!opts.noReview) {
-    const ai = await analyzePr({ db, secrets, riskClass, pr, files, profile, results: first, outcome: decision.outcome })
+    const ai = await analyzePr({ db, secrets, riskClass, pr, files, profile, results: first, outcome: decision.outcome, quota })
     if (ai.status === 'ok') out.ai_summary = { summary: ai.summaryZh, risks: ai.risksZh, suspect: ai.suspectZh || null, failure_explanation: ai.failureZh || null }
+    else if (ai.status === 'capped') { out.ai_summary = { status: 'capped', reason: ai.reasonZh }; out.quota_capped.push(quota.markCapped('pr-summary', { pr: number })) }
     else if (ai.status === 'error') health.llm_errors.push({ pr: number, stage: 'pr-summary', model: LLM_MODEL, message: `${ai.reasonZh} ${ai.detail ?? ''}`.trim() })
   }
 
@@ -368,7 +383,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
 }
 
 // ── AI 补测（夜间）────────────────────────────────────────
-async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, common, db, secrets, health, number, results }) {
+async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, common, db, secrets, health, number, results, quota = memoryQuota() }) {
   const caps = aiTestCaps()
   const t0 = Date.now()
   const deadline = t0 + caps.maxWallMin * 60_000
@@ -392,7 +407,13 @@ async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, commo
   for (let round = 1; round <= caps.maxCalls && remaining.length; round++) {
     const left = deadline - Date.now()
     if (left < 3 * 60_000) { ai.rounds.push({ round, skipped: 'wall-time cap reached' }); break }
-    const gen = await generateTargetedTests({ db, secrets, riskClass, pr, files, profile, gaps: remaining, maxTests: caps.maxTestsPerCall, highRiskFiles, feedback, timeoutMs: Math.min(8 * 60_000, left / 2) })
+    const gen = await generateTargetedTests({ db, secrets, riskClass, pr, files, profile, gaps: remaining, maxTests: caps.maxTestsPerCall, highRiskFiles, feedback, timeoutMs: Math.min(8 * 60_000, left / 2), quota })
+    if (gen.status === 'capped') {
+      // 每日 ai-test 额度用尽：这一轮及之后都不调模型；剩下的缺口维度记 capped（显示「额度用尽未补测」）
+      ai.capped = true; ai.capped_gaps = [...remaining]; ai.quota = gen.quota
+      ai.rounds.push({ round, gaps: [...remaining], status: 'capped', reason: gen.reasonZh, offered: 0, rejected_by_validation: 0, tokens: null, tests: [] })
+      break
+    }
     const called = !['skipped'].includes(gen.status)
     if (called) ai.model_calls++
     if (gen.model) ai.model = gen.model
@@ -440,7 +461,10 @@ async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, commo
         fingerprint: fp, pr_fingerprint: prFingerprint(fp, number), evidence: { tested_sha: sha, file: t.file, covers: t.covers, log_tail: t.log_tail } })
     }
   }
-  finish(ai.generated ? 'ok' : ai.rounds.some((r) => r.status === 'error') ? 'error' : 'empty', ai.generated ? null : (ai.rounds.at(-1)?.reason ?? ai.rounds.at(-1)?.skipped ?? null))
+  if (ai.capped) ai.capped_gaps = ai.capped_gaps.filter((k) => !ai.newly_covered.includes(k))
+  // 一次模型调用都没成就被额度挡住 → status capped；做了一部分 → status 按结果，capped: true + capped_gaps
+  if (ai.capped && !ai.generated) return finish('capped', `${CAPPED_ZH}: ${ai.rounds.at(-1)?.reason ?? 'ai-test daily cap reached'}`)
+  finish(ai.generated ? 'ok' : ai.rounds.some((r) => r.status === 'error') ? 'error' : 'empty', ai.generated ? (ai.capped ? `${CAPPED_ZH} (partly): ${ai.rounds.at(-1)?.reason}` : null) : (ai.rounds.at(-1)?.reason ?? ai.rounds.at(-1)?.skipped ?? null))
 }
 
 // coverage（QA 维度覆盖，不是代码覆盖率）补上：applicable_total / covered_total 与逐维度状态
@@ -450,11 +474,14 @@ export function withDimensionStatus(cov, triage, ai, profile, results) {
   const byChecks = (k) => profile.steps.filter((s) => ran.has(s.id) && (s.covers ?? []).includes(k)).map((s) => s.id)
   const byAi = (k) => (ai?.tests ?? []).filter((t) => t.result === 'kept' && t.covers.includes(k)).map((t) => t.id)
   const dims = {}
+  // capped（额度用尽未补测）：Jev 因额度没跑时没判定的维度；AI 补测因额度没做的缺口维度。和普通 gap 分开计
+  const jevCapped = triage.status === 'capped'
+  const aiCapped = new Set(ai?.capped ? ai.capped_gaps ?? [] : [])
   for (const [k, d] of Object.entries(triage.dimensions)) {
     const checks = byChecks(k), aiIds = byAi(k)
-    const status = d.applicability === 'not-applicable' ? 'not-applicable' : d.applicability === 'undetermined' ? 'undetermined'
-      : checks.length ? 'covered' : aiIds.length ? 'covered-by-ai-test' : 'gap'
-    dims[k] = { applicability: d.applicability, status, checks, ai_tests: aiIds }
+    const status = d.applicability === 'not-applicable' ? 'not-applicable' : d.applicability === 'undetermined' ? (jevCapped ? 'capped' : 'undetermined')
+      : checks.length ? 'covered' : aiIds.length ? 'covered-by-ai-test' : aiCapped.has(k) ? 'capped' : 'gap'
+    dims[k] = { applicability: d.applicability, status, checks, ai_tests: aiIds, ...(status === 'capped' ? { display_zh: CAPPED_ZH, capped_by: jevCapped && d.applicability === 'undetermined' ? 'jev' : 'ai-test' } : {}) }
   }
   return { ...cov, ...coverageTotalsFrom(dims), dimension_status: dims, basis: 'dimension_status (from prs[].triage, Jev)' }
 }
@@ -476,6 +503,9 @@ export function coverageTotalsFrom(dims) {
     ai_covered: applicable.filter((k) => dims[k].status === 'covered-by-ai-test'),
     not_applicable_total: keys.filter((k) => dims[k].applicability === 'not-applicable').length,
     undetermined_total: undetermined.length,
+    // 额度用尽未补测（status capped）：不算 gap，也不算覆盖
+    capped: keys.filter((k) => dims[k].status === 'capped'),
+    capped_total: keys.filter((k) => dims[k].status === 'capped').length,
   }
 }
 
@@ -504,6 +534,13 @@ export function probeSummary(rep) {
   return { total: checks.length + (rep.skipped?.length ?? 0), passed: checks.filter((c) => c.status === 'pass').length, failed: checks.filter((c) => c.status !== 'pass').length, skipped: rep.skipped?.length ?? 0, auth: rep.auth ?? null }
 }
 
+// 额度：system_health.quota = { pool, day, caps, caps_source, used_by_run, used_today, capped[] }；
+// 每个 capped 另加一条 notes（「额度用尽未补测：…」）。capped 让 status 变成 degraded，但不是 qa_tool_failures（不开 issue）
+export function recordQuota(health, summary) {
+  health.quota = summary
+  for (const c of summary.capped ?? []) health.notes.push(`${CAPPED_ZH}：#${c.pr ?? '?'} ${c.kind} (${c.pool} pool ${c.used}/${c.cap}, ${c.day})${c.dimensions?.length ? ` — ${c.dimensions.join(', ')}` : ''}`)
+}
+
 // 分诊结果进 system_health.triage；Jev 失败另记 llm_errors（失败 / 没配置时由 runNightly 加说明）
 export const TRIAGE_NOTE_NOT_CONFIGURED = '维度适用性未判定（Jev 未配置）'
 export const TRIAGE_NOTE_FAILED = '维度适用性未判定（Jev 分诊失败）'
@@ -526,12 +563,20 @@ async function reviewBaseSha({ repo, pr, sha, merged, extraRefspecs }) {
 
 // ming-qa 代码审查（白盒）。审查文件来自本地镜像 base..tested 的 diff（已合并：merge-base..merge commit；开放：merge-base..head）。
 // 本地 diff 拿不到时才退回 GitHub 的 PR 文件列表（那是 PR head 的 diff），并在 system_health.notes 里说明。
-async function runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha, results, profile, evDir, secrets, health, number, shaField = 'tested_sha' }) {
+export async function runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha, results, profile, evDir, secrets, health, number, shaField = 'tested_sha', quota = memoryQuota(), opts = {} }) {
   const reviewFiles = prDiff.files ?? files
   out.reviewed_sha = prDiff.files ? sha : (pr.head?.sha ?? null)
   out.review_base_sha = prDiff.files ? baseSha : (pr.base?.sha ?? null)
   out.review_diff_source = prDiff.files ? `local git diff base_sha..${shaField}` : `github pr files (local diff unavailable: ${prDiff.error})`
+  const q = quota.check('ai-review')
+  if (!q.ok) {
+    // 每日 ai-review 额度用尽：不调模型，审查记 capped（显示「额度用尽未补测」）；代码审查不对应 29 个维度里的任何一个
+    out.code_review = { status: 'capped', reason: `${CAPPED_ZH}: ai-review daily cap reached (${q.pool} pool ${q.used}/${q.cap})`, display_zh: CAPPED_ZH }
+    out.quota_capped.push(quota.markCapped('ai-review', { pr: number }))
+    return
+  }
   const cr = await codeReview({ secrets, pr, files: reviewFiles, results, profile, outDir: join(evDir, 'code-review') })
+  if (cr.status !== 'unavailable') quota.consume('ai-review', cr.tokens ?? 0)
   if (cr.status !== 'ok') {
     health.llm_errors.push({ pr: number, stage: 'code-review', model: LLM_MODEL, ...cr.error })
     out.code_review = { status: cr.status, error: cr.error }
@@ -995,7 +1040,7 @@ export async function processTargets(targets, { opts = {}, health, startedAt = n
 // status / complete / all_discovered_tested / 心跳收尾
 export function finalizeHealth(health, prs, startedAt = new Date(), now = () => Date.now()) {
   health.status = health.qa_tool_failures.some((f) => ['discovery', 'pipeline'].includes(f.stage)) || prs.some((p) => p.verdict === 'qa-error') ? 'failed'
-    : (health.qa_tool_failures.length || health.env_problems.length || health.llm_errors.length) ? 'degraded' : 'ok'
+    : (health.qa_tool_failures.length || health.env_problems.length || health.llm_errors.length || health.quota?.capped?.length) ? 'degraded' : 'ok'
   // complete：发现成功，且本次要测的每个 PR 都有最终结论（没有 qa-error，没有因超时 / 截止时间而没测）。
   // all_discovered_tested：当天发现的每个 PR 都有最终结论（--pr / --limit 排除的也算没测）。
   const unfinished = (p) => p.verdict === 'qa-error' || (p.verdict === 'not-tested' && ['pr-timeout', 'deadline'].includes(p.not_tested_code))
@@ -1044,6 +1089,8 @@ export async function runNightly(opts = {}) {
   if (env.disk_free_gb != null && env.disk_free_gb < 12) health.env_problems.push({ message: `low disk: ${env.disk_free_gb} GB free` })
   recordBootstrap(health, readBootstrapStatus())
   const db = openDb()
+  // 模型额度：manual（手动 / 演练 / 验收重跑）默认走 test 池，event / catch-up 走 production 池；--quota-pool 显式指定
+  const quota = createQuota({ db, pool: resolvePool({ quotaPool: opts.quotaPool, trigger: normalizeTrigger(opts.trigger) }) })
   const runId = randomUUID()
   const evidenceRoot = join(EVIDENCE_DIR, 'nightly', day, runId.slice(0, 8))
   mkdirSync(evidenceRoot, { recursive: true })
@@ -1062,8 +1109,9 @@ export async function runNightly(opts = {}) {
   if (opts.prs?.length && health.discovery) health.discovery.excluded_by_pr_filter = plan.excluded
   const { prs } = await processTargets(plan.targets, {
     opts, health, startedAt, repo,
-    processOne: (t) => processPr({ repo, project, number: t.number, discovery: t.reason, secrets, db, health, evidenceRoot, opts }),
+    processOne: (t) => processPr({ repo, project, number: t.number, discovery: t.reason, secrets, db, health, evidenceRoot, opts, quota }),
   })
+  recordQuota(health, quota.summary())
   prs.push(...plan.notTested)
   annotateTestBacked(prs)
   if (health.triage?.failed?.length) health.notes.push(`${TRIAGE_NOTE_FAILED}：${health.triage.failed.map((f) => `#${f.pr} ${f.reason}`).join('；')}`)
@@ -1083,7 +1131,7 @@ export async function runNightly(opts = {}) {
       started_at_shanghai: toShanghaiIso(startedAt), finished_at_shanghai: toShanghaiIso(),
       duration_s: Math.round((Date.now() - startedAt.getTime()) / 1000),
       trigger: normalizeTrigger(opts.trigger),
-      args: { date: opts.date ?? null, date_source: dateSource, prs: opts.prs ?? null, out: opts.out ?? null, reuse_merged: opts.reuseMerged !== false, create_issues: Boolean(opts.createIssues), limit: opts.limit ?? null, pr_timeout_min: opts.prTimeoutMin ?? null, deadline: opts.deadline ?? null, burst_cutoff: opts.deadlineKind === 'burst-cutoff' ? opts.deadline : null, step_cache: process.env.ARGUS_STEP_CACHE !== '0', write_merged: writeMergedEnabled(opts), write_open: writeOpenEnabled(opts), ai_tests: !opts.noAiTests && aiTestCaps().enabled, ai_test_caps: aiTestCaps() },
+      args: { date: opts.date ?? null, date_source: dateSource, prs: opts.prs ?? null, out: opts.out ?? null, reuse_merged: opts.reuseMerged !== false, create_issues: Boolean(opts.createIssues), limit: opts.limit ?? null, pr_timeout_min: opts.prTimeoutMin ?? null, deadline: opts.deadline ?? null, burst_cutoff: opts.deadlineKind === 'burst-cutoff' ? opts.deadline : null, step_cache: process.env.ARGUS_STEP_CACHE !== '0', write_merged: writeMergedEnabled(opts), write_open: writeOpenEnabled(opts), ai_tests: !opts.noAiTests && aiTestCaps().enabled, ai_test_caps: aiTestCaps(), quota_pool: quota.pool, quota_caps: quota.caps, fresh_review: Boolean(opts.freshReview) },
       argus_commit: (() => { try { return execFileSync('git', ['-C', CODE_DIR, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim() } catch { return null } })(),
       ming_qa_commit: await mingQaVersion(), llm_model: LLM_MODEL, evidence_root: evidenceRoot,
     },
@@ -1161,6 +1209,7 @@ export function mergedReportFor(report, pr, { kind = 'merged' } = {}) {
     prs: [pr],
     issues: { enabled: false, reason: 'written from a nightly run; issues are only handled by the run itself' },
     system_health: { ...h, qa_tool_failures: own(h.qa_tool_failures), env_problems: own(h.env_problems), llm_errors: own(h.llm_errors),
+      ...(h.quota ? { quota: { ...h.quota, capped: own(h.quota.capped) } } : {}),
       heartbeat: h.heartbeat ? { ...h.heartbeat, prs: (h.heartbeat.prs ?? []).filter((b) => b.number === pr.number) } : null },
     merged_reports: undefined,
     open_reports: undefined,

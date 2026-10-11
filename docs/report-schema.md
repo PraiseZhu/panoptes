@@ -100,6 +100,7 @@ Reports written before 2026-10-11 (commit `78184f9`) do not have `tested_at`; fa
 **`trigger`** (`event` = on-merge trigger, `catch-up` = the 2-hourly catch-up timer or `--catch-up`, `manual` = run by
 hand; default `manual`; reports before 2026-10-11 have no `trigger`), `id` (uuid), `started_at`, `finished_at`, `started_at_shanghai`, `finished_at_shanghai`, `duration_s`,
 `args` (`date` (the `--date` argument or `null`), `date_source` (how `date` was chosen: `--date`, `pr merged_at (Asia/Shanghai)`, `pr updated_at (Asia/Shanghai)`, `yesterday (Asia/Shanghai)`), `prs`, `out`, `reuse_merged`, `create_issues`, `limit`, `pr_timeout_min`, `deadline`, `burst_cutoff`, `step_cache`, `write_merged`, `write_open`),
+`ai_tests`, `ai_test_caps`, **`quota_pool`** (`production` | `test`, see *Model-call quotas*), **`quota_caps`** (`{ ai-test, jev, ai-review, pr-summary }` daily caps of that pool), `fresh_review` (see *Code review reuse*)),
 `argus_commit` (panoptes commit), `ming_qa_commit`, `llm_model`, `evidence_root`.
 Merged reports written by nightly also carry `run.source_report` (path of the nightly report).
 
@@ -147,17 +148,18 @@ Merged reports written by nightly also carry `run.source_report` (path of the ni
 | `run_mode` | `{ coverage_parallel, reason }`: whether the coverage round ran in parallel with the first run (memory guard: `MemAvailable` ≥ `ARGUS_PARALLEL_MIN_FREE_GB`, default 8, and `ARGUS_MAX_PARALLEL` ≠ 1) |
 | `checks[]` | `{ id, name, kind, dimension, qa_dimensions, status: pass/fail/timeout/unavailable, exit_code, duration_ms, failure_count, unavailable_reason?, sub_checks?, shards?, reused?, reused_from? }` (`shards` / `reused` / `reused_from`: see *Burst capacity*); `sub_checks` only for probe steps (`api-probe`): `{ total, passed, failed, skipped, auth: { account, account_via, host_exchange } }` — `status: pass` means every probe that **ran** passed; skipped probes are listed in `skipped_steps`, never counted as passed |
 | `failed_checks[]` | `{ check_id, check_name, dimension, qa_dimensions, test, failure_type, status, severity, attribution, fingerprint, pr_fingerprint, evidence{ tested_sha, base_sha, exit_code, timed_out, first_run, rerun, base_run, latest_main_run?, command, log_tail, log_file } }`; `status` ∈ `introduced, pre-existing, flaky, fixed-later, unverified, timeout, setup-failed`; also boolean **`flaky`** (`true` iff `status: "flaky"`), `related_to_pr: false` and **`base_comparison`** (see *Flaky*) for flaky entries, `evidence.base_log_file?` when base ran, and, in reports written before 2026-10-11 only, `reclassified { at, from, reason }` (legacy in-place re-classification; no longer done — see *Report preservation*) |
-| `code_review` | `{ status, summary, gate, model, tokens, findings_count, residual_risks, file }` or `{ status, error }`. **Also present for docs-only PRs** (reviewed on the same commit: merged → `base_sha` (first parent = merge-base) `..merge_sha`); `null` only with `--no-review` |
+| `code_review` | `{ status, summary, gate, model, tokens, findings_count, residual_risks, file }` or `{ status, error }`, or **`{ status: "capped", reason, display_zh: "额度用尽未补测" }`** when the day's ai-review quota was used up (no review happened; see *Model-call quotas*). **Also present for docs-only PRs** (reviewed on the same commit: merged → `base_sha` (first parent = merge-base) `..merge_sha`); `null` only with `--no-review` |
 | `findings[]` | everything that can raise severity. Every finding has **`source`** ∈ `check` (a failed check, same fields as `failed_checks`), `code-review` (LLM; capped at P1, original in `llm_severity`), `coverage-gate` (P2), `qa-error` (P2, the pipeline crashed), `ai-test` (P2, an AI-generated test that fails on the tested commit; `test_backed: false`, `status: "unconfirmed"`, `reproduced`) and boolean **`test_backed`** (see *test_backed*) |
 | **`test_backed`** | PR-level: `true` if at least one finding is test-backed |
 | `test_backed_severity` | highest severity among test-backed findings, or `null` |
 | `finding_sources` | distinct `source` values of this PR's findings |
-| `coverage` | QA-dimension coverage of the matrix — *not* code coverage. See *Reading `coverage` and `dimension_status`* below. **`dimension_status`** `{ <key>: { applicability, status: covered \| covered-by-ai-test \| gap \| not-applicable \| undetermined, checks: [step ids], ai_tests: [ai-test ids] } }` for all 29 dimensions, and every total derived from it: `applicable`, `covered`, `missed` (= `gaps`), `undetermined`, `undeterminedMissed`, `coverage`, **`applicable_total`**, **`covered_total`**, `covered_dimensions`, `ai_covered`, `not_applicable_total`, `undetermined_total`; `passRate` = share of checks that ran and passed; `basis` names the source |
+| `coverage` | QA-dimension coverage of the matrix — *not* code coverage. See *Reading `coverage` and `dimension_status`* below. **`dimension_status`** `{ <key>: { applicability, status: covered \| covered-by-ai-test \| gap \| capped \| not-applicable \| undetermined, checks: [step ids], ai_tests: [ai-test ids], display_zh?, capped_by? } }` for all 29 dimensions, and every total derived from it: `applicable`, `covered`, `missed` (= `gaps`), `undetermined`, `undeterminedMissed`, `coverage`, **`applicable_total`**, **`covered_total`**, `covered_dimensions`, `ai_covered`, `not_applicable_total`, `undetermined_total`, **`capped`**, **`capped_total`**; `passRate` = share of checks that ran and passed; `basis` names the source |
 | **`ai_tests`** | AI-generated tests for this PR, see *AI tests* |
 | **`coverage_gate`** | white-box code-coverage gate, see below; **docs-only: `{ status: "not-applicable", reason: "docs-only change" }`**; `null` when no unit run happened for another reason (not-tested, qa-error) |
 | **`skipped_steps`** | **every** profile step that did not run — **each step id at most once** (the first, most specific reason wins: not applicable / triage / `--skip-step` before `not run: …`; reports before 2026-10-11 could list e.g. `web-build` twice), each `{ id, nameZh, reason, reasonZh?, dimension }`; reasons: `triage: …` (optional step not relevant to the change), `skipped by --skip-step`, `not run: dependency install failed`, `not run: run stopped before this step …`, `docs-only change: no checks run`, `not applicable to this revision: …` (the profile step's `appliesIf` file is absent, e.g. `web-build` when the revision has no web entry `index.html`, or a dist scan whose script the revision does not have yet — neither a pass nor an unavailable check). **Sub-probes of a probe step that did not run** are listed too, as `{ id: "api-probe/<probe id>", nameZh, reason, parent_step: "api-probe", dimension }` — e.g. reason `no test account` for signed-in probes when neither local sign-in nor `MIVO_QA_TEST_*` is available |
 | **`triage`** | dimension applicability for this PR, see *Triage* |
-| `ai_summary` | `{ summary, risks, suspect, failure_explanation }` |
+| `ai_summary` | `{ summary, risks, suspect, failure_explanation }`, or `{ status: "capped", reason }` (pr-summary quota used up) |
+| **`quota_capped`** | `[{ pr, kind, pool, cap, used, day, dimensions, message }]` — what this PR did not get because a daily model-call quota was used up (`kind` ∈ `jev`, `ai-test`, `ai-review`, `pr-summary`; `dimensions` = the QA dimensions marked `capped`). Empty when nothing was capped; absent in reports before 2026-10-11 |
 | `evidence_dir`, `duration_s` | |
 | `reused`, `reused_from`, `reused_report_generated_at`, `reused_report_system_health` | only for reused on-merge results |
 
@@ -329,7 +331,8 @@ totals cannot contradict Jev:
 | `applicable` / `applicable_total` | `applicability: "applicable"` |
 | `covered` / `covered_dimensions` / `covered_total` | applicable **and** `status` `covered` (a check that ran declares it in `covers`) or `covered-by-ai-test` (a **kept** AI test covers it) |
 | `ai_covered` | applicable and `status: "covered-by-ai-test"` |
-| `missed` = `gaps` | applicable and `status: "gap"` (nothing covered it) |
+| `missed` = `gaps` | applicable and `status: "gap"` (nothing covered it; **capped dimensions are not gaps**) |
+| `capped` / `capped_total` | `status: "capped"` — **额度用尽未补测**: an applicable gap the AI tests did not attempt because the ai-test quota was used up (`capped_by: "ai-test"`), or a dimension left undetermined because Jev was not called (quota; `capped_by: "jev"`). Display text `display_zh: "额度用尽未补测"`. |
 | `undetermined` / `undetermined_total` | `applicability: "undetermined"` (only when Jev was not configured / failed) |
 | `coverage` | `covered_total / applicable_total` (`null` when nothing is applicable) |
 
@@ -342,13 +345,48 @@ Reports written **before** this change (`basis: "triage (prs[].triage)"`) comput
 
 - `status`: `ok` · `empty` (model wrote nothing usable) · `error` (gateway error, also in `system_health.llm_errors`
   stage `ai-tests`) · `skipped` (no gap, triage not decided, no `aiTests` profile config, install failed, …) ·
-  `disabled` (`--no-ai-tests` / `ARGUS_AITESTS=0`).
+  `disabled` (`--no-ai-tests` / `ARGUS_AITESTS=0`) · **`capped`** (the day's ai-test quota was used up before the first
+  model call: nothing generated, every gap dimension gets `dimension_status` `capped`, display **额度用尽未补测**). When the
+  quota runs out after round 1, `status` reflects round 1 and **`capped: true`** + **`capped_gaps`** list the dimensions
+  left (also `capped` in `dimension_status`); `rounds[]` has an entry with `status: "capped"`.
 - Caps per PR (env): `ARGUS_AITEST_MAX_CALLS` (default 2 model calls), `ARGUS_AITEST_MAX_MIN` (default 25 min wall time
-  for generation + execution), `ARGUS_AITEST_MAX_TESTS` (default 3 per call); plus the existing daily call cap
-  `ARGUS_AITEST_DAILY_CAP` (20). Round 2 only targets dimensions round 1 did not cover and gets round 1's discard reasons.
+  for generation + execution), `ARGUS_AITEST_MAX_TESTS` (default 3 per call). The daily cap is the `ai-test` quota (see
+  *Model-call quotas*; `ARGUS_AITEST_DAILY_CAP` is still read as the production ai-test cap). Round 2 only targets dimensions round 1 did not cover and gets round 1's discard reasons.
   Actuals: `model_calls`, `wall_s`. `run.args.ai_test_caps` records the caps of the run.
 - Each test also appears in `checks[]` with `source: "ai-test"`, `dimension: "white-box"`, `status` `pass` (kept) /
   `fail` (fails on current) / `discarded`, `ai_result`, `ai_reason`.
+
+## Model-call quotas (since 2026-10-11)
+
+Daily (Asia/Shanghai day) caps on model calls, **one counter per kind**:
+
+| kind | what | default cap / day | env (production pool) |
+|---|---|---|---|
+| `ai-test` | AI gap-test generation (`ai_tests`, one per round) | 40 | `ARGUS_QUOTA_AI_TEST` (legacy `ARGUS_AITEST_DAILY_CAP`) |
+| `jev` | Jev dimension triage (one per tested code PR) | 150 | `ARGUS_QUOTA_JEV` |
+| `ai-review` | ming-qa code review (one per PR; a reused cached verdict costs nothing) | 70 | `ARGUS_QUOTA_AI_REVIEW` |
+| `pr-summary` | plain-language PR summary (`ai_summary`) | 40 | `ARGUS_QUOTA_PR_SUMMARY` (legacy `ARGUS_AI_DAILY_CAP`) |
+
+**Two pools with separate counters.** `production` = `run.trigger` `event` / `catch-up`. `test` = `--trigger manual`
+(the default for hand-started runs, drills, acceptance reruns) or `--quota-pool test`; test-pool runs **never consume
+production quota**. `--quota-pool production|test` overrides the default. Test-pool caps: `ARGUS_QUOTA_TEST_<KIND>`
+(same defaults). Both pools can also be set in `$ARGUS_ROOT/quota.json` (`ARGUS_QUOTA_FILE`):
+`{ "production": { "ai-test": 40, … }, "test": { … } }`; env wins. The run records `run.args.quota_pool` / `quota_caps`.
+
+When a cap is hit the call is not made and the result says so — **`status: "capped"`**, display text
+**额度用尽未补测**, distinct from a normal gap:
+
+| kind | where it shows |
+|---|---|
+| `ai-test` | `ai_tests.status: "capped"` (or `capped: true` + `capped_gaps` after a partial run); those dimensions `dimension_status.status: "capped"` (`capped_by: "ai-test"`) |
+| `jev` | `triage.status: "capped"` (reason names the pool and cap); every undetermined dimension `status: "capped"` (`capped_by: "jev"`); optional checks all run (as without Jev); AI tests `skipped` |
+| `ai-review` | `code_review.status: "capped"` — no review, no review findings; the 29 dimensions are unaffected (code review covers none of them) |
+| `pr-summary` | `ai_summary: { status: "capped", reason }` |
+
+Every case is also in `prs[].quota_capped[]` and **`system_health.quota`** `{ pool, day, caps, caps_source,
+used_by_run, used_today, capped: [{ pr, kind, pool, cap, used, day, dimensions, message }] }` plus one
+`system_health.notes` line `额度用尽未补测：#N <kind> …`. A capped run is `system_health.status: "degraded"`, but capping
+is **not** a `qa_tool_failures` entry (no issue is opened for it).
 
 ## Issues: dedup and recurrence (`--create-issues` only)
 
@@ -433,7 +471,7 @@ Target: about 20 code PRs merged overnight, all tested before **08:30 Asia/Shang
 
 | Field | Notes |
 |---|---|
-| `status` | `ok` · `degraded` (any qa_tool_failures / env_problems / llm_errors) · `failed` (discovery failed or any `qa-error`) |
+| `status` | `ok` · `degraded` (any qa_tool_failures / env_problems / llm_errors, or a model-call quota capped) · `failed` (discovery failed or any `qa-error`) |
 | **`complete`** | `true` when discovery worked and every PR this run set out to test has a final verdict (no `qa-error`, no `pr-timeout` / `deadline`). `--pr` exclusions don't make it false. |
 | `all_discovered_tested` | `true` when additionally every discovered PR was tested (no `not-tested` at all) |
 | `qa_tool_failures[]` | `{ pr?, stage, message, dimension?, detail? }`; stages include `pipeline` (qa-error), `setup`, `<check id>` (unavailable / timeout), `pr-timeout`, `deadline`, `discovery`, `janitor`, `issues`, `write-merged-report`, `write-open-report`, `ming-qa assert-code-review`, `catch-up` (a gap given up after 3 attempts) |
@@ -442,6 +480,7 @@ Target: about 20 code PRs merged overnight, all tested before **08:30 Asia/Shang
 | `environment` | `{ host, platform, node, sandbox, bwrap, chromium, playwright, python, disk_free_gb }` |
 | `bootstrap` | `{ ran, missing_before[], missing_after[], log, checked_at }` from the wrapper's self-check (`scripts/bootstrap-box.sh`). `ran: true` = something was missing and the bootstrap ran (a note lists what it installed); every entry left in `missing_after` is also in `env_problems`, plus one `qa_tool_failures` entry with `stage: "bootstrap"`. A run that cannot start Node 24 writes a minimal report instead: `run.mode: "env-failed"`, `prs: []`, `system_health.status: "failed"` (to `--out`, or `<out>.env-failed-<ts>.json` if that file exists), exit 3. |
 | `discovery` | `{ window_start, window_end, found: [{ number, reason }], excluded_by_pr_filter? }` — `excluded_by_pr_filter` (only `--pr` runs): PR numbers discovery found that day but the run did not report on |
+| **`quota`** | model-call quota of this run, see *Model-call quotas* (absent before 2026-10-11) |
 | `notes[]` | strings (reuse notes, `tested_sha`/`reviewed_sha` mismatches, triage notes `维度适用性未判定（…）`, …) |
 | `triage` | `{ model, prs: [{ pr, status, applicable, not_applicable, undetermined, duration_ms }], failed: [{ pr, reason }] }` — present when at least one PR was triaged |
 | **`heartbeat`** | see below |

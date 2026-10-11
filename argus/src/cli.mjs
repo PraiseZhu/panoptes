@@ -8,7 +8,7 @@
 //   node src/cli.mjs once                  跑完下一个排队任务即退出（手动验收）
 //   node src/cli.mjs notify --text "..."   用 Doki 给主人发一条消息
 //   node src/cli.mjs doctor                只读自检（GitHub / 模型 / 飞书 / 磁盘）
-//   node src/cli.mjs nightly [--date YYYY-MM-DD] [--pr N ...] [--limit N] [--no-review] [--no-ai-tests] [--skip-step ID ...] [--out PATH] [--no-reuse] [--pr-timeout MIN] [--deadline HH:MM] [--write-merged | --no-write-merged] [--write-open] [--no-issues | --create-issues] [--trigger event|catch-up|manual] [--burst-cutoff [HH:MM]] [--no-step-cache]
+//   node src/cli.mjs nightly [--date YYYY-MM-DD] [--pr N ...] [--limit N] [--no-review] [--no-ai-tests] [--skip-step ID ...] [--out PATH] [--no-reuse] [--pr-timeout MIN] [--deadline HH:MM] [--write-merged | --no-write-merged] [--write-open] [--no-issues | --create-issues] [--trigger event|catch-up|manual] [--burst-cutoff [HH:MM]] [--no-step-cache] [--quota-pool test|production] [--fresh-review]
 //                                          Linux 夜间 QA：上海时区前一天的 PR → reports/YYYY-MM-DD.json（默认不写 GitHub）
 //   node src/cli.mjs catch-up [--wait-lock S] [--repo owner/name] [--trigger catch-up|manual|event] [--create-issues]   补测昨天+今天（上海）合并但 reports/merged 缺口的 PR（由 run-nightly.sh --catch-up 调用）
 //   node src/cli.mjs store-merged --from REPORT [--pr N ...]   把 --out 运行里测完的已合并 PR 存进 reports/merged/（旧文件 → PR-N.vN.json）
@@ -67,7 +67,10 @@ async function main() {
       const trigger = normalizeTrigger(opt('trigger') ?? process.env.PANOPTES_TRIGGER ?? null)
       // --no-step-cache：不复用步骤结果缓存（--no-reuse 只管 merged 报告复用）
       if (flag('no-step-cache')) process.env.ARGUS_STEP_CACHE = '0'
-      const { file, report } = await runNightly({ trigger, deadlineKind, date, prs, out, reuseMerged: !flag('no-reuse'), limit: opt('limit') ? Number(opt('limit')) : null, noReview: flag('no-review'), noAiTests: flag('no-ai-tests'), skipSteps: many('skip-step'), createIssues: flag('create-issues'), writeMerged: flag('write-merged') ? true : flag('no-write-merged') ? false : undefined, writeOpen: flag('write-open'), prTimeoutMin: prTimeout != null ? Number(prTimeout) : null, deadline })
+      // --quota-pool test|production：模型额度池（默认 manual → test，event / catch-up → production）；--fresh-review：不复用缓存的审查结论
+      const quotaPool = opt('quota-pool') ?? process.env.ARGUS_QUOTA_POOL ?? null
+      if (rest.includes('--quota-pool') && !['test', 'production'].includes(quotaPool)) throw new Error('--quota-pool 需要 test 或 production')
+      const { file, report } = await runNightly({ quotaPool, freshReview: flag('fresh-review'), trigger, deadlineKind, date, prs, out, reuseMerged: !flag('no-reuse'), limit: opt('limit') ? Number(opt('limit')) : null, noReview: flag('no-review'), noAiTests: flag('no-ai-tests'), skipSteps: many('skip-step'), createIssues: flag('create-issues'), writeMerged: flag('write-merged') ? true : flag('no-write-merged') ? false : undefined, writeOpen: flag('write-open'), prTimeoutMin: prTimeout != null ? Number(prTimeout) : null, deadline })
       console.log(JSON.stringify({ report: file, date: report.date, prs: report.prs.map((p) => ({ number: p.number, severity: p.severity, verdict: p.verdict })), system_health: report.system_health.status }, null, 2))
       if (report.system_health.status === 'failed') process.exitCode = 3
       return
