@@ -65,7 +65,19 @@
       "testReport": {
         "format": "vitest-json",
         "path": "${RUN}/reports/api-inproc.json"
-      }
+      },
+      "inputs": [
+        "server",
+        "shared",
+        "src",
+        "public",
+        "scripts/run-vitest.mjs",
+        "package.json",
+        "vitest.config.ts",
+        "vitest.setup.ts",
+        "tsconfig.json",
+        "tsconfig.server.json"
+      ]
     },
     {
       "id": "api-probe",
@@ -1349,7 +1361,19 @@
         "MIVO_QA_TEST_CLIENT_ID",
         "MIVO_QA_TEST_SCOPE"
       ],
-      "noteZh": "枚举 server/routes 下全部路由：状态码、坏输入的错误码、可重复操作的幂等性。登录态读写：优先用被测仓导出的 setCindyJwksLoader 接缝在本机签发一次性 Cindy JWT（两个本地用户，不碰生产账号）；没有该接缝时退回 secrets.env 里的 MIVO_QA_TEST_*；都没有时登录态用例记入 skipped_steps（no test account），绝不算通过。资产另用本机现生成的宿主交换密钥（HMAC）测。"
+      "noteZh": "枚举 server/routes 下全部路由：状态码、坏输入的错误码、可重复操作的幂等性。登录态读写：优先用被测仓导出的 setCindyJwksLoader 接缝在本机签发一次性 Cindy JWT（两个本地用户，不碰生产账号）；没有该接缝时退回 secrets.env 里的 MIVO_QA_TEST_*；都没有时登录态用例记入 skipped_steps（no test account），绝不算通过。资产另用本机现生成的宿主交换密钥（HMAC）测。",
+      "inputs": [
+        "server",
+        "shared",
+        "src",
+        "public",
+        "scripts/run-vitest.mjs",
+        "package.json",
+        "vitest.config.ts",
+        "vitest.setup.ts",
+        "tsconfig.json",
+        "tsconfig.server.json"
+      ]
     },
     {
       "id": "e2e-browser",
@@ -1449,7 +1473,8 @@
         "format": "vitest-json",
         "path": "${RUN}/reports/bench.json"
       },
-      "noteZh": "用仓里已有的性能测试和它们自带的阈值，不另编阈值；共享机器上耗时有波动，试运行期只记拿不准"
+      "noteZh": "用仓里已有的性能测试和它们自带的阈值，不另编阈值；共享机器上耗时有波动，试运行期只记拿不准",
+      "cache": false
     },
     {
       "id": "typecheck",
@@ -1572,6 +1597,10 @@
         "labels": [
           "cov"
         ]
+      },
+      "shard": {
+        "max": 8,
+        "perShardGb": 1.5
       }
     },
     {

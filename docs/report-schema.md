@@ -80,7 +80,7 @@ Reports written before 2026-10-11 (commit `78184f9`) do not have `tested_at`; fa
 
 **`trigger`** (`event` = on-merge trigger, `catch-up` = the 2-hourly catch-up timer or `--catch-up`, `manual` = run by
 hand; default `manual`; reports before 2026-10-11 have no `trigger`), `id` (uuid), `started_at`, `finished_at`, `started_at_shanghai`, `finished_at_shanghai`, `duration_s`,
-`args` (`date`, `prs`, `out`, `reuse_merged`, `create_issues`, `limit`, `pr_timeout_min`, `deadline`, `write_merged`, `write_open`),
+`args` (`date`, `prs`, `out`, `reuse_merged`, `create_issues`, `limit`, `pr_timeout_min`, `deadline`, `burst_cutoff`, `step_cache`, `write_merged`, `write_open`),
 `argus_commit` (panoptes commit), `ming_qa_commit`, `llm_model`, `evidence_root`.
 Merged reports written by nightly also carry `run.source_report` (path of the nightly report).
 
@@ -126,7 +126,7 @@ Merged reports written by nightly also carry `run.source_report` (path of the ni
 | `partial_result` | only for `not-tested` because of a time budget: `{ verdict, checks, evidence_dir }` of the interrupted run; not used for the verdict |
 | `error` | only for `qa-error` (redacted message); the entry also has one finding `{ source: "qa-error", test_backed: false, severity: "P2" }` |
 | `run_mode` | `{ coverage_parallel, reason }`: whether the coverage round ran in parallel with the first run (memory guard: `MemAvailable` ≥ `ARGUS_PARALLEL_MIN_FREE_GB`, default 8, and `ARGUS_MAX_PARALLEL` ≠ 1) |
-| `checks[]` | `{ id, name, kind, dimension, qa_dimensions, status: pass/fail/timeout/unavailable, exit_code, duration_ms, failure_count, unavailable_reason?, sub_checks? }`; `sub_checks` only for probe steps (`api-probe`): `{ total, passed, failed, skipped, auth: { account, account_via, host_exchange } }` — `status: pass` means every probe that **ran** passed; skipped probes are listed in `skipped_steps`, never counted as passed |
+| `checks[]` | `{ id, name, kind, dimension, qa_dimensions, status: pass/fail/timeout/unavailable, exit_code, duration_ms, failure_count, unavailable_reason?, sub_checks?, shards?, reused?, reused_from? }` (`shards` / `reused` / `reused_from`: see *Burst capacity*); `sub_checks` only for probe steps (`api-probe`): `{ total, passed, failed, skipped, auth: { account, account_via, host_exchange } }` — `status: pass` means every probe that **ran** passed; skipped probes are listed in `skipped_steps`, never counted as passed |
 | `failed_checks[]` | `{ check_id, check_name, dimension, qa_dimensions, test, failure_type, status, severity, attribution, fingerprint, pr_fingerprint, evidence{ tested_sha, base_sha, exit_code, timed_out, first_run, rerun, base_run, latest_main_run?, command, log_tail, log_file } }`; `status` ∈ `introduced, pre-existing, flaky, fixed-later, unverified, timeout, setup-failed`; also boolean **`flaky`** (`true` iff `status: "flaky"`), `related_to_pr: false` and **`base_comparison`** (see *Flaky*) for flaky entries, `evidence.base_log_file?` when base ran, and, in reports written before 2026-10-11 only, `reclassified { at, from, reason }` (legacy in-place re-classification; no longer done — see *Report preservation*) |
 | `code_review` | `{ status, summary, gate, model, tokens, findings_count, residual_risks, file }` or `{ status, error }`. **Also present for docs-only PRs** (reviewed on the same commit: merged → `base_sha` (first parent = merge-base) `..merge_sha`); `null` only with `--no-review` |
 | `findings[]` | everything that can raise severity. Every finding has **`source`** ∈ `check` (a failed check, same fields as `failed_checks`), `code-review` (LLM; capped at P1, original in `llm_severity`), `coverage-gate` (P2), `qa-error` (P2, the pipeline crashed), `ai-test` (P2, an AI-generated test that fails on the tested commit; `test_backed: false`, `status: "unconfirmed"`, `reproduced`) and boolean **`test_backed`** (see *test_backed*) |
@@ -153,7 +153,7 @@ Merged reports written by nightly also carry `run.source_report` (path of the ni
 | `qa-env-problem` | per findings | the environment failed (e.g. install failed twice) |
 | `docs-only` | P3 (or the highest code-review finding) | only docs changed; no checks run, `tested: false`, `tested_sha: null`; the ming-qa code review still runs on the merge commit / head (`code_review`, `reviewed_sha`), `coverage_gate.status: "not-applicable"`. Review findings are `test_backed: false`. |
 | `skipped` | P3 | closed without merge |
-| `not-tested` | **`untested`** | discovered but not tested in this run (`tested: false`, `tested_at: null`); `not_tested_code` ∈ `excluded-by-pr-filter` (deliberate `--pr`), `over-limit`, `pr-timeout`, `deadline`. Time-budget cases are also in `system_health.qa_tool_failures`. Look for this PR's own `merged/PR-N.json` before concluding it was never tested. |
+| `not-tested` | **`untested`** | discovered but not tested in this run (`tested: false`, `tested_at: null`); `not_tested_code` ∈ `excluded-by-pr-filter` (deliberate `--pr`), `over-limit`, `pr-timeout`, `deadline`, `burst-cutoff` (see *Burst capacity*). Time-budget cases are also in `system_health.qa_tool_failures`. Look for this PR's own `merged/PR-N.json` before concluding it was never tested. |
 | `qa-error` | **P2** | the QA pipeline itself crashed for this PR; also listed in `system_health.qa_tool_failures` (`stage: "pipeline"`) |
 
 Severity rules: P0 introduced failure on a merged PR that still fails on latest main · P1 introduced reproducible
@@ -369,6 +369,46 @@ A lock timeout (exit 75) stops the invocation; the next one retries. After 3 att
 `reports/catch-up/run-<ts>.json` has `system_health.gave_up[]` / `qa_tool_failures[]`
 (`{ pr, stage: "catch-up", merge_sha, attempts, message }`), and the next nightly report lists it in
 `system_health.qa_tool_failures` (`stage: "catch-up"`, for 48 h). With nothing to do it exits 0 silently and writes nothing.
+
+## Burst capacity (many merges overnight)
+
+Target: about 20 code PRs merged overnight, all tested before **08:30 Asia/Shanghai** (the daily report goes out at
+09:04). Three mechanisms, all recorded in the report:
+
+1. **Unit-test sharding.** The `unit` step (profile `shard: { max: 8, perShardGb }`) runs as N parallel
+   `vitest --shard=i/N` processes (Mivo's own config is single-worker, so shards are separate processes) in the same
+   sandboxed checkout, each with its own `TMPDIR`, JSON report and coverage directory. Afterwards the per-shard vitest
+   JSON reports are merged into the usual `reports/unit.json` (counts summed, `testResults` concatenated) and the
+   per-shard `coverage-final.json` files are merged by statement / function / branch location (hit counts added, so a
+   source file loaded by several shards is counted once) and `coverage-summary.json` totals are recomputed (istanbul
+   rules); `coverage_gate` and new-code coverage read the merged files exactly as before. **Memory guard:** one budget
+   for all shard steps running at the same time (the verdict run `h1` and the coverage run `cov` may overlap):
+   `min(ARGUS_SHARD_BUDGET_GB (10), MemAvailable − ARGUS_SHARD_RESERVE_GB (1.5)) − GB held by other shard steps`,
+   N = `clamp(floor(budget / perShardGb), 1, min(max, CPU cores))`; `ARGUS_UNIT_SHARDS=N` forces N (1 = off).
+   The existing coverage-parallel guard (`run_mode`, `ARGUS_PARALLEL_MIN_FREE_GB`) still decides whether `cov` overlaps `h1`.
+   `checks[].shards` (and `coverage_gate.unit_run_under_coverage.shards`): `{ count, reason, mem_available_gb,
+   budget_gb, per_shard_gb, per_shard: [{ shard, exit_code, timed_out, duration_ms }] }`; a single-process run has
+   `{ count: 1, reason }`. Failure names, flaky rerun and base comparison work on the merged report as before; a missing
+   shard report makes the merged report absent, i.e. `testOutcomeStatus: incomplete` (never guessed as passed).
+2. **Step-result reuse.** Before a step runs in the first run (`h1`), the coverage run (`cov`) or the latest-main
+   recheck (`l`), panoptes computes a key from the step definition, the substitution variables it uses (e.g.
+   `DIFF_BASE_SHA` for `design`), the Node major, the panoptes commit for steps with bundled tools (api-probe, journeys),
+   and the **git tree / blob hashes of the step's input paths plus `package-lock.json`** in the tested commit (profile
+   `inputs`, e.g. `api-inproc` / `api-probe`: `server`, `shared`, `src`, `public`, configs; default: the whole tree).
+   If a passing result with the same key exists (`$ARGUS_ROOT/cache/step-results/`, 14 days), it is reused instead of
+   re-run: `checks[].reused: true`, **`checks[].reused_from`** `{ job: "n<PR>", label, sha, run_dir, stored_at, key,
+   original_duration_ms }`, `duration_ms: 0`. Only passing, complete results are stored (coverage run: complete coverage
+   data); failures always re-run and go through rerun / base / latest-main. Never reused: reruns (`h2`), base runs (`b`),
+   AI tests, `bench` (`cache: false`). `--no-reuse` (or `ARGUS_STEP_CACHE=0`) turns reuse off;
+   `run.args.step_cache` records it. Typical hits: an open PR tested at its head and later merged with the identical
+   tree; a re-test after a burst cutoff; a PR that only touches `cindyplugin/` reusing `api-inproc` / `api-probe`.
+3. **Cutoff.** `run-nightly.sh --burst-cutoff [HH:MM]` (default `08:30` Shanghai; env `ARGUS_BURST_CUTOFF`) works like
+   `--deadline` but marks every PR still untested at the cutoff — not started, or stopped while running — as
+   `verdict: "not-tested"`, **`not_tested_code: "burst-cutoff"`**, `not_tested_reason: "burst cutoff 08:30
+   Asia/Shanghai reached …: not tested before the daily report; the catch-up timer (every 2 h) tests it later"`, also in
+   `system_health.qa_tool_failures` (`stage: "burst-cutoff"`) and `run.args.burst_cutoff`. No `merged/PR-N.json` is
+   written for such a PR, so the catch-up timer sees the gap and tests it later (steps that already passed before the
+   cutoff are reused). The daily report should list these as "not tested yet (burst cutoff), follows later".
 
 ## `system_health`
 

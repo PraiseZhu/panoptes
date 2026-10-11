@@ -10,6 +10,8 @@ import { fileURLToPath } from 'node:url'
 import { validateTestReport } from './config.mjs'
 import { normalizeTestOutcomes } from './test-outcomes.mjs'
 import { vitestCoverageArgs, readCoverageDir } from './coverage.mjs'
+import { stepCacheEnabled, stepCacheKey, lookupStepResult, storeStepResult, reusedResult } from './stepcache.mjs'
+import { shardPlan, reserveShards, shardArgs, mergeVitestJson, mergeCoverageFinal, coverageSummaryOf, readJsonOrNull } from './shard.mjs'
 
 const PROBE_SCRIPT = fileURLToPath(new URL('./probe-run.mjs', import.meta.url))
 const AI_TEST_SCRIPT = fileURLToPath(new URL('./ai-test-run.mjs', import.meta.url))
@@ -381,6 +383,15 @@ export async function runSteps(profile, src, runDir, { stepIds = null, execution
       log('info', 'step unavailable', { ...execution, step: step.id, reason: unmet })
       continue
     }
+    // 相关输入（tree 哈希 + lockfile）和上次通过时完全一样 → 复用那次的结果（reused + 来源），不重跑
+    let ck = null
+    try { ck = stepCacheEnabled() ? stepCacheKey({ step, label: execution?.runLabel, vars: stepSubstitutions, src }) : null } catch { ck = null }
+    const hit = lookupStepResult(ck)
+    if (hit) {
+      results.push(reusedResult(hit, identity))
+      log('info', 'step reused', { ...execution, step: step.id, from: hit.source })
+      continue
+    }
     if (step.probe || step.aiTest || step.tool) prepareTool(step, runDir, vars)
     const logFile = join(runDir, 'logs', `${step.id}.log`)
     const covDir = coverageDirFor(step, runDir, execution)
@@ -392,20 +403,88 @@ export async function runSteps(profile, src, runDir, { stepIds = null, execution
     const stepEnvBase = { ...env }
     for (const k of step.envUnset ?? []) delete stepEnvBase[k]
     const watch = watchDesktop(step.silentCheck)
-    const res = await run(argv[0], argv.slice(1), { cwd: src, env: { ...stepEnvBase, ...stepVars }, timeoutMs: (step.timeoutMin ?? 20) * 60_000, logFile })
+    const sp = step.shard ? shardPlan(step) : null
+    const res = sp && sp.shards > 1
+      ? await runSharded({ step, plan: sp, cmd, covDir, reportFile: stepVarsForReport.TEST_REPORT ?? null, runDir, src, profile, ro: bin.ro, env: { ...stepEnvBase, ...stepVars }, logFile })
+      : await run(argv[0], argv.slice(1), { cwd: src, env: { ...stepEnvBase, ...stepVars }, timeoutMs: (step.timeoutMin ?? 20) * 60_000, logFile })
+    if (sp && !res.shards) res.shards = { count: 1, reason: sp.reason }
     const disturbed = await watch.stop()
     if (disturbed) log('error', 'step disturbed desktop', { step: step.id })
-    const result = { ...identity, id: step.id, nameZh: step.nameZh, kind: step.kind, cmdText: step.cmd.join(' '), ok: res.ok, exitCode: res.exitCode, timedOut: res.timedOut, durationMs: res.durationMs, tail: res.tail, failures: res.ok ? [] : res.failures, failureDetails: res.ok ? [] : res.failureDetails, failureParseStatus: res.failureParseStatus }
+    const result = { ...identity, id: step.id, nameZh: step.nameZh, kind: step.kind, cmdText: step.cmd.join(' '), ok: res.ok, exitCode: res.exitCode, timedOut: res.timedOut, durationMs: res.durationMs, tail: res.tail, failures: res.ok ? [] : res.failures, failureDetails: res.ok ? [] : res.failureDetails, failureParseStatus: res.failureParseStatus, ...(res.shards ? { shards: res.shards } : {}) }
     toStepOutcome(step, result, runDir)
     Object.assign(result, readTestReport(step, result, src, runDir, stepVarsForReport, execution))
     if (disturbed) result.disturbedDesktop = true
     if (step.probe) { const pr = readProbeReport(join(runDir, `probe-${step.id}.json`)); if (pr) result.probeReport = pr }
     if (covDir) result.coverage = res.timedOut ? { status: 'unavailable', reason: 'unit step timed out' } : readCoverageDir(covDir, src)
+    try { storeStepResult(ck, result, { job: execution?.jobId ?? null, label: execution?.runLabel ?? null, sha: execution?.checkedOutSha ?? execution?.requestedSha ?? null, run_dir: basename(runDir) }) } catch (err) { log('warn', 'step cache store failed', { step: step.id, error: err.message }) }
     results.push(result)
     log('info', 'step done', { ...execution, step: step.id, ok: result.ok, unavailable: Boolean(result.unavailable), exitCode: res.exitCode, ms: res.durationMs })
     if (step.kind === 'setup' && !res.ok) break
   }
   return results
+}
+
+// 分片执行（step.shard）：N 个 `--shard=i/N` 进程并行，各写自己的 JSON 报告 / 覆盖率目录 / 日志，跑完合并成
+// 和不分片时同名的文件（reports/<step>.json、coverage/<step>/coverage-{final,summary}.json、logs/<step>.log），
+// 结果对象与 run() 同形，外加 shards { count, reason, per_shard[] }。
+export async function runSharded({ step, plan, cmd, covDir, reportFile, runDir, src, profile, ro = [], env, logFile }) {
+  const n = plan.shards
+  const release = reserveShards(n * (plan.per_shard_gb ?? 1.5))
+  const t0 = Date.now()
+  try {
+    const jobs = []
+    for (let i = 1; i <= n; i++) {
+      const shardReport = reportFile ? reportFile.replace(/\.json$/, '') + `.shard-${i}.json` : null
+      const shardCov = covDir ? join(covDir, `shard-${i}`) : null
+      let c = cmd.map((a) => (reportFile && a.includes(reportFile) ? a.split(reportFile).join(shardReport) : a))
+      if (covDir) c = c.map((a) => (a === `--coverage.reportsDirectory=${covDir}` ? `--coverage.reportsDirectory=${shardCov}` : a))
+      c = shardArgs(c, i, n)
+      if (shardCov) mkdirSync(shardCov, { recursive: true })
+      // 每片自己的 TMPDIR，避免测试用固定临时文件名时互相踩
+      const tmp = join(env.TMPDIR ?? tmpdir(), `shard-${i}`)
+      mkdirSync(tmp, { recursive: true })
+      const argv = sandboxed(c, runDir, profile, ro)
+      const shardLog = logFile.replace(/\.log$/, '') + `.shard-${i}.log`
+      jobs.push(run(argv[0], argv.slice(1), { cwd: src, env: { ...env, TMPDIR: tmp }, timeoutMs: (step.timeoutMin ?? 20) * 60_000, logFile: shardLog })
+        .then((r) => ({ i, r, shardReport, shardCov, shardLog })))
+    }
+    const done = await Promise.all(jobs)
+    // 合并 JSON 报告
+    if (reportFile) {
+      const parts = done.map((d) => readJsonOrNull(d.shardReport))
+      if (parts.every(Boolean)) writeFileSync(reportFile, JSON.stringify(mergeVitestJson(parts)))
+      else rmSync(reportFile, { force: true }) // 缺一片 → 没有合并报告（判定按 incomplete 处理，不猜）
+    }
+    // 合并覆盖率
+    if (covDir) {
+      const finals = done.map((d) => readJsonOrNull(join(d.shardCov, 'coverage-final.json')))
+      if (finals.every(Boolean)) {
+        const merged = mergeCoverageFinal(finals)
+        writeFileSync(join(covDir, 'coverage-final.json'), JSON.stringify(merged))
+        writeFileSync(join(covDir, 'coverage-summary.json'), JSON.stringify(coverageSummaryOf(merged)))
+      }
+      for (const d of done) rmSync(d.shardCov, { recursive: true, force: true })
+    }
+    // 合并日志（证据里的 logs/<step>.log 仍是一份完整日志）
+    const header = `[argus] ${step.id}: ${n} shards in parallel (${plan.reason})\n`
+    writeFileSync(logFile, header + done.map((d) => { let t = ''; try { t = readFileSync(d.shardLog, 'utf8') } catch { /* 没有日志 */ } return `\n===== shard ${d.i}/${n} exit=${d.r.exitCode} ${Math.round(d.r.durationMs / 1000)}s =====\n${t}` }).join(''))
+    const rs = done.map((d) => d.r)
+    const failed = rs.filter((r) => !r.ok)
+    const statuses = rs.map((r) => r.failureParseStatus)
+    const parse = failed.length
+      ? (failed.every((r) => r.failureParseStatus === 'complete') ? 'complete' : 'incomplete')
+      : (statuses.some((x) => x === 'incomplete') ? 'incomplete' : statuses.every((x) => x === 'complete') ? 'complete' : statuses[0])
+    const exitCode = failed.length ? (failed.find((r) => r.exitCode != null && r.exitCode !== 0)?.exitCode ?? null) : 0
+    return {
+      ok: failed.length === 0, exitCode, timedOut: rs.some((r) => r.timedOut), durationMs: Date.now() - t0,
+      tail: (failed.length ? failed : rs.slice(-1)).map((r) => r.tail ?? '').join('\n').slice(-20000),
+      failures: [...new Set(failed.flatMap((r) => r.failures ?? []))].sort(),
+      failureDetails: failed.flatMap((r) => r.failureDetails ?? []),
+      failureParseStatus: parse,
+      shards: { count: n, reason: plan.reason, mem_available_gb: plan.mem_available_gb ?? null, budget_gb: plan.budget_gb ?? null, per_shard_gb: plan.per_shard_gb ?? null,
+        per_shard: done.map((d) => ({ shard: d.i, exit_code: d.r.exitCode, timed_out: Boolean(d.r.timedOut), duration_ms: d.r.durationMs })) },
+    }
+  } finally { release() }
 }
 
 // 覆盖率只在专门的覆盖率轮次（label 'cov'，与首轮并行、独立检出）开启：v8 插桩会让少数测试改变行为

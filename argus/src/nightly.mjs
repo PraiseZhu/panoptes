@@ -1,6 +1,7 @@
 // 夜间 QA（Linux / Mivo QA）：发现前一天（上海时区）的 PR → 在隔离沙箱里跑项目检查 → 失败三重对照 →
 // ming-qa 代码审查 → 写 reports/YYYY-MM-DD.json。默认绝不写 GitHub；提 issue 只在 --create-issues 且
 // ARGUS_ALLOW_ISSUES=1 时才可能发生。
+import { memAvailableGb } from './memory.mjs'
 import { mkdirSync, writeFileSync, renameSync, existsSync, readFileSync, statfsSync } from 'node:fs'
 import { join, resolve, dirname, basename } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
@@ -92,13 +93,7 @@ export function recordBootstrap(health, st) {
 
 // ── 内存护栏：可用内存不够时，覆盖率轮次不与首轮并行，改为排在首轮之后 ─────────────────
 export const parallelMinFreeGb = () => Number(process.env.ARGUS_PARALLEL_MIN_FREE_GB ?? 8)
-export function memAvailableGb(meminfo) {
-  try {
-    const text = meminfo ?? readFileSync('/proc/meminfo', 'utf8')
-    const kb = Number(text.match(/^MemAvailable:\s+(\d+)\s*kB/m)?.[1])
-    return Number.isFinite(kb) ? Math.round(kb / 1048576 * 10) / 10 : null
-  } catch { return null }
-}
+export { memAvailableGb }
 export function parallelDecision({ freeGb = memAvailableGb(), minGb = parallelMinFreeGb(), maxParallel = Number(process.env.ARGUS_MAX_PARALLEL ?? 2) } = {}) {
   if (maxParallel <= 1) return { parallel: false, reason: 'ARGUS_MAX_PARALLEL=1' }
   if (freeGb == null) return { parallel: false, reason: 'MemAvailable unknown' }
@@ -289,6 +284,8 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
       exit_code: r.exitCode, duration_ms: r.durationMs, failure_count: r.failures?.length ?? 0,
       ...(r.unavailable ? { unavailable_reason: r.unavailableReasonZh } : {}),
       ...(r.probeReport ? { sub_checks: probeSummary(r.probeReport) } : {}),
+      ...(r.shards ? { shards: r.shards } : {}),
+      ...(r.reused ? { reused: true, reused_from: r.reusedFrom } : {}),
     })
     if (r.unavailable) health.qa_tool_failures.push({ pr: number, stage: r.id, dimension: toBox(step, profile), message: `check could not run: ${r.unavailableReasonZh}` })
     if (r.timedOut) health.qa_tool_failures.push({ pr: number, stage: r.id, dimension: toBox(step, profile), message: `check timed out after ${Math.round(r.durationMs / 60000)} min` })
@@ -598,7 +595,7 @@ function computeCoverageGate({ first, prDiff, covError = null }) {
     return coverageGate({ coverage: { status: 'unavailable', reason: covError ? `coverage run failed: ${redact(String(covError.message)).slice(0, 200)}` : setup ? 'coverage run: dependency install failed' : 'unit step not planned or coverage disabled' } })
   }
   // 覆盖率轮次里单测本身的结果只作说明（插桩可能让个别用例失败），不影响判定
-  const underCoverage = { exit_code: r.exitCode, timed_out: Boolean(r.timedOut), failed_tests: (r.failures ?? []).length, note: 'unit run under v8 coverage; its pass/fail is informational only and never used for the verdict' }
+  const underCoverage = { exit_code: r.exitCode, timed_out: Boolean(r.timedOut), failed_tests: (r.failures ?? []).length, note: 'unit run under v8 coverage; its pass/fail is informational only and never used for the verdict', ...(r.shards ? { shards: r.shards } : {}), ...(r.reused ? { reused: true, reused_from: r.reusedFrom } : {}) }
   if (r.coverage.status !== 'ok') return { ...coverageGate({ coverage: r.coverage, stepId: r.id }), unit_run_under_coverage: underCoverage }
   const diffError = prDiff.text == null ? `new-code coverage not evaluated: ${prDiff.error}` : null
   return { ...coverageGate({ coverage: r.coverage, added: diffError ? null : parseAddedLines(prDiff.text), stepId: r.id, diffError }), unit_run_under_coverage: underCoverage }
@@ -898,6 +895,11 @@ export function parseDeadline(v, now = new Date()) {
   return t
 }
 
+export const BURST_CUTOFF_DEFAULT = '08:30'
+export function burstReason(ms, when) {
+  return `burst cutoff ${toShanghaiIso(new Date(ms)).slice(11, 16)} Asia/Shanghai reached ${when}: not tested before the daily report; the catch-up timer (every 2 h) tests it later`
+}
+
 // 发现结果 → 本次要测的目标 + 发现了但不测的 PR（not-tested，带原因）
 export function planTargets(discovered, opts = {}) {
   let targets = discovered
@@ -919,14 +921,17 @@ export function planTargets(discovered, opts = {}) {
 export async function processTargets(targets, { opts = {}, health, startedAt = new Date(), processOne, now = () => Date.now(), repo = null }) {
   const prTimeoutMs = opts.prTimeoutMin ? opts.prTimeoutMin * 60_000 : null
   const deadlineMs = opts.deadline ? parseDeadline(opts.deadline, startedAt) : null
+  // --burst-cutoff：和 --deadline 一样截止，但 not_tested_code 是 burst-cutoff（之后由补测定时任务接着测）
+  const burst = opts.deadlineKind === 'burst-cutoff'
+  const cutCode = burst ? 'burst-cutoff' : 'deadline'
   const heartbeat = { run_started_at: toShanghaiIso(startedAt), run_finished_at: null, duration_s: null, last_beat_at: toShanghaiIso(startedAt), pr_timeout_min: opts.prTimeoutMin ?? null, deadline: deadlineMs ? new Date(deadlineMs).toISOString() : null, prs: [] }
   health.heartbeat = heartbeat
   const prs = []
   for (const t of targets) {
     if (deadlineMs && now() >= deadlineMs) {
-      const e = notTestedEntry(t, 'deadline', `run deadline ${new Date(deadlineMs).toISOString()} reached before this PR started`)
+      const e = notTestedEntry(t, cutCode, burst ? burstReason(deadlineMs, 'before this PR started') : `run deadline ${new Date(deadlineMs).toISOString()} reached before this PR started`)
       prs.push(e)
-      health.qa_tool_failures.push({ pr: t.number, stage: 'deadline', message: e.not_tested_reason })
+      health.qa_tool_failures.push({ pr: t.number, stage: cutCode, message: e.not_tested_reason })
       continue
     }
     log('info', 'nightly pr start', { pr: t.number })
@@ -950,8 +955,8 @@ export async function processTargets(targets, { opts = {}, health, startedAt = n
       }
     }
     if (overBudget()) {
-      const code = byTimeout ? 'pr-timeout' : 'deadline'
-      const why = byTimeout ? `per-PR time budget of ${opts.prTimeoutMin} min exceeded` : `run deadline ${new Date(deadlineMs).toISOString()} reached`
+      const code = byTimeout ? 'pr-timeout' : cutCode
+      const why = byTimeout ? `per-PR time budget of ${opts.prTimeoutMin} min exceeded` : burst ? burstReason(deadlineMs, 'while this PR was being tested') : `run deadline ${new Date(deadlineMs).toISOString()} reached`
       const e = notTestedEntry(t, code, why)
       if (result) e.partial_result = { verdict: result.verdict, checks: result.checks, evidence_dir: result.evidence_dir ?? null }
       health.qa_tool_failures.push({ pr: t.number, stage: code, message: why })
@@ -1049,7 +1054,7 @@ export async function runNightly(opts = {}) {
       started_at_shanghai: toShanghaiIso(startedAt), finished_at_shanghai: toShanghaiIso(),
       duration_s: Math.round((Date.now() - startedAt.getTime()) / 1000),
       trigger: normalizeTrigger(opts.trigger),
-      args: { date: opts.date ?? null, prs: opts.prs ?? null, out: opts.out ?? null, reuse_merged: opts.reuseMerged !== false, create_issues: Boolean(opts.createIssues), limit: opts.limit ?? null, pr_timeout_min: opts.prTimeoutMin ?? null, deadline: opts.deadline ?? null, write_merged: writeMergedEnabled(opts), write_open: writeOpenEnabled(opts), ai_tests: !opts.noAiTests && aiTestCaps().enabled, ai_test_caps: aiTestCaps() },
+      args: { date: opts.date ?? null, prs: opts.prs ?? null, out: opts.out ?? null, reuse_merged: opts.reuseMerged !== false, create_issues: Boolean(opts.createIssues), limit: opts.limit ?? null, pr_timeout_min: opts.prTimeoutMin ?? null, deadline: opts.deadline ?? null, burst_cutoff: opts.deadlineKind === 'burst-cutoff' ? opts.deadline : null, step_cache: process.env.ARGUS_STEP_CACHE !== '0', write_merged: writeMergedEnabled(opts), write_open: writeOpenEnabled(opts), ai_tests: !opts.noAiTests && aiTestCaps().enabled, ai_test_caps: aiTestCaps() },
       argus_commit: (() => { try { return execFileSync('git', ['-C', CODE_DIR, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim() } catch { return null } })(),
       ming_qa_commit: await mingQaVersion(), llm_model: LLM_MODEL, evidence_root: evidenceRoot,
     },

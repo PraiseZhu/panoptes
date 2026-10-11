@@ -5,7 +5,7 @@
 #   run-nightly.sh [--trigger event|catch-up|manual] [--date YYYY-MM-DD] [--pr N ...] [--limit N]
 #                  [--no-review] [--no-ai-tests] [--skip-step ID ...]
 #                  [--out PATH] [--no-reuse] [--wait-lock [SECONDS]]
-#                  [--pr-timeout MIN] [--deadline HH:MM] [--write-merged | --no-write-merged] [--write-open]
+#                  [--pr-timeout MIN] [--deadline HH:MM | --burst-cutoff [HH:MM]] [--write-merged | --no-write-merged] [--write-open]
 #                  [--no-issues | --create-issues]
 #
 #   --catch-up    pure-script gap filler (cron-safe, quiet when there is nothing to do): list PRs merged
@@ -33,6 +33,8 @@
 #   --wait-lock [SECONDS]  queue behind a running instance (default 14400 = 4h) instead of exit 75
 #   --pr-timeout MIN  per-PR time budget; a PR that exceeds it is stopped and reported as not-tested (P2)
 #                 (env ARGUS_PR_TIMEOUT_MIN; default: no limit)
+#   --burst-cutoff [HH:MM]  overnight burst cutoff (default 08:30 Asia/Shanghai): PRs still untested then are reported
+#                 not-tested (not_tested_code burst-cutoff); the catch-up timer tests them later (env ARGUS_BURST_CUTOFF)
 #   --deadline HH:MM  Asia/Shanghai wall-clock deadline (or ISO time); PRs not started by then are
 #                 reported as not-tested (P2) and a running PR is stopped (env ARGUS_DEADLINE)
 #   --write-merged / --no-write-merged  also write each merged PR that was actually tested to

@@ -8,7 +8,7 @@
 //   node src/cli.mjs once                  跑完下一个排队任务即退出（手动验收）
 //   node src/cli.mjs notify --text "..."   用 Doki 给主人发一条消息
 //   node src/cli.mjs doctor                只读自检（GitHub / 模型 / 飞书 / 磁盘）
-//   node src/cli.mjs nightly [--date YYYY-MM-DD] [--pr N ...] [--limit N] [--no-review] [--no-ai-tests] [--skip-step ID ...] [--out PATH] [--no-reuse] [--pr-timeout MIN] [--deadline HH:MM] [--write-merged | --no-write-merged] [--write-open] [--no-issues | --create-issues] [--trigger event|catch-up|manual]
+//   node src/cli.mjs nightly [--date YYYY-MM-DD] [--pr N ...] [--limit N] [--no-review] [--no-ai-tests] [--skip-step ID ...] [--out PATH] [--no-reuse] [--pr-timeout MIN] [--deadline HH:MM] [--write-merged | --no-write-merged] [--write-open] [--no-issues | --create-issues] [--trigger event|catch-up|manual] [--burst-cutoff [HH:MM]]
 //                                          Linux 夜间 QA：上海时区前一天的 PR → reports/YYYY-MM-DD.json（默认不写 GitHub）
 //   node src/cli.mjs catch-up [--wait-lock S] [--repo owner/name] [--trigger catch-up|manual|event] [--create-issues]   补测昨天+今天（上海）合并但 reports/merged 缺口的 PR（由 run-nightly.sh --catch-up 调用）
 //   node src/cli.mjs assemble --date D --out PATH --from FILE ... [--order N,N]   多份报告合成 full-D.json
@@ -27,7 +27,7 @@ import { catchUp, runNightlyFor, catchUpDir } from './catchup.mjs'
 import { LOGS_DIR } from './paths.mjs'
 import { openSync, closeSync } from 'node:fs'
 import { join } from 'node:path'
-import { writeReport, normalizeTrigger } from './nightly.mjs'
+import { writeReport, normalizeTrigger, BURST_CUTOFF_DEFAULT } from './nightly.mjs'
 import { toShanghaiIso as shIso } from './util.mjs'
 import { killAllActive } from './exec.mjs'
 
@@ -53,9 +53,18 @@ async function main() {
       if (rest.includes('--out') && (!out || out.startsWith('--'))) throw new Error('--out 需要文件路径')
       const prTimeout = opt('pr-timeout') ?? process.env.ARGUS_PR_TIMEOUT_MIN ?? null
       if (prTimeout != null && !(Number(prTimeout) > 0)) throw new Error(`--pr-timeout 需要正数分钟：${prTimeout}`)
-      const deadline = opt('deadline') ?? process.env.ARGUS_DEADLINE ?? null
+      let deadline = opt('deadline') ?? process.env.ARGUS_DEADLINE ?? null
+      // --burst-cutoff [HH:MM]（默认 08:30 上海）：到点还没测完的 PR 记 not-tested（burst-cutoff），补测之后接着测
+      let deadlineKind = null
+      const burstArg = rest.includes('--burst-cutoff') ? (opt('burst-cutoff') && !opt('burst-cutoff').startsWith('--') ? opt('burst-cutoff') : BURST_CUTOFF_DEFAULT) : (process.env.ARGUS_BURST_CUTOFF || null)
+      if (burstArg) {
+        if (rest.includes('--deadline')) throw new Error('--burst-cutoff 与 --deadline 不能同时使用')
+        deadline = burstArg; deadlineKind = 'burst-cutoff'
+      }
       const trigger = normalizeTrigger(opt('trigger') ?? process.env.PANOPTES_TRIGGER ?? null)
-      const { file, report } = await runNightly({ trigger, date, prs, out, reuseMerged: !flag('no-reuse'), limit: opt('limit') ? Number(opt('limit')) : null, noReview: flag('no-review'), noAiTests: flag('no-ai-tests'), skipSteps: many('skip-step'), createIssues: flag('create-issues'), writeMerged: flag('write-merged') ? true : flag('no-write-merged') ? false : undefined, writeOpen: flag('write-open'), prTimeoutMin: prTimeout != null ? Number(prTimeout) : null, deadline })
+      // --no-reuse：既不复用 merged 报告，也不复用步骤结果缓存
+      if (flag('no-reuse')) process.env.ARGUS_STEP_CACHE = '0'
+      const { file, report } = await runNightly({ trigger, deadlineKind, date, prs, out, reuseMerged: !flag('no-reuse'), limit: opt('limit') ? Number(opt('limit')) : null, noReview: flag('no-review'), noAiTests: flag('no-ai-tests'), skipSteps: many('skip-step'), createIssues: flag('create-issues'), writeMerged: flag('write-merged') ? true : flag('no-write-merged') ? false : undefined, writeOpen: flag('write-open'), prTimeoutMin: prTimeout != null ? Number(prTimeout) : null, deadline })
       console.log(JSON.stringify({ report: file, date: report.date, prs: report.prs.map((p) => ({ number: p.number, severity: p.severity, verdict: p.verdict })), system_health: report.system_health.status }, null, 2))
       if (report.system_health.status === 'failed') process.exitCode = 3
       return
