@@ -571,6 +571,8 @@ export async function runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha
   // 同一提交 + diff + 审查提示词 / 版本 + 模型已经审过 → 复用那次的结论（不调模型、不占额度）；--fresh-review 强制重审
   const ck = (() => { try { return reviewCacheKey({ sha: out.reviewed_sha, baseSha: out.review_base_sha, files: reviewFiles }) } catch { return null } })()
   const cached = opts.freshReview || process.env.ARGUS_REVIEW_CACHE === '0' ? null : lookupReviewVerdict(ck)
+  // --fresh-review 且已有缓存条目：重审只做对比，不覆盖缓存；结论不同 → 缓存结论有效（code_review.fresh_comparison）
+  const prior = opts.freshReview ? lookupReviewVerdict(ck) : null
   const q = cached ? { ok: true } : quota.check('ai-review')
   if (!q.ok) {
     // 每日 ai-review 额度用尽：不调模型，审查记 capped（显示「额度用尽未补测」）；代码审查不对应 29 个维度里的任何一个
@@ -578,9 +580,9 @@ export async function runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha
     out.quota_capped.push(quota.markCapped('ai-review', { pr: number }))
     return
   }
-  const cr = await codeReview({ secrets, pr, files: reviewFiles, results, profile, outDir: join(evDir, 'code-review'), cacheKey: ck, cached,
+  const cr = await codeReview({ secrets, pr, files: reviewFiles, results, profile, outDir: join(evDir, 'code-review'), cacheKey: ck, cached, prior, verdictOf: reviewVerdict,
     source: { pr: number, run_id: opts.runId ?? null, reviewed_sha: out.reviewed_sha, reviewed_at: new Date().toISOString() } })
-  if (cr.status !== 'unavailable' && !cr.reused) quota.consume('ai-review', cr.tokens ?? 0)
+  if (cr.status !== 'unavailable' && (!cr.reused || cr.fresh_comparison)) quota.consume('ai-review', cr.tokens ?? 0)
   if (cr.status !== 'ok') {
     health.llm_errors.push({ pr: number, stage: 'code-review', model: LLM_MODEL, ...cr.error })
     out.code_review = { status: cr.status, error: cr.error }
@@ -589,7 +591,7 @@ export async function runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha
   if (cr.gateError) health.qa_tool_failures.push({ pr: number, stage: 'ming-qa assert-code-review', message: cr.gateError.message })
   out.code_review = { status: cr.doc.status, summary: cr.doc.summary, gate: cr.gate, model: cr.model, tokens: cr.tokens, findings_count: cr.doc.findings.length, residual_risks: cr.doc.residualRisks, file: cr.reviewPath,
     // 可复现：reused = 这次复用了缓存的结论（reused_from 指向第一次审查）；cache_key 的组成见 docs/report-schema.md › Code review reuse
-    reused: Boolean(cr.reused), reused_from: cr.reused_from ?? null, fresh_requested: Boolean(opts.freshReview), sampling: cr.sampling ?? null,
+    reused: Boolean(cr.reused), reused_from: cr.reused_from ?? null, fresh_requested: Boolean(opts.freshReview), fresh_comparison: cr.fresh_comparison ?? null, sampling: cr.sampling ?? null,
     cache_key: ck ? { key: ck.key.slice(0, 16), reviewed_sha: ck.reviewed_sha, review_base_sha: ck.review_base_sha, diff_hash: ck.diff_hash.slice(0, 16), prompt_hash: ck.prompt_hash.slice(0, 16), prompt_version: ck.prompt_version, model: ck.model } : null,
     verdict: reviewVerdict(cr.doc) }
   for (const f of cr.doc.findings) {

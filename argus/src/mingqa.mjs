@@ -148,7 +148,8 @@ export function toCodeReviewDoc(raw, files) {
 // 同一提交 + 同一份 diff + 同一审查提示词 / 版本 + 同一模型 → 复用上次的审查结论，不再调模型（重跑结论一致，也不占额度）。
 // 键 = sha256(reviewed_sha, review_base_sha, diff_hash, prompt_hash, model)。diff_hash = 发给模型的 diff 文本的哈希；
 // prompt_hash = 系统提示词 + ming-qa 审查关注点 + REVIEW_PROMPT_VERSION + 推理强度 + 采样参数。
-// 只存成功的审查（status ok）；--fresh-review / ARGUS_REVIEW_CACHE=0 不读缓存（新结果照样写回，覆盖旧条目）。
+// 只存成功的审查（status ok）；--fresh-review / ARGUS_REVIEW_CACHE=0 不读缓存。--fresh-review 遇到已有缓存条目时只做对比：
+// 不覆盖缓存；结论不同 → 缓存的结论仍然有效（报告用缓存结论，重审结果另存 code-review.fresh.json，记在 fresh_comparison）。
 export const REVIEW_PROMPT_VERSION = 'panoptes-code-review/2'
 export const REVIEW_EFFORT = 'high'
 export const REVIEW_CACHE_DIR = () => process.env.ARGUS_REVIEW_CACHE_DIR ?? join(CACHE_DIR, 'review-verdicts')
@@ -174,7 +175,7 @@ export function storeReviewVerdict(ck, entry, { dir = REVIEW_CACHE_DIR() } = {})
   return file
 }
 
-export async function codeReview({ secrets, pr, files, results, profile, outDir, cacheKey = null, cached = null, source = {} }) {
+export async function codeReview({ secrets, pr, files, results, profile, outDir, cacheKey = null, cached = null, prior = null, verdictOf = null, source = {} }) {
   mkdirSync(outDir, { recursive: true })
   if (cached) return finishReview({ outDir, doc: cached.doc, model: cached.model, tokens: 0, ms: 0, sampling: cached.sampling ?? null, reused: true, reusedFrom: { key: cached.key.slice(0, 16), stored_at: cached.stored_at, ...(cached.source ?? {}), original_tokens: cached.tokens ?? null } })
   if (!secrets.ARGUS_LLM_BASE_URL || !secrets.ARGUS_LLM_API_KEY) return { status: 'unavailable', error: { kind: 'config', message: 'QA_LLM_BASE_URL / QA_LLM_API_KEY not configured' } }
@@ -193,6 +194,18 @@ export async function codeReview({ secrets, pr, files, results, profile, outDir,
   const res = await chat({ secrets, effort: REVIEW_EFFORT, messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: user }] })
   if (!res.ok) return { status: 'error', error: res.error }
   const doc = toCodeReviewDoc(res.json, files)
+  if (prior && verdictOf) {
+    // 对比模式：已有缓存结论 → 不覆盖缓存；结论不同时缓存结论有效
+    const cachedVerdict = verdictOf(prior.doc), freshVerdict = verdictOf(doc)
+    const same = JSON.stringify(cachedVerdict) === JSON.stringify(freshVerdict)
+    const freshPath = join(outDir, 'code-review.fresh.json')
+    writeFileSync(freshPath, JSON.stringify(doc, null, 2))
+    const out = await finishReview({ outDir, doc: same ? doc : prior.doc, model: same ? res.model : prior.model, tokens: res.tokens, ms: res.ms, sampling: res.sampling, reused: !same,
+      reusedFrom: same ? null : { key: prior.key.slice(0, 16), stored_at: prior.stored_at, ...(prior.source ?? {}), original_tokens: prior.tokens ?? null } })
+    out.fresh_comparison = { cached_key: prior.key.slice(0, 16), cached_stored_at: prior.stored_at ?? null, cached_sampling: prior.sampling ?? null, fresh_sampling: res.sampling ?? null,
+      cached_verdict: cachedVerdict, fresh_verdict: freshVerdict, same, authoritative: 'cached', fresh_file: freshPath, fresh_model: res.model, fresh_tokens: res.tokens, cache_overwritten: false }
+    return out
+  }
   const out = await finishReview({ outDir, doc, model: res.model, tokens: res.tokens, ms: res.ms, sampling: res.sampling, reused: false })
   if (cacheKey) { try { storeReviewVerdict(cacheKey, { doc, model: res.model, tokens: res.tokens, sampling: res.sampling, source: { ...source, review_file: out.reviewPath } }) } catch { /* 缓存写不进去不影响本次结果 */ } }
   return out

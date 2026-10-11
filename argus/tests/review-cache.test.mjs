@@ -1,4 +1,4 @@
-// 可复现的代码审查：同一提交 + diff + 审查提示词 / 版本 + 模型 → 复用缓存的结论（reused + 来源），--fresh-review 强制重审；
+// 可复现的代码审查：同一提交 + diff + 审查提示词 / 版本 + 模型 → 复用缓存的结论（reused + 来源），--fresh-review 强制重审（已有缓存时只做对比，缓存结论有效）；
 // 请求带 temperature 0（+ 固定 seed）
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -53,21 +53,46 @@ test('second review of the same commit + diff + prompt + model reuses the verdic
   assert.equal(q.summary().used_by_run['ai-review'], 1, 'reuse does not consume quota')
 })
 
-test('--fresh-review forces a new model call and replaces the cached entry; other commit / diff → new review', async () => {
+test('--fresh-review on a cached commit compares only: cache not overwritten, differing verdict → cached stays authoritative; other commit / diff → new review', async () => {
   calls = []; answer = 1
-  const c = await review({ fresh: true })
-  assert.equal(calls.length, 1)
-  assert.equal(c.code_review.reused, false)
+  const q = memoryQuota({ pool: 'test' })
+  const c = await review({ fresh: true, quota: q })
+  assert.equal(calls.length, 1, 'fresh review calls the model')
   assert.equal(c.code_review.fresh_requested, true)
-  assert.equal(c.code_review.verdict.max_severity, 'P2')
+  const fc = c.code_review.fresh_comparison
+  assert.equal(fc.same, false)
+  assert.equal(fc.authoritative, 'cached')
+  assert.equal(fc.cache_overwritten, false)
+  assert.equal(fc.fresh_verdict.max_severity, 'P2')
+  assert.equal(fc.cached_verdict.max_severity, 'P3')
+  assert.equal(c.code_review.verdict.max_severity, 'P3', 'report keeps the cached verdict')
+  assert.equal(c.code_review.reused, true)
+  assert.equal(q.summary().used_by_run['ai-review'], 1, 'the fresh call consumes quota')
   const d = await review()
   assert.equal(calls.length, 1)
   assert.equal(d.code_review.reused, true)
-  assert.equal(d.code_review.verdict.max_severity, 'P2', 'the fresh verdict is the one reused afterwards')
+  assert.equal(d.code_review.verdict.max_severity, 'P3', 'cache entry unchanged after a fresh review')
+  answer = 0
+  const e = await review({ fresh: true })
+  assert.equal(calls.length, 2)
+  assert.equal(e.code_review.fresh_comparison.same, true)
+  assert.equal(e.code_review.verdict.max_severity, 'P3')
+  answer = 1
   await review({ sha: 'deadbee2' })
-  assert.equal(calls.length, 2, 'different commit → new review')
+  assert.equal(calls.length, 3, 'different commit → new review')
   await review({ f: [{ ...files[0], patch: '@@ -1 +1 @@\n+export const a = 3' }] })
-  assert.equal(calls.length, 3, 'different diff → new review')
+  assert.equal(calls.length, 4, 'different diff → new review')
+})
+
+test('--fresh-review without a cached entry reviews and stores normally', async () => {
+  calls = []; answer = 0
+  const c = await review({ sha: 'feed005', fresh: true })
+  assert.equal(calls.length, 1)
+  assert.equal(c.code_review.fresh_comparison, null)
+  assert.equal(c.code_review.reused, false)
+  const d = await review({ sha: 'feed005' })
+  assert.equal(calls.length, 1)
+  assert.equal(d.code_review.reused, true)
 })
 
 test('cache key components: commit, base, diff hash, prompt hash/version, model', () => {
