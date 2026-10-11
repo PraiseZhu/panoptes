@@ -103,6 +103,10 @@ test('步骤结果复用：输入路径 tree 哈希 + lockfile 不变 → 复用
   // 用到的替换变量（DIFF_BASE_SHA）进键
   const design = { id: 'design', cmd: ['npm', 'run', 'verify:design'], env: { MIVO_GUARD_BASE_SHA: '${DIFF_BASE_SHA}' } }
   assert.notEqual(cache.stepCacheKey({ step: design, label: 'h1', src: repo.dir, vars: { DIFF_BASE_SHA: 'a' } }).key, cache.stepCacheKey({ step: design, label: 'h1', src: repo.dir, vars: { DIFF_BASE_SHA: 'b' } }).key)
+  // 每次运行不同的位置变量（\${TEST_REPORT}、\${RUN}、运行目录下的路径）不进键：两次运行同一棵树 → 同一个键（真跑 #893 时单测因此没命中）
+  const u2 = { id: 'unit', cmd: ['npm', 'run', 'test:unit', '--', '--outputFile=${TEST_REPORT}'], testReport: { format: 'vitest-json', path: '${RUN}/reports/unit.json' }, shard: { max: 8 } }
+  assert.equal(cache.stepCacheKey({ step: u2, label: 'h1', src: repo.dir, vars: { TEST_REPORT: '/c/runs/n893-h1-a/reports/unit.json', RUN: '/c/runs/n893-h1-a' } }).key,
+    cache.stepCacheKey({ step: u2, label: 'h1', src: repo.dir, vars: { TEST_REPORT: '/c/runs/n893-h1-b/reports/unit.json', RUN: '/c/runs/n893-h1-b' } }).key)
   delete process.env.ARGUS_STEP_CACHE_DIR
 })
 

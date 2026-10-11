@@ -18,6 +18,10 @@ export const STEP_CACHE_DIR = () => process.env.ARGUS_STEP_CACHE_DIR ?? join(CAC
 export const REUSE_LABELS = new Set(['h1', 'h1r', 'cov', 'l'])
 export const stepCacheEnabled = (env = process.env) => env.ARGUS_STEP_CACHE !== '0'
 const sha256 = (s) => createHash('sha256').update(s).digest('hex')
+// 每次运行都不同的位置变量（运行目录、报告文件路径、复制进来的工具路径）不进键：它们只决定结果写到哪，不影响结果本身。
+// 否则带 \${TEST_REPORT} / \${RUN} 的步骤（单测）永远命中不了。
+export const PER_RUN_VARS = new Set(['RUN', 'TEST_REPORT', 'NODE_TEST_REPORTER'])
+const isPerRunVar = (k, v) => PER_RUN_VARS.has(k) || (typeof v === 'string' && v.startsWith('/'))
 
 export function treeHashes(src, paths, { git = (args) => spawnSync('git', ['-C', src, ...args], { encoding: 'utf8' }) } = {}) {
   const out = {}
@@ -34,7 +38,7 @@ export function stepCacheKey({ step, label, vars = {}, src, nodeMajor = process.
   const inputs = [...new Set([...(step.inputs ?? ['.']), 'package-lock.json'])]
   const h = hashes ?? treeHashes(src, inputs)
   const def = JSON.stringify({ id: step.id, cmd: step.cmd, env: step.env ?? null, probe: step.probe ?? null, tool: step.tool ?? null, testReport: step.testReport ?? null, shard: Boolean(step.shard) })
-  const used = Object.fromEntries(Object.entries(vars).filter(([k]) => def.includes(`\${${k}}`)))
+  const used = Object.fromEntries(Object.entries(vars).filter(([k, v]) => !isPerRunVar(k, v) && def.includes(`\${${k}}`)))
   const cls = label === 'cov' ? 'cov' : 'verdict'
   const tools = step.probe || step.tool ? argusCodeVersion() : null
   return { key: sha256(JSON.stringify({ v: 1, def, used, cls, nodeMajor, h, tools })), inputs: h, cls }
