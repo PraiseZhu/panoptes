@@ -668,12 +668,15 @@ export function resolveOutPath(out, day) {
 // ── 报告 ──────────────────────────────────────────────
 // 已产出的报告绝不就地改写：再次写同一路径时，旧文件先原样改名为 <名字>.vN.json（N 取下一个空号），再写新的。
 // 重新分级 = 重跑；原件保留（例如 PR-902.v1.json）。
-export function preserveExisting(file) {
-  if (!existsSync(file)) return null
+export function nextVersionPath(file) {
   const stem = file.replace(/\.json$/, '')
   let n = 1
   while (existsSync(`${stem}.v${n}.json`)) n++
-  const kept = `${stem}.v${n}.json`
+  return `${stem}.v${n}.json`
+}
+export function preserveExisting(file) {
+  if (!existsSync(file)) return null
+  const kept = nextVersionPath(file)
   renameSync(file, kept)
   return kept
 }
@@ -908,12 +911,28 @@ export function planTargets(discovered, opts = {}) {
     targets = opts.prs.map((n) => ({ number: n, reason: byNum[n]?.reason ?? 'manual (--pr)', meta: byNum[n]?.meta }))
   }
   const notTested = []
-  if (opts.prs?.length) for (const t of discovered) if (!opts.prs.includes(t.number)) notTested.push(notTestedEntry(t, 'excluded-by-pr-filter', 'not selected by --pr in this run'))
+  // --pr 运行（单 PR / 指定 PR）只报告被点名的 PR：当天发现的其他 PR 不再以 not-tested（excluded-by-pr-filter）进 prs[]，
+  // 只记在 system_health.discovery.excluded_by_pr_filter（2026-10-11 之前的 --pr 报告里还有这些条目）
+  const excluded = opts.prs?.length ? discovered.filter((t) => !opts.prs.includes(t.number)).map((t) => t.number) : []
   if (opts.limit && targets.length > opts.limit) {
     for (const t of targets.slice(opts.limit)) notTested.push(notTestedEntry(t, 'over-limit', `beyond --limit ${opts.limit}`))
     targets = targets.slice(0, opts.limit)
   }
-  return { targets, notTested }
+  return { targets, notTested, excluded }
+}
+
+// --pr 且没给 --date 时报告的日期：PR 的合并时间换算成上海日期（开放 / 关闭未合并的 PR 用 updated_at）。
+// 多个 PR 时取最晚的那天。返回 { day, source, prs: [{ number, day, basis }] }；拿不到时间时 day 为 null。
+export function prReportDay(pulls) {
+  const per = (pulls ?? []).filter(Boolean).map((p) => {
+    const basis = p.merged_at ? 'merged_at' : 'updated_at'
+    const t = Date.parse(p[basis] ?? '')
+    return { number: p.number, day: Number.isFinite(t) ? toShanghaiDay(new Date(t)) : null, basis }
+  })
+  const days = per.map((x) => x.day).filter(Boolean).sort()
+  if (!days.length) return { day: null, source: null, prs: per }
+  const bases = [...new Set(per.filter((x) => x.day).map((x) => x.basis))]
+  return { day: days.at(-1), source: `pr ${bases.join(' / ')} (Asia/Shanghai)`, prs: per }
 }
 
 // 逐个 PR 执行：每个 PR 有心跳（开始/结束/耗时）；qa-error 记 P2 并登记 qa_tool_failures；
@@ -994,13 +1013,22 @@ export function finalizeHealth(health, prs, startedAt = new Date(), now = () => 
 export async function runNightly(opts = {}) {
   for (const d of ALL_DIRS) mkdirSync(d, { recursive: true })
   const startedAt = new Date()
-  const day = opts.date ?? previousShanghaiDay(startedAt)
+  const repo = opts.repo ?? 'xindong/mivo-canvas-plugin'
+  const health = { status: 'ok', qa_tool_failures: [], env_problems: [], llm_errors: [], environment: envSnapshot(), discovery: null, notes: [] }
+  // 日期：--date 优先；--pr 没给 --date → PR 合并时间（开放 PR：updated_at）的上海日期；否则上海昨天
+  let day = opts.date ?? null
+  let dateSource = day ? '--date' : null
+  if (!day && opts.prs?.length) {
+    try {
+      const d = prReportDay(await Promise.all(opts.prs.map((n) => (opts.getPull ?? getPull)(repo, n))))
+      if (d.day) { day = d.day; dateSource = d.source }
+    } catch (err) { health.notes.push(`report date: could not read the PR's merge time (${redact(err.message).slice(0, 200)}); fell back to yesterday (Asia/Shanghai)`) }
+  }
+  if (!day) { day = previousShanghaiDay(startedAt); dateSource = 'yesterday (Asia/Shanghai)' }
   shanghaiDayWindow(day)
   const outFile = resolveOutPath(opts.out, day)
   if (opts.deadline) parseDeadline(opts.deadline, startedAt) // 参数错误在任何工作开始前报出
-  const health = { status: 'ok', qa_tool_failures: [], env_problems: [], llm_errors: [], environment: envSnapshot(), discovery: null, notes: [] }
   const reg = loadRegistry()
-  const repo = opts.repo ?? 'xindong/mivo-canvas-plugin'
   const project = reg.projects.find((p) => p.repo === repo)
   if (!project?.profileData) throw new Error(`${repo} 没有在 registry 里配置 profile`)
   let secrets = {}
@@ -1031,6 +1059,7 @@ export async function runNightly(opts = {}) {
     health.qa_tool_failures.push({ stage: 'discovery', message: redact(err.message).slice(0, 500) })
   }
   const plan = planTargets(targets, opts)
+  if (opts.prs?.length && health.discovery) health.discovery.excluded_by_pr_filter = plan.excluded
   const { prs } = await processTargets(plan.targets, {
     opts, health, startedAt, repo,
     processOne: (t) => processPr({ repo, project, number: t.number, discovery: t.reason, secrets, db, health, evidenceRoot, opts }),
@@ -1054,7 +1083,7 @@ export async function runNightly(opts = {}) {
       started_at_shanghai: toShanghaiIso(startedAt), finished_at_shanghai: toShanghaiIso(),
       duration_s: Math.round((Date.now() - startedAt.getTime()) / 1000),
       trigger: normalizeTrigger(opts.trigger),
-      args: { date: opts.date ?? null, prs: opts.prs ?? null, out: opts.out ?? null, reuse_merged: opts.reuseMerged !== false, create_issues: Boolean(opts.createIssues), limit: opts.limit ?? null, pr_timeout_min: opts.prTimeoutMin ?? null, deadline: opts.deadline ?? null, burst_cutoff: opts.deadlineKind === 'burst-cutoff' ? opts.deadline : null, step_cache: process.env.ARGUS_STEP_CACHE !== '0', write_merged: writeMergedEnabled(opts), write_open: writeOpenEnabled(opts), ai_tests: !opts.noAiTests && aiTestCaps().enabled, ai_test_caps: aiTestCaps() },
+      args: { date: opts.date ?? null, date_source: dateSource, prs: opts.prs ?? null, out: opts.out ?? null, reuse_merged: opts.reuseMerged !== false, create_issues: Boolean(opts.createIssues), limit: opts.limit ?? null, pr_timeout_min: opts.prTimeoutMin ?? null, deadline: opts.deadline ?? null, burst_cutoff: opts.deadlineKind === 'burst-cutoff' ? opts.deadline : null, step_cache: process.env.ARGUS_STEP_CACHE !== '0', write_merged: writeMergedEnabled(opts), write_open: writeOpenEnabled(opts), ai_tests: !opts.noAiTests && aiTestCaps().enabled, ai_test_caps: aiTestCaps() },
       argus_commit: (() => { try { return execFileSync('git', ['-C', CODE_DIR, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim() } catch { return null } })(),
       ming_qa_commit: await mingQaVersion(), llm_model: LLM_MODEL, evidence_root: evidenceRoot,
     },
@@ -1114,6 +1143,8 @@ export function mergedReportFor(report, pr, { kind = 'merged' } = {}) {
   const untested = UNTESTED_VERDICTS.has(pr.verdict)
   return {
     ...report,
+    // 单 PR 文件的 date：已合并 → 合并时间的上海日期（与日报按 merged_at 选 PR 的规则一致）
+    date: kind === 'merged' && pr.merged_at ? toShanghaiDay(new Date(pr.merged_at)) : report.date,
     ...(kind === 'merged' ? { merged_sha: pr.merge_sha ?? pr.tested_sha ?? null } : { head_sha: pr.tested_sha ?? pr.head_sha ?? null }),
     written_by: 'nightly',
     run: { ...report.run, args: { ...report.run.args, prs: [pr.number] }, source_report: null },
@@ -1149,9 +1180,11 @@ export function writePerPrReports(report, { opts, outFile, kind }) {
   for (const pr of report.prs) {
     if (!k.select(pr)) continue
     const file = k.path(pr.number, opts)
-    if (resolve(file) === resolve(outFile)) continue
+    const self = resolve(file) === resolve(outFile)
+    if (self && !opts.allowSelf) continue
     const doc = mergedReportFor(report, pr, { kind })
-    doc.run.source_report = outFile
+    // store-merged 从当前的 PR-N.json 自己重新存（例如修正 date / 去掉别的 PR）：原件先按版本机制改名，来源指向原件
+    doc.run.source_report = self ? nextVersionPath(file) : outFile
     try { writeReport(doc, file); written.push({ pr: pr.number, file }) } catch (err) { report.system_health.qa_tool_failures.push({ pr: pr.number, stage: `write-${kind}-report`, message: redact(err.message).slice(0, 300) }) }
   }
   return written

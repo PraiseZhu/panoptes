@@ -15,13 +15,15 @@ const health = () => ({ status: 'ok', qa_tool_failures: [], env_problems: [], ll
 const disc = [{ number: 1, reason: 'merged' }, { number: 2, reason: 'merged' }, { number: 3, reason: 'open-updated' }]
 
 test('发现了但没测的 PR 仍进 prs[]：severity 固定 untested（绝不是 P3）、tested=false，都带原因', () => {
+  // --pr：只报告点名的 PR；别的发现结果只记在 excluded（→ system_health.discovery.excluded_by_pr_filter）
   const a = planTargets(disc, { prs: [2] })
   assert.deepEqual(a.targets.map((t) => [t.number, t.reason]), [[2, 'merged']])
-  assert.deepEqual(a.notTested.map((p) => [p.number, p.verdict, p.severity, p.tested, p.not_tested_code]), [[1, 'not-tested', 'untested', false, 'excluded-by-pr-filter'], [3, 'not-tested', 'untested', false, 'excluded-by-pr-filter']])
-  assert.ok(a.notTested.every((p) => p.not_tested_reason && Array.isArray(p.findings)))
+  assert.deepEqual(a.notTested, [])
+  assert.deepEqual(a.excluded, [1, 3])
   const b = planTargets(disc, { limit: 2 })
   assert.deepEqual(b.targets.map((t) => t.number), [1, 2])
   assert.deepEqual(b.notTested.map((p) => [p.number, p.severity, p.not_tested_code]), [[3, 'untested', 'over-limit']])
+  assert.ok(b.notTested.every((p) => p.not_tested_reason && Array.isArray(p.findings)))
   const c = planTargets(disc, {})
   assert.equal(c.targets.length, 3)
   assert.equal(c.notTested.length, 0)

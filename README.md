@@ -118,8 +118,8 @@ run-nightly.sh [--trigger event|catch-up|manual] [--date YYYY-MM-DD] [--pr N ...
 |---|---|
 | `--catch-up` | Pure-script gap filler, safe to run from cron every few minutes (quiet and fast when there is nothing to do). Lists PRs merged yesterday + today (Shanghai) via `gh`, compares with `reports/merged/PR-N.json` (gap = missing / unfinished / `tested_sha` ≠ merge commit) and tests the gaps oldest-first with `--pr N --date <merge day> --write-merged --wait-lock S --no-issues --out reports/catch-up/PR-N.json`. A lock timeout (75) stops and retries next invocation; after **3** attempts a PR is given up and recorded in `system_health` (`reports/catch-up/run-*.json` and the next nightly report). One catch-up at a time (`catch-up.lock`). Exit `0` ok / nothing to do, `3` something still missing or given up. |
 | `--trigger T` | Who started the run, recorded as **`run.trigger`**: `event` (on-merge trigger), `catch-up`, `manual`. Default `manual`; `--catch-up` defaults to `catch-up` and passes it to its children. |
-| `--date D` | Asia/Shanghai day to report on. Default: yesterday in Shanghai. |
-| `--pr N` | Test only these PRs (repeatable). Discovery still runs and is recorded in `system_health.discovery`. |
+| `--date D` | Asia/Shanghai day to report on. Default: yesterday in Shanghai; **with `--pr` the PR's merge time converted to a Shanghai date** (open PRs: `updated_at`; several PRs: the latest such day), recorded in `run.args.date_source`. |
+| `--pr N` | Test only these PRs (repeatable). The report's `prs[]` contains **only** these PRs; discovery still runs and is recorded in `system_health.discovery` (other PRs of that day in `discovery.excluded_by_pr_filter`, not as `not-tested` entries). |
 | `--limit N` | Test at most N discovered PRs. |
 | `--no-review` | Skip the ming-qa LLM code review. |
 | `--skip-step ID` | Skip one profile step (repeatable), e.g. a slow bench. |

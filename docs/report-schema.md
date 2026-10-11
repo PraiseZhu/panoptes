@@ -41,7 +41,9 @@ the current `reports/merged/PR-N.json` through the same writer the nightly uses,
 `cd argus && node src/cli.mjs store-merged --from <that report> --pr N` (env `ARGUS_ROOT`, `ARGUS_REPORTS_DIR` as in
 `run-nightly.sh`). The existing file becomes `PR-N.vN.json`; the new one is the per-PR form of the re-run
 (`written_by: "nightly"`, `run.source_report` = the re-run file) with `previous_version`. Alternatively re-run with
-`--write-merged`, which does the same at the end of the run.
+`--write-merged`, which does the same at the end of the run. `--from` may also be the current
+`reports/merged/PR-N.json` itself (re-store it in single-PR form: only PR N, `date` = its Shanghai merge day); the
+original is kept as `PR-N.vN.json` and `run.source_report` points at that kept file.
 
 ### Older reports (fields that did not exist yet)
 
@@ -62,7 +64,7 @@ were not produced for that run; do not compute them from the legacy `coverage.ap
 | **`prs[].tested_at`** | ISO 8601 with `+08:00`, e.g. `2026-10-11T03:52:10+08:00` | When this PR's result was produced (verdict reached). Present on every `prs[]` entry; `null` when the PR was not tested (`not-tested`, `qa-error`). For a reused on-merge result (`reused: true`) it is the time of the original on-merge test. |
 | `prs[].test_started_at` | ISO 8601 `+08:00` | When processing of this PR started. |
 | `prs[].created_at`, `updated_at` | ISO 8601 UTC (`Z`), from GitHub | PR lifecycle times. |
-| `date` | `YYYY-MM-DD` | For day-level runs: the Asia/Shanghai day of the discovery window. Not the test time, not the selection key. |
+| `date` | `YYYY-MM-DD` | For day-level runs: the Asia/Shanghai day of the discovery window. For `--pr` runs without `--date` and for every `reports/merged/PR-N.json`: the PR's `merged_at` as a Shanghai date (open PRs: `updated_at`). Not the test time, not the selection key. |
 | `generated_at` | ISO 8601 UTC (`Z`) | When the JSON was assembled. |
 | `run.started_at`, `run.finished_at` | ISO 8601 UTC (`Z`) | Run start / end. |
 | `run.started_at_shanghai`, `run.finished_at_shanghai` | ISO 8601 `+08:00` | Same instants in Shanghai time. |
@@ -76,7 +78,7 @@ Reports written before 2026-10-11 (commit `78184f9`) do not have `tested_at`; fa
 |---|---|---|
 | `schema_version` | `"1.0"` | |
 | `tool` | string | `panoptes (argus + ming-qa)` |
-| `date` | `YYYY-MM-DD` | Shanghai day reported on |
+| `date` | `YYYY-MM-DD` | Shanghai day reported on. Day-level run: `--date` or yesterday. `--pr` run without `--date` (since 2026-10-11): the PR's merge time converted to a Shanghai date (open PRs `updated_at`; several PRs: the latest); per-PR merged files always use the merge day. Source in `run.args.date_source`. |
 | `timezone` | `"Asia/Shanghai"` | |
 | `repo` | string | `xindong/mivo-canvas-plugin` |
 | `generated_at` | ISO UTC | |
@@ -87,7 +89,7 @@ Reports written before 2026-10-11 (commit `78184f9`) do not have `tested_at`; fa
 | `dimensions` | object | `white-box` / `gray-box` / `black-box` → description |
 | `severity_scale` | object | `P0`…`P3` → description |
 | `summary` | object | see below |
-| `prs` | array | one entry per discovered (or `--pr`-requested) PR, see below |
+| `prs` | array | one entry per discovered PR; for `--pr` runs **only the requested PRs** (since 2026-10-11; older `--pr` reports also listed the day's other PRs as `not-tested` / `excluded-by-pr-filter`, e.g. the 10-11 PR-905/906/907 originals kept as `.v1.json`) |
 | `issues` | object | issue creation result (off by default) |
 | `merged_reports` | array | `[{ pr, file }]` merged PR reports this run wrote (empty for `--pr` runs) |
 | `open_reports` | array | only with `--write-open`: `[{ pr, file }]` open PR reports this run wrote |
@@ -97,7 +99,7 @@ Reports written before 2026-10-11 (commit `78184f9`) do not have `tested_at`; fa
 
 **`trigger`** (`event` = on-merge trigger, `catch-up` = the 2-hourly catch-up timer or `--catch-up`, `manual` = run by
 hand; default `manual`; reports before 2026-10-11 have no `trigger`), `id` (uuid), `started_at`, `finished_at`, `started_at_shanghai`, `finished_at_shanghai`, `duration_s`,
-`args` (`date`, `prs`, `out`, `reuse_merged`, `create_issues`, `limit`, `pr_timeout_min`, `deadline`, `burst_cutoff`, `step_cache`, `write_merged`, `write_open`),
+`args` (`date` (the `--date` argument or `null`), `date_source` (how `date` was chosen: `--date`, `pr merged_at (Asia/Shanghai)`, `pr updated_at (Asia/Shanghai)`, `yesterday (Asia/Shanghai)`), `prs`, `out`, `reuse_merged`, `create_issues`, `limit`, `pr_timeout_min`, `deadline`, `burst_cutoff`, `step_cache`, `write_merged`, `write_open`),
 `argus_commit` (panoptes commit), `ming_qa_commit`, `llm_model`, `evidence_root`.
 Merged reports written by nightly also carry `run.source_report` (path of the nightly report).
 
@@ -170,7 +172,7 @@ Merged reports written by nightly also carry `run.source_report` (path of the ni
 | `qa-env-problem` | per findings | the environment failed (e.g. install failed twice) |
 | `docs-only` | P3 (or the highest code-review finding) | only docs changed; no checks run, `tested: false`, `tested_sha: null`; the ming-qa code review still runs on the merge commit / head (`code_review`, `reviewed_sha`), `coverage_gate.status: "not-applicable"`. Review findings are `test_backed: false`. |
 | `skipped` | P3 | closed without merge |
-| `not-tested` | **`untested`** | discovered but not tested in this run (`tested: false`, `tested_at: null`); `not_tested_code` ∈ `excluded-by-pr-filter` (deliberate `--pr`), `over-limit`, `pr-timeout`, `deadline`, `burst-cutoff` (see *Burst capacity*). Time-budget cases are also in `system_health.qa_tool_failures`. Look for this PR's own `merged/PR-N.json` before concluding it was never tested. |
+| `not-tested` | **`untested`** | discovered but not tested in this run (`tested: false`, `tested_at: null`); `not_tested_code` ∈ `excluded-by-pr-filter` (deliberate `--pr`; only in reports written before 2026-10-11 — current `--pr` reports leave other PRs out of `prs[]` and list them in `system_health.discovery.excluded_by_pr_filter`), `over-limit`, `pr-timeout`, `deadline`, `burst-cutoff` (see *Burst capacity*). Time-budget cases are also in `system_health.qa_tool_failures`. Look for this PR's own `merged/PR-N.json` before concluding it was never tested. |
 | `qa-error` | **P2** | the QA pipeline itself crashed for this PR; also listed in `system_health.qa_tool_failures` (`stage: "pipeline"`) |
 
 Severity rules: P0 introduced failure on a merged PR that still fails on latest main · P1 introduced reproducible
@@ -439,7 +441,7 @@ Target: about 20 code PRs merged overnight, all tested before **08:30 Asia/Shang
 | `llm_errors[]` | `{ pr, stage, model, … }` |
 | `environment` | `{ host, platform, node, sandbox, bwrap, chromium, playwright, python, disk_free_gb }` |
 | `bootstrap` | `{ ran, missing_before[], missing_after[], log, checked_at }` from the wrapper's self-check (`scripts/bootstrap-box.sh`). `ran: true` = something was missing and the bootstrap ran (a note lists what it installed); every entry left in `missing_after` is also in `env_problems`, plus one `qa_tool_failures` entry with `stage: "bootstrap"`. A run that cannot start Node 24 writes a minimal report instead: `run.mode: "env-failed"`, `prs: []`, `system_health.status: "failed"` (to `--out`, or `<out>.env-failed-<ts>.json` if that file exists), exit 3. |
-| `discovery` | `{ window_start, window_end, found: [{ number, reason }] }` |
+| `discovery` | `{ window_start, window_end, found: [{ number, reason }], excluded_by_pr_filter? }` — `excluded_by_pr_filter` (only `--pr` runs): PR numbers discovery found that day but the run did not report on |
 | `notes[]` | strings (reuse notes, `tested_sha`/`reviewed_sha` mismatches, triage notes `维度适用性未判定（…）`, …) |
 | `triage` | `{ model, prs: [{ pr, status, applicable, not_applicable, undetermined, duration_ms }], failed: [{ pr, reason }] }` — present when at least one PR was triaged |
 | **`heartbeat`** | see below |

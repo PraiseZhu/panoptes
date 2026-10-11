@@ -106,7 +106,8 @@ async function main() {
       const only = rest.flatMap((a, i) => (a === '--pr' ? [Number(rest[i + 1])] : []))
       const report = JSON.parse(readFileSync(from, 'utf8'))
       if (only.length) report.prs = report.prs.filter((p) => only.includes(p.number))
-      const written = writePerPrReports(report, { opts: { writeMerged: true }, outFile: resolvePath(from), kind: 'merged' })
+      // --from 可以就是 reports/merged/PR-N.json 本身（重新存成单 PR 形式：只含这个 PR、date = 合并日）；原件 → PR-N.vN.json
+      const written = writePerPrReports(report, { opts: { writeMerged: true, allowSelf: true }, outFile: resolvePath(from), kind: 'merged' })
       const fails = report.system_health.qa_tool_failures.filter((f) => String(f.stage).startsWith('write-merged'))
       console.log(JSON.stringify({ from, written, failures: fails }, null, 2))
       if (fails.length || !written.length) process.exitCode = 3
