@@ -2,7 +2,7 @@
 // ming-qa 代码审查 → 写 reports/YYYY-MM-DD.json。默认绝不写 GitHub；提 issue 只在 --create-issues 且
 // ARGUS_ALLOW_ISSUES=1 时才可能发生。
 import { memAvailableGb } from './memory.mjs'
-import { mkdirSync, writeFileSync, renameSync, existsSync, readFileSync, statfsSync } from 'node:fs'
+import { mkdirSync, writeFileSync, renameSync, existsSync, readFileSync, statfsSync, readdirSync } from 'node:fs'
 import { join, resolve, dirname, basename } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { hostname } from 'node:os'
@@ -730,22 +730,80 @@ export function resolveOutPath(out, day) {
 // ── 报告 ──────────────────────────────────────────────
 // 已产出的报告绝不就地改写：再次写同一路径时，旧文件先原样改名为 <名字>.vN.json（N 取下一个空号），再写新的。
 // 重新分级 = 重跑；原件保留（例如 PR-902.v1.json）。
+// 版本放在报告同目录的 history/ 子目录：reports/merged/PR-902.json 的旧版 → reports/merged/history/PR-902.vN.json。
+// N 取下一个空号（history/ 和 2026-10-11 之前平铺在同目录的旧版都算）。previous_version 记相对于当前报告所在目录的路径
+// （"history/PR-902.v1.json"），不论引用它的文件本身在哪。读报告的程序只读 PR-<数字>.json。
+export const HISTORY_DIR = 'history'
 export function nextVersionPath(file) {
-  const stem = file.replace(/\.json$/, '')
+  const dir = dirname(file)
+  const stem = basename(file).replace(/\.json$/, '')
   let n = 1
-  while (existsSync(`${stem}.v${n}.json`)) n++
-  return `${stem}.v${n}.json`
+  while (existsSync(join(dir, HISTORY_DIR, `${stem}.v${n}.json`)) || existsSync(join(dir, `${stem}.v${n}.json`))) n++
+  return join(dir, HISTORY_DIR, `${stem}.v${n}.json`)
 }
+export const versionRef = (kept) => `${HISTORY_DIR}/${basename(kept)}`
 export function preserveExisting(file) {
   if (!existsSync(file)) return null
   const kept = nextVersionPath(file)
+  mkdirSync(dirname(kept), { recursive: true })
   renameSync(file, kept)
   return kept
 }
+
+// 一次性迁移：把平铺在 dir 里的旧版 <name>.vN.json 挪进 dir/history/，并把指向它们的路径字段改成新位置：
+// previous_version（裸文件名 → "history/<name>.vN.json"）和 run.source_report（绝对路径）。只改这两个路径字段，内容不动。
+export function migrateHistory(dir) {
+  const moved = new Map() // 旧绝对路径 → 新绝对路径
+  const conflicts = []
+  mkdirSync(join(dir, HISTORY_DIR), { recursive: true })
+  for (const name of readdirSync(dir)) {
+    if (!/\.v\d+\.json$/.test(name)) continue
+    const from = join(dir, name), to = join(dir, HISTORY_DIR, name)
+    if (existsSync(to)) { conflicts.push(name); continue }
+    renameSync(from, to)
+    moved.set(from, to)
+  }
+  const rewritten = []
+  const files = [...readdirSync(dir).filter((n) => /\.json$/.test(n)).map((n) => join(dir, n)), ...readdirSync(join(dir, HISTORY_DIR)).filter((n) => /\.json$/.test(n)).map((n) => join(dir, HISTORY_DIR, n))]
+  for (const f of files) {
+    let doc
+    try { doc = JSON.parse(readFileSync(f, 'utf8')) } catch { continue }
+    const changes = []
+    const pv = doc.previous_version
+    if (typeof pv === 'string' && /\.v\d+\.json$/.test(pv) && !pv.includes('/')) { doc.previous_version = `${HISTORY_DIR}/${pv}`; changes.push({ field: 'previous_version', from: pv, to: doc.previous_version }) }
+    const src = doc.run?.source_report
+    if (typeof src === 'string' && moved.has(resolve(src))) { doc.run.source_report = moved.get(resolve(src)); changes.push({ field: 'run.source_report', from: src, to: doc.run.source_report }) }
+    if (!changes.length) continue
+    const tmp = `${f}.tmp-${process.pid}`
+    writeFileSync(tmp, JSON.stringify(doc, null, 2) + '\n')
+    renameSync(tmp, f)
+    rewritten.push({ file: f, changes })
+  }
+  return { dir, moved: [...moved.entries()].map(([from, to]) => ({ from, to })), conflicts, rewritten }
+}
+
+// 规范化（只在重新存报告时做，原件按版本机制保留）：2026-10-11 之前的 flaky 条目没有 base_comparison →
+// 补成 not-compared，reason "report predates feature"，文字「未与合并前版本对比（该报告早于此功能生成）」。
+export const PREDATES_FEATURE_ZH = `${NOT_COMPARED_ZH}（该报告早于此功能生成）`
+export function normalizePreFeature(report) {
+  const changes = []
+  for (const pr of report?.prs ?? []) {
+    for (const field of ['failed_checks', 'findings']) {
+      for (const c of pr[field] ?? []) {
+        if (c?.status !== 'flaky' || c.base_comparison) continue
+        c.base_comparison = { compared: false, base_sha: c.evidence?.base_sha ?? pr.base_sha ?? null, base_run: c.evidence?.base_run ?? 'not-recorded', result: 'not-compared', reason: 'report predates feature', note: `${PREDATES_FEATURE_ZH} (not compared with the base revision: report predates feature)`, note_zh: PREDATES_FEATURE_ZH }
+        changes.push({ pr: pr.number, field, check_id: c.check_id, test: c.test ?? null, change: 'base_comparison: not-compared (report predates feature)' })
+      }
+    }
+  }
+  if (changes.length) report.normalized = [...(report.normalized ?? []), { at: new Date().toISOString(), by: 'panoptes normalizePreFeature', changes }]
+  return changes
+}
+
 export function writeReport(report, file) {
   mkdirSync(dirname(file), { recursive: true })
   const kept = preserveExisting(file)
-  if (kept && report && typeof report === 'object') report.previous_version = basename(kept)
+  if (kept && report && typeof report === 'object') report.previous_version = versionRef(kept)
   const tmp = `${file}.tmp-${process.pid}`
   writeFileSync(tmp, JSON.stringify(report, null, 2) + '\n')
   renameSync(tmp, file)

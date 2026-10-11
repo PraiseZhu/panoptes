@@ -11,7 +11,9 @@
 //   node src/cli.mjs nightly [--date YYYY-MM-DD] [--pr N ...] [--limit N] [--no-review] [--no-ai-tests] [--skip-step ID ...] [--out PATH] [--no-reuse] [--pr-timeout MIN] [--deadline HH:MM] [--write-merged | --no-write-merged] [--write-open] [--no-issues | --create-issues] [--trigger event|catch-up|manual] [--burst-cutoff [HH:MM]] [--no-step-cache] [--quota-pool test|production] [--fresh-review]
 //                                          Linux 夜间 QA：上海时区前一天的 PR → reports/YYYY-MM-DD.json（默认不写 GitHub）
 //   node src/cli.mjs catch-up [--wait-lock S] [--repo owner/name] [--trigger catch-up|manual|event] [--create-issues]   补测昨天+今天（上海）合并但 reports/merged 缺口的 PR（由 run-nightly.sh --catch-up 调用）
-//   node src/cli.mjs store-merged --from REPORT [--pr N ...]   把 --out 运行里测完的已合并 PR 存进 reports/merged/（旧文件 → PR-N.vN.json）
+//   node src/cli.mjs store-merged --from REPORT [--pr N ...]   把 --out 运行里测完的已合并 PR 存进 reports/merged/（旧文件 → history/PR-N.vN.json）
+//   node src/cli.mjs migrate-history --dir DIR                 平铺的旧版 *.vN.json 挪进 DIR/history/（只改路径字段）
+//   node src/cli.mjs normalize --file REPORT                   早于功能的报告规范化后重存（原件 → history/）
 //   node src/cli.mjs assemble --date D --out PATH --from FILE ... [--order N,N]   多份报告合成 full-D.json
 import { mkdirSync } from 'node:fs'
 import { loadRegistry, loadSecrets } from './config.mjs'
@@ -28,7 +30,7 @@ import { catchUp, runNightlyFor, catchUpDir } from './catchup.mjs'
 import { LOGS_DIR } from './paths.mjs'
 import { openSync, closeSync } from 'node:fs'
 import { join } from 'node:path'
-import { writeReport, normalizeTrigger, BURST_CUTOFF_DEFAULT, writePerPrReports } from './nightly.mjs'
+import { writeReport, normalizeTrigger, BURST_CUTOFF_DEFAULT, writePerPrReports, normalizePreFeature, migrateHistory } from './nightly.mjs'
 import { readFileSync } from 'node:fs'
 import { resolve as resolvePath } from 'node:path'
 import { toShanghaiIso as shIso } from './util.mjs'
@@ -109,11 +111,35 @@ async function main() {
       const only = rest.flatMap((a, i) => (a === '--pr' ? [Number(rest[i + 1])] : []))
       const report = JSON.parse(readFileSync(from, 'utf8'))
       if (only.length) report.prs = report.prs.filter((p) => only.includes(p.number))
+      // 重新存时做一遍规范化（早于功能的 flaky 条目补 base_comparison not-compared），改动记在 normalized[]
+      const normalized = normalizePreFeature(report)
       // --from 可以就是 reports/merged/PR-N.json 本身（重新存成单 PR 形式：只含这个 PR、date = 合并日）；原件 → PR-N.vN.json
       const written = writePerPrReports(report, { opts: { writeMerged: true, allowSelf: true }, outFile: resolvePath(from), kind: 'merged' })
       const fails = report.system_health.qa_tool_failures.filter((f) => String(f.stage).startsWith('write-merged'))
-      console.log(JSON.stringify({ from, written, failures: fails }, null, 2))
+      console.log(JSON.stringify({ from, written, failures: fails, normalized }, null, 2))
       if (fails.length || !written.length) process.exitCode = 3
+      return
+    }
+    case 'migrate-history': {
+      // migrate-history --dir DIR [--dir DIR ...]：平铺的旧版 <name>.vN.json → DIR/history/，只改指向它们的路径字段
+      const dirs = rest.flatMap((a, i) => (a === '--dir' ? [rest[i + 1]] : []))
+      if (!dirs.length) throw new Error('migrate-history 需要 --dir DIR')
+      console.log(JSON.stringify(dirs.map((d) => migrateHistory(resolvePath(d))), null, 2))
+      return
+    }
+    case 'normalize': {
+      // normalize --file REPORT [--file ...]：非单 PR 文件（日报 / full- / merged-batch-）的规范化重存；
+      // 有改动才写，经 writeReport（原件 → history/<name>.vN.json，新文件 previous_version + normalized[]）
+      const files = rest.flatMap((a, i) => (a === '--file' ? [rest[i + 1]] : []))
+      if (!files.length) throw new Error('normalize 需要 --file REPORT')
+      const results = []
+      for (const f of files) {
+        const doc = JSON.parse(readFileSync(f, 'utf8'))
+        const changes = normalizePreFeature(doc)
+        if (changes.length) writeReport(doc, resolvePath(f))
+        results.push({ file: f, changes, previous_version: changes.length ? doc.previous_version : null })
+      }
+      console.log(JSON.stringify(results, null, 2))
       return
     }
     case 'assemble': {

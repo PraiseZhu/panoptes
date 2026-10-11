@@ -179,10 +179,12 @@ test('报告不就地改写：再次写同一路径时原件改名为 .v1 / .v2�
   nightly.writeReport({ n: 1 }, f)
   nightly.writeReport({ n: 2 }, f)
   nightly.writeReport({ n: 3 }, f)
-  assert.deepEqual(readdirSync(dir).sort(), ['PR-7.json', 'PR-7.v1.json', 'PR-7.v2.json'])
-  assert.equal(JSON.parse(readFileSync(join(dir, 'PR-7.v1.json'), 'utf8')).n, 1)
+  assert.deepEqual(readdirSync(dir).sort(), ['PR-7.json', 'history'])
+  assert.deepEqual(readdirSync(join(dir, 'history')).sort(), ['PR-7.v1.json', 'PR-7.v2.json'])
+  assert.equal(JSON.parse(readFileSync(join(dir, 'history/PR-7.v1.json'), 'utf8')).n, 1)
   const cur = JSON.parse(readFileSync(f, 'utf8'))
-  assert.equal(cur.n, 3); assert.equal(cur.previous_version, 'PR-7.v2.json')
+  assert.equal(cur.n, 3); assert.equal(cur.previous_version, 'history/PR-7.v2.json')
+  assert.equal(JSON.parse(readFileSync(join(dir, 'history/PR-7.v2.json'), 'utf8')).previous_version, 'history/PR-7.v1.json', 'path is relative to the current file\'s directory')
 })
 
 // ── 维度分诊 ─────────────────────────────────────────────

@@ -53,7 +53,7 @@ test('per-PR merged file: date = merge day in Shanghai, prs = [that PR]', () => 
   assert.deepEqual(doc.summary.not_tested, [])
 })
 
-test('store-merged from the current PR-N.json itself: original kept as PR-N.v1.json, new file has previous_version + source_report', () => {
+test('store-merged from the current PR-N.json itself: original kept as history/PR-N.v1.json, new file has previous_version + source_report', () => {
   const dir = mkdtempSync(join(tmpdir(), 'merged-self-'))
   const file = join(dir, 'PR-905.json')
   const original = { date: '2026-10-10', run: { args: { prs: [905] } }, system_health: health(), prs: [prEntry(905, '2026-10-11T06:42:40Z'), { number: 892, state: 'merged', merged_at: '2026-10-10T06:23:41Z', verdict: 'not-tested', severity: 'untested', not_tested_code: 'excluded-by-pr-filter', findings: [] }] }
@@ -64,11 +64,11 @@ test('store-merged from the current PR-N.json itself: original kept as PR-N.v1.j
   assert.deepEqual(writePerPrReports(report, { opts: { writeMerged: true, mergedDir: dir }, outFile: file, kind: 'merged' }), [])
   const written = writePerPrReports(report, { opts: { writeMerged: true, allowSelf: true, mergedDir: dir }, outFile: file, kind: 'merged' })
   assert.deepEqual(written.map((w) => w.pr), [905])
-  assert.ok(existsSync(join(dir, 'PR-905.v1.json')))
-  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'PR-905.v1.json'), 'utf8')), original, 'original unchanged')
+  assert.ok(existsSync(join(dir, 'history/PR-905.v1.json')))
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'history/PR-905.v1.json'), 'utf8')), original, 'original unchanged')
   const now = JSON.parse(readFileSync(file, 'utf8'))
-  assert.equal(now.previous_version, 'PR-905.v1.json')
-  assert.equal(now.run.source_report, join(dir, 'PR-905.v1.json'))
+  assert.equal(now.previous_version, 'history/PR-905.v1.json')
+  assert.equal(now.run.source_report, join(dir, 'history/PR-905.v1.json'))
   assert.equal(now.date, '2026-10-11')
   assert.deepEqual(now.prs.map((p) => p.number), [905])
   assert.equal(now.written_by, 'nightly')
