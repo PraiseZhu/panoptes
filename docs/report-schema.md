@@ -419,6 +419,10 @@ production quota**. `--quota-pool production|test` overrides the default. Test-p
 (same defaults). Both pools can also be set in `$ARGUS_ROOT/quota.json` (`ARGUS_QUOTA_FILE`):
 `{ "production": { "ai-test": 40, … }, "test": { … } }`; env wins. The run records `run.args.quota_pool` / `quota_caps`.
 
+Counters live in the sqlite `ai_usage` table under **`quota:<pool>:<kind>:<YYYY-MM-DD>`**. The pre-2026-10-11 keys
+(`gen:<day>`, `jev:<day>`, bare `<day>`) are not read by the nightly flow (only by the Mac `control.mjs` flow, on its own
+DB); `cli.mjs prune-quota-keys [--dry-run]` backs the DB up (`VACUUM INTO argus.sqlite.bak-<ts>`) and deletes them.
+
 When a cap is hit the call is not made and the result says so — **`status: "capped"`**, display text
 **额度用尽未补测**, distinct from a normal gap:
 

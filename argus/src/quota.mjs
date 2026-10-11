@@ -46,6 +46,15 @@ export function quotaCaps(pool, env = process.env) {
 
 export const quotaCounterKey = (pool, kind, day) => `quota:${pool}:${kind}:${day}`
 
+// 旧计数键：gen:<日>（旧 AI 补测）、jev:<日>、裸 <日>（旧 pr-summary）。夜间流程只读 quota:<池>:<种类>:<日>；
+// 只有 Mac 上的 control.mjs（不传 quota 时）还读当天的旧键，它用自己那台机器的库。prune 前先备份（cli prune-quota-keys）
+export const LEGACY_QUOTA_KEY = /^(?:gen:|jev:)?\d{4}-\d{2}-\d{2}$/
+export function pruneLegacyQuotaKeys(db, { dryRun = false } = {}) {
+  const rows = db.prepare('SELECT day, calls, tokens FROM ai_usage ORDER BY day').all().filter((r) => LEGACY_QUOTA_KEY.test(r.day))
+  if (!dryRun) { const del = db.prepare('DELETE FROM ai_usage WHERE day = ?'); for (const r of rows) del.run(r.day) }
+  return rows.map((r) => ({ key: r.day, calls: r.calls, tokens: r.tokens }))
+}
+
 // 一次运行用的额度对象。check(kind) 不扣；consume(kind, tokens) 记一次调用；markCapped 记下谁因为额度没做
 export function createQuota({ db, pool = 'production', env = process.env, day = () => toShanghaiDay() } = {}) {
   const { caps, source } = quotaCaps(pool, env)

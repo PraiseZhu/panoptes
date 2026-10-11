@@ -14,6 +14,7 @@
 //   node src/cli.mjs store-merged --from REPORT [--pr N ...]   把 --out 运行里测完的已合并 PR 存进 reports/merged/（旧文件 → history/PR-N.vN.json）
 //   node src/cli.mjs migrate-history --dir DIR                 平铺的旧版 *.vN.json 挪进 DIR/history/（只改路径字段）
 //   node src/cli.mjs normalize --file REPORT                   早于功能的报告规范化后重存（原件 → history/）
+//   node src/cli.mjs prune-quota-keys [--dry-run] [--backup PATH]   删掉不再读的旧额度计数键（gen:* / jev:* / 裸日期），先 VACUUM INTO 备份
 //   node src/cli.mjs assemble --date D --out PATH --from FILE ... [--order N,N]   多份报告合成 full-D.json
 import { mkdirSync } from 'node:fs'
 import { loadRegistry, loadSecrets } from './config.mjs'
@@ -140,6 +141,22 @@ async function main() {
         results.push({ file: f, changes, previous_version: changes.length ? doc.previous_version : null })
       }
       console.log(JSON.stringify(results, null, 2))
+      return
+    }
+    case 'prune-quota-keys': {
+      const { pruneLegacyQuotaKeys } = await import('./quota.mjs')
+      const { DB_PATH } = await import('./paths.mjs')
+      const dryRun = rest.includes('--dry-run')
+      const bi = rest.indexOf('--backup')
+      const db = openDb()
+      let backup = null
+      if (!dryRun) {
+        backup = bi >= 0 ? resolvePath(rest[bi + 1]) : `${DB_PATH}.bak-${new Date().toISOString().replace(/[-:]/g, '').slice(0, 15)}`
+        db.prepare('VACUUM INTO ?').run(backup)
+      }
+      const removed = pruneLegacyQuotaKeys(db, { dryRun })
+      const kept = db.prepare('SELECT day AS key, calls, tokens FROM ai_usage ORDER BY day').all()
+      console.log(JSON.stringify({ db: DB_PATH, dry_run: dryRun, backup, removed, kept }, null, 2))
       return
     }
     case 'assemble': {
