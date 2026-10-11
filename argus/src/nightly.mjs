@@ -675,6 +675,8 @@ export function verdictOf(pr) {
   if (pr.findings.some((f) => f.severity === 'P2')) return 'review-suggested'
   if (pr.checks.some((c) => c.status === 'unavailable' || c.status === 'timeout')) return 'partially-verified'
   if ((pr.dimensions_missing ?? []).length) return 'partially-verified'
+  // 代码审查因每日额度用尽没做：不能说 clean
+  if (pr.code_review?.status === 'capped') return 'partially-verified'
   return 'clean'
 }
 

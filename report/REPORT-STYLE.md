@@ -114,7 +114,7 @@
 - **额度用尽**（since 2026-10-11）：`ai_tests.status: "capped"`（一次都没补就被额度挡住；做了一部分时 `ai_tests.capped: true` +
   `capped_gaps`）、`code_review.status: "capped"`（当天没做代码审查）、`ai_summary.status: "capped"`、`triage.status: "capped"`（Jev 没跑）。
   每个 PR 的汇总在 `prs[].quota_capped[]`（`kind`、`dimensions`）。群里统一写「额度用尽未补测」，和"测了没覆盖"分开说；
-  审查被额度挡住时，P 级只反映真实跑过的检查，要写「代码审查额度用尽，今天没审」，不能写成「审查无问题」。
+  审查被额度挡住时（verdict 最多 `partially-verified`，不会是 clean），P 级只反映真实跑过的检查，要写「代码审查额度用尽，今天没审」，不能写成「审查无问题」。
   额度池、上限、用量（`system_health.quota`）只进给 Praise 的私下补充；`system_health.status` 会因此是 degraded，系统状态一句写「有 N 个 PR 额度用尽未补测」。
 
 ## 代码审查的复用（since 2026-10-11）

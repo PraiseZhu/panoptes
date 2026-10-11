@@ -120,3 +120,9 @@ test('system_health: capped entries land in quota.capped + notes and make the ru
   assert.equal(health.quota.pool, 'production')
   assert.ok(health.notes.some((n) => n.startsWith('额度用尽未补测：#893 ai-test')))
 })
+
+test('a PR whose code review was capped is never clean (partially-verified)', () => {
+  const pr = { outcome: 'passed', findings: [], checks: [{ status: 'pass' }], dimensions_missing: [], code_review: { status: 'capped' } }
+  assert.equal(N.verdictOf(pr), 'partially-verified')
+  assert.equal(N.verdictOf({ ...pr, code_review: { status: 'passed' } }), 'clean')
+})

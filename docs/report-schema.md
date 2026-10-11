@@ -170,7 +170,7 @@ Merged reports written by nightly also carry `run.source_report` (path of the ni
 | `clean` | P3 | nothing found, every planned check ran and passed, **and all three dimensions (white / gray / black) actually ran** |
 | `review-suggested` | P2 | P2 findings (quality guard, unverified failure, review P2, coverage below gate) |
 | `needs-attention` | P0/P1 | at least one P0/P1 finding |
-| `partially-verified` | P3 | nothing found, but some checks were unavailable / timed out **or a dimension did not run** (`dimensions_missing`) |
+| `partially-verified` | P3 | nothing found, but some checks were unavailable / timed out **or a dimension did not run** (`dimensions_missing`), **or the code review was skipped because the ai-review quota was used up** (`code_review.status: "capped"`) |
 | `qa-env-problem` | per findings | the environment failed (e.g. install failed twice) |
 | `docs-only` | P3 (or the highest code-review finding) | only docs changed; no checks run, `tested: false`, `tested_sha: null`; the ming-qa code review still runs on the merge commit / head (`code_review`, `reviewed_sha`), `coverage_gate.status: "not-applicable"`. Review findings are `test_backed: false`. |
 | `skipped` | P3 | closed without merge |
@@ -402,7 +402,7 @@ When a cap is hit the call is not made and the result says so — **`status: "ca
 |---|---|
 | `ai-test` | `ai_tests.status: "capped"` (or `capped: true` + `capped_gaps` after a partial run); those dimensions `dimension_status.status: "capped"` (`capped_by: "ai-test"`) |
 | `jev` | `triage.status: "capped"` (reason names the pool and cap); every undetermined dimension `status: "capped"` (`capped_by: "jev"`); optional checks all run (as without Jev); AI tests `skipped` |
-| `ai-review` | `code_review.status: "capped"` — no review, no review findings; the 29 dimensions are unaffected (code review covers none of them) |
+| `ai-review` | `code_review.status: "capped"` — no review, no review findings; verdict at best `partially-verified` (never `clean`); the 29 dimensions are unaffected (code review covers none of them) |
 | `pr-summary` | `ai_summary: { status: "capped", reason }` |
 
 Every case is also in `prs[].quota_capped[]` and **`system_health.quota`** `{ pool, day, caps, caps_source,
