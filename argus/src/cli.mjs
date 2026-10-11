@@ -10,6 +10,7 @@
 //   node src/cli.mjs doctor                只读自检（GitHub / 模型 / 飞书 / 磁盘）
 //   node src/cli.mjs nightly [--date YYYY-MM-DD] [--pr N ...] [--limit N] [--no-review] [--skip-step ID ...] [--out PATH] [--no-reuse] [--pr-timeout MIN] [--deadline HH:MM] [--write-merged | --no-write-merged] [--write-open] [--no-issues | --create-issues]
 //                                          Linux 夜间 QA：上海时区前一天的 PR → reports/YYYY-MM-DD.json（默认不写 GitHub）
+//   node src/cli.mjs catch-up [--wait-lock S] [--repo owner/name]   补测昨天+今天（上海）合并但 reports/merged 缺口的 PR（由 run-nightly.sh --catch-up 调用）
 //   node src/cli.mjs assemble --date D --out PATH --from FILE ... [--order N,N]   多份报告合成 full-D.json
 import { mkdirSync } from 'node:fs'
 import { loadRegistry, loadSecrets } from './config.mjs'
@@ -22,6 +23,12 @@ import { ALL_DIRS } from './paths.mjs'
 import { OUTCOMES } from './decide.mjs'
 import { runNightly } from './nightly.mjs'
 import { assembleFiles } from './assemble.mjs'
+import { catchUp, runNightlyFor, catchUpDir } from './catchup.mjs'
+import { LOGS_DIR } from './paths.mjs'
+import { openSync, closeSync } from 'node:fs'
+import { join } from 'node:path'
+import { writeReport } from './nightly.mjs'
+import { toShanghaiIso as shIso } from './util.mjs'
 import { killAllActive } from './exec.mjs'
 
 const [cmd, ...rest] = process.argv.slice(2)
@@ -50,6 +57,27 @@ async function main() {
       const { file, report } = await runNightly({ date, prs, out, reuseMerged: !flag('no-reuse'), limit: opt('limit') ? Number(opt('limit')) : null, noReview: flag('no-review'), skipSteps: many('skip-step'), createIssues: flag('create-issues'), writeMerged: flag('write-merged') ? true : flag('no-write-merged') ? false : undefined, writeOpen: flag('write-open'), prTimeoutMin: prTimeout != null ? Number(prTimeout) : null, deadline })
       console.log(JSON.stringify({ report: file, date: report.date, prs: report.prs.map((p) => ({ number: p.number, severity: p.severity, verdict: p.verdict })), system_health: report.system_health.status }, null, 2))
       if (report.system_health.status === 'failed') process.exitCode = 3
+      return
+    }
+    case 'catch-up': {
+      const waitLock = Number(opt('wait-lock', 14400))
+      if (!Number.isInteger(waitLock) || waitLock < 0) throw new Error('--wait-lock 需要整秒数')
+      const repo = opt('repo', 'xindong/mivo-canvas-plugin')
+      let logFd = null
+      const runOne = (pr) => {
+        if (logFd == null) logFd = openSync(join(LOGS_DIR, `catch-up-${shIso().slice(0, 19).replace(/[-:]/g, '')}.log`), 'a')
+        process.stdout.write(`[catch-up] PR #${pr.number} (${pr.day}, ${pr.gap.reason}) …\n`)
+        return runNightlyFor(pr, { waitLock, log: logFd })
+      }
+      const r = catchUp({ repo, runOne })
+      if (logFd != null) closeSync(logFd)
+      if (r.status === 'nothing-to-do') return // 安静退出
+      const file = writeReport(r, join(catchUpDir(), `run-${shIso().slice(0, 19).replace(/[-:]/g, '')}.json`))
+      for (const run of r.runs) process.stdout.write(`[catch-up] PR #${run.number} attempt ${run.attempt}: exit ${run.exit_code}, ${run.filled ? 'filled' : `still missing (${run.remaining_gap})`}\n`)
+      for (const g of r.system_health.gave_up) process.stdout.write(`[catch-up] gave up on PR #${g.pr} after ${g.attempts} attempts\n`)
+      if (r.stopped) process.stdout.write(`[catch-up] stopped: ${r.stopped}; remaining gaps retry on the next invocation\n`)
+      process.stdout.write(`[catch-up] result: ${file}\n`)
+      if (r.system_health.status !== 'ok') process.exitCode = 3
       return
     }
     case 'assemble': {

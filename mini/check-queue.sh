@@ -105,7 +105,8 @@ EVIDENCE_DIR="${EVIDENCE_DIR%/}"
 # ---------------------------------------------------------------- query queue
 # gh's embedded jq (gojq) parses, validates and orders the queue. Output:
 #   MQ_META <tab> total <tab> skipped(list or -)
-#   MQ_FIELDS <tab> number url createdAt repo sha caseId outcomeCode status sev fp dim   (only if a usable issue exists)
+#   MQ_FIELDS <tab> number url createdAt repo sha caseId outcomeCode status sev fp dim dedup   (only if a usable issue exists)
+#   dedup = finding.dedup_key ("<fingerprint>@<merge sha>") when the block has one; older blocks without it fall back to the fingerprint.
 #   MQ_EVIDENCE <tab> <compact JSON evidence payload>                                     (idem)
 # Every MQ_FIELDS value is validated to a tab/newline/quote-free charset here.
 # shellcheck disable=SC2016  # $vars below are jq variables, not shell.
@@ -120,6 +121,7 @@ def assess:
   | if ($f | type) != "object" then {ok: false, n: $i.number, why: "no-finding-block"}
     elif ($f.schema // "") != "mivo-qa-finding/v1" then {ok: false, n: $i.number, why: "unknown-schema"}
     elif ($f.fingerprint | okstr("^[A-Za-z0-9-]{1,100}$")) | not then {ok: false, n: $i.number, why: "bad-fingerprint"}
+    elif ($f.dedup_key != null and (($f.dedup_key | okstr("^[A-Za-z0-9-]{1,100}@[A-Za-z0-9:-]{1,60}$")) and ($f.dedup_key | startswith($f.fingerprint + "@")) | not)) then {ok: false, n: $i.number, why: "bad-dedup-key"}
     elif ($f.pr.tested_sha | okstr("^[a-f0-9]{40}$")) | not then {ok: false, n: $i.number, why: "bad-tested-sha"}
     elif ($f.repo | IN("xindong/mivo-canvas-plugin", "xindong/mivo-canvas", "makecindy/cindy")) | not then {ok: false, n: $i.number, why: "repo-not-lifeline"}
     elif ($i.createdAt | okstr("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z$")) | not then {ok: false, n: $i.number, why: "bad-createdAt"}
@@ -139,7 +141,8 @@ def assess:
             elif ($f.severity | IN("P0", "P1", "P2", "P3")) then $f.severity
             else "unverified" end),
            $f.fingerprint,
-           (($f.dimension // $f.check_id // "unknown") | clean(160))
+           (($f.dimension // $f.check_id // "unknown") | clean(160)),
+           ($f.dedup_key // $f.fingerprint)
          ],
          evidence: {
            schema: "mivo-qa-lifeline-evidence/v1",
@@ -195,10 +198,12 @@ if [ -z "$FIELDS" ] || [ -z "$EVIDENCE_JSON" ]; then
   die "$EX_UNPARSEABLE" "${TOTAL} open ${QUEUE_LABEL} issue(s) in ${QUEUE_REPO}, none with a usable mivo-qa-finding block: ${SKIPPED}"
 fi
 
-IFS='	' read -r NUM URL CREATED_AT OBS_REPO SOURCE_SHA CASE_ID OUTCOME_CODE OBS_STATUS SOURCE_SEV FINGERPRINT FAIL_DIM <<EOF_FIELDS
+IFS='	' read -r NUM URL CREATED_AT OBS_REPO SOURCE_SHA CASE_ID OUTCOME_CODE OBS_STATUS SOURCE_SEV FINGERPRINT FAIL_DIM DEDUP_KEY <<EOF_FIELDS
 $FIELDS
 EOF_FIELDS
 [ -n "${FAIL_DIM:-}" ] || die "$EX_GH" "unexpected gh output (incomplete MQ_FIELDS)"
+# Backward compatible: issues written before the dedup key existed dedup on the fingerprint alone.
+DEDUP_KEY="${DEDUP_KEY:-$FINGERPRINT}"
 
 # ---------------------------------------------------------------- write files
 ISSUE_DIR="${EVIDENCE_DIR}/issue-${NUM}"
@@ -260,6 +265,7 @@ printf 'MIVO_QA_EVIDENCE=%s\n' "$EVIDENCE_PATH"
 printf 'MIVO_QA_ISSUE=%s#%s\n' "$QUEUE_REPO" "$NUM"
 printf 'MIVO_QA_ISSUE_URL=%s\n' "$URL"
 printf 'MIVO_QA_FINGERPRINT=%s\n' "$FINGERPRINT"
+printf 'MIVO_QA_DEDUP_KEY=%s\n' "$DEDUP_KEY"
 [ -n "$LIFELINE_CONFIG" ] && printf 'MIVO_QA_LIFELINE_CONFIG=%s\n' "$LIFELINE_CONFIG"
 printf 'MIVO_QA_QUEUE_DEPTH=%s\n' "$TOTAL"
 [ "$SKIPPED" != "-" ] && printf 'MIVO_QA_SKIPPED_UNPARSEABLE=%s\n' "$SKIPPED"

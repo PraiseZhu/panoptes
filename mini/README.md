@@ -29,7 +29,11 @@ ancestor. On macOS that means it can't be under `/tmp` or `/var`.
 
 stdout (cindy appends it to the agent prompt as untrusted data): line 1 is the observation path, then
 `MIVO_QA_OBSERVATION=`, `MIVO_QA_EVIDENCE=`, `MIVO_QA_ISSUE=`, `MIVO_QA_ISSUE_URL=`, `MIVO_QA_FINGERPRINT=`,
-`MIVO_QA_LIFELINE_CONFIG=`, `MIVO_QA_QUEUE_DEPTH=`, (`MIVO_QA_SKIPPED_UNPARSEABLE=`), `CINDY_PRECHECK_OK`.
+`MIVO_QA_DEDUP_KEY=`, `MIVO_QA_LIFELINE_CONFIG=`, `MIVO_QA_QUEUE_DEPTH=`, (`MIVO_QA_SKIPPED_UNPARSEABLE=`), `CINDY_PRECHECK_OK`.
+
+`MIVO_QA_DEDUP_KEY` is the finding block's `dedup_key` (`<fingerprint>@<merge commit>`, issues since 2026-10-11) or,
+for older issues without it, the fingerprint itself. A present but malformed `dedup_key` (not
+`<fingerprint>@[A-Za-z0-9:-]+`) makes that issue unusable (`bad-dedup-key`). The observation file is unchanged.
 
 Exit codes: `0` an issue is ready (run) · `2` queue empty (skip) · `3` gh failed (not installed, not logged in, network or API error) ·
 `4` there are open `cindy-dispatch` issues but none has a usable finding block (needs a human) · `5` local error

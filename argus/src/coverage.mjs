@@ -109,20 +109,28 @@ export const NEW_CODE_METHOD = 'ming-qa newCode = line coverage of new code. Cha
   + 'pct = covered / executable changed lines; null (not evaluated) when the diff has no executable source lines.'
 
 // 门禁结论：任何一项低于门槛 → fail（P2）；拿不到覆盖率 → unavailable（不判 fail，单独说明）
+// 门禁只看新代码覆盖率（< new_code 阈值 → 不达标 → 一条 P2）。全仓 lines / branches / functions 只作基线趋势数据：
+// 记在 baseline 里（附参考线 BASELINE_REFERENCE），results 里标 'baseline'，永远不让门禁失败、不产生 finding。
+export const GATED_METRICS = Object.freeze(['new_code'])
+export const BASELINE_METRICS = Object.freeze(['lines', 'branches', 'functions'])
 export function coverageGate({ coverage, added, thresholds = COVERAGE_THRESHOLDS, stepId = 'unit', diffError = null }) {
-  const gate = { step: stepId, provider: 'v8 (vitest --coverage)', thresholds_source: COVERAGE_SOURCE, thresholds: { ...thresholds }, values: null, results: null, status: 'unavailable', pass: null, new_code: null, new_code_method: NEW_CODE_METHOD, reason: null }
+  const gated = Object.fromEntries(GATED_METRICS.map((k) => [k, thresholds[k]]))
+  const reference = Object.fromEntries(BASELINE_METRICS.map((k) => [k, thresholds[k]]))
+  const gate = { step: stepId, provider: 'v8 (vitest --coverage)', thresholds_source: COVERAGE_SOURCE, thresholds: gated, gated_metrics: [...GATED_METRICS], baseline: null, values: null, results: null, status: 'unavailable', pass: null, new_code: null, new_code_method: NEW_CODE_METHOD, reason: null }
   if (!coverage || coverage.status !== 'ok') { gate.reason = coverage?.reason ?? 'unit step did not run with coverage'; return gate }
   const nc = diffError || !coverage.files ? null : newCodeCoverage(added, coverage.files)
   gate.new_code = nc ?? { pct: null, reason: diffError ?? 'per-line coverage unavailable' }
   gate.values = { lines: coverage.total.lines, branches: coverage.total.branches, functions: coverage.total.functions, new_code: nc?.pct ?? null }
-  gate.results = Object.fromEntries(Object.keys(thresholds).map((k) => {
-    const v = gate.values[k]
-    return [k, v == null ? 'not-evaluated' : v >= thresholds[k] ? 'pass' : 'fail']
-  }))
-  const failed = Object.entries(gate.results).filter(([, r]) => r === 'fail').map(([k]) => k)
-  gate.status = failed.length ? 'fail' : 'pass'
-  gate.pass = !failed.length
+  gate.baseline = { role: 'trend-only (recorded, never gated, never a finding)', lines: gate.values.lines, branches: gate.values.branches, functions: gate.values.functions, reference }
+  gate.results = Object.fromEntries([
+    ...BASELINE_METRICS.map((k) => [k, 'baseline']),
+    ...GATED_METRICS.map((k) => { const v = gate.values[k]; return [k, v == null ? 'not-evaluated' : v >= gated[k] ? 'pass' : 'fail'] }),
+  ])
+  const failed = GATED_METRICS.filter((k) => gate.results[k] === 'fail')
+  const notEvaluated = GATED_METRICS.some((k) => gate.results[k] === 'not-evaluated')
+  gate.status = failed.length ? 'fail' : notEvaluated ? 'not-evaluated' : 'pass'
+  gate.pass = failed.length ? false : notEvaluated ? null : true
   gate.failed = failed
-  if (Object.values(gate.results).includes('not-evaluated')) gate.reason = 'some metrics not evaluated (see results)'
+  if (notEvaluated) gate.reason = `new-code coverage not evaluated: ${gate.new_code?.reason ?? 'unknown'}`
   return gate
 }

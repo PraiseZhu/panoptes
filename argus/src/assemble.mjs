@@ -1,5 +1,6 @@
 // 把多份报告（批量运行 / 单 PR 文件 merged/ open/）合成一份日报形状的 full-YYYY-MM-DD.json。
 // 同一 PR 出现多次时以后面的来源为准；prs[] 条目原样保留，summary 重算，system_health 聚合（最差状态、问题清单合并）。
+import { writeReport } from './nightly.mjs'
 import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -74,8 +75,7 @@ export function assembleReport({ date, sources, order = null, now = new Date() }
 export function assembleFiles({ date, files, out, order = null }) {
   const sources = files.map((file) => ({ file, doc: JSON.parse(readFileSync(file, 'utf8')) }))
   const doc = assembleReport({ date, sources, order })
-  mkdirSync(dirname(out), { recursive: true })
-  writeFileSync(`${out}.tmp-${process.pid}`, JSON.stringify(doc, null, 2) + '\n')
-  renameSync(`${out}.tmp-${process.pid}`, out)
+  // 与 nightly 同一规则：已存在的报告先保留成 <名字>.vN.json，绝不就地改写
+  writeReport(doc, out)
   return doc
 }

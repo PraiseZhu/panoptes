@@ -201,6 +201,17 @@ export async function findIssueByFingerprint(repo, fingerprint, { maxPages = 10 
   throw new Error(`按指纹回查超过 ${maxPages} 页仍未翻完`)
 }
 
+// 同上，但返回全部命中（开放 + 已关闭），供「指纹 + 合并提交」去重判定
+export async function findIssuesByMarkerLabel(repo, label, marker, { maxPages = 10 } = {}) {
+  const hits = []
+  for (let page = 1; page <= maxPages; page++) {
+    const rows = await apiGet(`repos/${repo}/issues?state=all&labels=${encodeURIComponent(label)}&sort=created&direction=desc&per_page=100&page=${page}`)
+    hits.push(...(rows ?? []).filter((i) => !i.pull_request && String(i.body ?? '').includes(marker)))
+    if (!Array.isArray(rows) || rows.length < 100) return hits
+  }
+  throw new Error(`按指纹回查超过 ${maxPages} 页仍未翻完`)
+}
+
 // 日报用：目标仓里全部自动 QA issue（含已关闭），用来给出实时状态
 export async function listQaIssues(repo, { maxPages = 5 } = {}) {
   const all = []

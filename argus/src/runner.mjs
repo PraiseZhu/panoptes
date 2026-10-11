@@ -204,12 +204,12 @@ export function bwrapArgs(runDir, { extraRo = [], extraRw = [], chdir = null } =
   return args
 }
 
-function sandboxed(argv, runDir, profile) {
+function sandboxed(argv, runDir, profile, stepRo = []) {
   const mode = sandboxMode(profile)
   if (mode === 'disabled-by-profile' || mode === 'env-only') return argv
   if (mode === 'missing') throw new Error(process.platform === 'darwin' ? '本机没有 sandbox-exec，拒绝在无隔离的情况下跑测试' : '本机没有 bubblewrap（bwrap），拒绝在无隔离的情况下跑测试；装 bubblewrap 或显式设置 ARGUS_ALLOW_UNSANDBOXED=1')
   if (mode === 'bwrap') {
-    const extraRo = [process.env.PLAYWRIGHT_BROWSERS_PATH, join(CODE_DIR, 'node_modules'), ...(profile.sandboxReadOnly ?? [])]
+    const extraRo = [process.env.PLAYWRIGHT_BROWSERS_PATH, join(CODE_DIR, 'node_modules'), ...(profile.sandboxReadOnly ?? []), ...stepRo]
     // ARGUS_SANDBOX_EXTRA_RW：冒号分隔的额外读写目录（测试夹具用；生产不设）
     const extraRw = (process.env.ARGUS_SANDBOX_EXTRA_RW ?? '').split(':').filter(Boolean)
     return [BWRAP, ...bwrapArgs(runDir, { extraRo, extraRw, chdir: join(runDir, 'src') }), '--', ...argv]
@@ -258,6 +258,7 @@ function prepareTool(step, runDir, vars) {
   mkdirSync(tools, { recursive: true })
   if (step.probe) {
     writeFileSync(join(tools, 'probe-run.mjs'), readFileSync(PROBE_SCRIPT))
+    if (step.probe.localOidc) writeFileSync(join(tools, 'probe-local-auth-server.mjs'), readFileSync(fileURLToPath(new URL('./tools/probe-local-auth-server.mjs', import.meta.url))))
     writeFileSync(join(runDir, `probe-${step.id}.json`), subst(JSON.stringify(step.probe), runDir, vars))
   }
   if (step.tool) {
@@ -317,10 +318,40 @@ function readTestReport(step, res, src, runDir, vars, execution) {
   }
 }
 
+// step.passEnv：只给这一步、从 nightly 自己的环境（secrets.env 经 run-nightly.sh 导出）透传的变量名，
+// 例如接口探针的测试账号。值不进命令行、不进 spec 文件、不进日志；没有设置的不传。
+export function passEnvFor(step, env = process.env) {
+  const out = {}
+  for (const k of step.passEnv ?? []) if (/^[A-Z0-9_]+$/.test(k) && env[k]) out[k] = env[k]
+  return out
+}
+
+// step.binary：步骤需要的宿主程序（例如 gitleaks）。按 env 变量 → 候选路径 → PATH 查找；找到就以 ${var} 代入命令，
+// 并只读挂进沙箱（单个文件）；找不到这一步记没跑成。
+export function resolveStepBinary(step, env = process.env) {
+  const b = step.binary
+  if (!b) return { vars: {}, ro: [], unmet: null }
+  const fromPath = (name) => (env.PATH ?? '').split(':').filter(Boolean).map((d) => join(d, name)).find((p) => existsSync(p))
+  const found = [env[b.env], ...(b.candidates ?? []), ...(b.names ?? []).map(fromPath)].filter(Boolean).find((p) => isAbsolute(p) && existsSync(p))
+  if (!found) return { vars: {}, ro: [], unmet: b.reasonZh ?? `本机没有 ${b.names?.[0] ?? b.var}` }
+  const real = realpathSync(found)
+  return { vars: { [b.var]: real }, ro: [real], unmet: null }
+}
+
+function readProbeReport(specPath) {
+  try {
+    const r = JSON.parse(readFileSync(specPath.replace(/\.json$/, '') + '.report.json', 'utf8'))
+    return { status: r.status, checks: Array.isArray(r.checks) ? r.checks : [], skipped: Array.isArray(r.skipped) ? r.skipped : [], auth: r.auth ?? null }
+  } catch { return null }
+}
+
 export async function runSteps(profile, src, runDir, { stepIds = null, execution = null } = {}) {
   const env = stepEnv(runDir, profile)
-  const needsBase = profile.steps.some((s) => JSON.stringify(s).includes('${BASE_SHA}'))
-  const vars = needsBase ? { BASE_SHA: await toParentSha(src) } : {}
+  const needsBase = profile.steps.some((s) => /\$\{(?:BASE_SHA|DIFF_BASE_SHA)\}/.test(JSON.stringify(s)))
+  const parent = needsBase ? await toParentSha(src) : ''
+  // BASE_SHA：被测提交的第一个父提交；DIFF_BASE_SHA：本 PR 改动的起点（nightly 传入的 base_sha：merged → 第一个父提交，
+  // open → 与目标分支的 merge-base），没有时退回第一个父提交（对照 / 最新主干轮次）
+  const vars = needsBase ? { BASE_SHA: parent, DIFF_BASE_SHA: execution?.diffBase || parent } : {}
   const results = []
   for (const step of profile.steps) {
     if (isStopping() || overBudget()) break
@@ -328,7 +359,8 @@ export async function runSteps(profile, src, runDir, { stepIds = null, execution
     const stepVarsForReport = prepareTestReport(step, runDir)
     const stepSubstitutions = { ...vars, ...stepVarsForReport }
     const identity = { ...(execution ?? {}), commandTemplate: [...step.cmd], covers: [...(step.covers ?? [])], aiGenerated: Boolean(step.aiGenerated) }
-    const unmet = toUnmetRequirement(step, src)
+    const bin = resolveStepBinary(step)
+    const unmet = toUnmetRequirement(step, src) ?? bin.unmet
     if (unmet) {
       results.push({ ...identity, id: step.id, nameZh: step.nameZh, kind: step.kind, cmdText: step.cmd.join(' '), ok: false, unavailable: true, unavailableReasonZh: unmet, exitCode: null, timedOut: false, durationMs: 0, tail: '', failures: [] })
       log('info', 'step unavailable', { ...execution, step: step.id, reason: unmet })
@@ -337,10 +369,10 @@ export async function runSteps(profile, src, runDir, { stepIds = null, execution
     if (step.probe || step.aiTest || step.tool) prepareTool(step, runDir, vars)
     const logFile = join(runDir, 'logs', `${step.id}.log`)
     const covDir = coverageDirFor(step, runDir, execution)
-    const cmd = step.cmd.map((a) => subst(a, runDir, stepSubstitutions))
+    const cmd = step.cmd.map((a) => subst(a, runDir, { ...stepSubstitutions, ...bin.vars }))
     if (covDir) { rmSync(covDir, { recursive: true, force: true }); mkdirSync(dirname(covDir), { recursive: true }); cmd.push(...vitestCoverageArgs(covDir)) }
-    const argv = sandboxed(cmd, runDir, profile)
-    const stepVars = Object.fromEntries(Object.entries(step.env ?? {}).map(([k, v]) => [k, subst(v, runDir, vars)]))
+    const argv = sandboxed(cmd, runDir, profile, bin.ro)
+    const stepVars = { ...passEnvFor(step), ...Object.fromEntries(Object.entries(step.env ?? {}).map(([k, v]) => [k, subst(v, runDir, vars)])) }
     // step.envUnset：这一步不要继承的公共变量（例如单测要求 MIVO_ASSET_STORE_DIR 未设置）
     const stepEnvBase = { ...env }
     for (const k of step.envUnset ?? []) delete stepEnvBase[k]
@@ -352,6 +384,7 @@ export async function runSteps(profile, src, runDir, { stepIds = null, execution
     toStepOutcome(step, result, runDir)
     Object.assign(result, readTestReport(step, result, src, runDir, stepVarsForReport, execution))
     if (disturbed) result.disturbedDesktop = true
+    if (step.probe) { const pr = readProbeReport(join(runDir, `probe-${step.id}.json`)); if (pr) result.probeReport = pr }
     if (covDir) result.coverage = res.timedOut ? { status: 'unavailable', reason: 'unit step timed out' } : readCoverageDir(covDir, src)
     results.push(result)
     log('info', 'step done', { ...execution, step: step.id, ok: result.ok, unavailable: Boolean(result.unavailable), exitCode: res.exitCode, ms: res.durationMs })
@@ -442,7 +475,7 @@ export async function cleanupRun(mirror, runDir) {
 }
 
 // 一次完整执行：检出 → 跑步骤 → 清理；清理失败只记日志，由 janitor 兜底
-export async function executeOnSha({ repo, jobId, label, sha, profile, stepIds, extraRefspecs = [], keepTo = null }) {
+export async function executeOnSha({ repo, jobId, label, sha, profile, stepIds, extraRefspecs = [], keepTo = null, diffBase = null }) {
   const mirror = await ensureMirror(repo, sha, { extraRefspecs })
   const runDir = newRunDir(jobId, label)
   try {
@@ -458,7 +491,7 @@ export async function executeOnSha({ repo, jobId, label, sha, profile, stepIds, 
   async function runCheckout() {
     const src = await checkout(mirror, sha, runDir, { repo, lfs: Boolean(profile.lfs), mode: profile.checkoutMode ?? 'worktree' })
     const checkedOutSha = await verifyCheckoutSha(src, sha)
-    return await runSteps(profile, src, runDir, { stepIds, execution: { jobId, runLabel: label, requestedSha: sha, checkedOutSha } })
+    return await runSteps(profile, src, runDir, { stepIds, execution: { jobId, runLabel: label, requestedSha: sha, checkedOutSha, diffBase } })
   }
 }
 

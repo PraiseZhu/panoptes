@@ -139,3 +139,40 @@ export function toCoverage({ profile, triage, results, knownOnlyStepIds = [] }) 
     coverage: applicable.length ? covered.length / applicable.length : null,
   }
 }
+
+// 报告用的维度适用性：每个维度都给出明确结论 applicable / not-applicable + 理由（不留 undetermined），
+// 只要分诊成功（或维度由 profile / 路径规则决定）。Jev 概率的四段：
+//   p ≥ 0.7 applicable（high）· 0.5 ≤ p < 0.7 applicable（low，偏向保守：拿不准按涉及算）·
+//   0.3 < p < 0.5 not-applicable（low）· p ≤ 0.3 not-applicable（high）
+// 分诊没做（没有 key）或失败 → 由 profile / 路径决定的维度照常给结论，其余 undetermined，并带原因。
+export const APPLICABILITY_CUTOFF = 0.5
+export function toApplicability(triage) {
+  const dims = {}
+  const fmt = (p) => p.toFixed(2)
+  for (const d of DIMENSIONS) {
+    const r = (triage?.rows ?? []).find((x) => x.key === d.key) ?? { key: d.key, verdict: 'undetermined', source: 'none' }
+    let row
+    if (r.source === 'profile') row = { applicability: 'not-applicable', source: 'profile', confidence: 'high', reason: `profile notApplicable: ${r.reasonZh}` }
+    else if (r.source === 'path') row = { applicability: 'applicable', source: 'path', confidence: 'high', reason: `profile pathHints: ${r.reasonZh}` }
+    else if (r.source === 'jev' && typeof r.p === 'number') {
+      const p = r.p
+      if (p >= APPLICABLE_P) row = { applicability: 'applicable', source: 'jev', confidence: 'high', p, reason: `Jev p=${fmt(p)} ≥ ${APPLICABLE_P}: the change touches ${d.key}` }
+      else if (p >= APPLICABILITY_CUTOFF) row = { applicability: 'applicable', source: 'jev', confidence: 'low', p, reason: `Jev p=${fmt(p)} in [${APPLICABILITY_CUTOFF}, ${APPLICABLE_P}): leaning yes, treated as applicable (conservative)` }
+      else if (p > UNRELATED_P) row = { applicability: 'not-applicable', source: 'jev', confidence: 'low', p, reason: `Jev p=${fmt(p)} in (${UNRELATED_P}, ${APPLICABILITY_CUTOFF}): leaning no` }
+      else row = { applicability: 'not-applicable', source: 'jev', confidence: 'high', p, reason: `Jev p=${fmt(p)} ≤ ${UNRELATED_P}: the change does not touch ${d.key}` }
+    } else row = { applicability: 'undetermined', source: 'none', confidence: null, reason: triage?.status === 'ok' ? 'Jev returned no answer for this dimension' : `triage not available: ${triage?.reasonZh ?? 'not run'}` }
+    dims[d.key] = { label: d.labelZh, group: d.group, ...row }
+  }
+  const vals = Object.values(dims)
+  return {
+    status: triage?.status === 'ok' ? 'ok' : triage?.jevStatus ?? 'not-run',
+    model: triage?.model ?? null,
+    reason: triage?.status === 'ok' ? null : triage?.reasonZh ?? null,
+    total: vals.length,
+    applicable: Object.keys(dims).filter((k) => dims[k].applicability === 'applicable'),
+    not_applicable: Object.keys(dims).filter((k) => dims[k].applicability === 'not-applicable'),
+    undetermined: Object.keys(dims).filter((k) => dims[k].applicability === 'undetermined'),
+    thresholds: { applicable_high: APPLICABLE_P, cutoff: APPLICABILITY_CUTOFF, not_applicable_high: UNRELATED_P },
+    dimensions: dims,
+  }
+}

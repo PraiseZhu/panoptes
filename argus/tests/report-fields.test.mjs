@@ -88,7 +88,8 @@ test('单 PR 时间预算：超时的子进程被终止，PR 记 not-tested（un
 
 test('整晚截止时间：到点后未开始的 PR 记 not-tested（deadline）', async () => {
   const h = health()
-  const startedAt = new Date('2026-10-11T00:30:00Z') // 上海 08:30
+  // 用相对真实时钟的未来时间：overBudget() 看的是真实 Date.now()，写死日期的话过了那一刻测试就会自己坏掉
+  const startedAt = new Date(Date.now() + 24 * 3600_000)
   let t = startedAt.getTime()
   const { prs } = await processTargets(disc.slice(0, 2), {
     health: h, startedAt, opts: { deadline: new Date(startedAt.getTime() + 1000).toISOString() }, now: () => t,
@@ -128,7 +129,7 @@ test('覆盖率：istanbul 逐行压缩、新代码覆盖率（未被加载的�
   assert.equal(newCodeCoverage({ 'docs/a.md': [{ line: 1, text: 'x' }] }, files).pct, null)
 })
 
-test('覆盖率门禁：门槛 80/70/80/90，任一不达标 fail；拿不到覆盖率 unavailable', () => {
+test('覆盖率门禁：只有新代码 < 90% 才 fail；全仓 lines/branches/functions 只记基线；拿不到覆盖率 unavailable', () => {
   assert.deepEqual(COVERAGE_THRESHOLDS, { lines: 80, branches: 70, functions: 80, new_code: 90 })
   const files = { 'src/a.ts': { lines: [1, 2], covered: [1, 2] } }
   const ok = coverageGate({ coverage: { status: 'ok', total: { lines: 85, branches: 72, functions: 90 }, files }, added: { 'src/a.ts': [{ line: 1, text: 'a()' }] } })
@@ -136,9 +137,14 @@ test('覆盖率门禁：门槛 80/70/80/90，任一不达标 fail；拿不到覆
   assert.match(ok.new_code_method, /ming-qa newCode/)
   assert.match(ok.thresholds_source, /ming-qa G2/)
   const bad = coverageGate({ coverage: { status: 'ok', total: { lines: 85, branches: 60, functions: 90 }, files }, added: { 'src/b.ts': [{ line: 1, text: 'b()' }] } })
-  assert.equal(bad.status, 'fail'); assert.deepEqual(bad.failed, ['branches', 'new_code'])
+  assert.equal(bad.status, 'fail'); assert.deepEqual(bad.failed, ['new_code'])
+  assert.equal(bad.results.branches, 'baseline'); assert.equal(bad.baseline.branches, 60); assert.equal(bad.baseline.reference.branches, 70)
+  assert.deepEqual(bad.thresholds, { new_code: 90 })
+  // 全仓指标再低也不让门禁失败（只是趋势数据）
+  const lowGlobal = coverageGate({ coverage: { status: 'ok', total: { lines: 10, branches: 5, functions: 3 }, files }, added: { 'src/a.ts': [{ line: 1, text: 'a()' }] } })
+  assert.equal(lowGlobal.status, 'pass'); assert.deepEqual(lowGlobal.failed, []); assert.equal(lowGlobal.baseline.lines, 10)
   const noDiff = coverageGate({ coverage: { status: 'ok', total: { lines: 85, branches: 72, functions: 90 }, files }, added: null, diffError: 'base unknown' })
-  assert.equal(noDiff.status, 'pass'); assert.equal(noDiff.results.new_code, 'not-evaluated')
+  assert.equal(noDiff.status, 'not-evaluated'); assert.equal(noDiff.pass, null); assert.equal(noDiff.results.new_code, 'not-evaluated'); assert.match(noDiff.reason, /base unknown/)
   const na = coverageGate({ coverage: { status: 'unavailable', reason: 'coverage-summary.json not produced' } })
   assert.equal(na.status, 'unavailable'); assert.equal(na.pass, null)
 })

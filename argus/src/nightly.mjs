@@ -8,18 +8,19 @@ import { hostname } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { loadRegistry, loadSecrets } from './config.mjs'
 import { openDb } from './db.mjs'
-import { listNightlyPrs, getPull, getCommit, getBranchHead, listPullFiles, shanghaiDayWindow, findIssueByMarkerLabel, createIssue } from './github.mjs'
+import { listNightlyPrs, getPull, getCommit, getBranchHead, listPullFiles, shanghaiDayWindow, findIssuesByMarkerLabel, createIssue } from './github.mjs'
 import { classifyChange } from './classify.mjs'
 import { executeOnSha, ensureMirror, mergeBase, sandboxMode, janitor } from './runner.mjs'
 import { decideOutcome, failedIds, setupFailed, failureKeys, compareKey } from './decide.mjs'
 import { analyzePr } from './ai.mjs'
 import { evaluateJev } from './jev.mjs'
-import { toMatrixQuestions, toMatrixState, toTriage, toStepPlan, toCoverage } from './matrix.mjs'
+import { toMatrixQuestions, toMatrixState, toTriage, toStepPlan, toCoverage, toApplicability } from './matrix.mjs'
 import { codeReview, toBox, BOXES, LLM_MODEL, mingQaVersion, mingQaAvailable } from './mingqa.mjs'
 import { ALL_DIRS, CACHE_DIR, EVIDENCE_DIR, REPORTS_DIR, CODE_DIR } from './paths.mjs'
 import { log, redact, tail, toShanghaiDay, toShanghaiIso } from './util.mjs'
 import { setBudget, overBudget } from './exec.mjs'
 import { coverageGate, parseAddedLines, COVERAGE_THRESHOLDS } from './coverage.mjs'
+import { recentGiveUps } from './catchup.mjs'
 
 const SCHEMA_VERSION = '1.0'
 const SEV_RANK = { P0: 0, P1: 1, P2: 2, P3: 3 }
@@ -35,6 +36,14 @@ export function previousShanghaiDay(now = new Date()) {
 const normalize = (s) => String(s ?? '').replace(/\x1b\[[0-9;]*m/g, '').replace(/\b[0-9a-f]{7,40}\b/g, '<sha>').replace(/\d+(\.\d+)?\s*(ms|s|m)\b/g, '<dur>').replace(/:\d+:\d+/g, ':<l>:<c>').replace(/\/tmp\/[^\s'"]+|\/workspace\/[^\s'"]+/g, '<path>').replace(/\s+/g, ' ').trim().toLowerCase()
 export function fingerprintOf(repo, parts) { return `mq1-${sha256([repo, ...parts.map(normalize)].join('|')).slice(0, 20)}` }
 const prFingerprint = (fp, n) => `${fp}-pr${n}`
+// 代码审查标题归一化后的短哈希（12 位）：同一文件 / 符号 / 类别下的不同问题不再撞同一个指纹
+export const normalizeTitle = (t) => normalize(t).replace(/[`'"“”‘’.,;:!?()[\]{}<>]/g, ' ').replace(/\b\d+\b/g, '<n>').replace(/\s+/g, ' ').trim()
+export const titleHash = (t) => sha256(normalizeTitle(t)).slice(0, 12)
+// 标题哈希不经 normalize（它会把 12 位十六进制当成 sha 抹掉），直接拼进指纹输入
+export const codeReviewFingerprint = (repo, f) => `mq1-${sha256([repo, ...['code-review', f.file, f.symbol || '', f.category].map(normalize), `title=${titleHash(f.title)}`].join('|')).slice(0, 20)}`
+// issue 去重键 = 指纹 + 合并提交（已合并 PR 用 merge commit；开放 PR 用被测 head；没有 PR 的系统健康项用报告日期）。
+// 已关闭 issue 的问题在新的合并提交上再次出现 → 新的去重键 → 可以开新 issue；同指纹的开放 issue 仍然去重。
+export const dedupKeyOf = (fp, mergeSha) => `${fp}@${mergeSha ? String(mergeSha).slice(0, 40) : 'unknown'}`
 
 function wholeStepSignature(r) {
   const lines = String(r?.tail ?? '').split('\n').filter((l) => /error|fail|✗|×|assert/i.test(l)).slice(-5)
@@ -42,7 +51,7 @@ function wholeStepSignature(r) {
 }
 
 // ── 单个失败键的归因（逐项，不依赖整体判定）────────────────
-function classifyKey(key, { first, rerun, base, latest, latestIsSame }) {
+function classifyKey(key, { first, rerun, base, latest, latestIsSame, skipLatest = false }) {
   if (!rerun) return { status: 'unverified', why: 'no rerun available' }
   const vsRerun = compareKey(key, rerun, first)
   if (vsRerun === 'absent') return { status: 'flaky', why: 'unstable: failed once, passed on a clean rerun of the same commit; not attributed to this PR' }
@@ -51,6 +60,7 @@ function classifyKey(key, { first, rerun, base, latest, latestIsSame }) {
   const vsBase = compareKey(key, base, first)
   if (vsBase === 'same') return { status: 'pre-existing', why: 'also fails on the base revision' }
   if (vsBase === 'unknown') return { status: 'unverified', why: 'reproduced; base comparison incomplete' }
+  if (skipLatest) return { status: 'introduced', why: 'fails reproducibly on this PR and passes on the base revision (no latest-main recheck: a problem in the PR\'s own commits cannot be fixed by later commits)' }
   if (!latestIsSame && latest) {
     const vsLatest = compareKey(key, latest, first)
     if (vsLatest === 'absent') return { status: 'fixed-later', why: 'introduced by this PR but already passing on latest main' }
@@ -63,6 +73,7 @@ function classifyKey(key, { first, rerun, base, latest, latestIsSame }) {
 //  introduced：产品类检查（构建/类型/单测/接口/E2E）→ P1；若是已合并 PR 且最新主干仍失败 → P0（主干已坏）；质量守卫类 → P2
 //  unverified / setup 失败 / flaky（不稳定：首跑失败、同一提交干净重跑通过）→ P2；pre-existing / fixed-later → P3；
 //  试运行检查（trialOnly）最高 P2。flaky 与 PR 无关，test_backed=false（不是测试佐证的缺陷，不触发通知 / issue）
+export { classifyKey }
 export function severityFor({ status, step, merged }) {
   let sev
   if (status === 'introduced') sev = step.kind === 'quality' ? 'P2' : merged ? 'P0' : 'P1'
@@ -116,6 +127,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   out.risk_reason = classReason
   if (riskClass === 'A') {
     out.skipped_steps = baseProfile.steps.filter((x) => x.kind !== 'setup').map((x) => ({ id: x.id, nameZh: x.nameZh, reason: 'docs-only change: no checks run', dimension: toBox(x, baseProfile) }))
+    out.triage = toApplicability({ status: 'skipped', jevStatus: 'not-run', reasonZh: 'docs-only change: no checks run, dimension triage not needed', rows: toTriage({ profile: baseProfile, files, jev: null }).rows })
     Object.assign(out, dimensionsOf([])); out.tested = false; out.verdict = 'docs-only'; out.outcome = 'docs_only'; out.outcome_reason = classReason
     // 文档改动也做代码审查（同一提交规则：merged → merge-base..merge commit；open → merge-base..head）；不跑测试，覆盖率门禁不适用
     out.coverage_gate = DOCS_ONLY_COVERAGE_GATE()
@@ -140,10 +152,14 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   out.tested_sha = sha
 
   // 分诊（Jev，可选）；没有 key 时所有可选检查都跑
+  const jevConfigured = Boolean(secrets.ARGUS_TYPESAFE_API_KEY)
   let jev = { ok: false, reasonZh: '没有配置 Jev 的 key（ARGUS_TYPESAFE_API_KEY），可选检查全部执行' }
-  if (secrets.ARGUS_TYPESAFE_API_KEY) jev = await evaluateJev({ state: toMatrixState({ pr, files, profile: baseProfile }), questions: toMatrixQuestions(baseProfile), secrets })
+  const jevT0 = Date.now()
+  if (jevConfigured) jev = await evaluateJev({ state: toMatrixState({ pr, files, profile: baseProfile }), questions: toMatrixQuestions(baseProfile), secrets })
   const triage = toTriage({ profile: baseProfile, files, jev })
-  if (secrets.ARGUS_TYPESAFE_API_KEY && !jev.ok) health.llm_errors.push({ pr: number, stage: 'triage(jev)', message: jev.reasonZh })
+  triage.jevStatus = jev.ok ? 'ok' : jevConfigured ? 'failed' : 'not-configured'
+  out.triage = { ...toApplicability(triage), duration_ms: jevConfigured ? Date.now() - jevT0 : null, usage: jev.usage ?? null }
+  recordTriage(health, number, out.triage)
   const plan = toStepPlan({ profile: baseProfile, riskClass, triage })
   for (const sk of plan.skipped) sk.reason ??= 'triage: change does not touch what this optional step covers'
   if (opts.skipSteps?.length) {
@@ -154,7 +170,11 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     plan.stepIds = plan.stepIds.filter((id) => !opts.skipSteps.includes(id))
   }
   const profile = baseProfile
-  const common = { repo, jobId: `n${number}`, profile, extraRefspecs, keepTo: evDir }
+  // 对照版本：已合并 → merge commit 的第一个父提交；开放 → PR head 与目标分支的 merge-base。
+  // 先算出来：按 diff 范围工作的检查（verify:design 的 MIVO_GUARD_BASE_SHA、gitleaks 的 base..HEAD）每一轮都用它（${DIFF_BASE_SHA}）
+  const baseSha = await reviewBaseSha({ repo, pr, sha, merged, extraRefspecs })
+  out.base_sha = baseSha
+  const common = { repo, jobId: `n${number}`, profile, extraRefspecs, keepTo: evDir, diffBase: baseSha }
 
   // 覆盖率轮次：独立检出、只跑单测（带 --coverage），与首轮并行；它的通过 / 失败不参与任何判定
   const covStep = profile.steps.find((x) => x.coverage && plan.stepIds.includes(x.id))
@@ -166,9 +186,6 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     health.qa_tool_failures.push({ pr: number, stage: 'setup', message: 'dependency install failed, retrying once', detail: tail(redact(first.find((r) => r.kind === 'setup')?.tail ?? ''), 600) })
     first = await executeOnSha({ ...common, label: 'h1r', sha, stepIds: plan.stepIds })
   }
-  // 对照版本：已合并 → merge commit 的第一个父提交；开放 → PR head 与目标分支的 merge-base
-  const baseSha = await reviewBaseSha({ repo, pr, sha, merged, extraRefspecs })
-  out.base_sha = baseSha
   // 同一份 diff（base..tested）同时给覆盖率门禁和代码审查用：审查的就是被测的那个提交
   const prDiff = await diffForReview({ repo, sha, baseSha, extraRefspecs })
   const cov = await covRun
@@ -185,7 +202,9 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
       if (prelim.outcome === 'defect') {
         const head = await getBranchHead(repo, pr.base.ref)
         latestIsSame = Boolean(head) && head === sha
-        if (head && !latestIsSame) latest = await executeOnSha({ ...common, label: 'l', sha: head, stepIds: prelim.failedSteps })
+        // noLatestRecheck 的步骤（secret-scan）不在最新主干复查：泄露进了历史，后续提交修不掉
+        const recheck = prelim.failedSteps.filter((id) => !profile.steps.find((x) => x.id === id)?.noLatestRecheck)
+        if (head && !latestIsSame && recheck.length) latest = await executeOnSha({ ...common, label: 'l', sha: head, stepIds: recheck })
         out.latest_main_sha = head
       }
     }
@@ -203,6 +222,8 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     plan.skipped.push({ id, nameZh: st?.nameZh, reason: setupFailed(first) ? 'not run: dependency install failed' : 'not run: run stopped before this step (time budget / shutdown)', reasonZh: '没跑到' })
   }
   out.skipped_steps = plan.skipped.map((sk) => ({ ...sk, dimension: toBox(profile.steps.find((x) => x.id === sk.id) ?? { id: sk.id }, profile) }))
+  // 接口探测里没跑的子用例（例如没有测试账号的登录态用例）逐条记进 skipped_steps，绝不算通过
+  out.skipped_steps.push(...probeSkippedSteps(first, profile))
 
   // 检查清单（每步带维度）
   const stepById = Object.fromEntries(profile.steps.map((s) => [s.id, s]))
@@ -213,6 +234,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
       status: r.unavailable ? 'unavailable' : r.timedOut ? 'timeout' : r.ok ? 'pass' : 'fail',
       exit_code: r.exitCode, duration_ms: r.durationMs, failure_count: r.failures?.length ?? 0,
       ...(r.unavailable ? { unavailable_reason: r.unavailableReasonZh } : {}),
+      ...(r.probeReport ? { sub_checks: probeSummary(r.probeReport) } : {}),
     })
     if (r.unavailable) health.qa_tool_failures.push({ pr: number, stage: r.id, dimension: toBox(step, profile), message: `check could not run: ${r.unavailableReasonZh}` })
     if (r.timedOut) health.qa_tool_failures.push({ pr: number, stage: r.id, dimension: toBox(step, profile), message: `check timed out after ${Math.round(r.durationMs / 60000)} min` })
@@ -230,7 +252,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     const test = key.slice(key.indexOf('::') + 2)
     const r = first.find((x) => x.id === stepId)
     const step = stepById[stepId] ?? { id: stepId, kind: r?.kind }
-    let { status, why } = classifyKey(key, { first, rerun, base, latest, latestIsSame })
+    let { status, why } = classifyKey(key, { first, rerun, base, latest, latestIsSame, skipLatest: Boolean(step.noLatestRecheck) })
     if (r?.timedOut) { status = 'timeout'; why = 'check timed out; no comparable failure evidence' }
     const named = test !== '*'
     const fp = fingerprintOf(repo, ['check', stepId, named ? test : wholeStepSignature(r)])
@@ -264,9 +286,9 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     const fp = fingerprintOf(repo, ['coverage-gate', gate.step, gate.failed.join(',')])
     out.findings.push({
       source: 'coverage-gate', test_backed: false, check_id: 'coverage-gate', dimension: 'white-box', severity: 'P2',
-      title: `coverage below gate: ${gate.failed.map((k) => `${k} ${gate.values[k]}% < ${gate.thresholds[k]}%`).join(', ')}`,
+      title: `new-code coverage ${gate.values.new_code}% < ${gate.thresholds.new_code}%`,
       fingerprint: fp, pr_fingerprint: prFingerprint(fp, number),
-      evidence: { tested_sha: sha, base_sha: baseSha, values: gate.values, thresholds: gate.thresholds, new_code_files: (gate.new_code?.files ?? []).slice(0, 20) },
+      evidence: { tested_sha: sha, base_sha: baseSha, values: gate.values, thresholds: gate.thresholds, baseline: gate.baseline, new_code_files: (gate.new_code?.files ?? []).slice(0, 20) },
     })
   }
   out.findings = [...out.failed_checks.map((c) => ({ source: 'check', test_backed: checkIsTestBacked(c), ...c })), ...out.findings]
@@ -284,6 +306,35 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
 
 // 文档改动（risk A）的覆盖率门禁：没有单测运行，不是失败也不是 unavailable
 export const DOCS_ONLY_COVERAGE_GATE = () => ({ status: 'not-applicable', reason: 'docs-only change' })
+
+// 接口探测报告 → skipped_steps 条目（id: api-probe/<子用例>，parent_step 指回探测步骤）
+export function probeSkippedSteps(results, profile) {
+  const out = []
+  for (const r of results ?? []) {
+    for (const s of r.probeReport?.skipped ?? []) {
+      const step = profile.steps.find((x) => x.id === r.id) ?? { id: r.id }
+      out.push({ id: `${r.id}/${s.id}`, nameZh: s.name, reason: s.reason, parent_step: r.id, dimension: toBox(step, profile) })
+    }
+  }
+  return out
+}
+export function probeSummary(rep) {
+  const checks = rep.checks ?? []
+  return { total: checks.length + (rep.skipped?.length ?? 0), passed: checks.filter((c) => c.status === 'pass').length, failed: checks.filter((c) => c.status !== 'pass').length, skipped: rep.skipped?.length ?? 0, auth: rep.auth ?? null }
+}
+
+// 分诊结果进 system_health.triage；Jev 失败另记 llm_errors（失败 / 没配置时由 runNightly 加说明）
+export const TRIAGE_NOTE_NOT_CONFIGURED = '维度适用性未判定（Jev 未配置）'
+export const TRIAGE_NOTE_FAILED = '维度适用性未判定（Jev 分诊失败）'
+export function recordTriage(health, number, t) {
+  const h = health.triage ??= { model: null, prs: [], failed: [] }
+  if (t.model) h.model = t.model
+  h.prs.push({ pr: number, status: t.status, applicable: t.applicable.length, not_applicable: t.not_applicable.length, undetermined: t.undetermined.length, duration_ms: t.duration_ms ?? null })
+  if (t.status === 'failed') {
+    h.failed.push({ pr: number, reason: t.reason })
+    health.llm_errors.push({ pr: number, stage: 'triage(jev)', message: t.reason })
+  }
+}
 
 // 对照版本：已合并 → merge commit 的第一个父提交；开放 → PR head 与目标分支的 merge-base
 async function reviewBaseSha({ repo, pr, sha, merged, extraRefspecs }) {
@@ -311,7 +362,7 @@ async function runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha, resul
     if (f.verdict === 'REJECTED') continue
     // LLM 单独给出的结论最高记 P1：P0 需要真实执行的失败作证（原始等级保留在 llm_severity）
     const severity = f.severity === 'P0' ? 'P1' : f.severity
-    const fp = fingerprintOf(repo, ['code-review', f.file, f.symbol || '', f.category])
+    const fp = codeReviewFingerprint(repo, f)
     out.findings.push({
       source: 'code-review', test_backed: false, check_id: 'code-review', dimension: 'white-box', severity, llm_severity: f.severity, verdict: f.verdict,
       category: f.category, title: f.title, file: f.file, line: f.line, symbol: f.symbol,
@@ -434,8 +485,21 @@ export function resolveOutPath(out, day) {
 }
 
 // ── 报告 ──────────────────────────────────────────────
-function writeReport(report, file) {
+// 已产出的报告绝不就地改写：再次写同一路径时，旧文件先原样改名为 <名字>.vN.json（N 取下一个空号），再写新的。
+// 重新分级 = 重跑；原件保留（例如 PR-902.v1.json）。
+export function preserveExisting(file) {
+  if (!existsSync(file)) return null
+  const stem = file.replace(/\.json$/, '')
+  let n = 1
+  while (existsSync(`${stem}.v${n}.json`)) n++
+  const kept = `${stem}.v${n}.json`
+  renameSync(file, kept)
+  return kept
+}
+export function writeReport(report, file) {
   mkdirSync(dirname(file), { recursive: true })
+  const kept = preserveExisting(file)
+  if (kept && report && typeof report === 'object') report.previous_version = basename(kept)
   const tmp = `${file}.tmp-${process.pid}`
   writeFileSync(tmp, JSON.stringify(report, null, 2) + '\n')
   renameSync(tmp, file)
@@ -450,10 +514,14 @@ function writeReport(report, file) {
 export const ISSUE_REPO = 'PraiseZhu/pr-qa-agent-deploy'
 export const ISSUE_LABELS = ['qa-auto', 'cindy-dispatch']
 export const fingerprintMarker = (fp) => `<!-- mivo-qa-fingerprint: ${fp} -->`
+export const dedupMarker = (key) => `<!-- mivo-qa-dedup: ${key} -->`
+// 发现的去重键：已合并 PR 用 merge commit，开放 PR 用被测 head
+export const findingDedupKey = (pr, f) => dedupKeyOf(f.fingerprint, pr.state === 'merged' ? (pr.merge_sha ?? pr.tested_sha) : pr.tested_sha ?? pr.head_sha)
 
 export function buildIssuePayload(report, pr, f) {
   const finding = {
     schema: 'mivo-qa-finding/v1', fingerprint: f.fingerprint, pr_fingerprint: f.pr_fingerprint,
+    dedup_key: findingDedupKey(pr, f), merge_sha: pr.merge_sha ?? null,
     report_date: report.date, report_file: `reports/${report.date}.json`, run_id: report.run?.id,
     repo: report.repo, pr: { number: pr.number, title: pr.title, author: pr.author, url: pr.url, state: pr.state, tested_sha: pr.tested_sha, base_sha: pr.base_sha },
     source: f.source, check_id: f.check_id, check_name: f.check_name ?? null, dimension: f.dimension, qa_dimensions: f.qa_dimensions ?? [],
@@ -482,6 +550,7 @@ export function buildIssuePayload(report, pr, f) {
     '```',
     '',
     fingerprintMarker(f.fingerprint),
+    dedupMarker(findingDedupKey(pr, f)),
   ].filter((x) => x !== null).join('\n')
   return { title, body: redact(body), labels: ISSUE_LABELS }
 }
@@ -503,14 +572,14 @@ export function selectIssueCandidates(report, { authors = ISSUE_AUTHORS } = {}) 
         : !authors.includes(pr.author) ? `author ${pr.author} not in ${authors.join(',')}`
           : null
       if (why) skipped.push({ pr: pr.number, fingerprint: f.fingerprint, severity: f.severity, source: f.source, reason: why })
-      else out.push({ kind: 'finding', pr, finding: f, fingerprint: f.fingerprint })
+      else out.push({ kind: 'finding', pr, finding: f, fingerprint: f.fingerprint, dedup_key: findingDedupKey(pr, f) })
     }
   }
   const h = report.system_health ?? {}
   for (const [key, label] of Object.entries(HEALTH_KINDS)) {
     for (const e of h[key] ?? []) {
       const fp = fingerprintOf(report.repo, ['system-health', key, e.stage ?? '', e.kind ?? '', e.message ?? ''])
-      out.push({ kind: 'health', category: key, label, entry: e, fingerprint: fp })
+      out.push({ kind: 'health', category: key, label, entry: e, fingerprint: fp, dedup_key: dedupKeyOf(fp, `day:${report.date}`) })
     }
   }
   return { candidates: out, skipped }
@@ -518,7 +587,7 @@ export function selectIssueCandidates(report, { authors = ISSUE_AUTHORS } = {}) 
 
 export function buildHealthIssuePayload(report, c) {
   const e = c.entry
-  const block = { schema: 'mivo-qa-health/v1', fingerprint: c.fingerprint, report_date: report.date, report_file: `reports/${report.date}.json`, run_id: report.run?.id, repo: report.repo, category: c.category, entry: e, system_health_status: report.system_health?.status, environment: report.system_health?.environment }
+  const block = { schema: 'mivo-qa-health/v1', fingerprint: c.fingerprint, dedup_key: c.dedup_key ?? null, report_date: report.date, report_file: `reports/${report.date}.json`, run_id: report.run?.id, repo: report.repo, category: c.category, entry: e, system_health_status: report.system_health?.status, environment: report.system_health?.environment }
   const body = [
     `Mivo QA nightly (${report.date}, Asia/Shanghai) hit a QA ${c.label}${e.pr ? ` while testing ${report.repo}#${e.pr}` : ''}.`,
     '',
@@ -531,6 +600,7 @@ export function buildHealthIssuePayload(report, c) {
     '```',
     '',
     fingerprintMarker(c.fingerprint),
+    c.dedup_key ? dedupMarker(c.dedup_key) : null,
   ].filter((x) => x !== null).join('\n')
   return { title: `[Mivo QA][system_health] ${c.label}: ${String(e.stage ?? e.message ?? '').slice(0, 120)}`.slice(0, 240), body: redact(body), labels: ISSUE_LABELS }
 }
@@ -539,14 +609,29 @@ export function buildIssuePayloadFor(report, c) {
   return c.kind === 'health' ? buildHealthIssuePayload(report, c) : buildIssuePayload(report, c.pr, c.finding)
 }
 
+// 去重判定（纯函数）：同指纹的开放 issue → 跳过（exists-open）；同去重键（指纹 + 合并提交）的已关闭 issue → 跳过
+// （exists-closed，同一个提交上的同一问题不重复开）；只有指纹相同、提交不同的已关闭 issue → 新开（recurred）。
+// 旧 issue 正文没有 dedup 标记时，按指纹标记匹配，视为提交未知：开放的照样去重，关闭的不挡新开。
+export function dedupDecision(issues, c) {
+  const fpMark = fingerprintMarker(c.fingerprint)
+  const mine = (issues ?? []).filter((i) => String(i.body ?? '').includes(fpMark))
+  const open = mine.find((i) => i.state === 'open')
+  if (open) return { action: 'exists', reason: 'open issue with the same fingerprint', issue: open }
+  const same = mine.find((i) => c.dedup_key && String(i.body ?? '').includes(dedupMarker(c.dedup_key)))
+  if (same) return { action: 'exists', reason: 'closed issue for the same fingerprint and merge commit', issue: same }
+  return { action: 'create', recurred: mine.length > 0, previous: mine.map((i) => i.html_url) }
+}
+
 async function createIssues(report) {
   const { candidates, skipped } = selectIssueCandidates(report)
   const results = skipped.map((x) => ({ ...x, action: 'not-eligible' }))
   for (const c of candidates) {
-    const existing = await findIssueByMarkerLabel(ISSUE_REPO, ISSUE_LABELS[0], fingerprintMarker(c.fingerprint))
-    if (existing) { results.push({ kind: c.kind, pr: c.pr?.number ?? null, fingerprint: c.fingerprint, action: 'exists', issue: existing.html_url }); continue }
+    const found = await findIssuesByMarkerLabel(ISSUE_REPO, ISSUE_LABELS[0], fingerprintMarker(c.fingerprint))
+    const d = dedupDecision(found, c)
+    const base = { kind: c.kind, pr: c.pr?.number ?? null, fingerprint: c.fingerprint, dedup_key: c.dedup_key ?? null }
+    if (d.action === 'exists') { results.push({ ...base, action: 'exists', reason: d.reason, issue: d.issue.html_url }); continue }
     const issue = await createIssue(ISSUE_REPO, buildIssuePayloadFor(report, c))
-    results.push({ kind: c.kind, pr: c.pr?.number ?? null, fingerprint: c.fingerprint, action: 'created', issue: issue?.html_url })
+    results.push({ ...base, action: d.recurred ? 'created-recurred' : 'created', previous_issues: d.recurred ? d.previous : undefined, issue: issue?.html_url })
   }
   return results
 }
@@ -699,7 +784,9 @@ export async function runNightly(opts = {}) {
   let secrets = {}
   try { secrets = loadSecrets() } catch (err) { health.env_problems.push({ message: `secrets file unreadable: ${err.message}` }) }
   for (const k of ['ARGUS_LLM_BASE_URL', 'ARGUS_LLM_API_KEY']) if (!secrets[k]) health.env_problems.push({ message: `missing secret ${k === 'ARGUS_LLM_BASE_URL' ? 'QA_LLM_BASE_URL' : 'QA_LLM_API_KEY'}` })
-  if (!secrets.ARGUS_TYPESAFE_API_KEY) health.notes.push('Jev triage not configured (no ARGUS_TYPESAFE_API_KEY): every optional check runs for every PR')
+  if (!secrets.ARGUS_TYPESAFE_API_KEY) health.notes.push(TRIAGE_NOTE_NOT_CONFIGURED, 'Jev triage not configured (no ARGUS_TYPESAFE_API_KEY): every optional check runs for every PR')
+  // 补测放弃的 PR（最近 48 小时）进日报 system_health；补测自己起的子运行不重复带
+  if (process.env.PANOPTES_CATCH_UP_CHILD !== '1') { try { health.qa_tool_failures.push(...recentGiveUps()) } catch { /* 没有状态文件 */ } }
   if (!mingQaAvailable()) health.env_problems.push({ message: 'ming-qa qa_agent.py not found; code-review gate unavailable' })
   const env = health.environment
   if (env.sandbox !== 'bwrap') health.env_problems.push({ message: `sandbox mode is '${env.sandbox}' (expected bwrap)` })
@@ -727,6 +814,8 @@ export async function runNightly(opts = {}) {
   })
   prs.push(...plan.notTested)
   annotateTestBacked(prs)
+  if (health.triage?.failed?.length) health.notes.push(`${TRIAGE_NOTE_FAILED}：${health.triage.failed.map((f) => `#${f.pr} ${f.reason}`).join('；')}`)
+  if (opts.catchUp) health.catch_up = opts.catchUp
 
   const allFindings = prs.flatMap((p) => p.findings ?? [])
   finalizeHealth(health, prs, startedAt)
@@ -760,7 +849,7 @@ export async function runNightly(opts = {}) {
       prs_test_backed: prs.filter((p) => p.test_backed).map((p) => p.number),
     },
     prs,
-    issues: { enabled: false, repo: ISSUE_REPO, labels: ISSUE_LABELS, dedup: 'fingerprint marker in body, label qa-auto, open+closed', policy: 'P0/P1 findings backed by a failing check on PRs authored by PraiseZhu; system_health failures always; LLM-review-only findings never', results: [] },
+    issues: { enabled: false, repo: ISSUE_REPO, labels: ISSUE_LABELS, dedup: 'key = fingerprint + merge commit (body markers mivo-qa-fingerprint + mivo-qa-dedup, label qa-auto): an open issue with the same fingerprint dedups; a closed one dedups only for the same merge commit, a recurrence on a new commit opens a new issue', policy: 'P0/P1 findings backed by a failing check on PRs authored by PraiseZhu; system_health failures always; LLM-review-only findings never', results: [] },
     system_health: health,
   }
   if (opts.createIssues) {

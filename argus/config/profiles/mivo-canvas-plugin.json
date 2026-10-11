@@ -1,7 +1,7 @@
 {
   "version": 2,
   "intentZh": "Mivo 是桌面式 AI 艺术画布，本仓以 Cindy 插件形态为主（网页入口已下线，网页与插件共用 src/ 共享层）：无限画布、FigJam 风格标注、AI 生图工作流。关键不变量：用户导入或生成的图片归用户资产，删除原始文件不影响编辑，关闭重开后画布和资产都能恢复；失败或取消不能留下半成品；所有会改状态、加载数据、执行工作流、跳过或失败的操作都要写 Debug Log，需要即时反馈的要弹提示；插件形态依赖 Cindy 宿主的存储与生命周期。非目标：本系统目前不验证 Cindy 宿主内的真实使用、Windows 原生和真实 GPU。",
-  "sourceOfSteps": "对齐 origin/main 的 .github/workflows/ci.yml（build-and-test、structure-guard、cindyplugin-build、linux-unit-shards）；接口测试与浏览器端到端来自仓内已有测试和脚本，不在 CI 里，浏览器用 Ego Lite 无头实例",
+  "sourceOfSteps": "对齐 origin/main 的 .github/workflows/ci.yml（build-and-test、structure-guard、cindyplugin-build、linux-unit-shards）；接口测试与浏览器端到端来自仓内已有测试和脚本，不在 CI 里，浏览器用 Ego Lite 无头实例；2026-10-11 补齐 ci.yml 里 panoptes 原先没跑的：verify:design、check-internal-literals、check-endpoint-literals、cindyplugin/check-host-locale.mjs、check-vendor-split.mjs、gitleaks（secret-scan），以及 package.json 的 npm run build（网页构建）",
   "aPaths": [
     "**/*.md",
     "docs/**",
@@ -76,12 +76,16 @@
         "api",
         "api-oracle",
         "permission",
-        "negativeAssertions"
+        "permission-boundary",
+        "negative-path",
+        "negativeAssertions",
+        "data-consistency",
+        "state-transition"
       ],
       "unavailableExitCodes": [
         2
       ],
-      "timeoutMin": 5,
+      "timeoutMin": 8,
       "probe": {
         "start": [
           "node",
@@ -91,12 +95,22 @@
         "env": {
           "MIVO_ASSET_STORE_DIR": "${RUN}/asset-store"
         },
+        "hostExchangeEnv": "MIVO_CINDY_EXCHANGE_SECRET",
+        "localOidc": {
+          "start": [
+            "node",
+            "${RUN}/tools/probe-local-auth-server.mjs"
+          ],
+          "issuer": "https://auth.cindy.com.cn",
+          "audience": "argus-qa:mivo-canvas"
+        },
         "ready": {
           "path": "/healthz",
           "timeoutSec": 30
         },
         "requests": [
           {
+            "id": "healthz",
             "name": "健康检查",
             "method": "GET",
             "path": "/healthz",
@@ -108,6 +122,7 @@
             }
           },
           {
+            "id": "recipes-catalog",
             "name": "配方菜单",
             "method": "GET",
             "path": "/api/mivo/recipes",
@@ -117,34 +132,1186 @@
             }
           },
           {
+            "id": "recipes-resolve-unknown",
+            "name": "未知配方返回找不到",
+            "method": "POST",
+            "path": "/api/mivo/recipes/resolve",
+            "expect": {
+              "status": 404,
+              "error": "RECIPE_NOT_FOUND"
+            },
+            "body": {
+              "recipeId": "ro/poster"
+            }
+          },
+          {
+            "id": "recipes-resolve-bad-json",
+            "name": "配方解析：坏 JSON 返回参数错误",
+            "method": "POST",
+            "path": "/api/mivo/recipes/resolve",
+            "expect": {
+              "status": 400,
+              "error": "RECIPE_PARAM_INVALID"
+            },
+            "rawBody": "{not json",
+            "contentType": "application/json"
+          },
+          {
+            "id": "recipes-resolve-bad-params",
+            "name": "配方解析：params 不是对象",
+            "method": "POST",
+            "path": "/api/mivo/recipes/resolve",
+            "expect": {
+              "status": 400,
+              "error": "RECIPE_PARAM_INVALID"
+            },
+            "body": {
+              "recipeId": "cindy/portrait",
+              "params": "x"
+            }
+          },
+          {
+            "id": "recipes-asset-unknown",
+            "name": "配方素材：未知配方",
+            "method": "GET",
+            "path": "/api/mivo/recipes/assets/nope/nope/x.png",
+            "expect": {
+              "status": 404,
+              "error": "RECIPE_NOT_FOUND"
+            }
+          },
+          {
+            "id": "changelog",
+            "name": "更新日志",
+            "method": "GET",
+            "path": "/api/mivo/changelog",
+            "expect": {
+              "status": 200
+            }
+          },
+          {
+            "id": "changelog-public",
+            "name": "更新日志（公开别名）",
+            "method": "GET",
+            "path": "/api/mivo/recipes/assets/_public/changelog.json",
+            "expect": {
+              "status": 200
+            }
+          },
+          {
+            "id": "projects-list-unauth",
             "name": "未登录不能读项目",
             "method": "GET",
             "path": "/api/projects",
             "expect": {
-              "status": 401
+              "status": 401,
+              "error": "unauthorized"
             }
           },
           {
+            "id": "projects-create-unauth",
+            "name": "未登录不能建项目",
+            "method": "POST",
+            "path": "/api/projects",
+            "expect": {
+              "status": 401,
+              "error": "unauthorized"
+            },
+            "body": {
+              "name": "x"
+            }
+          },
+          {
+            "id": "canvas-list-unauth",
+            "name": "未登录不能读画布",
+            "method": "GET",
+            "path": "/api/canvas",
+            "expect": {
+              "status": 401,
+              "error": "unauthorized"
+            }
+          },
+          {
+            "id": "canvas-create-unauth",
+            "name": "未登录不能建画布",
+            "method": "POST",
+            "path": "/api/canvas",
+            "expect": {
+              "status": 401,
+              "error": "unauthorized"
+            },
+            "body": {}
+          },
+          {
+            "id": "user-state-list-unauth",
+            "name": "未登录不能读用户状态",
+            "method": "GET",
+            "path": "/api/user-state",
+            "expect": {
+              "status": 401,
+              "error": "unauthorized"
+            }
+          },
+          {
+            "id": "user-state-put-unauth",
+            "name": "未登录不能写用户状态",
+            "method": "PUT",
+            "path": "/api/user-state/k",
+            "expect": {
+              "status": 401,
+              "error": "unauthorized"
+            },
+            "body": {
+              "value": 1
+            }
+          },
+          {
+            "id": "assets-get-unauth",
             "name": "未登录不能读资产",
             "method": "GET",
             "path": "/api/assets/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "expect": {
-              "status": 401
+              "status": 401,
+              "error": "unauthorized"
             }
           },
           {
-            "name": "未知配方返回找不到",
+            "id": "assets-upload-unauth",
+            "name": "未登录不能上传资产",
             "method": "POST",
-            "path": "/api/mivo/recipes/resolve",
-            "body": {
-              "recipeId": "ro/poster"
-            },
+            "path": "/api/assets",
             "expect": {
-              "status": 404
+              "status": 401,
+              "error": "unauthorized"
+            },
+            "body": {
+              "image": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+              "mimeType": "image/png"
             }
+          },
+          {
+            "id": "assets-list-unauth",
+            "name": "未登录不能列资产",
+            "method": "GET",
+            "path": "/api/assets?canvasId=x",
+            "expect": {
+              "status": 401,
+              "error": "unauthorized"
+            }
+          },
+          {
+            "id": "assets-attach-unauth",
+            "name": "未登录不能挂资产",
+            "method": "POST",
+            "path": "/api/assets/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/attach",
+            "expect": {
+              "status": 401,
+              "error": "unauthorized"
+            },
+            "body": {
+              "nodeId": "n",
+              "canvasId": "c"
+            }
+          },
+          {
+            "id": "projects-bad-bearer",
+            "name": "伪造 Bearer 不能读项目",
+            "method": "GET",
+            "path": "/api/projects",
+            "expect": {
+              "status": 401,
+              "error": "unauthorized"
+            },
+            "auth": "bad-bearer"
+          },
+          {
+            "id": "assets-bad-bearer-no-fallback",
+            "name": "带 Bearer 失败不回落其它凭证",
+            "method": "GET",
+            "path": "/api/assets/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "expect": {
+              "status": 401,
+              "error": "unauthorized"
+            },
+            "auth": "bad-bearer"
+          },
+          {
+            "id": "projects-host-exchange-rejected",
+            "name": "宿主交换凭证不能读项目（项目只认 Cindy 登录）",
+            "method": "GET",
+            "path": "/api/projects",
+            "expect": {
+              "status": 401,
+              "error": "unauthorized"
+            },
+            "auth": "host"
+          },
+          {
+            "id": "assets-upload-host",
+            "name": "资产上传（宿主交换）且重复上传幂等",
+            "method": "POST",
+            "path": "/api/assets",
+            "expect": {
+              "status": 200,
+              "types": {
+                "assetId": "string"
+              },
+              "json": {
+                "deduped": false
+              }
+            },
+            "auth": "host",
+            "body": {
+              "image": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+              "mimeType": "image/png",
+              "originalName": "qa.png"
+            },
+            "repeat": 2,
+            "sameAs": [
+              "assetId",
+              "sizeBytes"
+            ],
+            "expectRepeat": {
+              "json": {
+                "deduped": true
+              }
+            },
+            "capture": {
+              "hostAsset": "assetId"
+            }
+          },
+          {
+            "id": "assets-get-host",
+            "name": "读回自己的资产",
+            "method": "GET",
+            "path": "/api/assets/${hostAsset}",
+            "expect": {
+              "status": 200,
+              "header": {
+                "content-type": "image/png",
+                "x-content-type-options": "nosniff"
+              }
+            },
+            "auth": "host"
+          },
+          {
+            "id": "assets-get-cross-owner",
+            "name": "别人的资产读不到",
+            "method": "GET",
+            "path": "/api/assets/${hostAsset}",
+            "expect": {
+              "status": 404,
+              "error": "not-found"
+            },
+            "auth": "host-b"
+          },
+          {
+            "id": "assets-get-bad-variant",
+            "name": "不支持的派生图参数",
+            "method": "GET",
+            "path": "/api/assets/${hostAsset}?variant=bogus",
+            "expect": {
+              "status": 400,
+              "error": "bad-request"
+            },
+            "auth": "host"
+          },
+          {
+            "id": "assets-get-bad-id",
+            "name": "非法资产 id",
+            "method": "GET",
+            "path": "/api/assets/not-a-hash",
+            "expect": {
+              "status": 404,
+              "error": "not-found"
+            },
+            "auth": "host"
+          },
+          {
+            "id": "assets-upload-missing-image",
+            "name": "上传缺图片",
+            "method": "POST",
+            "path": "/api/assets",
+            "expect": {
+              "status": 400,
+              "error": "missing-image"
+            },
+            "auth": "host",
+            "body": {
+              "mimeType": "image/png"
+            }
+          },
+          {
+            "id": "assets-upload-unsupported-type",
+            "name": "上传不支持的类型",
+            "method": "POST",
+            "path": "/api/assets",
+            "expect": {
+              "status": 415,
+              "error": "unsupported-type"
+            },
+            "auth": "host",
+            "body": {
+              "image": "aGVsbG8gd29ybGQ=",
+              "mimeType": "text/plain"
+            }
+          },
+          {
+            "id": "assets-list-missing-canvas",
+            "name": "列资产缺 canvasId",
+            "method": "GET",
+            "path": "/api/assets",
+            "expect": {
+              "status": 400,
+              "error": "bad-request"
+            },
+            "auth": "host"
+          },
+          {
+            "id": "assets-list-host-empty",
+            "name": "非 Cindy 登录列资产为空",
+            "method": "GET",
+            "path": "/api/assets?canvasId=x",
+            "expect": {
+              "status": 200,
+              "json": {
+                "assetIds": []
+              }
+            },
+            "auth": "host"
+          },
+          {
+            "id": "assets-attach-host-rejected",
+            "name": "挂资产只认 Cindy 登录",
+            "method": "POST",
+            "path": "/api/assets/${hostAsset}/attach",
+            "expect": {
+              "status": 401,
+              "error": "unauthorized"
+            },
+            "auth": "host",
+            "body": {
+              "nodeId": "n",
+              "canvasId": "c"
+            }
+          },
+          {
+            "id": "projects-list",
+            "name": "登录：列项目",
+            "method": "GET",
+            "path": "/api/projects",
+            "expect": {
+              "status": 200,
+              "types": {
+                "projects": "array"
+              }
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "projects-create-missing-name",
+            "name": "登录：建项目缺名字",
+            "method": "POST",
+            "path": "/api/projects",
+            "expect": {
+              "status": 400,
+              "error": "bad-request"
+            },
+            "body": {},
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "projects-create",
+            "name": "登录：建项目",
+            "method": "POST",
+            "path": "/api/projects",
+            "expect": {
+              "status": 201,
+              "json": {
+                "id": "argus-qa-p1",
+                "name": "QA",
+                "revision": 1
+              }
+            },
+            "body": {
+              "id": "argus-qa-p1",
+              "name": "QA"
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "projects-create-duplicate",
+            "name": "登录：同 id 重复建项目被拒（不重复创建）",
+            "method": "POST",
+            "path": "/api/projects",
+            "expect": {
+              "status": 409,
+              "error": "project-exists"
+            },
+            "body": {
+              "id": "argus-qa-p1",
+              "name": "QA"
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "projects-get",
+            "name": "登录：读项目",
+            "method": "GET",
+            "path": "/api/projects/argus-qa-p1",
+            "expect": {
+              "status": 200,
+              "json": {
+                "name": "QA"
+              }
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "projects-get-cross-owner",
+            "name": "登录：读不到别人的项目",
+            "method": "GET",
+            "path": "/api/projects/argus-qa-p1",
+            "expect": {
+              "status": 404,
+              "error": "unknown-project"
+            },
+            "auth": "account-b",
+            "requires": "account-b"
+          },
+          {
+            "id": "projects-get-unknown",
+            "name": "登录：未知项目",
+            "method": "GET",
+            "path": "/api/projects/argus-qa-nope",
+            "expect": {
+              "status": 404,
+              "error": "unknown-project"
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "projects-patch-no-if-match",
+            "name": "登录：改项目缺 If-Match",
+            "method": "PATCH",
+            "path": "/api/projects/argus-qa-p1",
+            "expect": {
+              "status": 428,
+              "error": "precondition-required"
+            },
+            "body": {
+              "name": "QA2"
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "projects-patch-bad-if-match",
+            "name": "登录：改项目 If-Match 非法",
+            "method": "PATCH",
+            "path": "/api/projects/argus-qa-p1",
+            "expect": {
+              "status": 400,
+              "error": "bad-request"
+            },
+            "body": {
+              "name": "QA2"
+            },
+            "headers": {
+              "if-match": "abc"
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "projects-patch",
+            "name": "登录：改项目",
+            "method": "PATCH",
+            "path": "/api/projects/argus-qa-p1",
+            "expect": {
+              "status": 200,
+              "json": {
+                "name": "QA2",
+                "revision": 2
+              }
+            },
+            "body": {
+              "name": "QA2"
+            },
+            "headers": {
+              "if-match": "1"
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "projects-patch-stale",
+            "name": "登录：旧版本改项目冲突",
+            "method": "PATCH",
+            "path": "/api/projects/argus-qa-p1",
+            "expect": {
+              "status": 409,
+              "error": "revision-conflict",
+              "json": {
+                "currentRevision": 2
+              }
+            },
+            "body": {
+              "name": "QA3"
+            },
+            "headers": {
+              "if-match": "1"
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "projects-invite",
+            "name": "登录：邀请未实现",
+            "method": "POST",
+            "path": "/api/projects/argus-qa-p1/invite",
+            "expect": {
+              "status": 501,
+              "error": "not-implemented"
+            },
+            "body": {},
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "canvas-create",
+            "name": "登录：建画布",
+            "method": "POST",
+            "path": "/api/canvas",
+            "expect": {
+              "status": 201,
+              "json": {
+                "id": "argus-qa-c1",
+                "projectId": "argus-qa-p1"
+              }
+            },
+            "body": {
+              "id": "argus-qa-c1",
+              "projectId": "argus-qa-p1",
+              "title": "QA"
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "canvas-create-duplicate",
+            "name": "登录：同 id 重复建画布被拒",
+            "method": "POST",
+            "path": "/api/canvas",
+            "expect": {
+              "status": 409,
+              "error": "canvas-exists"
+            },
+            "body": {
+              "id": "argus-qa-c1",
+              "projectId": "argus-qa-p1"
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "canvas-create-unknown-project",
+            "name": "登录：画布挂到未知项目",
+            "method": "POST",
+            "path": "/api/canvas",
+            "expect": {
+              "status": 404,
+              "error": "unknown-project"
+            },
+            "body": {
+              "id": "argus-qa-c2",
+              "projectId": "argus-qa-nope"
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "canvas-list",
+            "name": "登录：按项目列画布",
+            "method": "GET",
+            "path": "/api/canvas?projectId=argus-qa-p1",
+            "expect": {
+              "status": 200,
+              "json": {
+                "canvases.0.id": "argus-qa-c1"
+              }
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "canvas-get",
+            "name": "登录：读画布",
+            "method": "GET",
+            "path": "/api/canvas/argus-qa-c1",
+            "expect": {
+              "status": 200,
+              "json": {
+                "id": "argus-qa-c1"
+              },
+              "types": {
+                "nodes": "array"
+              }
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "canvas-get-cross-owner",
+            "name": "登录：读不到别人的画布",
+            "method": "GET",
+            "path": "/api/canvas/argus-qa-c1",
+            "expect": {
+              "status": 404,
+              "error": "unknown-canvas"
+            },
+            "auth": "account-b",
+            "requires": "account-b"
+          },
+          {
+            "id": "canvas-put-no-if-match",
+            "name": "登录：改画布缺 If-Match",
+            "method": "PUT",
+            "path": "/api/canvas/argus-qa-c1",
+            "expect": {
+              "status": 428,
+              "error": "precondition-required"
+            },
+            "body": {
+              "payload": {
+                "title": "QA2"
+              }
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "canvas-put-bad-if-match",
+            "name": "登录：改画布 If-Match 非法",
+            "method": "PUT",
+            "path": "/api/canvas/argus-qa-c1",
+            "expect": {
+              "status": 400,
+              "error": "bad-request"
+            },
+            "body": {
+              "payload": {
+                "title": "QA2"
+              }
+            },
+            "headers": {
+              "if-match": "x"
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "canvas-put",
+            "name": "登录：改画布",
+            "method": "PUT",
+            "path": "/api/canvas/argus-qa-c1",
+            "expect": {
+              "status": 200,
+              "json": {
+                "title": "QA2",
+                "metaRevision": 2
+              }
+            },
+            "body": {
+              "payload": {
+                "title": "QA2"
+              }
+            },
+            "headers": {
+              "if-match": "1"
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "canvas-node-create",
+            "name": "登录：新建节点",
+            "method": "POST",
+            "path": "/api/canvas/argus-qa-c1/nodes/argus-qa-n1",
+            "expect": {
+              "status": 200,
+              "json": {
+                "id": "argus-qa-n1",
+                "revision": 1
+              }
+            },
+            "body": {
+              "payload": {
+                "type": "image"
+              }
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "canvas-node-update-no-if-match",
+            "name": "登录：改已有节点缺 If-Match",
+            "method": "POST",
+            "path": "/api/canvas/argus-qa-c1/nodes/argus-qa-n1",
+            "expect": {
+              "status": 428,
+              "error": "precondition-required"
+            },
+            "body": {
+              "payload": {
+                "type": "image"
+              }
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "canvas-node-update",
+            "name": "登录：改节点",
+            "method": "POST",
+            "path": "/api/canvas/argus-qa-c1/nodes/argus-qa-n1",
+            "expect": {
+              "status": 200,
+              "json": {
+                "revision": 2
+              }
+            },
+            "body": {
+              "payload": {
+                "type": "image",
+                "x": 1
+              }
+            },
+            "headers": {
+              "if-match": "1"
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "canvas-node-update-stale",
+            "name": "登录：旧版本改节点冲突",
+            "method": "POST",
+            "path": "/api/canvas/argus-qa-c1/nodes/argus-qa-n1",
+            "expect": {
+              "status": 409,
+              "error": "revision-conflict",
+              "json": {
+                "currentRevision": 2
+              }
+            },
+            "body": {
+              "payload": {}
+            },
+            "headers": {
+              "if-match": "1"
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "canvas-node-bad-if-match",
+            "name": "登录：节点 If-Match 非法",
+            "method": "POST",
+            "path": "/api/canvas/argus-qa-c1/edges/argus-qa-e1",
+            "expect": {
+              "status": 400,
+              "error": "bad-request"
+            },
+            "body": {
+              "payload": {}
+            },
+            "headers": {
+              "if-match": "-1"
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "canvas-get-nodes",
+            "name": "登录：读回节点",
+            "method": "GET",
+            "path": "/api/canvas/argus-qa-c1",
+            "expect": {
+              "status": 200,
+              "json": {
+                "nodes.0.id": "argus-qa-n1",
+                "nodes.0.revision": 2
+              }
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "assets-upload-account",
+            "name": "登录：上传资产",
+            "method": "POST",
+            "path": "/api/assets",
+            "expect": {
+              "status": 200,
+              "types": {
+                "assetId": "string"
+              }
+            },
+            "body": {
+              "image": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+              "mimeType": "image/png"
+            },
+            "capture": {
+              "accAsset": "assetId"
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "assets-attach-missing-body",
+            "name": "登录：挂资产缺参数",
+            "method": "POST",
+            "path": "/api/assets/${accAsset}/attach",
+            "expect": {
+              "status": 400,
+              "error": "bad-request"
+            },
+            "body": {},
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "assets-attach-unknown-canvas",
+            "name": "登录：挂到未知画布",
+            "method": "POST",
+            "path": "/api/assets/${accAsset}/attach",
+            "expect": {
+              "status": 404,
+              "error": "unknown-canvas"
+            },
+            "body": {
+              "nodeId": "argus-qa-n1",
+              "canvasId": "argus-qa-nope"
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "assets-attach",
+            "name": "登录：挂资产到节点（重复挂幂等）",
+            "method": "POST",
+            "path": "/api/assets/${accAsset}/attach",
+            "expect": {
+              "status": 200
+            },
+            "body": {
+              "nodeId": "argus-qa-n1",
+              "canvasId": "argus-qa-c1"
+            },
+            "repeat": 2,
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "assets-list-attached",
+            "name": "登录：按画布列出已挂资产",
+            "method": "GET",
+            "path": "/api/assets?canvasId=argus-qa-c1",
+            "expect": {
+              "status": 200,
+              "json": {
+                "assetIds": [
+                  "${accAsset}"
+                ]
+              }
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "assets-detach-cross-owner",
+            "name": "登录：别人不能摘我的资产",
+            "method": "POST",
+            "path": "/api/assets/${accAsset}/detach",
+            "expect": {
+              "status": [
+                403,
+                404
+              ]
+            },
+            "body": {
+              "nodeId": "argus-qa-n1",
+              "canvasId": "argus-qa-c1"
+            },
+            "auth": "account-b",
+            "requires": "account-b"
+          },
+          {
+            "id": "assets-detach",
+            "name": "登录：摘资产（重复摘幂等）",
+            "method": "POST",
+            "path": "/api/assets/${accAsset}/detach",
+            "expect": {
+              "status": 200
+            },
+            "body": {
+              "nodeId": "argus-qa-n1",
+              "canvasId": "argus-qa-c1"
+            },
+            "repeat": 2,
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "assets-list-detached",
+            "name": "登录：摘掉后不再列出",
+            "method": "GET",
+            "path": "/api/assets?canvasId=argus-qa-c1",
+            "expect": {
+              "status": 200,
+              "json": {
+                "assetIds": []
+              }
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "user-state-put",
+            "name": "登录：写用户状态",
+            "method": "PUT",
+            "path": "/api/user-state/argus-qa-key",
+            "expect": {
+              "status": 200,
+              "json": {
+                "revision": 1
+              }
+            },
+            "body": {
+              "value": {
+                "a": 1
+              }
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "user-state-get",
+            "name": "登录：读用户状态",
+            "method": "GET",
+            "path": "/api/user-state/argus-qa-key",
+            "expect": {
+              "status": 200,
+              "json": {
+                "value": {
+                  "a": 1
+                }
+              }
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "user-state-get-cross-owner",
+            "name": "登录：读不到别人的用户状态",
+            "method": "GET",
+            "path": "/api/user-state/argus-qa-key",
+            "expect": {
+              "status": 404,
+              "error": "unknown-key"
+            },
+            "auth": "account-b",
+            "requires": "account-b"
+          },
+          {
+            "id": "user-state-bad-if-match",
+            "name": "登录：用户状态 If-Match 非法",
+            "method": "PUT",
+            "path": "/api/user-state/argus-qa-key",
+            "expect": {
+              "status": 400,
+              "error": "bad-request"
+            },
+            "body": {
+              "value": 2
+            },
+            "headers": {
+              "if-match": "1.5"
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "user-state-delete",
+            "name": "登录：删用户状态（重复删幂等）",
+            "method": "DELETE",
+            "path": "/api/user-state/argus-qa-key",
+            "expect": {
+              "status": 204
+            },
+            "repeat": 2,
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "user-state-get-deleted",
+            "name": "登录：删掉后读不到",
+            "method": "GET",
+            "path": "/api/user-state/argus-qa-key",
+            "expect": {
+              "status": 404,
+              "error": "unknown-key"
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "canvas-archive",
+            "name": "登录：归档画布（重复归档幂等）",
+            "method": "POST",
+            "path": "/api/canvas/argus-qa-c1/archive",
+            "expect": {
+              "status": 200,
+              "json": {
+                "status": "archived"
+              }
+            },
+            "repeat": 2,
+            "sameAs": [
+              "metaRevision"
+            ],
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "canvas-node-archived-rejected",
+            "name": "登录：归档画布不能再写节点",
+            "method": "POST",
+            "path": "/api/canvas/argus-qa-c1/nodes/argus-qa-n2",
+            "expect": {
+              "status": 409,
+              "error": "archived"
+            },
+            "body": {
+              "payload": {}
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "canvas-unarchive",
+            "name": "登录：取消归档（重复幂等）",
+            "method": "POST",
+            "path": "/api/canvas/argus-qa-c1/unarchive",
+            "expect": {
+              "status": 200
+            },
+            "repeat": 2,
+            "sameAs": [
+              "metaRevision"
+            ],
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "canvas-delete",
+            "name": "登录：删画布（重复删幂等）",
+            "method": "DELETE",
+            "path": "/api/canvas/argus-qa-c1",
+            "expect": {
+              "status": 204
+            },
+            "repeat": 2,
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "canvas-get-deleted",
+            "name": "登录：删掉的画布读不到",
+            "method": "GET",
+            "path": "/api/canvas/argus-qa-c1",
+            "expect": {
+              "status": 404,
+              "error": "unknown-canvas"
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "projects-archive",
+            "name": "登录：归档项目（重复归档幂等）",
+            "method": "POST",
+            "path": "/api/projects/argus-qa-p1/archive",
+            "expect": {
+              "status": 200,
+              "json": {
+                "status": "archived"
+              }
+            },
+            "repeat": 2,
+            "sameAs": [
+              "revision"
+            ],
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "projects-unarchive",
+            "name": "登录：取消归档项目（重复幂等）",
+            "method": "POST",
+            "path": "/api/projects/argus-qa-p1/unarchive",
+            "expect": {
+              "status": 200
+            },
+            "repeat": 2,
+            "sameAs": [
+              "revision"
+            ],
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "projects-delete",
+            "name": "登录：删项目（重复删幂等）",
+            "method": "DELETE",
+            "path": "/api/projects/argus-qa-p1",
+            "expect": {
+              "status": 204
+            },
+            "repeat": 2,
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "projects-get-deleted",
+            "name": "登录：删掉的项目读不到",
+            "method": "GET",
+            "path": "/api/projects/argus-qa-p1",
+            "expect": {
+              "status": 404,
+              "error": "unknown-project"
+            },
+            "auth": "account",
+            "requires": "account"
           }
         ]
-      }
+      },
+      "passEnv": [
+        "MIVO_QA_TEST_USER",
+        "MIVO_QA_TEST_PASSWORD",
+        "MIVO_QA_TEST_TOKEN",
+        "MIVO_QA_TEST_TOKEN_URL",
+        "MIVO_QA_TEST_CLIENT_ID",
+        "MIVO_QA_TEST_SCOPE"
+      ],
+      "noteZh": "枚举 server/routes 下全部路由：状态码、坏输入的错误码、可重复操作的幂等性。登录态读写：优先用被测仓导出的 setCindyJwksLoader 接缝在本机签发一次性 Cindy JWT（两个本地用户，不碰生产账号）；没有该接缝时退回 secrets.env 里的 MIVO_QA_TEST_*；都没有时登录态用例记入 skipped_steps（no test account），绝不算通过。资产另用本机现生成的宿主交换密钥（HMAC）测。"
     },
     {
       "id": "e2e-browser",
@@ -188,6 +1355,37 @@
       },
       "timeoutMin": 10,
       "silentCheck": true
+    },
+    {
+      "id": "e2e-legacy-migration",
+      "nameZh": "浏览器旅程：旧数据迁移与 IndexedDB 恢复",
+      "kind": "product",
+      "optional": true,
+      "covers": [
+        "e2e",
+        "data",
+        "compatibility",
+        "data-consistency",
+        "db"
+      ],
+      "tool": "legacy-migration-journey",
+      "cmd": [
+        "node",
+        "${RUN}/tools/legacy-migration-journey.mjs",
+        "${RUN}/e2e-legacy-migration"
+      ],
+      "env": {
+        "ARGUS_PLAYWRIGHT_MODULE": "${ARGUS_CODE}/node_modules/playwright/index.mjs"
+      },
+      "unavailableExitCodes": [
+        2
+      ],
+      "failureReport": {
+        "format": "checks",
+        "path": "${RUN}/e2e-legacy-migration/report.json"
+      },
+      "timeoutMin": 10,
+      "noteZh": "用仓里现有的迁移代码（persistIdbStorage 的 localStorage→IDB 与匿名→命名空间认领、persistMigration.dryRunMigration、canvasStore.migratePersistedState）和 canvasStoreMigrate.test.ts 的夹具形状：播种旧格式数据 → 刷新加载 → 校验迁移 → 刷新后恢复 → 坏数据诊断 → IndexedDB 不可用时退回 localStorage"
     },
     {
       "id": "bench",
@@ -242,6 +1440,64 @@
         "compatibility",
         "regression"
       ]
+    },
+    {
+      "id": "web-build",
+      "nameZh": "网页构建（npm run build）",
+      "kind": "product",
+      "cmd": [
+        "npm",
+        "run",
+        "build"
+      ],
+      "timeoutMin": 30,
+      "covers": [
+        "compatibility",
+        "regression"
+      ],
+      "noteZh": "对齐 package.json 的 build：tsc -b && vite build"
+    },
+    {
+      "id": "host-locale",
+      "nameZh": "插件产物不读浏览器语言",
+      "kind": "quality",
+      "cmd": [
+        "bash",
+        "-c",
+        "if [ ! -f cindyplugin/dist/panel.html ]; then bash cindyplugin/build.sh >&2 || { echo \"plugin build failed; host-locale scan not run\"; exit 2; }; fi; exec node cindyplugin/check-host-locale.mjs cindyplugin/dist"
+      ],
+      "unavailableExitCodes": [
+        2
+      ],
+      "requires": [
+        {
+          "file": "cindyplugin/check-host-locale.mjs",
+          "reasonZh": "这个版本还没有 cindyplugin/check-host-locale.mjs"
+        }
+      ],
+      "timeoutMin": 30,
+      "noteZh": "对齐 ci.yml cindyplugin-build 的同名扫描；插件产物不在时先构建（构建失败记没跑成，构建本身由 plugin 步骤判定）"
+    },
+    {
+      "id": "vendor-split",
+      "nameZh": "插件产物第三方拆包检查",
+      "kind": "quality",
+      "cmd": [
+        "bash",
+        "-c",
+        "if [ ! -f cindyplugin/dist/panel.html ]; then bash cindyplugin/build.sh >&2 || { echo \"plugin build failed; vendor-split scan not run\"; exit 2; }; fi; exec node cindyplugin/check-vendor-split.mjs cindyplugin/dist"
+      ],
+      "unavailableExitCodes": [
+        2
+      ],
+      "requires": [
+        {
+          "file": "cindyplugin/check-vendor-split.mjs",
+          "reasonZh": "这个版本还没有 cindyplugin/check-vendor-split.mjs"
+        }
+      ],
+      "timeoutMin": 30,
+      "noteZh": "对齐 ci.yml cindyplugin-build 的同名扫描；插件产物不在时先构建（构建失败记没跑成，构建本身由 plugin 步骤判定）"
     },
     {
       "id": "unit",
@@ -326,6 +1582,73 @@
         "scripts/ci/structure-guard.mjs"
       ],
       "timeoutMin": 10
+    },
+    {
+      "id": "design",
+      "nameZh": "设计规范校验（verify:design）",
+      "kind": "quality",
+      "cmd": [
+        "npm",
+        "run",
+        "verify:design"
+      ],
+      "env": {
+        "MIVO_GUARD_BASE_SHA": "${DIFF_BASE_SHA}",
+        "MIVO_LITERAL_RATCHET_ENFORCE": "1"
+      },
+      "timeoutMin": 10,
+      "noteZh": "对齐 ci.yml design-verification：MIVO_GUARD_BASE_SHA = 本 PR 的 base，裸颜色/圆角棘轮阻断（ENFORCE=1）"
+    },
+    {
+      "id": "internal-literals",
+      "nameZh": "内部基础设施字面量守卫",
+      "kind": "quality",
+      "cmd": [
+        "node",
+        "scripts/ci/check-internal-literals.mjs"
+      ],
+      "timeoutMin": 10
+    },
+    {
+      "id": "endpoint-literals",
+      "nameZh": "生产端点字面量守卫",
+      "kind": "quality",
+      "cmd": [
+        "node",
+        "scripts/ci/check-endpoint-literals.mjs"
+      ],
+      "timeoutMin": 10
+    },
+    {
+      "id": "secret-scan",
+      "nameZh": "密钥泄露扫描（gitleaks）",
+      "kind": "product",
+      "noLatestRecheck": true,
+      "covers": [
+        "security",
+        "privacy"
+      ],
+      "binary": {
+        "var": "GITLEAKS",
+        "env": "ARGUS_GITLEAKS_BIN",
+        "names": [
+          "gitleaks"
+        ],
+        "candidates": [
+          "/usr/local/bin/gitleaks",
+          "/workspace/_tools/gitleaks"
+        ],
+        "reasonZh": "本机没有 gitleaks（设 ARGUS_GITLEAKS_BIN）"
+      },
+      "cmd": [
+        "bash",
+        "-c",
+        "cfg=(); [ -f .gitleaks.toml ] && cfg=(--config .gitleaks.toml); exec \"$0\" detect --source . \"${cfg[@]}\" --log-opts \"$1..HEAD\" --no-banner --redact=100 --exit-code 1",
+        "${GITLEAKS}",
+        "${DIFF_BASE_SHA}"
+      ],
+      "timeoutMin": 10,
+      "noteZh": "对齐 ci.yml gitleaks job（同一 .gitleaks.toml、--redact=100）；只扫本 PR 的提交范围 base..tested。泄露进了提交历史，后续提交修不掉，所以不做「最新主干」复查"
     }
   ],
   "notApplicable": {
@@ -389,7 +1712,15 @@
     "logging": "white-box",
     "i18n": "white-box",
     "cycles": "white-box",
-    "structure": "white-box"
+    "structure": "white-box",
+    "web-build": "gray-box",
+    "design": "white-box",
+    "internal-literals": "white-box",
+    "endpoint-literals": "white-box",
+    "host-locale": "gray-box",
+    "vendor-split": "gray-box",
+    "secret-scan": "white-box",
+    "e2e-legacy-migration": "black-box"
   },
   "platforms": {
     "linux": {

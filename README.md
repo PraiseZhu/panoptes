@@ -32,6 +32,8 @@ panoptes/
 ├── mini/                   Mac mini side: cindy schedule that pulls the issue queue into lifeline
 ├── scripts/refresh-roster.py   rebuilds $QA_HOME/author-map.json (GitHub roster + Feishu open_ids)
 ├── scripts/send-feishu-dm.mjs  sends one Feishu DM (P0/P1 author notification), idempotent per dedupe key
+├── report/                 daily report: send-feishu-report.mjs (sender), REPORT-STYLE.md, build-sample-*.mjs,
+│                           allowed-chats.example.json ($QA_HOME/report/send-feishu-report.mjs is a symlink here)
 ├── llm-models.json         models available on the gateway (reference only)
 └── secrets.env.example
 ```
@@ -45,7 +47,10 @@ Code and data are separate. Everything the pipeline writes lives in **`$QA_HOME`
 | `cache/ms-playwright/` | Playwright browsers |
 | `.venv/` | Python for ming-qa |
 | `author-map.json` | roster output of `scripts/refresh-roster.py` (personal data, never committed) |
-| `feishu-sent.json` | dedupe log of `scripts/send-feishu-dm.mjs` (`{ key: { open_id, sent_at, message_id } }`) |
+| `feishu-sent.json` | dedupe log of `scripts/send-feishu-dm.mjs` / `report/send-feishu-report.mjs` (`{ key: { open_id, sent_at, message_id } }`) |
+| `report/allowed-chats.json` | group allow-list of the daily-report sender (real chat ids; never committed — format in `report/allowed-chats.example.json`) |
+| `report/send-feishu-report.mjs` etc. | **symlinks** into `panoptes/report/` (the 09:04 daily job calls this exact path); generated `content-*.json` / `sample-*` stay here |
+| `reports/catch-up/` | catch-up child reports, `run-<ts>.json` results, `state.json` attempt counters |
 
 ## Setup / 安装
 
@@ -90,6 +95,7 @@ Environment overrides for `run-nightly.sh`:
 ## Usage / 用法
 
 ```
+run-nightly.sh --catch-up [--wait-lock SECONDS]
 run-nightly.sh [--date YYYY-MM-DD] [--pr N ...] [--limit N] [--no-review] [--skip-step ID ...]
                [--out PATH] [--no-reuse] [--wait-lock [SECONDS]] [--pr-timeout MIN] [--deadline HH:MM]
                [--write-merged | --no-write-merged] [--write-open] [--no-issues | --create-issues]
@@ -97,6 +103,7 @@ run-nightly.sh [--date YYYY-MM-DD] [--pr N ...] [--limit N] [--no-review] [--ski
 
 | Flag | Meaning |
 |---|---|
+| `--catch-up` | Pure-script gap filler, safe to run from cron every few minutes (quiet and fast when there is nothing to do). Lists PRs merged yesterday + today (Shanghai) via `gh`, compares with `reports/merged/PR-N.json` (gap = missing / unfinished / `tested_sha` ≠ merge commit) and tests the gaps oldest-first with `--pr N --date <merge day> --write-merged --wait-lock S --no-issues --out reports/catch-up/PR-N.json`. A lock timeout (75) stops and retries next invocation; after **3** attempts a PR is given up and recorded in `system_health` (`reports/catch-up/run-*.json` and the next nightly report). One catch-up at a time (`catch-up.lock`). Exit `0` ok / nothing to do, `3` something still missing or given up. |
 | `--date D` | Asia/Shanghai day to report on. Default: yesterday in Shanghai. |
 | `--pr N` | Test only these PRs (repeatable). Discovery still runs and is recorded in `system_health.discovery`. |
 | `--limit N` | Test at most N discovered PRs. |
@@ -140,7 +147,9 @@ verdict) is not re-tested; the entry is copied with `reused: true` and listed in
 ## Per-PR pipeline / 单个 PR 的流程
 
 1. Classify the change (docs-only PRs skip tests but still get the ming-qa code review on the merge commit,
-   `coverage_gate: {status: "not-applicable"}`); optional Jev triage.
+   `coverage_gate: {status: "not-applicable"}`); Jev triage gives every one of the 29 QA dimensions an explicit
+   applicable / not-applicable decision with a reason (`prs[].triage`; without a key or when Jev fails the note
+   `维度适用性未判定（Jev 未配置）` / `…（Jev 分诊失败）` is added and failures go to `system_health`).
 2. Fresh git worktree from a local bare mirror: merged → merge commit, open → `refs/pull/N/head`.
 3. Run the profile steps (`argus/config/profiles/mivo-canvas-plugin.json`) inside the sandbox.
 4. Triple-check failures: clean rerun → base revision → latest main (merged PRs). Status per failure:
@@ -148,8 +157,37 @@ verdict) is not re-tested; the entry is copied with `reused: true` and listed in
 5. ming-qa white-box review of the diff, validated by ming-qa's own `assert-code-review` gate.
 6. Plain-language PR summary.
 
-Dimensions: **white-box** (unit tests, `tsc -b`, eslint, guards, code review) · **gray-box** (API tests, real-server
-probe, plugin build, perf bench) · **black-box** (Mivo CDP browser journey, Playwright smoke of the built plugin).
+Dimensions: **white-box** (unit tests, `tsc -b`, eslint, guards, `verify:design`, internal/endpoint literal guards,
+gitleaks secret scan, code review) · **gray-box** (API tests, real-server probe, plugin build, web build
+`npm run build`, plugin dist scans host-locale / vendor-split, perf bench) · **black-box** (Mivo CDP browser journey,
+legacy-data migration + IndexedDB recovery journey, Playwright smoke of the built plugin).
+
+Target-CI parity (commands taken verbatim from `xindong/mivo-canvas-plugin` `.github/workflows/ci.yml` and
+`package.json`):
+
+| Step | Command | Kind → introduced failure |
+|---|---|---|
+| `web-build` | `npm run build` (`tsc -b && vite build`) | product → P1 open / P0 merged |
+| `design` | `npm run verify:design` with `MIVO_GUARD_BASE_SHA=<base_sha>`, `MIVO_LITERAL_RATCHET_ENFORCE=1` | quality → P2 |
+| `internal-literals` | `node scripts/ci/check-internal-literals.mjs` | quality → P2 |
+| `endpoint-literals` | `node scripts/ci/check-endpoint-literals.mjs` | quality → P2 |
+| `host-locale` | `node cindyplugin/check-host-locale.mjs cindyplugin/dist` (builds dist if missing) | quality → P2 |
+| `vendor-split` | `node cindyplugin/check-vendor-split.mjs cindyplugin/dist` (builds dist if missing) | quality → P2 |
+| `secret-scan` | `gitleaks detect --source . [--config .gitleaks.toml] --log-opts "<base_sha>..HEAD" --no-banner --redact=100` (binary: `ARGUS_GITLEAKS_BIN`, `/usr/local/bin/gitleaks`, `/workspace/_tools/gitleaks` or PATH; missing → unavailable) | product → P1 open / P0 merged; no latest-main recheck (a leaked secret stays in history) |
+
+Diff-scoped checks (`design`, `secret-scan`) get the PR's `base_sha` as `${DIFF_BASE_SHA}` in every run (first,
+rerun, base, latest).
+
+API probe (`api-probe`): every route under `server/routes` — status codes, error codes for bad input, idempotency
+(repeat + same result) where applicable. Signed-in probes (projects / canvas / nodes / attach-detach / user-state)
+use a **locally signed Cindy JWT**: when the revision exports the test seam `setCindyJwksLoader`
+(`server/lib/assetAuth.ts`), the probe generates a throw-away RSA key, starts the server through
+`probe-local-auth-server.mjs` with that public JWKS, and signs tokens for two local users
+(issuer `https://auth.cindy.com.cn`, audience `argus-qa:mivo-canvas`). Assets are also probed through the host
+exchange with a freshly generated `MIVO_CINDY_EXCHANGE_SECRET`. No production account is ever used. Fallback for
+revisions without the seam: `MIVO_QA_TEST_TOKEN`, or `MIVO_QA_TEST_USER` + `MIVO_QA_TEST_PASSWORD` +
+`MIVO_QA_TEST_TOKEN_URL` from `secrets.env`; with neither, signed-in probes are listed in `skipped_steps` with reason
+`no test account` — never counted as passed.
 
 Severity: **P0** introduced failure on a merged PR that still fails on latest main · **P1** introduced reproducible
 product-check failure on an open PR, or LLM review P0/P1 (LLM-only capped at P1) · **P2** quality-guard failure,
@@ -183,8 +221,11 @@ Off unless `--create-issues` **and** `ARGUS_ALLOW_ISSUES=1`. When on:
   the report. Skipped candidates are listed with a reason.
 - **system_health:** QA tool failures, environment problems and LLM errors always become issues (any author), with a
   ```` ```json mivo-qa-health ```` block.
-- **Dedup:** each body carries `<!-- mivo-qa-fingerprint: mq1-… -->`; existing `qa-auto` issues (open **and** closed)
-  with the same marker are skipped — no comment, no reopen.
+- **Dedup:** key = fingerprint + merge commit. Each body carries `<!-- mivo-qa-fingerprint: mq1-… -->` and
+  `<!-- mivo-qa-dedup: mq1-…@<merge sha> -->`. An **open** `qa-auto` issue with the same fingerprint → skipped; a
+  **closed** one → skipped only for the same merge commit; the same problem recurring on a new merge commit after the
+  issue was closed opens a new issue (`created-recurred`). No comments, no reopening. Code-review fingerprints include
+  a hash of the normalized finding title.
 - Finding bodies include a ```` ```json mivo-qa-finding ```` block (`schema: mivo-qa-finding/v1`) that
   [`mini/check-queue.sh`](mini/README.md) turns into a lifeline observation on the Mac mini.
 
@@ -214,13 +255,19 @@ node scripts/send-feishu-dm.mjs --help
 
 A dedicated coverage run (`cov`: own checkout of the tested revision, unit step only, in parallel with the first
 verdict run) adds `vitest --coverage` (v8, JSON reports). Verdict runs never carry coverage — v8 instrumentation makes
-a few Mivo tests fail — and the coverage run's own pass/fail never affects the verdict. Thresholds: **lines 80 · branches 70 ·
-functions 80 · new code 90**. New code = added/modified lines of `git diff base_sha..tested_sha` in non-test JS/TS
-sources, intersected with v8 statement lines; files no test loads count as uncovered. Below any threshold →
-one **P2** finding (`source: "coverage-gate"`), which by the issue rules never becomes an issue. Result in
+a few Mivo tests fail — and the coverage run's own pass/fail never affects the verdict. **Only new-code coverage is
+gated (90)**; repo-wide lines / branches / functions are recorded as baseline trend data (`coverage_gate.baseline`,
+reference lines 80 / 70 / 80) and never produce a finding. New code = added/modified lines of
+`git diff base_sha..tested_sha` in non-test JS/TS sources, intersected with v8 statement lines; files no test loads
+count as uncovered. New code < 90% → one **P2** finding (`source: "coverage-gate"`), which by the issue rules never
+becomes an issue. Result in
 `prs[].coverage_gate`. `ARGUS_COVERAGE=0` turns it off.
 
 ## Report / 报告格式
+
+**Produced reports are never rewritten.** Re-classification = a re-run; when a run writes to an existing report path
+the old file is kept as `<name>.vN.json` (e.g. `PR-902.v1.json`) and the new one records `previous_version`. Do not
+patch reports with ad-hoc scripts (the 2026-10-10 reports stay as produced).
 
 Full field reference (for the daily-report agent): **[`docs/report-schema.md`](docs/report-schema.md)** (copied to
 `$QA_HOME/reports/SCHEMA.md`). Key points: every `prs[]` entry has `tested_at` (ISO 8601, `+08:00`); discovered

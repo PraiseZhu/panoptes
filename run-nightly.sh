@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
 # panoptes — Mivo QA nightly entrypoint (Linux).
 #
+#   run-nightly.sh --catch-up [--wait-lock SECONDS]
 #   run-nightly.sh [--date YYYY-MM-DD] [--pr N ...] [--limit N]
 #                  [--no-review] [--skip-step ID ...]
 #                  [--out PATH] [--no-reuse] [--wait-lock [SECONDS]]
 #                  [--pr-timeout MIN] [--deadline HH:MM] [--write-merged | --no-write-merged] [--write-open]
 #                  [--no-issues | --create-issues]
 #
+#   --catch-up    pure-script gap filler (cron-safe, quiet when there is nothing to do): list PRs merged
+#                 yesterday + today (Asia/Shanghai) via gh, compare with $QA_HOME/reports/merged/PR-N.json
+#                 (gap = missing, or tested_sha != merge commit), then test each gap oldest-first with
+#                 --pr N --date <merge day> --write-merged --wait-lock S --no-issues --out reports/catch-up/PR-N.json.
+#                 A lock timeout (exit 75) stops and retries on the next invocation; after 3 attempts a PR is
+#                 given up and recorded in system_health (reports/catch-up/run-*.json and the next daily report).
+#                 Only one catch-up at a time (catch-up.lock; a second one exits 0 silently).
 #   --date        Asia/Shanghai calendar day to report on (default: yesterday in Shanghai)
 #   --pr N        test only these PRs (repeatable); otherwise discovery picks
 #                 open PRs updated that day + PRs merged that day (all authors)
@@ -46,11 +54,13 @@ SECRETS="${QA_SECRETS_FILE:-/home/box/.config/mivo-qa/secrets.env}"
 # --wait-lock [SECONDS]: wait for the single-instance lock instead of exiting 75 (default 14400 = 4h).
 # Consumed here; everything else is passed to the Node CLI unchanged.
 WAIT_LOCK=""
+CATCH_UP=""
 ARGS=()
 while (( $# )); do
   case "$1" in
     -h|--help)
       sed -n '2,/^set -euo/{/^set -euo/d;s/^# \{0,1\}//;p}' "${BASH_SOURCE[0]}"; exit 0 ;;
+    --catch-up) CATCH_UP=1 ;;
     --wait-lock)
       WAIT_LOCK=14400
       if [[ "${2:-}" =~ ^[0-9]+$ ]]; then WAIT_LOCK="$2"; shift; fi ;;
@@ -105,6 +115,16 @@ export ARGUS_LLM_MODEL="${ARGUS_LLM_MODEL:-openai/gpt-6-luna}"
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$QA_HOME/cache/ms-playwright}"
 export TZ=Asia/Shanghai
 mkdir -p "$ARGUS_ROOT/logs" "$ARGUS_REPORTS_DIR"
+
+if [[ -n "$CATCH_UP" ]]; then
+  (( $# == 0 )) || { echo "--catch-up takes no other options besides --wait-lock" >&2; exit 1; }
+  # A second catch-up while one is running: nothing to add, leave quietly. The children take nightly.lock themselves.
+  exec 8>"$ARGUS_ROOT/catch-up.lock"
+  flock -n 8 || exit 0
+  cd "$PANOPTES_DIR/argus"
+  export PANOPTES_RUN_NIGHTLY="$PANOPTES_DIR/run-nightly.sh"
+  exec node --disable-warning=ExperimentalWarning src/cli.mjs catch-up --wait-lock "${WAIT_LOCK:-14400}"
+fi
 
 # One run at a time
 exec 9>"$ARGUS_ROOT/nightly.lock"
