@@ -186,6 +186,9 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     health.qa_tool_failures.push({ pr: number, stage: 'setup', message: 'dependency install failed, retrying once', detail: tail(redact(first.find((r) => r.kind === 'setup')?.tail ?? ''), 600) })
     first = await executeOnSha({ ...common, label: 'h1r', sha, stepIds: plan.stepIds })
   }
+  // 不适用于这个版本的步骤（appliesIf 不满足）：不进 checks、不参与判定，记进 skipped_steps
+  for (const r of first.filter((x) => x.notApplicable)) plan.skipped.push({ id: r.id, nameZh: r.nameZh, reason: `not applicable to this revision: ${r.notApplicableReason}` })
+  first = first.filter((x) => !x.notApplicable)
   // 同一份 diff（base..tested）同时给覆盖率门禁和代码审查用：审查的就是被测的那个提交
   const prDiff = await diffForReview({ repo, sha, baseSha, extraRefspecs })
   const cov = await covRun

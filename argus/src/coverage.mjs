@@ -131,6 +131,6 @@ export function coverageGate({ coverage, added, thresholds = COVERAGE_THRESHOLDS
   gate.status = failed.length ? 'fail' : notEvaluated ? 'not-evaluated' : 'pass'
   gate.pass = failed.length ? false : notEvaluated ? null : true
   gate.failed = failed
-  if (notEvaluated) gate.reason = `new-code coverage not evaluated: ${gate.new_code?.reason ?? 'unknown'}`
+  if (notEvaluated) gate.reason = `new-code coverage not evaluated: ${gate.new_code?.reason ?? (gate.new_code?.executable_lines === 0 ? 'the diff adds no executable lines in non-test JS/TS sources' : 'unknown')}`
   return gate
 }

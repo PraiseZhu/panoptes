@@ -285,3 +285,15 @@ test('legacy-migration journey: a revision without the migration code is unavail
   assert.ok(existsSync(join(out, 'report.json')))
   assert.match(r.stdout + r.stderr, /persistIdbStorage/)
 })
+
+test('appliesIf：被测版本没有检查对象（如 index.html）→ 不适用（不是没跑成，也不进 checks）', async () => {
+  const { toNotApplicable } = await import('../src/runner.mjs')
+  const src = mkdtempSync(join(tmpdir(), 'na-'))
+  const step = { appliesIf: [{ file: 'index.html', reasonZh: 'no web entry' }] }
+  assert.equal(toNotApplicable(step, src), 'no web entry')
+  writeFileSync(join(src, 'index.html'), '<html></html>')
+  assert.equal(toNotApplicable(step, src), null)
+  const p = loadProfile('mivo-canvas-plugin')
+  assert.deepEqual(p.steps.find((s) => s.id === 'web-build').appliesIf.map((r) => r.file), ['index.html'])
+  assert.deepEqual(p.steps.find((s) => s.id === 'host-locale').appliesIf.map((r) => r.file), ['cindyplugin/check-host-locale.mjs'])
+})

@@ -1455,7 +1455,13 @@
         "compatibility",
         "regression"
       ],
-      "noteZh": "对齐 package.json 的 build：tsc -b && vite build"
+      "noteZh": "对齐 package.json 的 build（tsc -b && vite build）。网页入口已下线的版本（没有 index.html）不适用：记进 skipped_steps，不算没跑成也不算通过；入口回来后自动恢复",
+      "appliesIf": [
+        {
+          "file": "index.html",
+          "reasonZh": "no web entry (index.html) in this revision: the web build was retired and the target CI no longer runs npm run build"
+        }
+      ]
     },
     {
       "id": "host-locale",
@@ -1469,14 +1475,14 @@
       "unavailableExitCodes": [
         2
       ],
-      "requires": [
+      "timeoutMin": 30,
+      "noteZh": "对齐 ci.yml cindyplugin-build 的同名扫描；插件产物不在时先构建（构建失败记没跑成，构建本身由 plugin 步骤判定）",
+      "appliesIf": [
         {
           "file": "cindyplugin/check-host-locale.mjs",
-          "reasonZh": "这个版本还没有 cindyplugin/check-host-locale.mjs"
+          "reasonZh": "this revision has no cindyplugin/check-host-locale.mjs (the target CI did not run this scan yet)"
         }
-      ],
-      "timeoutMin": 30,
-      "noteZh": "对齐 ci.yml cindyplugin-build 的同名扫描；插件产物不在时先构建（构建失败记没跑成，构建本身由 plugin 步骤判定）"
+      ]
     },
     {
       "id": "vendor-split",
@@ -1490,14 +1496,14 @@
       "unavailableExitCodes": [
         2
       ],
-      "requires": [
+      "timeoutMin": 30,
+      "noteZh": "对齐 ci.yml cindyplugin-build 的同名扫描；插件产物不在时先构建（构建失败记没跑成，构建本身由 plugin 步骤判定）",
+      "appliesIf": [
         {
           "file": "cindyplugin/check-vendor-split.mjs",
-          "reasonZh": "这个版本还没有 cindyplugin/check-vendor-split.mjs"
+          "reasonZh": "this revision has no cindyplugin/check-vendor-split.mjs (the target CI did not run this scan yet)"
         }
-      ],
-      "timeoutMin": 30,
-      "noteZh": "对齐 ci.yml cindyplugin-build 的同名扫描；插件产物不在时先构建（构建失败记没跑成，构建本身由 plugin 步骤判定）"
+      ]
     },
     {
       "id": "unit",

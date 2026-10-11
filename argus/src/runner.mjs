@@ -242,6 +242,15 @@ async function toParentSha(src) {
   return res.ok ? String(res.tail).trim().split('\n').pop() : ''
 }
 
+// 适用条件（appliesIf）：被测版本根本没有这项检查的对象时（例如网页入口 index.html 已下线、扫描脚本还没合入），
+// 这一步「不适用」—— 不是没跑成，也不算通过：nightly 把它记进 skipped_steps，不进 checks
+export function toNotApplicable(step, src) {
+  for (const r of step.appliesIf ?? []) {
+    if (!existsSync(join(src, r.file))) return r.reasonZh ?? `not applicable: this revision has no ${r.file}`
+  }
+  return null
+}
+
 // 前提条件：被测版本的脚本还不支持时（例如还没合入对 Ego Lite 的支持），这一步记没跑成，不退回到别的浏览器
 function toUnmetRequirement(step, src) {
   for (const r of step.requires ?? []) {
@@ -359,6 +368,12 @@ export async function runSteps(profile, src, runDir, { stepIds = null, execution
     const stepVarsForReport = prepareTestReport(step, runDir)
     const stepSubstitutions = { ...vars, ...stepVarsForReport }
     const identity = { ...(execution ?? {}), commandTemplate: [...step.cmd], covers: [...(step.covers ?? [])], aiGenerated: Boolean(step.aiGenerated) }
+    const na = toNotApplicable(step, src)
+    if (na) {
+      results.push({ ...identity, id: step.id, nameZh: step.nameZh, kind: step.kind, cmdText: step.cmd.join(' '), ok: true, notApplicable: true, notApplicableReason: na, unavailable: false, exitCode: null, timedOut: false, durationMs: 0, tail: '', failures: [] })
+      log('info', 'step not applicable', { ...execution, step: step.id, reason: na })
+      continue
+    }
     const bin = resolveStepBinary(step)
     const unmet = toUnmetRequirement(step, src) ?? bin.unmet
     if (unmet) {
