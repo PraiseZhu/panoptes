@@ -44,7 +44,7 @@
 #                 $QA_HOME/reports/open/PR-N.json (same per-PR format). Default: off
 #   --quota-pool P  daily model-call quota pool: production | test. Default: --trigger manual → test (manual runs,
 #                 drills, acceptance reruns never consume production quota), event / catch-up → production.
-#                 Caps per kind and pool: ARGUS_QUOTA_{AI_TEST,JEV,AI_REVIEW,PR_SUMMARY} (40/150/70/40) and
+#                 Caps per kind and pool: ARGUS_QUOTA_{AI_TEST,JEV,AI_REVIEW,PR_SUMMARY} (50/150/70/40) and
 #                 ARGUS_QUOTA_TEST_* for the test pool, or $ARGUS_ROOT/quota.json (env ARGUS_QUOTA_FILE)
 #   --fresh-review  do not reuse a cached code-review verdict (commit + diff + prompt + model); review afresh
 #   --no-issues   default behaviour; accepted for explicitness

@@ -114,7 +114,7 @@ Reports written before 2026-10-11 (commit `78184f9`) do not have `tested_at`; fa
 **`trigger`** (`event` = on-merge trigger, `catch-up` = the 2-hourly catch-up timer or `--catch-up`, `manual` = run by
 hand; default `manual`; reports before 2026-10-11 have no `trigger`), `id` (uuid), `started_at`, `finished_at`, `started_at_shanghai`, `finished_at_shanghai`, `duration_s`,
 `args` (`date` (the `--date` argument or `null`), `date_source` (how `date` was chosen: `--date`, `pr merged_at (Asia/Shanghai)`, `pr updated_at (Asia/Shanghai)`, `yesterday (Asia/Shanghai)`), `prs`, `out`, `reuse_merged`, `create_issues`, `limit`, `pr_timeout_min`, `deadline`, `burst_cutoff`, `step_cache`, `write_merged`, `write_open`),
-`ai_tests`, `ai_test_caps`, **`quota_pool`** (`production` | `test`, see *Model-call quotas*), **`quota_caps`** (`{ ai-test, jev, ai-review, pr-summary }` daily caps of that pool), `fresh_review` (see *Code review reuse*)),
+`ai_tests`, `ai_test_caps` (effective caps; since 2026-10-12 the tiered caps of the PR, or of the highest-tier PR in a multi-PR run), **`ai_test_tier`** (see *AI-test tiers*; `null` when no PR was tested), **`quota_pool`** (`production` | `test`, see *Model-call quotas*), **`quota_caps`** (`{ ai-test, jev, ai-review, pr-summary }` daily caps of that pool), `fresh_review` (see *Code review reuse*)),
 `argus_commit` (panoptes commit), `ming_qa_commit`, `llm_model`, `evidence_root`.
 Merged reports written by nightly also carry `run.source_report` (path of the nightly report).
 
@@ -365,10 +365,37 @@ Reports written **before** this change (`basis: "triage (prs[].triage)"`) comput
   model call: nothing generated, every gap dimension gets `dimension_status` `capped`, display **额度用尽未补测**). When the
   quota runs out after round 1, `status` reflects round 1 and **`capped: true`** + **`capped_gaps`** list the dimensions
   left (also `capped` in `dimension_status`); `rounds[]` has an entry with `status: "capped"`.
-- Caps per PR (env): `ARGUS_AITEST_MAX_CALLS` (default 2 model calls), `ARGUS_AITEST_MAX_MIN` (default 25 min wall time
-  for generation + execution), `ARGUS_AITEST_MAX_TESTS` (default 3 per call). The daily cap is the `ai-test` quota (see
+- Caps per PR: **tiered by PR type and size since 2026-10-12** (see *AI-test tiers*; before that flat 2 calls x 3 tests,
+  25 min). Explicit env `ARGUS_AITEST_MAX_CALLS` / `ARGUS_AITEST_MAX_MIN` / `ARGUS_AITEST_MAX_TESTS` override the tier
+  value (noted in `ai_test_tier.reason`). `ai_tests.caps` holds the effective caps of the PR. The daily cap is the `ai-test` quota (see
   *Model-call quotas*; `ARGUS_AITEST_DAILY_CAP` is still read as the production ai-test cap). Round 2 only targets dimensions round 1 did not cover and gets round 1's discard reasons.
-  Actuals: `model_calls`, `wall_s`. `run.args.ai_test_caps` records the caps of the run.
+  Actuals: `model_calls`, `wall_s`. `run.args.ai_test_caps` records the effective caps of the run.
+
+### AI-test tiers (since 2026-10-12)
+
+Per PR, `prs[].ai_test_tier` = `{ tier, reason, product_lines, files, product_files, type, quota_remaining, degraded,
+degraded_from_calls? }` and `prs[].ai_test_caps` = `{ enabled, maxCalls, maxTestsPerCall, maxWallMin }` (effective).
+`run.args.ai_test_tier` = the highest-tier PR's object plus `pr` and `per_pr: [{ pr, tier, type, product_lines, files, degraded, caps }]`.
+Absent on reports older than 2026-10-12 and on reused (on-merge) results that predate it.
+
+`type` comes from the changed files: lockfiles and generated files (`dist/`, `build/`, `*.min.js`, `*.map`, `*.snap`,
+`*.generated.*` …) are never product code. `product_lines` = additions + deletions of product files only.
+
+| type | when | tier | maxCalls x maxTestsPerCall | maxWallMin |
+|---|---|---|---|---|
+| `docs` | only docs / changelog / config (or `risk_class` A) | `none` | 0 (no AI tests, `ai_tests.status: skipped`) | 0 |
+| `ci` | only CI/workflow (`.github/` …) | `S` | 1 x 2 | 10 |
+| `tests` | only test files | `S` | 1 x 2 | 10 |
+| `deps` | lockfiles / dependency manifests / mix without product source | `S` | 1 x 2 | 10 |
+| `product` | `product_lines` < 50 | `S` | 1 x 2 | 10 |
+| `product` | 50–299 | `M` | 2 x 3 | 20 |
+| `product` | 300–1000 | `L` | 3 x 3 | 30 |
+| `product` | > 1000 lines or > 30 product files | `XL` | 4 x 4 | 40 |
+| `unknown` | file list unavailable | `M` | 2 x 3 | 20 |
+
+The daily `ai-test` quota (50) stays the global ceiling: if the remaining quota is below the tier's `maxCalls`, `maxCalls`
+is lowered to what is left, `degraded: true`, `degraded_from_calls` = the tier value and `reason` says so; with 0 left
+`ai_tests.status` is `capped` (额度用尽未补测).
 - Each test also appears in `checks[]` with `source: "ai-test"`, `dimension: "white-box"`, `status` `pass` (kept) /
   `fail` (fails on current) / `discarded`, `ai_result`, `ai_reason`.
 
@@ -408,7 +435,7 @@ Daily (Asia/Shanghai day) caps on model calls, **one counter per kind**:
 
 | kind | what | default cap / day | env (production pool) |
 |---|---|---|---|
-| `ai-test` | AI gap-test generation (`ai_tests`, one per round) | 40 | `ARGUS_QUOTA_AI_TEST` (legacy `ARGUS_AITEST_DAILY_CAP`) |
+| `ai-test` | AI gap-test generation (`ai_tests`, one per round) | 50 (40 before 2026-10-12) | `ARGUS_QUOTA_AI_TEST` (legacy `ARGUS_AITEST_DAILY_CAP`) |
 | `jev` | Jev dimension triage (one per tested code PR) | 150 | `ARGUS_QUOTA_JEV` |
 | `ai-review` | ming-qa code review (one per PR; a reused cached verdict costs nothing) | 70 | `ARGUS_QUOTA_AI_REVIEW` |
 | `pr-summary` | plain-language PR summary (`ai_summary`) | 40 | `ARGUS_QUOTA_PR_SUMMARY` (legacy `ARGUS_AI_DAILY_CAP`) |
@@ -417,7 +444,7 @@ Daily (Asia/Shanghai day) caps on model calls, **one counter per kind**:
 (the default for hand-started runs, drills, acceptance reruns) or `--quota-pool test`; test-pool runs **never consume
 production quota**. `--quota-pool production|test` overrides the default. Test-pool caps: `ARGUS_QUOTA_TEST_<KIND>`
 (same defaults). Both pools can also be set in `$ARGUS_ROOT/quota.json` (`ARGUS_QUOTA_FILE`):
-`{ "production": { "ai-test": 40, … }, "test": { … } }`; env wins. The run records `run.args.quota_pool` / `quota_caps`.
+`{ "production": { "ai-test": 50, … }, "test": { … } }`; env wins. The run records `run.args.quota_pool` / `quota_caps`.
 
 Counters live in the sqlite `ai_usage` table under **`quota:<pool>:<kind>:<YYYY-MM-DD>`**. The pre-2026-10-11 keys
 (`gen:<day>`, `jev:<day>`, bare `<day>`) are not read by the nightly flow (only by the Mac `control.mjs` flow, on its own

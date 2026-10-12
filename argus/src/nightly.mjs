@@ -22,7 +22,7 @@ import { log, redact, tail, toShanghaiDay, toShanghaiIso } from './util.mjs'
 import { setBudget, overBudget } from './exec.mjs'
 import { coverageGate, parseAddedLines, COVERAGE_THRESHOLDS } from './coverage.mjs'
 import { recentGiveUps } from './catchup.mjs'
-import { generateTargetedTests, toAiTestSteps, toAiGaps, toAiTestResult, aiTestCaps } from './aitests.mjs'
+import { generateTargetedTests, toAiTestSteps, toAiGaps, toAiTestResult, aiTestCaps, aiTestTier, degradeForQuota } from './aitests.mjs'
 import { globToRegExp } from './classify.mjs'
 import { createQuota, memoryQuota, resolvePool, CAPPED_ZH } from './quota.mjs'
 
@@ -174,6 +174,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   if (riskClass === 'A') {
     out.skipped_steps = baseProfile.steps.filter((x) => x.kind !== 'setup').map((x) => ({ id: x.id, nameZh: x.nameZh, reason: 'docs-only change: no checks run', dimension: toBox(x, baseProfile) }))
     out.triage = toApplicability({ status: 'skipped', jevStatus: 'not-run', reasonZh: 'docs-only change: no checks run, dimension triage not needed', rows: toTriage({ profile: baseProfile, files, jev: null }).rows })
+    { const t = aiTestTier({ files, riskClass }); out.ai_test_tier = t.tier; out.ai_test_caps = t.caps }
     Object.assign(out, dimensionsOf([])); out.tested = false; out.verdict = 'docs-only'; out.outcome = 'docs_only'; out.outcome_reason = classReason
     // 文档改动也做代码审查（同一提交规则：merged → merge-base..merge commit；open → merge-base..head）；不跑测试，覆盖率门禁不适用
     out.coverage_gate = DOCS_ONLY_COVERAGE_GATE()
@@ -386,9 +387,30 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   return out
 }
 
+// run.args 里的 ai_test_caps / ai_test_tier：单 PR 运行就是这个 PR 的生效值；多 PR 取各 PR 中最大的一档并附 per_pr
+const TIER_ORDER = ['none', 'S', 'M', 'L', 'XL']
+function pickTop(prs) {
+  const t = prs.filter((p) => p.ai_test_tier && !p.reused)
+  if (!t.length) return null
+  return t.reduce((a, b) => (TIER_ORDER.indexOf(b.ai_test_tier.tier) > TIER_ORDER.indexOf(a.ai_test_tier.tier) ? b : a))
+}
+export function runAiTestCaps(prs) {
+  const top = pickTop(prs)
+  return top ? { ...top.ai_test_caps } : aiTestCaps()
+}
+export function runAiTestTier(prs) {
+  const t = prs.filter((p) => p.ai_test_tier && !p.reused)
+  const top = pickTop(prs)
+  if (!top) return null
+  return { ...top.ai_test_tier, pr: top.number, per_pr: t.map((p) => ({ pr: p.number, tier: p.ai_test_tier.tier, type: p.ai_test_tier.type, product_lines: p.ai_test_tier.product_lines, files: p.ai_test_tier.files, degraded: Boolean(p.ai_test_tier.degraded), caps: p.ai_test_caps })) }
+}
+
 // ── AI 补测（夜间）────────────────────────────────────────
 async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, common, db, secrets, health, number, results, quota = memoryQuota() }) {
-  const caps = aiTestCaps()
+  const tiered = degradeForQuota(aiTestTier({ files, riskClass }), quota.check('ai-test'))
+  const caps = tiered.caps
+  out.ai_test_tier = tiered.tier
+  out.ai_test_caps = { ...caps }
   const t0 = Date.now()
   const deadline = t0 + caps.maxWallMin * 60_000
   const ai = out.ai_tests = { status: 'not-run', reason: null, model: null, caps: { max_model_calls: caps.maxCalls, max_wall_min: caps.maxWallMin, max_tests_per_call: caps.maxTestsPerCall },
@@ -400,7 +422,7 @@ async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, commo
   if (out.triage?.status !== 'ok') return finish('skipped', `dimension applicability not decided (triage ${out.triage?.status ?? 'missing'})`)
   ai.gaps = toAiGaps({ applicability: out.triage, profile, results })
   if (!ai.gaps.length) return finish('skipped', 'no applicable gap dimension: every applicable dimension in the AI-test set is covered by a check')
-  if (caps.maxCalls < 1) return finish('skipped', 'ARGUS_AITEST_MAX_CALLS=0')
+  if (caps.maxCalls < 1) return finish(tiered.tier.tier === 'none' ? 'skipped' : tiered.tier.degraded ? 'capped' : 'skipped', tiered.tier.tier === 'none' ? `ai-test tier none: ${tiered.tier.reason}` : tiered.tier.degraded ? `${CAPPED_ZH}: ${tiered.tier.reason}` : 'ARGUS_AITEST_MAX_CALLS=0')
   const cGlobs = (profile.cPaths ?? []).map(globToRegExp)
   const highRiskFiles = files.map((f) => f.filename).filter((f) => cGlobs.some((re) => re.test(f)))
   const setupIds = profile.steps.filter((s) => s.kind === 'setup').map((s) => s.id)
@@ -1243,7 +1265,7 @@ export async function runNightly(opts = {}) {
       started_at_shanghai: toShanghaiIso(startedAt), finished_at_shanghai: toShanghaiIso(),
       duration_s: Math.round((Date.now() - startedAt.getTime()) / 1000),
       trigger: normalizeTrigger(opts.trigger),
-      args: { date: opts.date ?? null, date_source: dateSource, prs: opts.prs ?? null, out: opts.out ?? null, reuse_merged: opts.reuseMerged !== false, create_issues: Boolean(opts.createIssues), limit: opts.limit ?? null, pr_timeout_min: opts.prTimeoutMin ?? null, deadline: opts.deadline ?? null, burst_cutoff: opts.deadlineKind === 'burst-cutoff' ? opts.deadline : null, step_cache: process.env.ARGUS_STEP_CACHE !== '0', write_merged: writeMergedEnabled(opts), write_open: writeOpenEnabled(opts), ai_tests: !opts.noAiTests && aiTestCaps().enabled, ai_test_caps: aiTestCaps(), quota_pool: quota.pool, quota_caps: quota.caps, fresh_review: Boolean(opts.freshReview) },
+      args: { date: opts.date ?? null, date_source: dateSource, prs: opts.prs ?? null, out: opts.out ?? null, reuse_merged: opts.reuseMerged !== false, create_issues: Boolean(opts.createIssues), limit: opts.limit ?? null, pr_timeout_min: opts.prTimeoutMin ?? null, deadline: opts.deadline ?? null, burst_cutoff: opts.deadlineKind === 'burst-cutoff' ? opts.deadline : null, step_cache: process.env.ARGUS_STEP_CACHE !== '0', write_merged: writeMergedEnabled(opts), write_open: writeOpenEnabled(opts), ai_tests: !opts.noAiTests && aiTestCaps().enabled, ai_test_caps: runAiTestCaps(prs), ai_test_tier: runAiTestTier(prs), quota_pool: quota.pool, quota_caps: quota.caps, fresh_review: Boolean(opts.freshReview) },
       argus_commit: (() => { try { return execFileSync('git', ['-C', CODE_DIR, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim() } catch { return null } })(),
       ming_qa_commit: await mingQaVersion(), llm_model: LLM_MODEL, evidence_root: evidenceRoot,
     },

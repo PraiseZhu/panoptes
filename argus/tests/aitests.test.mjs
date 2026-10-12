@@ -121,3 +121,39 @@ test('补测确认的问题只记拿不准；和其它检查一起确认时，�
   const passed = { outcome: 'passed' }
   assert.equal(toTrialDecision(passed, aiSteps), passed)
 })
+
+// ── 分级补测上限 ──
+import * as T from '../src/aitests.mjs'
+const F = (filename, a = 0, d = 0) => ({ filename, additions: a, deletions: d })
+test('ai-test tier: docs/config-only → none, ci/tests/deps → S', () => {
+  assert.equal(T.aiTestTier({ files: [F('README.md', 10), F('CHANGELOG.md', 3), F('config/app.yaml', 2)], env: {} }).tier.tier, 'none')
+  assert.equal(T.aiTestTier({ files: [F('src/x.ts', 1)], riskClass: 'A', env: {} }).tier.tier, 'S') // product source wins over class A label
+  const ci = T.aiTestTier({ files: [F('.github/workflows/ci.yml', 400)], env: {} })
+  assert.deepEqual([ci.tier.type, ci.tier.tier, ci.caps.maxCalls, ci.caps.maxTestsPerCall, ci.caps.maxWallMin], ['ci', 'S', 1, 2, 10])
+  assert.equal(T.aiTestTier({ files: [F('tests/a.test.mjs', 900)], env: {} }).tier.type, 'tests')
+  assert.equal(T.aiTestTier({ files: [F('package-lock.json', 5000)], env: {} }).tier.type, 'deps')
+})
+test('ai-test tier: product size thresholds, lockfiles/generated excluded', () => {
+  const t = (files) => T.aiTestTier({ files, env: {} })
+  assert.equal(t([F('src/a.ts', 30, 19)]).tier.tier, 'S')
+  assert.equal(t([F('src/a.ts', 30, 20)]).tier.tier, 'M')
+  assert.equal(t([F('server/a.py', 299)]).tier.tier, 'M')
+  assert.equal(t([F('server/a.py', 300)]).tier.tier, 'L')
+  assert.equal(t([F('plugin/a.js', 1000)]).tier.tier, 'L')
+  assert.equal(t([F('plugin/a.js', 1001)]).tier.tier, 'XL')
+  assert.equal(t(Array.from({ length: 31 }, (_, i) => F(`src/f${i}.ts`, 1))).tier.tier, 'XL')
+  const mixed = t([F('src/a.ts', 10), F('package-lock.json', 9000), F('dist/bundle.min.js', 5000), F('tests/a.test.ts', 800)])
+  assert.deepEqual([mixed.tier.tier, mixed.tier.product_lines, mixed.tier.files, mixed.tier.type], ['S', 10, 4, 'product'])
+  assert.deepEqual(t([F('src/a.ts', 2000)]).caps, { enabled: true, maxCalls: 4, maxTestsPerCall: 4, maxWallMin: 40 })
+})
+test('ai-test tier: env override and daily-quota degrade', () => {
+  const o = T.aiTestTier({ files: [F('src/a.ts', 2000)], env: { ARGUS_AITEST_MAX_CALLS: '1' } })
+  assert.equal(o.caps.maxCalls, 1); assert.match(o.tier.reason, /ARGUS_AITEST_MAX_CALLS=1/)
+  const base = T.aiTestTier({ files: [F('src/a.ts', 500)], env: {} })
+  const ok = T.degradeForQuota(base, { cap: 50, used: 10 })
+  assert.deepEqual([ok.caps.maxCalls, ok.tier.degraded, ok.tier.quota_remaining], [3, false, 40])
+  const d = T.degradeForQuota(base, { cap: 50, used: 49 })
+  assert.deepEqual([d.caps.maxCalls, d.tier.degraded, d.tier.degraded_from_calls], [1, true, 3])
+  assert.match(d.tier.reason, /degraded/)
+  assert.equal(T.degradeForQuota(base, { cap: 50, used: 50 }).caps.maxCalls, 0)
+})

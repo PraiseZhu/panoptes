@@ -22,8 +22,8 @@ test('pool: manual → test, event / catch-up → production, --quota-pool overr
   assert.throws(() => Q.resolvePool({ quotaPool: 'prod' }))
 })
 
-test('caps: defaults ai-test 40 / ai-review 70 / jev 150, env per kind and pool, legacy env, quota.json', () => {
-  assert.deepEqual(Q.quotaCaps('production', {}).caps, { 'ai-test': 40, jev: 150, 'ai-review': 70, 'pr-summary': 40 })
+test('caps: defaults ai-test 50 / ai-review 70 / jev 150, env per kind and pool, legacy env, quota.json', () => {
+  assert.deepEqual(Q.quotaCaps('production', {}).caps, { 'ai-test': 50, jev: 150, 'ai-review': 70, 'pr-summary': 40 })
   const env = { ARGUS_QUOTA_AI_TEST: '5', ARGUS_QUOTA_TEST_AI_REVIEW: '3', ARGUS_AI_DAILY_CAP: '9' }
   assert.equal(Q.quotaCaps('production', env).caps['ai-test'], 5)
   assert.equal(Q.quotaCaps('production', env).caps['ai-review'], 70)

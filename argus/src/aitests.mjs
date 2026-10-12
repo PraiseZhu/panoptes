@@ -151,3 +151,76 @@ export function toAiTestResult(r) {
   if (r.unavailable) return { result: 'discarded', reason: `could not run: ${r.unavailableReasonZh ?? `exit ${r.exitCode}`}` }
   return { result: 'fails-on-current', reason: 'fails on the tested commit' }
 }
+
+// ── 分级补测上限（按 PR 类型 + 改动规模）────────────────────────────
+// 类型：docs（文档 / 变更日志 / 纯配置）→ 不补测；ci（只改 CI/workflow）→ S；tests（只改测试）→ S；
+//       deps（只改锁文件 / 依赖清单）→ S；product（有产品源码）→ 按产品代码改动行数 + 文件数分 S/M/L/XL。
+// 行数 = additions + deletions，不计锁文件和生成文件。环境变量 ARGUS_AITEST_MAX_* 显式给出时覆盖对应上限（reason 里注明）。
+export const AI_TEST_TIERS = Object.freeze({
+  none: { maxCalls: 0, maxTestsPerCall: 0, maxWallMin: 0 },
+  S: { maxCalls: 1, maxTestsPerCall: 2, maxWallMin: 10 },
+  M: { maxCalls: 2, maxTestsPerCall: 3, maxWallMin: 20 },
+  L: { maxCalls: 3, maxTestsPerCall: 3, maxWallMin: 30 },
+  XL: { maxCalls: 4, maxTestsPerCall: 4, maxWallMin: 40 },
+})
+const TIER_RE = {
+  lock: /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|uv\.lock|poetry\.lock|Pipfile\.lock|Cargo\.lock|go\.sum|composer\.lock|Gemfile\.lock)$/,
+  generated: /(^|\/)(dist|build|out|coverage|vendor|node_modules|__generated__|generated)\/|\.min\.(js|css)$|\.map$|\.snap$|\.generated\.|\.pb\.go$|_pb2\.py$/,
+  docs: /\.(md|mdx|rst|txt|adoc)$|^docs\/|(^|\/)(LICENSE|CHANGELOG|CHANGES|NOTICE|AUTHORS)(\.[^/]*)?$/i,
+  ci: /^\.github\/|^\.gitlab-ci\.yml$|^\.circleci\/|(^|\/)Jenkinsfile$|^\.buildkite\//,
+  tests: /(^|\/)(tests?|__tests__|spec|e2e|fixtures)\/|\.(test|spec)\.[^/]+$|(^|\/)test_[^/]+\.py$|_test\.(go|py)$/,
+  depManifest: /(^|\/)(package\.json|pyproject\.toml|requirements[^/]*\.txt|Cargo\.toml|go\.mod|Gemfile)$/,
+  config: /(^|\/)\.[^/]+rc(\.[^/]+)?$|(^|\/)\.(editorconfig|gitignore|gitattributes|npmrc|nvmrc|prettierignore|eslintignore|dockerignore)$|\.(ya?ml|toml|ini|cfg|conf|env\.example)$|(^|\/)(tsconfig|jsconfig)[^/]*\.json$/,
+}
+export function fileKind(path) {
+  if (TIER_RE.lock.test(path)) return 'lock'
+  if (TIER_RE.generated.test(path)) return 'generated'
+  if (TIER_RE.ci.test(path)) return 'ci'
+  if (TIER_RE.tests.test(path)) return 'tests'
+  if (TIER_RE.depManifest.test(path)) return 'deps'
+  if (TIER_RE.docs.test(path)) return 'docs'
+  if (TIER_RE.config.test(path)) return 'config'
+  return 'product'
+}
+export function sizeTier(lines, files) {
+  if (lines > 1000 || files > 30) return 'XL'
+  if (lines >= 300) return 'L'
+  if (lines >= 50) return 'M'
+  return 'S'
+}
+
+// files: GitHub PR files（filename, additions, deletions）；riskClass 'A' = 现有分类器判为只改文档
+export function aiTestTier({ files = [], riskClass = null, env = process.env } = {}) {
+  const kinds = files.map((f) => ({ f, k: fileKind(f.filename ?? '') }))
+  const product = kinds.filter((x) => x.k === 'product')
+  const productLines = product.reduce((s, x) => s + (Number(x.f.additions) || 0) + (Number(x.f.deletions) || 0), 0)
+  const n = files.length
+  const has = (k) => kinds.some((x) => x.k === k)
+  let type, tier, reason
+  if (!n) { type = 'unknown'; tier = 'M'; reason = 'changed-file list unavailable: default tier M' }
+  else if (product.length) { type = 'product'; tier = sizeTier(productLines, product.length); reason = `product source: ${productLines} lines in ${product.length} file(s)` }
+  else if (riskClass === 'A' || kinds.every((x) => ['docs', 'config', 'generated'].includes(x.k))) { type = 'docs'; tier = 'none'; reason = 'docs/changelog/config-only change: no AI tests' }
+  else if (has('ci') && kinds.every((x) => ['ci', 'docs', 'config', 'generated'].includes(x.k))) { type = 'ci'; tier = 'S'; reason = 'CI/workflow-only change: small tier' }
+  else if (has('tests') && kinds.every((x) => ['tests', 'docs', 'config', 'generated'].includes(x.k))) { type = 'tests'; tier = 'S'; reason = 'tests-only change: small tier' }
+  else { type = 'deps'; tier = 'S'; reason = 'dependency/lockfile/CI/test change without product source: small tier' }
+  const caps = { enabled: env.ARGUS_AITESTS !== '0', ...AI_TEST_TIERS[tier] }
+  const base = aiTestCaps(env)
+  const overrides = []
+  if (tier !== 'none') {
+    for (const [key, name] of [['maxCalls', 'ARGUS_AITEST_MAX_CALLS'], ['maxWallMin', 'ARGUS_AITEST_MAX_MIN'], ['maxTestsPerCall', 'ARGUS_AITEST_MAX_TESTS']]) {
+      if (env[name] != null && env[name] !== '') { caps[key] = base[key]; overrides.push(`${name}=${base[key]}`) }
+    }
+  }
+  if (overrides.length) reason += `; env override ${overrides.join(', ')}`
+  return { caps, tier: { tier, reason, product_lines: productLines, files: n, product_files: product.length, type } }
+}
+
+// 每日 ai-test 额度是全局上限：剩余额度 < 分级调用次数时降级（只降调用次数），并记录
+export function degradeForQuota(result, quotaCheck) {
+  if (!quotaCheck || !result.caps.maxCalls) return result
+  const remaining = Math.max(0, (quotaCheck.cap ?? 0) - (quotaCheck.used ?? 0))
+  if (remaining >= result.caps.maxCalls) return { ...result, tier: { ...result.tier, quota_remaining: remaining, degraded: false } }
+  const from = result.caps.maxCalls
+  return { caps: { ...result.caps, maxCalls: remaining },
+    tier: { ...result.tier, quota_remaining: remaining, degraded: true, degraded_from_calls: from, reason: `${result.tier.reason}; degraded: daily ai-test quota has ${remaining} call(s) left (< tier ${from})` } }
+}

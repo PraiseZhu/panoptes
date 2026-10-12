@@ -2,7 +2,7 @@
 //   种类：ai-test（AI 补测生成）· jev（Jev 维度分诊）· ai-review（ming-qa 代码审查）· pr-summary（人话摘要）
 //   池子：production（event 合并即测、catch-up 补测）· test（--trigger manual 手动跑 / 演练 / 验收重跑，或 --quota-pool test）
 // 上限可配：环境变量 ARGUS_QUOTA_<KIND>（生产）/ ARGUS_QUOTA_TEST_<KIND>（测试池），或 JSON 文件
-// ARGUS_QUOTA_FILE（默认 $ARGUS_ROOT/quota.json：{ "production": { "ai-test": 40, … }, "test": { … } }）；环境变量优先。
+// ARGUS_QUOTA_FILE（默认 $ARGUS_ROOT/quota.json：{ "production": { "ai-test": 50, … }, "test": { … } }）；环境变量优先。
 // 计数存在 sqlite ai_usage 表（day 列 = quota:<pool>:<kind>:<YYYY-MM-DD>），一次运行一把锁，先查后记即可。
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -11,7 +11,7 @@ import { toShanghaiDay } from './util.mjs'
 
 export const QUOTA_KINDS = ['ai-test', 'jev', 'ai-review', 'pr-summary']
 export const QUOTA_POOLS = ['production', 'test']
-export const DEFAULT_CAPS = { 'ai-test': 40, jev: 150, 'ai-review': 70, 'pr-summary': 40 }
+export const DEFAULT_CAPS = { 'ai-test': 50, jev: 150, 'ai-review': 70, 'pr-summary': 40 }
 // 旧的单一上限变量仍然认（只作用于生产池的对应种类）
 const LEGACY_ENV = { 'ai-test': 'ARGUS_AITEST_DAILY_CAP', 'pr-summary': 'ARGUS_AI_DAILY_CAP' }
 export const CAPPED_ZH = '额度用尽未补测'
