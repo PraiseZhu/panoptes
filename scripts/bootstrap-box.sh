@@ -5,6 +5,11 @@
 #   scripts/bootstrap-box.sh            check, then install whatever is missing, then check again
 #   scripts/bootstrap-box.sh --check    only check; prints one "missing: <item> — <why>" line per gap; exit 0 = all ok
 #
+# apt / dpkg lock: another apt-get / dpkg / unattended-upgrade holding the lock (e.g. a package install at boot) is
+# waited for, not treated as a failure: every apt-get call passes -o DPkg::Lock::Timeout and is retried while the
+# lock is held, up to PANOPTES_APT_LOCK_WAIT seconds in total (default 600). Only what is still missing after the
+# final re-check is reported.
+#
 # What lives where (persistent locations under /workspace survive a box replacement; system packages do not):
 #   Node 24 via nvm      $PANOPTES_TOOLS/nvm            (NVM_DIR; default /workspace/_tools/nvm)
 #   argus npm deps       $PANOPTES_DIR/argus/node_modules (npm ci)
@@ -40,6 +45,47 @@ CHECK_ONLY=""
 [[ "${1:-}" == "--check" ]] && CHECK_ONLY=1
 
 log() { echo "[bootstrap] $*" >&2; }
+
+# ── apt with lock waiting ──────────────────────────────────────────────────────────────────────
+APT_LOCK_WAIT="${PANOPTES_APT_LOCK_WAIT:-600}"     # total seconds to wait for a held apt/dpkg lock
+APT_LOCK_POLL="${PANOPTES_APT_LOCK_POLL:-10}"      # seconds between retries
+read -r -a APT_LOCK_FILES <<<"${PANOPTES_APT_LOCK_FILES:-/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock}"
+APT_DEADLINE=""
+apt_lock_held() {   # 0 = some process holds an apt/dpkg lock file (fuser; absent fuser → assume free)
+  command -v fuser >/dev/null || return 1
+  local f; for f in "${APT_LOCK_FILES[@]}"; do [[ -e "$f" ]] && ${SUDO:-} fuser "$f" >/dev/null 2>&1 && return 0; done
+  return 1
+}
+apt_remaining() { local r=$(( APT_DEADLINE - $(date +%s) )); (( r > 0 )) && echo "$r" || echo 0; }
+# wait_apt_lock: poll until no apt/dpkg lock is held or the shared deadline passes; 0 = free
+wait_apt_lock() {
+  [[ -n "$APT_DEADLINE" ]] || APT_DEADLINE=$(( $(date +%s) + APT_LOCK_WAIT ))
+  local said=""
+  while apt_lock_held; do
+    (( $(apt_remaining) > 0 )) || { log "apt/dpkg lock still held after ${APT_LOCK_WAIT}s"; return 1; }
+    [[ -n "$said" ]] || { log "apt/dpkg lock held by another process; waiting up to $(apt_remaining)s"; said=1; }
+    sleep "$APT_LOCK_POLL"
+  done
+  return 0
+}
+# apt_get <args…>: apt-get with DPkg::Lock::Timeout, retried while the failure is a held lock (until the deadline)
+apt_get() {
+  [[ -n "$APT_DEADLINE" ]] || APT_DEADLINE=$(( $(date +%s) + APT_LOCK_WAIT ))
+  local out rc
+  while :; do
+    wait_apt_lock || true
+    out=$($SUDO env DEBIAN_FRONTEND=noninteractive "${APT_GET:-apt-get}" -o "DPkg::Lock::Timeout=$(apt_remaining)" "$@" 2>&1); rc=$?
+    (( rc == 0 )) && return 0
+    if grep -Eqi 'could not get lock|unable to acquire the dpkg|unable to lock|is another process using it|lock-frontend' <<<"$out" \
+       && (( $(apt_remaining) > 0 )); then
+      log "apt-get $1: lock held, retrying in ${APT_LOCK_POLL}s ($(apt_remaining)s left)"
+      sleep "$APT_LOCK_POLL"; continue
+    fi
+    printf '%s\n' "$out" | tail -20 >&2
+    return "$rc"
+  done
+}
+[[ -n "${PANOPTES_BOOTSTRAP_LIB:-}" ]] && return 0 2>/dev/null   # sourced by tests: functions only
 unset NPM_CONFIG_PREFIX npm_config_prefix
 
 load_node() {
@@ -97,8 +143,8 @@ has() { grep -Eq "^missing: $1([: ]|\$)" <<<"$MISSING"; }
 
 if has apt || has bwrap || has chromium; then
   log "apt: installing ${APT_PKGS[*]}"
-  if $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null \
-     && $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "${APT_PKGS[@]}" >/dev/null; then :
+  if apt_get update -qq >/dev/null \
+     && apt_get install -y -qq --no-install-recommends "${APT_PKGS[@]}" >/dev/null; then :
   else FAILED+=("apt install (needs passwordless sudo + network)"); fi
 fi
 if has chromium-wrapper || has chromium; then
@@ -130,8 +176,12 @@ if load_node; then
       log "Playwright chromium → $PLAYWRIGHT_BROWSERS_PATH"
       "$PW" install chromium >/dev/null 2>&1 || FAILED+=("playwright install chromium")
       log "Playwright system deps (apt)"
-      $SUDO env "PATH=$PATH" PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" "$PW" install-deps chromium >/dev/null 2>&1 \
-        || FAILED+=("playwright install-deps chromium")
+      # install-deps runs apt-get itself (no lock timeout): wait for the lock first, retry while it is held
+      until wait_apt_lock || true
+            $SUDO env "PATH=$PATH" PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" "$PW" install-deps chromium >/dev/null 2>&1; do
+        if apt_lock_held && (( $(apt_remaining) > 0 )); then continue; fi
+        FAILED+=("playwright install-deps chromium"); break
+      done
     else FAILED+=("playwright CLI missing (argus npm ci failed?)"); fi
   fi
 else FAILED+=("Node $NODE_MAJOR unavailable, skipped npm / Playwright"); fi

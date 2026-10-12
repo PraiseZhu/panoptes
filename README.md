@@ -68,7 +68,9 @@ libraries, the ming-qa venv `$QA_HOME/.venv`, and via apt (passwordless sudo) De
 `/workspace` does, so a box replacement (which wipes `$HOME` and system packages) only costs the apt part.
 **`run-nightly.sh` runs the check before every run and calls the bootstrap automatically** when something is missing
 (`PANOPTES_BOOTSTRAP=0` disables that); the outcome is in `system_health.bootstrap`, unresolved gaps in
-`qa_tool_failures` (stage `bootstrap`) and `env_problems`. Without Node 24 the wrapper still writes a minimal report
+`qa_tool_failures` (stage `bootstrap`) and `env_problems`, what it fixed in `system_health.bootstrap.self_repaired`. A held
+apt/dpkg lock (e.g. a package install at boot) is waited for and retried, up to `PANOPTES_APT_LOCK_WAIT` s (default
+600). Without Node 24 the wrapper still writes a minimal report
 (`system_health.status: "failed"`, never over an existing file) and exits 3.
 
 Memory: the coverage round runs in parallel with the first run only when `MemAvailable` ≥
@@ -257,8 +259,10 @@ Off unless `--create-issues` **and** `ARGUS_ALLOW_ISSUES=1`. When on:
 - **PR findings:** only **P0/P1** findings **backed by a failing check** (`source: "check"`) on PRs **authored by
   PraiseZhu**. Findings that come only from the LLM code review **never** become issues, at any severity — they stay in
   the report. Skipped candidates are listed with a reason.
-- **system_health:** QA tool failures, environment problems and LLM errors always become issues (any author), with a
-  ```` ```json mivo-qa-health ```` block.
+- **system_health:** QA tool failures, environment problems and LLM errors become issues (any author), aggregated into
+  **one** issue per run with a list and a ```` ```json mivo-qa-health ```` block — only for problems still present
+  after the run's self-repair (bootstrap retry); self-repaired / `transient` ones stay in the report only. An open
+  system_health issue gets a comment instead of a new issue.
 - **Dedup and recurrence** (as in argus's publisher): dedup by the body marker `<!-- mivo-qa-fingerprint: mq1-… -->`
   over `qa-auto` issues, open and closed. Open issue with the same fingerprint → comment with the new evidence (once
   per run × PR); closed as fixed → reopen + comment; closed as won't-fix (`state_reason: not_planned` or a `wontfix`

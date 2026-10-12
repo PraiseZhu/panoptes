@@ -45,7 +45,7 @@ Debian Chromium 154 (`/usr/bin/chromium`), Playwright (headless Chromium), Pytho
 * `--wait-lock [SECONDS]` (handled by `run-nightly.sh`): queue behind a running instance for up to SECONDS
   (default 14400 = 4 h) instead of exiting 75; exit 75 if the wait times out.
 * `--pr` restricts the run to specific PRs (discovery is still recorded in `system_health.discovery`).
-* Issue eligibility: only P0/P1 findings backed by a failing check, on PRs authored by PraiseZhu; findings that come solely from the LLM code review never become issues (they stay in the report); system_health entries (QA tool failures, env problems, LLM errors) always do (body has a `json mivo-qa-health` block).
+* Issue eligibility: only P0/P1 findings backed by a failing check, on PRs authored by PraiseZhu; findings that come solely from the LLM code review never become issues (they stay in the report); system_health entries (QA tool failures, env problems, LLM errors) still present after the run's self-repair become ONE aggregated issue per run (body has a `json mivo-qa-health` block); an open system_health issue gets a comment instead; self-repaired / transient entries stay in the report only.
 * Issue creation is **off** by default. `--create-issues` does nothing unless `ARGUS_ALLOW_ISSUES=1`
   is also exported. Then, for every P0/P1 finding, it opens an issue in the **private repo
   `PraiseZhu/pr-qa-agent-deploy`** (never in the repo under test) with labels `qa-auto` and

@@ -119,7 +119,9 @@ test('issue 资格：只有失败检查佐证的 P0/P1 + 作者 PraiseZhu；LLM 
   }
   const { candidates, skipped } = selectIssueCandidates(report)
   assert.deepEqual(candidates.filter((c) => c.kind === 'finding').map((c) => c.fingerprint).sort(), ['a', 'b'])
-  assert.equal(candidates.filter((c) => c.kind === 'health').length, 3, 'system_health 不受作者限制')
+  const hc = candidates.filter((c) => c.kind === 'health')
+  assert.equal(hc.length, 1, 'system_health 不受作者限制，且一次运行聚合成一个候选')
+  assert.equal(hc[0].items.length, 3)
   assert.deepEqual(skipped.map((s) => s.fingerprint).sort(), ['d', 'e', 'f', 'g'])
   assert.ok(skipped.filter((s) => s.source === 'code-review').every((s) => /llm-review-only/.test(s.reason)))
   for (const c of candidates) {

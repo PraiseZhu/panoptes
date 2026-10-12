@@ -84,7 +84,11 @@ export function readBootstrapStatus(path = process.env.PANOPTES_BOOTSTRAP_STATUS
 export function recordBootstrap(health, st) {
   if (!st) return
   const before = st.missing_before ?? [], after = st.missing_after ?? []
-  health.bootstrap = { ran: Boolean(st.ran), missing_before: before, missing_after: after, log: st.log || null, checked_at: st.checked_at ?? null }
+  const item = (m) => m.replace(/^missing: /, '').split(' — ')[0]
+  const left = new Set(after.map(item))
+  // self_repaired：本次运行开始时缺、自举后已补齐的项（只记在报告里，不提 issue）
+  const repaired = st.ran ? [...new Set(before.map(item))].filter((x) => !left.has(x)) : []
+  health.bootstrap = { ran: Boolean(st.ran), missing_before: before, missing_after: after, self_repaired: repaired, log: st.log || null, checked_at: st.checked_at ?? null }
   if (st.ran && !after.length) health.notes.push(`box self-check found missing dependencies and bootstrap-box.sh installed them: ${before.map((m) => m.replace(/^missing: /, '').split(' — ')[0]).join(', ')}`)
   if (after.length) {
     health.qa_tool_failures.push({ stage: 'bootstrap', message: st.ran ? `bootstrap-box.sh could not install ${after.length} dependenc${after.length === 1 ? 'y' : 'ies'}` : `${after.length} dependenc${after.length === 1 ? 'y' : 'ies'} missing (auto-install disabled)`, detail: st.log || null })
@@ -878,25 +882,47 @@ export function selectIssueCandidates(report, { authors = ISSUE_AUTHORS } = {}) 
       else out.push({ kind: 'finding', pr, finding: f, fingerprint: f.fingerprint })
     }
   }
-  const h = report.system_health ?? {}
-  for (const [key, label] of Object.entries(HEALTH_KINDS)) {
-    for (const e of h[key] ?? []) {
-      const fp = fingerprintOf(report.repo, ['system-health', key, e.stage ?? '', e.kind ?? '', e.message ?? ''])
-      out.push({ kind: 'health', category: key, label, entry: e, fingerprint: fp })
-    }
-  }
+  const hc = healthIssueCandidate(report)
+  if (hc) out.push(hc)
   return { candidates: out, skipped }
 }
 
+// system_health → 至多一个 issue（每次运行一个，带清单）。规则：
+//  · 只收本次运行自修复（bootstrap 重试）之后仍然存在的问题：transient / self_repaired 的条目只留在报告里；
+//  · 指纹固定（repo + 'system-health'），所以已有开放的 system_health issue 时只评论，不再新开；
+//  · 每个条目自己的指纹（entry_fingerprint）放在清单里，便于对照。
+export const HEALTH_ISSUE_KEY = ['system-health', 'aggregate-v1']
+export const healthIssueFingerprint = (repo) => fingerprintOf(repo, HEALTH_ISSUE_KEY)
+export function persistentHealthEntries(report) {
+  const h = report.system_health ?? {}
+  const items = []
+  for (const [key, label] of Object.entries(HEALTH_KINDS)) {
+    for (const e of h[key] ?? []) {
+      if (e?.transient === true || e?.self_repaired === true) continue
+      items.push({ category: key, label, entry: e, entry_fingerprint: fingerprintOf(report.repo, ['system-health', key, e.stage ?? '', e.kind ?? '', e.message ?? '']) })
+    }
+  }
+  return items
+}
+export function healthIssueCandidate(report) {
+  const items = persistentHealthEntries(report)
+  if (!items.length) return null
+  return { kind: 'health', category: 'system_health', label: 'system_health', items, entry: items[0].entry, fingerprint: healthIssueFingerprint(report.repo) }
+}
+
+const healthLine = (it) => `- **${it.label}**${it.entry.pr ? ` (PR #${it.entry.pr})` : ''}${it.entry.stage ? ` [${it.entry.stage}]` : ''}: ${String(it.entry.message ?? '').slice(0, 300)}`
 export function buildHealthIssuePayload(report, c) {
-  const e = c.entry
-  const block = { schema: 'mivo-qa-health/v1', fingerprint: c.fingerprint, report_date: report.date, report_file: `reports/${report.date}.json`, run_id: report.run?.id, repo: report.repo, category: c.category, entry: e, system_health_status: report.system_health?.status, environment: report.system_health?.environment }
+  const h = report.system_health ?? {}
+  const repaired = h.bootstrap?.self_repaired ?? []
+  const block = { schema: 'mivo-qa-health/v2', fingerprint: c.fingerprint, report_date: report.date, report_file: `reports/${report.date}.json`, run_id: report.run?.id, repo: report.repo,
+    items: c.items.map((it) => ({ category: it.category, entry_fingerprint: it.entry_fingerprint, entry: it.entry })), self_repaired: repaired, system_health_status: h.status, environment: h.environment }
+  const details = c.items.filter((it) => it.entry.detail).map((it) => `\n<details><summary>${it.entry.stage ?? it.label}</summary>\n\n\`\`\`\n${String(it.entry.detail).slice(-2000)}\n\`\`\`\n</details>`)
   const body = [
-    `Mivo QA nightly (${report.date}, Asia/Shanghai) hit a QA ${c.label}${e.pr ? ` while testing ${report.repo}#${e.pr}` : ''}.`,
+    `Mivo QA (${report.date}, Asia/Shanghai, run ${report.run?.id ?? '?'}) found ${c.items.length} QA system problem${c.items.length === 1 ? '' : 's'} that persisted after the run's self-repair attempt:`,
     '',
-    e.stage ? `- Stage: ${e.stage}` : null,
-    `- Message: ${e.message ?? ''}`,
-    e.detail ? `\n\`\`\`\n${String(e.detail).slice(-2000)}\n\`\`\`` : null,
+    ...c.items.map(healthLine),
+    repaired.length ? `\nSelf-repaired during this run (not part of this issue): ${repaired.join(', ')}` : null,
+    ...details,
     '',
     '```json mivo-qa-health',
     JSON.stringify(block, null, 2),
@@ -904,7 +930,9 @@ export function buildHealthIssuePayload(report, c) {
     '',
     fingerprintMarker(c.fingerprint),
   ].filter((x) => x !== null).join('\n')
-  return { title: `[Mivo QA][system_health] ${c.label}: ${String(e.stage ?? e.message ?? '').slice(0, 120)}`.slice(0, 240), body: redact(body), labels: ISSUE_LABELS }
+  const first = c.items[0]
+  const head = `${first.label}: ${String(first.entry.stage ?? first.entry.message ?? '').slice(0, 80)}`
+  return { title: `[Mivo QA][system_health] ${c.items.length} problem${c.items.length === 1 ? '' : 's'} (${head}${c.items.length > 1 ? ', …' : ''})`.slice(0, 240), body: redact(body), labels: ISSUE_LABELS }
 }
 
 export function buildIssuePayloadFor(report, c) {
@@ -919,11 +947,18 @@ export function buildIssuePayloadFor(report, c) {
 const WONTFIX_LABELS = new Set(['wontfix', "won't fix", 'wont-fix', 'won\'t-fix'])
 const labelNames = (i) => (i.labels ?? []).map((l) => String(typeof l === 'string' ? l : l?.name ?? '').toLowerCase())
 export const isWontFix = (i) => i.state === 'closed' && (i.state_reason === 'not_planned' || labelNames(i).some((l) => WONTFIX_LABELS.has(l)))
+export const HEALTH_BODY_MARK = '```json mivo-qa-health'
+export const isHealthIssue = (i) => String(i?.body ?? '').includes(HEALTH_BODY_MARK) || String(i?.title ?? '').startsWith('[Mivo QA][system_health]')
 export function recurrenceDecision(issues, c) {
   const fpMark = fingerprintMarker(c.fingerprint)
   const mine = (issues ?? []).filter((i) => String(i.body ?? '').includes(fpMark)).sort((a, b) => b.number - a.number)
   const open = mine.find((i) => i.state === 'open')
   if (open) return { action: 'comment', issue: open }
+  // system_health：任何仍开着的 system_health issue（含旧版逐条 issue）都算同一件事 → 评论，不新开
+  if (c.kind === 'health') {
+    const anyOpen = (issues ?? []).filter((i) => i.state === 'open' && isHealthIssue(i)).sort((a, b) => b.number - a.number)[0]
+    if (anyOpen) return { action: 'comment', issue: anyOpen }
+  }
   const latest = mine[0]
   if (!latest) return { action: 'create' }
   if (isWontFix(latest)) return { action: 'suppressed', issue: latest, reason: latest.state_reason === 'not_planned' ? 'closed as not planned' : 'closed with a wontfix label' }
@@ -946,8 +981,8 @@ export function buildEvidenceComment(report, c, { reopened = false } = {}) {
     : [
         reopened ? `**Recurred** after this issue was closed — reopened by Mivo QA (${report.date}).` : `Observed again by Mivo QA (${report.date}).`,
         '',
-        c.entry.stage ? `- Stage: ${c.entry.stage}` : null,
-        `- Message: ${c.entry.message ?? ''}`,
+        `Run ${report.run?.id ?? '?'}: ${c.items.length} problem${c.items.length === 1 ? '' : 's'} still present after self-repair:`,
+        ...c.items.map(healthLine),
       ]
   return { id: obsId, body: redact([...lines.filter((x) => x !== null), '', fingerprintMarker(c.fingerprint), observationMarker(obsId)].join('\n')) }
 }
@@ -956,7 +991,7 @@ export async function createIssues(report, { repo = ISSUE_REPO } = {}) {
   const { candidates, skipped } = selectIssueCandidates(report)
   const results = skipped.map((x) => ({ ...x, action: 'not-eligible' }))
   for (const c of candidates) {
-    const found = await findIssuesByMarkerLabel(repo, ISSUE_LABELS[0], fingerprintMarker(c.fingerprint))
+    const found = await findIssuesByMarkerLabel(repo, ISSUE_LABELS[0], c.kind === 'health' ? HEALTH_BODY_MARK : fingerprintMarker(c.fingerprint))
     const d = recurrenceDecision(found, c)
     const base = { kind: c.kind, pr: c.pr?.number ?? null, fingerprint: c.fingerprint }
     if (d.action === 'create') {

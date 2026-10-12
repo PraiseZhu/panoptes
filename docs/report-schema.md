@@ -458,6 +458,15 @@ is available when a per-PR key is needed. Recurrence follows argus's own publish
 | closed as fixed (`state_reason` `completed` / null) | `reopened` — reopened plus the same evidence comment |
 | closed as won't-fix (`state_reason: not_planned`, or a `wontfix` / `won't fix` label) | `suppressed` — no comment, no reopen, no new issue |
 
+**system_health issues are aggregated:** one run opens at most **one** system_health issue, listing every
+`qa_tool_failures` / `env_problems` / `llm_errors` entry that is still present after the run's self-repair (bootstrap
+retry). Entries with `transient: true` or `self_repaired: true`, and items in `system_health.bootstrap.self_repaired`,
+stay in the report but open no issue. The issue's fingerprint is fixed per repo (`system-health` / `aggregate-v1`), its
+body has a ```` ```json mivo-qa-health ```` block (`schema: "mivo-qa-health/v2"`, `items[]` with each entry and its
+own `entry_fingerprint`, `self_repaired[]`). If **any** system_health issue is open (including older per-entry ones),
+the run comments its list there (once per run, `<!-- mivo-qa-observation: <run id>/system_health -->`) instead of
+opening a new one; otherwise the table above applies to the aggregate fingerprint.
+
 The ```` ```json mivo-qa-finding ```` block carries `merge_sha`. Code-review fingerprints include a 12-hex hash of the
 normalized finding title, so different findings on the same file / symbol / category no longer collide.
 (An intermediate design keyed issues on fingerprint + merge commit; it was never used to create issues and is
@@ -530,7 +539,7 @@ Target: about 20 code PRs merged overnight, all tested before **08:30 Asia/Shang
 | `env_problems[]` | `{ pr?, message }` |
 | `llm_errors[]` | `{ pr, stage, model, … }` |
 | `environment` | `{ host, platform, node, sandbox, bwrap, chromium, playwright, python, disk_free_gb }` |
-| `bootstrap` | `{ ran, missing_before[], missing_after[], log, checked_at }` from the wrapper's self-check (`scripts/bootstrap-box.sh`). `ran: true` = something was missing and the bootstrap ran (a note lists what it installed); every entry left in `missing_after` is also in `env_problems`, plus one `qa_tool_failures` entry with `stage: "bootstrap"`. A run that cannot start Node 24 writes a minimal report instead: `run.mode: "env-failed"`, `prs: []`, `system_health.status: "failed"` (to `--out`, or `<out>.env-failed-<ts>.json` if that file exists), exit 3. |
+| `bootstrap` | `{ ran, missing_before[], missing_after[], self_repaired[], log, checked_at }` from the wrapper's self-check (`scripts/bootstrap-box.sh`). `ran: true` = something was missing and the bootstrap ran (a note lists what it installed); `self_repaired` = item names in `missing_before` but not in `missing_after` (fixed within this run: recorded here only, never an issue). A held apt/dpkg lock is waited for (up to `PANOPTES_APT_LOCK_WAIT`, default 600 s) instead of failing; every entry left in `missing_after` is also in `env_problems`, plus one `qa_tool_failures` entry with `stage: "bootstrap"`. A run that cannot start Node 24 writes a minimal report instead: `run.mode: "env-failed"`, `prs: []`, `system_health.status: "failed"` (to `--out`, or `<out>.env-failed-<ts>.json` if that file exists), exit 3. |
 | `discovery` | `{ window_start, window_end, found: [{ number, reason }], excluded_by_pr_filter? }` — `excluded_by_pr_filter` (only `--pr` runs): PR numbers discovery found that day but the run did not report on |
 | **`quota`** | model-call quota of this run, see *Model-call quotas* (absent before 2026-10-11) |
 | `notes[]` | strings (reuse notes, `tested_sha`/`reviewed_sha` mismatches, triage notes `维度适用性未判定（…）`, …) |

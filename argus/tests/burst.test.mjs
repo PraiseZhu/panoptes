@@ -112,14 +112,17 @@ test('步骤结果复用：输入路径 tree 哈希 + lockfile 不变 → 复用
 
 test('--burst-cutoff：到点未开始的 PR → not-tested（burst-cutoff，说明补测稍后接着测），也进 qa_tool_failures', async () => {
   const h = health()
-  let t = Date.parse('2026-10-12T08:00:00+08:00')
+  // relative to the real clock: the per-PR budget timer (overBudget) uses Date.now(), so a fixed 08:00 start fails
+  // once the real time is past the cutoff. Cutoff = real now + 30 min (Asia/Shanghai HH:MM).
+  let t = Date.now()
+  const cut = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(t + 30 * 60_000))
   const { prs } = await processTargets([{ number: 1, reason: 'merged' }, { number: 2, reason: 'merged' }], {
-    health: h, opts: { deadline: '08:30', deadlineKind: 'burst-cutoff' }, startedAt: new Date(t), now: () => t,
+    health: h, opts: { deadline: cut, deadlineKind: 'burst-cutoff' }, startedAt: new Date(t), now: () => t,
     processOne: async (x) => { t += 40 * 60_000; return { number: x.number, verdict: 'clean', severity: 'P3', findings: [], checks: [] } },
   })
   assert.equal(prs[0].verdict, 'clean')
   assert.equal(prs[1].verdict, 'not-tested'); assert.equal(prs[1].not_tested_code, 'burst-cutoff')
-  assert.match(prs[1].not_tested_reason, /burst cutoff 08:30 Asia\/Shanghai .*catch-up/)
+  assert.match(prs[1].not_tested_reason, new RegExp(`burst cutoff ${cut} Asia/Shanghai .*catch-up`))
   assert.deepEqual(h.qa_tool_failures.map((f) => [f.pr, f.stage]), [[2, 'burst-cutoff']])
 })
 
