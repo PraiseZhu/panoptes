@@ -371,6 +371,21 @@ test('bootstrap 状态进 system_health：装好了记 note；装不上记 qa_to
   assert.equal(broken.qa_tool_failures[0].stage, 'bootstrap'); assert.equal(broken.env_problems[0].message, 'chromium — /usr/lib/chromium/chromium')
 })
 
+test('收尾复查：开跑后才补齐的依赖记 resolved_later，撤掉对应问题', () => {
+  const h = () => ({ qa_tool_failures: [], env_problems: [], notes: [], environment: null })
+  const st = { ran: true, checked_at: 't0', missing_before: ['missing: apt:chromium', 'missing: apt:cron'], missing_after: ['missing: apt:chromium', 'missing: apt:cron'] }
+  const a = h(); nightly.recordBootstrap(a, st); a.env_problems.push({ message: '/usr/bin/chromium missing: browser E2E will be unavailable' })
+  nightly.recheckBootstrap(a, () => ['missing: apt:cron'], () => new Date('2026-10-12T10:46:00Z'))
+  assert.deepEqual(a.bootstrap.resolved_later, ['apt:chromium']); assert.deepEqual(a.env_problems.map((e) => e.message), ['apt:cron'])
+  assert.equal(a.qa_tool_failures.length, 1); assert.match(a.qa_tool_failures[0].message, /still missing at report time/)
+  assert.deepEqual(a.bootstrap.self_repaired, []); assert.equal(a.bootstrap.recheck.checked_at, '2026-10-12T18:46:00+08:00')
+  const b = h(); nightly.recordBootstrap(b, st); nightly.recheckBootstrap(b, () => [])
+  assert.equal(b.qa_tool_failures.length, 0); assert.equal(b.env_problems.length, 0); assert.match(b.notes.at(-1), /re-check at report time/)
+  const c = h(); nightly.recordBootstrap(c, st); nightly.recheckBootstrap(c, () => null)
+  assert.equal(c.bootstrap.recheck, undefined); assert.equal(c.env_problems.length, 2)
+  const d = h(); nightly.recordBootstrap(d, { ran: false, missing_before: [], missing_after: [] }); let called = false; nightly.recheckBootstrap(d, () => { called = true; return [] }); assert.equal(called, false)
+})
+
 test('内存护栏：可用内存低于阈值或 ARGUS_MAX_PARALLEL=1 → 覆盖率轮次串行', () => {
   assert.equal(nightly.memAvailableGb('MemTotal: 16386504 kB\nMemAvailable:    3482656 kB\n'), 3.3)
   assert.equal(nightly.memAvailableGb('nothing'), null)

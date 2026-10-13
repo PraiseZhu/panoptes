@@ -96,6 +96,32 @@ export function recordBootstrap(health, st) {
   }
 }
 
+// 收尾复查：开跑时的自检快照可能早于后来的修复（如 apt 锁释放后手动 / 另一进程补装）。
+// 报告写出前再跑一次 --check；开跑时缺、现在已齐的项记入 bootstrap.resolved_later，并从 env_problems / qa_tool_failures 撤掉。
+export function bootstrapCheckNow() {
+  try { execFileSync(join(CODE_DIR, '..', 'scripts', 'bootstrap-box.sh'), ['--check'], { encoding: 'utf8', timeout: 60_000, stdio: ['ignore', 'pipe', 'ignore'] }); return [] }
+  catch (err) { return typeof err.stdout === 'string' ? err.stdout.split('\n').filter((l) => l.trim()) : null }
+}
+export function recheckBootstrap(health, check = bootstrapCheckNow, now = () => new Date()) {
+  const b = health.bootstrap
+  if (!b?.missing_after?.length) return
+  const missing = check()
+  if (!Array.isArray(missing)) return // 复查本身失败：保留开跑时的结论
+  const item = (m) => m.replace(/^missing: /, '').split(' — ')[0]
+  const still = new Set(missing.map(item))
+  const resolved = [...new Set(b.missing_after.map(item))].filter((x) => !still.has(x))
+  b.recheck = { checked_at: toShanghaiIso(now()), missing }
+  b.resolved_later = resolved
+  if (!resolved.length) return
+  const gone = new Set(b.missing_after.filter((m) => !still.has(item(m))).map((m) => m.replace(/^missing: /, '')))
+  health.env_problems = health.env_problems.filter((e) => !gone.has(e.message) && !(resolved.some((r) => r.includes('chromium')) && /chromium missing: browser E2E/.test(e.message)))
+  health.qa_tool_failures = health.qa_tool_failures.filter((f) => f.stage !== 'bootstrap')
+  if (missing.length) health.qa_tool_failures.push({ stage: 'bootstrap', message: `${missing.length} dependenc${missing.length === 1 ? 'y' : 'ies'} still missing at report time`, detail: b.log || null })
+  for (const m of missing) if (!health.env_problems.some((e) => e.message === m.replace(/^missing: /, ''))) health.env_problems.push({ message: m.replace(/^missing: /, '') })
+  health.notes.push(`bootstrap self-check at ${b.checked_at} still reported missing ${resolved.join(', ')}; re-check at report time found them present (installed during the run, not by this run's bootstrap)`)
+  if (resolved.some((r) => r.includes('chromium'))) { const env = health.environment; if (env) { try { env.chromium = execFileSync(env.chromium_path, ['--version'], { encoding: 'utf8', timeout: 15_000 }).trim().split('\n')[0] } catch { /* keep */ } } }
+}
+
 // ── 内存护栏：可用内存不够时，覆盖率轮次不与首轮并行，改为排在首轮之后 ─────────────────
 export const parallelMinFreeGb = () => Number(process.env.ARGUS_PARALLEL_MIN_FREE_GB ?? 8)
 export { memAvailableGb }
@@ -1252,6 +1278,7 @@ export async function runNightly(opts = {}) {
   if (opts.catchUp) health.catch_up = opts.catchUp
 
   const allFindings = prs.flatMap((p) => p.findings ?? [])
+  recheckBootstrap(health)
   finalizeHealth(health, prs, startedAt)
   const report = {
     schema_version: SCHEMA_VERSION,
