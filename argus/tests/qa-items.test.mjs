@@ -315,6 +315,22 @@ test('AI 补测判定：通过且植入错误被发现 → kept；植入错误�
   assert.equal(ai.toAiTestResult({ timedOut: true }).result, 'discarded')
 })
 
+test('AI 补测「测试无效」：断言前就因缺测试数据 / 文件、缺模块失败 → discarded + invalid，不算 fails-on-current', () => {
+  const enoent = "FAIL  src/loops/lifeline-cli.argus.test.ts > accepts the packet SHA-256 argument\n\x1b[31mError: ENOENT: no such file or directory, open '/w/runs/n904-ai2/src/lifeline.json'\x1b[39m\n ❯ readJson scripts/loops/lifeline/state.mjs:8:44"
+  const r = ai.toAiTestResult({ ok: false, exitCode: 1, tail: enoent })
+  assert.equal(r.result, 'discarded'); assert.equal(r.invalid, true); assert.equal(r.invalid_kind, 'missing-file'); assert.equal(r.display_zh, '测试无效')
+  assert.match(r.reason, /^test invalid \(测试无效\).*ENOENT/)
+  assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: "Error: Failed to resolve import \"../x/nope.mjs\" from \"src/a.argus.test.ts\". Does the file exist?" }).invalid_kind, 'missing-module')
+  assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: "Error: Cannot find module '/w/src/missing.mjs'" }).invalid_kind, 'missing-module')
+  assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: "SyntaxError: The requested module '../state.mjs' does not provide an export named 'nope'" }).invalid_kind, 'missing-module')
+  // 断言失败（哪怕信息里带 ENOENT）仍是「在当前代码上失败」：可能是真问题，留给人确认
+  const asserted = "AssertionError: expected [Function] to throw error including 'EVIDENCE_FILE_TOO_LARGE' but got 'ENOENT: no such file or directory'"
+  assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: asserted }).result, 'fails-on-current')
+  assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: "AssertionError: expected [Function] to throw error including 'X' but got 'invalid-observation-identity'" }).result, 'fails-on-current')
+  assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: 'TypeError: x is not a function' }).result, 'fails-on-current')
+  assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1 }).invalid, undefined)
+})
+
 test('AI 补测步骤编号可接着上一轮编；每次调用的测试数上限生效', () => {
   const profile = { aiTests: { run: ['x', '{file}'], pathGlobs: ['src/**/*.argus.test.ts'] } }
   const t = { kind: 'coverage', purposeZh: 'p', covers: ['boundary'], filePath: 'src/a.argus.test.ts', content: 'x', mutation: { file: 'src/a.ts', find: 'a', replace: 'b' } }

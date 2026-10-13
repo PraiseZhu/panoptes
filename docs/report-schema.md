@@ -324,14 +324,29 @@ the tested commit is re-run once (`reproduced`) and becomes a `source: "ai-test"
 `test_backed: false`; it is only upgraded by a person after the failure is reproduced and confirmed. Generated files
 are deleted after the run; nothing is written to the target repo.
 
+**Invalid tests — 测试无效 (since 2026-10-13).** A case that fails on the tested commit **before any assertion** because
+the test's own precondition is missing is not evidence about the code: a missing fixture / data file (`ENOENT`,
+`no such file or directory`) or a missing module / export (`Cannot find module`, `Failed to resolve import`,
+`Failed to load url`, `does not provide an export named`). Such a case gets `result: "discarded"` (so it is never a
+finding and never counts as coverage) plus **`invalid: true`**, **`invalid_kind`** (`missing-file` | `missing-module`),
+**`display_zh: "测试无效"`** and a `reason` starting with `test invalid (测试无效)` that quotes the matched line. If the
+output contains an assertion failure (`AssertionError`, `expected … to …`) the case stays `fails-on-current` even when the
+message mentions `ENOENT` (e.g. `toThrow('X')` received an ENOENT) — that may be a real defect and is left for a person.
+`ai_tests.invalid` counts these cases; they are **included in** `ai_tests.discarded` (so `kept + discarded +
+fails_on_current = generated` still holds). The matching `checks[]` entry keeps `status: "discarded"` and adds
+`ai_invalid: true`, `display_zh: "测试无效"`. The reason is also fed back to the next generation round. Reports written
+before 2026-10-13 have no `invalid` fields: there such a case is a `fails-on-current` P2 finding (e.g. #904
+`ai-test-4`, ENOENT on `src/lifeline.json`).
+
 ```json
 {
   "status": "ok", "reason": null, "model": "openai/gpt-6-luna",
   "caps": { "max_model_calls": 2, "max_wall_min": 25, "max_tests_per_call": 3 },
   "model_calls": 2, "wall_s": 610, "gaps": ["boundary", "exception"],
-  "generated": 5, "kept": 2, "discarded": 3, "fails_on_current": 0, "newly_covered": ["boundary"],
+  "generated": 5, "kept": 2, "discarded": 3, "invalid": 1, "fails_on_current": 0, "newly_covered": ["boundary"],
   "tests": [{ "id": "ai-test-1", "round": 1, "kind": "coverage", "purpose": "…", "covers": ["boundary"], "file": "src/x.argus.test.ts",
-              "mutation_file": "src/x.ts", "result": "kept | discarded | fails-on-current", "reason": "…", "exit_code": 0, "duration_ms": 41000, "log_tail": "…", "reproduced": null }],
+              "mutation_file": "src/x.ts", "result": "kept | discarded | fails-on-current", "reason": "…", "exit_code": 0, "duration_ms": 41000, "log_tail": "…", "reproduced": null,
+              "invalid": "true (only on 测试无效 cases)", "invalid_kind": "missing-file | missing-module", "display_zh": "测试无效" }],
   "rounds": [{ "round": 1, "gaps": ["boundary", "exception"], "status": "ok", "offered": 3, "rejected_by_validation": 0, "tokens": 23000, "tests": ["ai-test-1", "…"] }]
 }
 ```
@@ -397,7 +412,7 @@ The daily `ai-test` quota (50) stays the global ceiling: if the remaining quota 
 is lowered to what is left, `degraded: true`, `degraded_from_calls` = the tier value and `reason` says so; with 0 left
 `ai_tests.status` is `capped` (额度用尽未补测).
 - Each test also appears in `checks[]` with `source: "ai-test"`, `dimension: "white-box"`, `status` `pass` (kept) /
-  `fail` (fails on current) / `discarded`, `ai_result`, `ai_reason`.
+  `fail` (fails on current) / `discarded`, `ai_result`, `ai_reason`; 测试无效 cases add `ai_invalid: true`, `display_zh: "测试无效"`.
 
 ## Code review reuse (reproducible review, since 2026-10-11)
 

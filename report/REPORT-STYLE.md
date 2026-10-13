@@ -117,7 +117,8 @@
   （大白话：「异常处理这块没有测试覆盖」）。这两个数和 `applicable` / `covered` / `missed` / `undetermined` 都是从 `dimension_status` 数出来的，不会互相矛盾。
   旧报告（`coverage.basis` 不是 `dimension_status …`）里的 `missed` / `undetermined` 是旧规则算的，**不要用**；10-10 的报告完全没有这些字段 → 写「当时还没做维度统计」。
 - **AI 补测**（`prs[].ai_tests`）：`kept` = 补的测试在当前代码上通过、并且能抓到故意植入的错误 → 算补上了覆盖（`newly_covered`）；
-  `discarded` = 抓不到植入的错误或跑不起来，丢弃，不算覆盖也不算问题；`fails_on_current` = 补的测试在当前代码上就失败 → 一条 P2 finding
+  `discarded` = 抓不到植入的错误或跑不起来，丢弃，不算覆盖也不算问题（其中 `invalid: true` / `display_zh: "测试无效"` 的是补的测试自己缺测试数据或文件、
+  还没走到断言就失败，since 2026-10-13；同样不算问题，群里不用提，计数 `ai_tests.invalid` 已含在 `discarded` 里）；`fails_on_current` = 补的测试在当前代码上就失败 → 一条 P2 finding
   （`source: "ai-test"`，`test_backed: false`，`status: "unconfirmed"`）。
   群里写成「自动补的测试发现一处可疑行为，还没人确认」，**不能**写成"测出了 bug"、不 @ 作者催改；`reproduced: true` 只说明重跑一次还失败，仍需人确认。
   成本（`model_calls`、`wall_s`）只进给 Praise 的私下补充。

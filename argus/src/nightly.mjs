@@ -440,7 +440,7 @@ async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, commo
   const t0 = Date.now()
   const deadline = t0 + caps.maxWallMin * 60_000
   const ai = out.ai_tests = { status: 'not-run', reason: null, model: null, caps: { max_model_calls: caps.maxCalls, max_wall_min: caps.maxWallMin, max_tests_per_call: caps.maxTestsPerCall },
-    model_calls: 0, wall_s: 0, gaps: [], generated: 0, kept: 0, discarded: 0, fails_on_current: 0, newly_covered: [], tests: [], rounds: [] }
+    model_calls: 0, wall_s: 0, gaps: [], generated: 0, kept: 0, discarded: 0, invalid: 0, fails_on_current: 0, newly_covered: [], tests: [], rounds: [] }
   const finish = (status, reason = null) => { ai.status = status; ai.reason = reason; ai.wall_s = Math.round((Date.now() - t0) / 1000) }
   if (!caps.enabled) return finish('disabled', 'ARGUS_AITESTS=0')
   if (!profile.aiTests) return finish('skipped', 'profile has no aiTests config')
@@ -502,10 +502,11 @@ async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, commo
   ai.kept = ai.tests.filter((t) => t.result === 'kept').length
   ai.fails_on_current = failing.length
   ai.discarded = ai.tests.filter((t) => t.result === 'discarded').length
+  ai.invalid = ai.tests.filter((t) => t.result === 'discarded' && t.invalid).length // 测试无效：已含在 discarded 里
   ai.newly_covered = ai.gaps.filter((k) => ai.tests.some((t) => t.result === 'kept' && t.covers.includes(k)))
   for (const t of ai.tests) {
     out.checks.push({ id: t.id, name: `AI test: ${t.purpose}`, kind: 'product', source: 'ai-test', dimension: 'white-box', qa_dimensions: t.covers,
-      status: t.result === 'kept' ? 'pass' : t.result === 'fails-on-current' ? 'fail' : 'discarded', exit_code: t.exit_code, duration_ms: t.duration_ms, failure_count: t.result === 'fails-on-current' ? 1 : 0, ai_result: t.result, ai_reason: t.reason })
+      status: t.result === 'kept' ? 'pass' : t.result === 'fails-on-current' ? 'fail' : 'discarded', exit_code: t.exit_code, duration_ms: t.duration_ms, failure_count: t.result === 'fails-on-current' ? 1 : 0, ai_result: t.result, ai_reason: t.reason, ...(t.invalid ? { ai_invalid: true, display_zh: t.display_zh } : {}) })
     if (t.result === 'fails-on-current') {
       const fp = fingerprintOf(repo, ['ai-test', t.file, t.purpose])
       out.findings.push({ source: 'ai-test', test_backed: false, check_id: t.id, check_name: `AI test: ${t.purpose}`, dimension: 'white-box', qa_dimensions: t.covers, severity: 'P2',

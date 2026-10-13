@@ -141,7 +141,26 @@ export function toAiGaps({ applicability, profile, results }) {
   return (applicability?.applicable ?? []).filter((k) => AI_GAP_DIMENSIONS.includes(k) && !covered.has(k))
 }
 
-// 补测执行结果 → 判定：kept（当前代码通过且植入错误后失败）/ discarded（植入错误对不上、植入后仍通过、没法跑）/
+// 「测试无效」：补测在当前代码上失败，但失败原因是测试自己没备好前提（缺测试数据 / 文件、导入了不存在的模块或导出），
+// 还没走到断言。这类失败说明不了被测代码有问题 → 按 discarded 处理（invalid: true，显示「测试无效」），不产生 finding。
+// 只要输出里有断言失败（AssertionError / expected … to …）就不算无效：例如 expect(...).toThrow('X') 却收到 ENOENT，仍是 fails-on-current。
+export const AI_TEST_INVALID_ZH = '测试无效'
+const INVALID_SIGNATURES = [
+  { kind: 'missing-file', re: /\bENOENT\b|no such file or directory/i },
+  { kind: 'missing-module', re: /Cannot find module ['"]|Cannot find package ['"]|Failed to resolve import|Failed to load url|Does the file exist\?|does not provide an export named/ },
+]
+const ASSERTION_FAILURE = /AssertionError|\bexpected\b[^\n]*\bto (be|equal|throw|have|contain|match|deep|strictly|include|satisfy)/i
+export function toInvalidTest(tail) {
+  const text = String(tail ?? '').replace(/\x1b\[[0-9;]*m/g, '')
+  if (!text || ASSERTION_FAILURE.test(text)) return null
+  for (const { kind, re } of INVALID_SIGNATURES) {
+    const line = text.split('\n').find((l) => re.test(l))
+    if (line) return { kind, line: line.trim().slice(0, 240) }
+  }
+  return null
+}
+
+// 补测执行结果 → 判定：kept（当前代码通过且植入错误后失败）/ discarded（植入错误对不上、植入后仍通过、没法跑、测试无效）/
 // fails-on-current（在当前代码上就失败：可能是缺陷，P2、test_backed=false，复现后才可升级）
 export function toAiTestResult(r) {
   if (!r) return { result: 'discarded', reason: 'not run (time budget / setup failed)' }
@@ -149,6 +168,9 @@ export function toAiTestResult(r) {
   if (r.ok) return { result: 'kept', reason: 'passes on the tested commit and fails with the injected bug' }
   if (r.unavailable && r.exitCode === 4) return { result: 'discarded', reason: 'mutation check failed (injected bug not caught, or mutation did not match the source)' }
   if (r.unavailable) return { result: 'discarded', reason: `could not run: ${r.unavailableReasonZh ?? `exit ${r.exitCode}`}` }
+  const invalid = toInvalidTest(r.tail)
+  if (invalid) return { result: 'discarded', invalid: true, invalid_kind: invalid.kind, display_zh: AI_TEST_INVALID_ZH,
+    reason: `test invalid (${AI_TEST_INVALID_ZH}): failed before any assertion because the test's own precondition is missing (${invalid.kind}: ${invalid.line})` }
   return { result: 'fails-on-current', reason: 'fails on the tested commit' }
 }
 
