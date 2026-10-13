@@ -338,6 +338,18 @@ fails_on_current = generated` still holds). The matching `checks[]` entry keeps 
 before 2026-10-13 have no `invalid` fields: there such a case is a `fails-on-current` P2 finding (e.g. #904
 `ai-test-4`, ENOENT on `src/lifeline.json`).
 
+**Verified mark on AI-test leads (since 2026-10-13).** Every `source: "ai-test"` entry in `prs[].findings[]` (the
+lead the daily report would surface) carries **`verified`** (boolean, default `false`), **`verified_at`** (ISO time or
+`null`), **`verified_by`** (`null` or who checked, e.g. `daily-review`) and **`verified_note`** (`null` or free text).
+Only `verified === true` counts as verified; missing / `null` / `false` (including all reports written before this
+field existed) mean **not verified**. The daily report (sent 09:04 Asia/Shanghai) includes only leads with
+`verified: true`; the daily review (10:57) verifies leads afterwards, and a lead verified after that day's report goes
+into the **next** day's report, naming the PR. Set it without touching any other field with
+`node scripts/verify-ai-lead.mjs --pr <N> --fingerprint <fingerprint|pr_fingerprint>` (or `--check-id ai-test-K`;
+options `--by`, `--note`, `--unset`, `--dry-run`, `--file`; default file
+`$MIVO_QA_REPORTS/merged/PR-<N>.json`, `MIVO_QA_REPORTS` defaults to `/workspace/mivo-qa/reports`). Exit 1 = no AI-test
+lead matched. `verified` is independent of `status` (`unconfirmed`) and `reproduced`.
+
 ```json
 {
   "status": "ok", "reason": null, "model": "openai/gpt-6-luna",

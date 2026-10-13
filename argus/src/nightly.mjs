@@ -510,7 +510,7 @@ async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, commo
     if (t.result === 'fails-on-current') {
       const fp = fingerprintOf(repo, ['ai-test', t.file, t.purpose])
       out.findings.push({ source: 'ai-test', test_backed: false, check_id: t.id, check_name: `AI test: ${t.purpose}`, dimension: 'white-box', qa_dimensions: t.covers, severity: 'P2',
-        title: `AI-generated test fails on the tested commit: ${t.purpose}`, status: 'unconfirmed', reproduced: t.reproduced, upgrade: 'only after the failure is reproduced and confirmed by a human',
+        title: `AI-generated test fails on the tested commit: ${t.purpose}`, status: 'unconfirmed', reproduced: t.reproduced, verified: false, verified_at: null, verified_by: null, verified_note: null, upgrade: 'only after the failure is reproduced and confirmed by a human',
         fingerprint: fp, pr_fingerprint: prFingerprint(fp, number), evidence: { tested_sha: sha, file: t.file, covers: t.covers, log_tail: t.log_tail } })
     }
   }

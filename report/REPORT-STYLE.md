@@ -122,6 +122,7 @@
   （`source: "ai-test"`，`test_backed: false`，`status: "unconfirmed"`）。
   群里写成「自动补的测试发现一处可疑行为，还没人确认」，**不能**写成"测出了 bug"、不 @ 作者催改；`reproduced: true` 只说明重跑一次还失败，仍需人确认。
   成本（`model_calls`、`wall_s`）只进给 Praise 的私下补充。
+- 日报只写 verified=true 的 AI 补测线索；当天未核实的不写，核实后写进次日日报并注明 PR 号。（`prs[].findings[]` 里 `source: "ai-test"` 的 `verified`；缺省 / null / false 都算未核实）
 - **额度用尽**（since 2026-10-11）：`ai_tests.status: "capped"`（一次都没补就被额度挡住；做了一部分时 `ai_tests.capped: true` +
   `capped_gaps`）、`code_review.status: "capped"`（当天没做代码审查）、`ai_summary.status: "capped"`、`triage.status: "capped"`（Jev 没跑）。
   每个 PR 的汇总在 `prs[].quota_capped[]`（`kind`、`dimensions`）。群里统一写「额度用尽未补测」，和"测了没覆盖"分开说；
