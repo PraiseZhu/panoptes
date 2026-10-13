@@ -10,7 +10,8 @@
 - 消息类型：飞书富文本 **post**（`zh_cn.title` + `content` 行数组；PR 号用 `{"tag":"a"}` 链接，小节标题用
   `{"tag":"text","style":["bold"]}`，空行用 `{"tag":"text","text":" "}`）。不用卡片：post 在手机上排版稳定、链接可点、
   无标题色问题。
-- 脚本：`node send-feishu-report.mjs --chat-id <id> --msg-type post --content-file <json> --dedupe-key mivo-qa-daily:<date>:<chat_id>`
+- 脚本：`node send-feishu-report.mjs --chat-id <id> --msg-type post --content-file <json> --dedupe-key mivo-daily-report:<数据日 YYYY-MM-DD>`
+  （10-10 起实际一直用这个 key；任务可能被重复触发，开跑前先查 feishu-sent.json 里有没有这个 key，有 message_id 就不再发。）
   - 发群：chat_id 必须先由 Praise 确认后加进 `allowed-chats.json`（当前为 `[]`，任何群都发不出去）。
   - 测试发 Praise 私聊：`--open-id <PraiseZhu 的 feishu_open_id> --allow-owner`（author-map 里他是 notify_via_feishu=false）。
   - 只读查群：`--list-chats`。
@@ -37,6 +38,7 @@
        改法只能来自该 finding 的 `evidence.recommendation`（可压缩，不得新增内容）。P0 的下一步写"修复后提 PR"，同样给"如果觉得不用改，在 PR 下留言说明就行"的退路。
    - **P2/P3 条目**（2 行）：`#N 短标题 — @作者 或 作者名` + `· <级别> <一句问题和动作>`，例如
      `· P2 1 条小建议：窗口比较矮时，栏目内容可能被切掉看不到，可顺手加个降级布局或允许滚动。`
+     AI 补测线索（`source:"ai-test"` 的 P2）写在**它所属 PR 的条目里**（P1 条目可加一行 `· 另有 1 条 AI 补测线索，待确认，先不用处理。`），或统一放「测试覆盖情况」一节；不要挂在别的 PR 条目下面。
      只有覆盖率差、且属仓库基线的写「只是仓库整体覆盖率差一点（见下），本 PR 不用处理」；只有 flaky 的写「有个测试不稳定，重跑就过了，见下」（和合并前代码的对比按下面第 4 条写）；纯文档写「纯文档，按规则不跑测试，审查无问题，无需处理」。
    - 动作措辞不得出现"请尽快""立刻""马上"等施压词；P0 用"请优先修复"。
 3. **已私信通知**（紧跟 P1 节；没有 P0/P1 时紧跟开头）：每行 `#N 短标题 → 作者中文名，已飞书私信`，顺序与正文一致。
@@ -56,7 +58,13 @@
      `result:"passes-on-base"` → 「在合并前的代码上跑了一次是过的，单跑一次说明不了它不会偶发失败」；
      `compared:false` 或没有 `base_comparison`（旧报告）→ 必须写「未与合并前版本对比」，不写「跟 PR 无关」；
      `base_comparison.reason:"report predates feature"` → 照 `note_zh` 写「未与合并前版本对比（该报告早于此功能生成）」。
+   - **AI 补测档位**（since 2026-10-13，读 `prs[].ai_test_tier`）：每个测了的 PR 带一句，例「AI 补测档位 M（产品代码 120 行、5 个文件，上限 2 轮，每轮 3 个测试）」；
+     `tier:"none"` 写「纯文档或配置改动，未做 AI 补测」；`degraded:true` 补「当天补测额度不足，已降为 N 轮」。字段为 `null`（功能上线前的旧报告）就不写，不要编。
+     PR 多时可合并成一行（如「#930 档位 M、#938 档位 S」），控制总行数。
 5. **系统状态**：一句大白话。`system_health.status` ok 且 complete → "N 个都测完了，测试系统本身运行正常"；否则如实说哪类问题（如"有 1 个没测完"），不贴细节。
+   - `system_health.bootstrap.self_repaired[]` 非空：只写「电脑换实例后依赖已自动补齐」，不算测试系统故障，开头一句照写"运行正常"。
+     `missing_after[]` 仍非空才算异常；说"已自动修好"必须有依据（后续报告恢复 ok 或系统健康 issue 已自动关闭），否则只说"有异常"。
+   - 已自动关闭的系统健康 issue 不当成待处理的派活，只在给 Praise 的私下补充里一句话带过。
 6. **未合并（顺带）**：可选，一行带过，同样用大白话（如"有一个性能测试没过，但它改之前就不过，不是它导致的"）。
 7. **分级说明**（末行，固定文案；post 不支持小字号，单独一行放最后）：
    `分级说明：P0 合进去后现在的代码还在出错，要先修；P1 这个 PR 带来的严重问题，请作者看看；P2 测试补得不够、测试不稳定或一般建议，有空再改；P3 只是提醒或没问题。`
