@@ -1581,7 +1581,7 @@
         "--reporter=json",
         "--outputFile=${TEST_REPORT}"
       ],
-      "timeoutMin": 60,
+      "timeoutMin": 120,
       "covers": [
         "unit",
         "functional",
@@ -1599,7 +1599,7 @@
         ]
       },
       "shard": {
-        "max": 8,
+        "max": 2,
         "perShardGb": 1.2
       }
     },

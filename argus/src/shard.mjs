@@ -1,7 +1,7 @@
 // 单测分片（burst 容量）：一个 vitest 步骤拆成 N 个 `--shard=i/N` 进程并行跑（Mivo 的 vitest.config 是
 // maxWorkers: 1 / fileParallelism: false，单进程串行；分片是独立进程，互不共享内存状态）。
 // 分片数受内存护栏约束：同一进程里所有正在跑的分片步骤（首轮 h1 与覆盖率轮次 cov 可能同时在跑）共用一个预算
-//   预算 = min(ARGUS_SHARD_BUDGET_GB（默认 10）, MemAvailable − ARGUS_SHARD_RESERVE_GB（默认 1.5）) − 已被其他分片步骤占用的
+//   预算 = min(ARGUS_SHARD_BUDGET_GB（默认 3）, MemAvailable − ARGUS_SHARD_RESERVE_GB（默认 1.5）) − 已被其他分片步骤占用的
 //   分片数 = clamp(floor(预算 / 每片内存), 1, min(step.shard.max, CPU 核数))，ARGUS_UNIT_SHARDS 可强制指定（1 = 不分片）。
 // 跑完把各片的 vitest JSON 报告合成一份（判定、flaky 对比照旧读这一份），覆盖率 coverage-final.json 按语句位置把命中数相加，
 // 再重新算 coverage-summary.json 的总数。
@@ -20,7 +20,7 @@ export function shardPlan(step, { freeGb = memGbFrom(), reserved = reservedGb, c
   const max = Math.max(1, Math.min(Number(cfg.max ?? 8), cores, Number(env.ARGUS_SHARD_MAX ?? 2) || 2))
   const per = Number(env.ARGUS_SHARD_GB ?? cfg.perShardGb ?? 1.2)
   const forced = env.ARGUS_UNIT_SHARDS != null && env.ARGUS_UNIT_SHARDS !== '' ? Math.max(1, Math.floor(Number(env.ARGUS_UNIT_SHARDS)) || 1) : null
-  const cap = Number(env.ARGUS_SHARD_BUDGET_GB ?? 10)
+  const cap = Number(env.ARGUS_SHARD_BUDGET_GB ?? 3)
   const keep = Number(env.ARGUS_SHARD_RESERVE_GB ?? 1.5)
   const budget = Math.max(0, Math.min(cap, (freeGb ?? 0) - keep) - reserved)
   if (forced != null) return { shards: Math.min(forced, max), reason: `ARGUS_UNIT_SHARDS=${forced}`, per_shard_gb: per, budget_gb: round1(budget), mem_available_gb: round1(freeGb), reserved_gb: round1(reserved) }

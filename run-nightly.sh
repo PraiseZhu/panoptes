@@ -67,7 +67,8 @@
 #
 # Output: $QA_HOME/reports/YYYY-MM-DD.json  (logs: $QA_HOME/argus-root/logs)
 # Exit codes: 0 ok/degraded, 3 pipeline failed or QA environment broken (see system_health), 1 usage/config error,
-#             75 another run active, or skipped for low memory (PANOPTES_MIN_MEM_GB, default 3) → left for catch-up.
+#             75 another run active. Low memory (MemAvailable < PANOPTES_MIN_MEM_GB, default 3) delays the run up to
+#             30 min, then runs it single-shard; it never skips.
 set -euo pipefail
 
 PANOPTES_DIR="${PANOPTES_DIR:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)}"
@@ -275,20 +276,24 @@ EXTRA_EXIT_CLEANUP='rm -f "$BOOT_STATUS"; rm -rf --one-file-system "$RUN_TMP"'
 cd "$PANOPTES_DIR/argus"
 LOG="$ARGUS_ROOT/logs/nightly-$(date +%Y%m%dT%H%M%S).log"
 
-# Memory guard (box: 15 GB, no swap, shared by several bots; 2026-10-14 froze from memory exhaustion).
-# Wait while MemAvailable < PANOPTES_MIN_MEM_GB (default 3), rechecking every 60 s for up to 15 min; still low →
-# skip with exit 75 (no report written, so the PR stays a catch-up gap: not tested, never passed).
+# Memory gate (box: 15 GB, no swap, shared by several bots; 2026-10-14 froze from memory exhaustion).
+# Never skips a PR: while MemAvailable < PANOPTES_MIN_MEM_GB (default 3) wait, rechecking every 60 s for up to
+# PANOPTES_MEM_WAIT_S (default 1800 = 30 min); still low → run anyway with ARGUS_UNIT_SHARDS=1 (one vitest process,
+# slower but smaller). A run that then dies or times out writes no passing report, so catch-up retests the PR.
 MIN_MEM_KB=$(( ${PANOPTES_MIN_MEM_GB:-3} * 1024 * 1024 ))
 mem_avail_kb() { awk '/^MemAvailable:/{print $2}' /proc/meminfo; }
 mem_waited=0
 while (( $(mem_avail_kb) < MIN_MEM_KB )); do
-  if (( mem_waited >= ${PANOPTES_MEM_WAIT_S:-900} )); then
-    msg="skipped: MemAvailable $(( $(mem_avail_kb) / 1024 )) MiB < ${PANOPTES_MIN_MEM_GB:-3} GiB after ${mem_waited}s; left for catch-up"
+  if (( mem_waited >= ${PANOPTES_MEM_WAIT_S:-1800} )); then
+    msg="MemAvailable $(( $(mem_avail_kb) / 1024 )) MiB still < ${PANOPTES_MIN_MEM_GB:-3} GiB after ${mem_waited}s: running with ARGUS_UNIT_SHARDS=1"
+    export ARGUS_UNIT_SHARDS=1
     echo "[panoptes] $msg" | tee -a "$LOG" >&2
-    ctl "run-nightly skipped low memory" "\"reason\":\"$msg\""
-    exit 75
+    ctl "run-nightly low memory, single shard" "\"reason\":\"$msg\""
+    break
   fi
-  echo "[panoptes] MemAvailable $(( $(mem_avail_kb) / 1024 )) MiB < ${PANOPTES_MIN_MEM_GB:-3} GiB, waiting 60s (${mem_waited}s so far)" | tee -a "$LOG" >&2
+  msg="MemAvailable $(( $(mem_avail_kb) / 1024 )) MiB < ${PANOPTES_MIN_MEM_GB:-3} GiB, waiting 60s (${mem_waited}s so far)"
+  echo "[panoptes] $msg" | tee -a "$LOG" >&2
+  (( mem_waited % 300 == 0 )) && ctl "run-nightly waiting for memory" "\"reason\":\"$msg\""
   sleep 60; mem_waited=$(( mem_waited + 60 ))
 done
 echo "[panoptes] code: $PANOPTES_DIR ($(git -C "$PANOPTES_DIR" rev-parse --short HEAD 2>/dev/null || echo '?'))  data: $QA_HOME  log: $LOG" >&2

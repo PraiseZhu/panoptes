@@ -545,7 +545,7 @@ A lock timeout (exit 75) stops the invocation; the next one retries. After 3 att
 Target: about 20 code PRs merged overnight, all tested before **08:30 Asia/Shanghai** (the daily report goes out at
 09:04). Three mechanisms, all recorded in the report:
 
-1. **Unit-test sharding.** The `unit` step (profile `shard: { max: 8, perShardGb }`) runs as N parallel
+1. **Unit-test sharding.** The `unit` step (profile `shard: { max: 2, perShardGb }`) runs as N parallel
    `vitest --shard=i/N` processes (Mivo's own config is single-worker, so shards are separate processes) in the same
    sandboxed checkout, each with its own `TMPDIR`, JSON report and coverage directory. Afterwards the per-shard vitest
    JSON reports are merged into the usual `reports/unit.json` (counts summed, `testResults` concatenated) and the
@@ -553,8 +553,13 @@ Target: about 20 code PRs merged overnight, all tested before **08:30 Asia/Shang
    source file loaded by several shards is counted once) and `coverage-summary.json` totals are recomputed (istanbul
    rules); `coverage_gate` and new-code coverage read the merged files exactly as before. **Memory guard:** one budget
    for all shard steps running at the same time (the verdict run `h1` and the coverage run `cov` may overlap):
-   `min(ARGUS_SHARD_BUDGET_GB (10), MemAvailable − ARGUS_SHARD_RESERVE_GB (1.5)) − GB held by other shard steps`,
-   N = `clamp(floor(budget / perShardGb), 1, min(max, CPU cores))`; `ARGUS_UNIT_SHARDS=N` forces N (1 = off).
+   `min(ARGUS_SHARD_BUDGET_GB (3), MemAvailable − ARGUS_SHARD_RESERVE_GB (1.5)) − GB held by other shard steps`,
+   N = `clamp(floor(budget / perShardGb), 1, min(max, CPU cores, ARGUS_SHARD_MAX (2)))`; `ARGUS_UNIT_SHARDS=N` forces N (1 = off),
+   still capped by ARGUS_SHARD_MAX. Since 2026-10-14 (box froze from memory exhaustion: 15 GB, no swap, shared by
+   several bots) the defaults keep one process at ≤ 3 shards (~3.6 GB) total across overlapping `h1` / `cov`; overlap between
+   separate PR processes is bounded by run-nightly.sh's pre-run gate (wait while MemAvailable < 3 GiB, up to 30 min,
+   then run anyway with `ARGUS_UNIT_SHARDS=1`; a PR is never skipped for memory). The `unit` step timeout is 120 min
+   so a single-shard, memory-constrained run fits; a run that still dies or times out is reported not-tested.
    The existing coverage-parallel guard (`run_mode`, `ARGUS_PARALLEL_MIN_FREE_GB`) still decides whether `cov` overlaps `h1`.
    `checks[].shards` (and `coverage_gate.unit_run_under_coverage.shards`): `{ count, reason, mem_available_gb,
    budget_gb, per_shard_gb, per_shard: [{ shard, exit_code, timed_out, duration_ms }] }`; a single-process run has

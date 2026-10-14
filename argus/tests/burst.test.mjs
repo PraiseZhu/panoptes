@@ -15,13 +15,13 @@ const health = () => ({ status: 'ok', qa_tool_failures: [], env_problems: [], ll
 const step = { id: 'unit', shard: { max: 8, perShardGb: 1.5 } }
 
 test('分片数：内存够 → 8 片（CPU 核数封顶）；内存紧 → 按预算降；其他分片步骤占用的预算要扣掉；ARGUS_UNIT_SHARDS 强制', () => {
-  assert.equal(shard.shardPlan(step, { freeGb: 14, reserved: 0, cores: 8, env: { ARGUS_SHARD_MAX: '8' } }).shards, 6, 'budget min(10, 14-1.5)=10 → 6 × 1.5 GB')
-  assert.equal(shard.shardPlan(step, { freeGb: 14, reserved: 0, cores: 8, env: { ARGUS_SHARD_MAX: '8', ARGUS_SHARD_GB: '1' } }).shards, 8)
-  assert.equal(shard.shardPlan(step, { freeGb: 14, reserved: 0, cores: 4, env: { ARGUS_SHARD_MAX: '8', ARGUS_SHARD_GB: '1' } }).shards, 4, 'never more than cores')
-  assert.equal(shard.shardPlan(step, { freeGb: 5, reserved: 0, cores: 8, env: { ARGUS_SHARD_MAX: '8' } }).shards, 2, '(5-1.5)/1.5')
-  assert.equal(shard.shardPlan(step, { freeGb: 14, reserved: 9, cores: 8, env: { ARGUS_SHARD_MAX: '8' } }).shards, 1, 'h1 already holds 9 GB → cov gets 1 shard')
-  assert.equal(shard.shardPlan(step, { freeGb: 1, reserved: 0, cores: 8, env: { ARGUS_SHARD_MAX: '8' } }).shards, 1, 'never below 1')
-  assert.equal(shard.shardPlan(step, { freeGb: 1, reserved: 0, cores: 8, env: { ARGUS_SHARD_MAX: '8', ARGUS_UNIT_SHARDS: '3' } }).shards, 3)
+  assert.equal(shard.shardPlan(step, { freeGb: 14, reserved: 0, cores: 8, env: { ARGUS_SHARD_MAX: '8', ARGUS_SHARD_BUDGET_GB: '10' } }).shards, 6, 'budget min(10, 14-1.5)=10 → 6 × 1.5 GB')
+  assert.equal(shard.shardPlan(step, { freeGb: 14, reserved: 0, cores: 8, env: { ARGUS_SHARD_MAX: '8', ARGUS_SHARD_BUDGET_GB: '10', ARGUS_SHARD_GB: '1' } }).shards, 8)
+  assert.equal(shard.shardPlan(step, { freeGb: 14, reserved: 0, cores: 4, env: { ARGUS_SHARD_MAX: '8', ARGUS_SHARD_BUDGET_GB: '10', ARGUS_SHARD_GB: '1' } }).shards, 4, 'never more than cores')
+  assert.equal(shard.shardPlan(step, { freeGb: 5, reserved: 0, cores: 8, env: { ARGUS_SHARD_MAX: '8', ARGUS_SHARD_BUDGET_GB: '10' } }).shards, 2, '(5-1.5)/1.5')
+  assert.equal(shard.shardPlan(step, { freeGb: 14, reserved: 9, cores: 8, env: { ARGUS_SHARD_MAX: '8', ARGUS_SHARD_BUDGET_GB: '10' } }).shards, 1, 'h1 already holds 9 GB → cov gets 1 shard')
+  assert.equal(shard.shardPlan(step, { freeGb: 1, reserved: 0, cores: 8, env: { ARGUS_SHARD_MAX: '8', ARGUS_SHARD_BUDGET_GB: '10' } }).shards, 1, 'never below 1')
+  assert.equal(shard.shardPlan(step, { freeGb: 1, reserved: 0, cores: 8, env: { ARGUS_SHARD_MAX: '8', ARGUS_SHARD_BUDGET_GB: '10', ARGUS_UNIT_SHARDS: '3' } }).shards, 3)
   assert.equal(shard.shardPlan({ id: 'lint' }, { freeGb: 14 }).shards, 1)
   const release = shard.reserveShards(6); assert.equal(shard.shardReservedGb(), 6); release(); release(); assert.equal(shard.shardReservedGb(), 0)
 })
@@ -30,6 +30,7 @@ test('分片数默认封顶 2（共享机器防内存耗尽）', () => {
   assert.equal(shard.shardPlan(step, { freeGb: 14, reserved: 0, cores: 8, env: {} }).shards, 2)
   assert.equal(shard.shardPlan(step, { freeGb: 14, reserved: 0, cores: 8, env: { ARGUS_UNIT_SHARDS: '6' } }).shards, 2)
   assert.equal(shard.shardPlan(step, { freeGb: 1, reserved: 0, cores: 8, env: {} }).shards, 1)
+  assert.equal(shard.shardPlan(step, { freeGb: 14, reserved: 3, cores: 8, env: {} }).shards, 1, 'default budget 3 GB: h1 holds 2 × 1.5 → cov 1 shard')
 })
 
 test('分片 JSON 报告合并：计数相加、testResults 拼接、任何一片失败 success=false', () => {
