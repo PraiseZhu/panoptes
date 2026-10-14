@@ -6,6 +6,12 @@ import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, mkdtem
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
+const feedbackBlock = (pr) => `怎么告诉我处理好了：
+· 改了：提修复 PR，标题或描述里写上原 PR 号（比如 #${pr}）
+· 不用改：在原 PR 下留言写一句原因
+· 飞书私信回复我收不到，别回这里
+这两种我每天都会自动查，看到了就不再提醒 🙃`;
+
 
 const QA = process.env.QA_HOME || '/workspace/mivo-qa'
 const REPO = 'xindong/mivo-canvas-plugin'
@@ -107,7 +113,7 @@ function detect(it) {
 const oneLine = (s) => String(s).replace(/\s+/g, ' ').trim()
 function remindText(items) {
   const lines = items.map(it => `· #${it.pr} https://github.com/${REPO}/pull/${it.pr} — ${oneLine(it.problems[0] || '上次私聊提到的问题')}`)
-  return `之前私聊提过的${items.length > 1 ? '几处' : '这处'}，还没看到动静 👀\n\n${lines.join('\n')}\n\n不催你，就是提一下，免得${items.length > 1 ? '它们' : '它'}自己躺到下周~\n如果觉得不用改，在 PR 下留言说明就行，我就不会再来问 🙃`
+  return `之前私聊提过的${items.length > 1 ? '几处' : '这处'}，还没看到动静 👀\n\n${lines.join('\n')}\n\n不催你，就是提一下，免得${items.length > 1 ? '它们' : '它'}自己躺到下周~\n\n${feedbackBlock(items[0].pr)}`
 }
 function thanksText(items) {
   const prs = items.map(it => `#${it.pr}`).join('、')
