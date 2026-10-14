@@ -178,7 +178,7 @@ export function run(cmd, args, { cwd, env, timeoutMs = 10 * 60_000, logFile, inp
   if (budgetEnd != null) {
     const left = budgetEnd - Date.now()
     if (left <= 0) return Promise.resolve({ ok: false, exitCode: null, timedOut: true, budgetExceeded: true, durationMs: 0, tail: 'PR time budget exhausted; not started', failures: [], failureDetails: [], failureParseStatus: 'incomplete' })
-    if (left < timeoutMs) { timeoutMs = left; budgetCut = true }
+    if (left < timeoutMs) { timeoutMs = Math.max(1, Math.floor(left)); budgetCut = true }
   }
   return new Promise((resolve) => {
     const started = Date.now()
@@ -209,6 +209,7 @@ export function run(cmd, args, { cwd, env, timeoutMs = 10 * 60_000, logFile, inp
     child.stdout.on('data', (buf) => onData('stdout', buf))
     child.stderr.on('data', (buf) => onData('stderr', buf))
     if (input != null) child.stdin.end(input)
+    timeoutMs = Math.max(1, Math.floor(Number(timeoutMs)) || 1)
     const timer = setTimeout(() => {
       timedOut = true
       killGroup(child, 'SIGTERM')

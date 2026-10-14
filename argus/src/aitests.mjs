@@ -104,7 +104,7 @@ export async function generateTargetedTests({ db, secrets, riskClass, pr, files,
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${secrets.ARGUS_LLM_API_KEY}` },
       body: JSON.stringify({ model: MODEL, reasoning_effort: EFFORT[riskClass], response_format: { type: 'json_object' }, max_completion_tokens: 16_000, messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: user }] }),
-      signal: AbortSignal.timeout(Math.max(30_000, timeoutMs)),
+      signal: AbortSignal.timeout(Math.max(30_000, Math.floor(Number(timeoutMs)) || 30_000)),
     })
     const data = await resp.json().catch(() => ({}))
     if (quota) quota.consume('ai-test', data?.usage?.total_tokens ?? 0)

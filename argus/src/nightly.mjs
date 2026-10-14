@@ -356,14 +356,22 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
       baseComparison = flakyBaseComparison({ baseSha, baseRun: compareOn(base) })
       why = `${why}; ${baseComparison.note}`
     }
+    const baseRun = compareOn(base)
+    // 合并前同检查也失败：显式 pre_existing 给日报读；test_timeout 等无法 fingerprint 对齐时仍标为 pre-existing（P3）
+    if (baseRun === 'fail' && status === 'unverified') {
+      status = 'pre-existing'
+      why = 'also fails on the base revision (base run failed; failure type not fingerprint-comparable, e.g. test_timeout)'
+    }
+    const preExisting = status === 'pre-existing' || baseRun === 'fail'
     out.failed_checks.push({
       check_id: stepId, check_name: r?.nameZh, dimension: toBox(step, profile), qa_dimensions: step.covers ?? [],
       test: named ? test : null, failure_type: type, status, flaky: status === 'flaky', related_to_pr: status === 'flaky' ? false : undefined,
+      pre_existing: preExisting,
       severity: severityFor({ status, step, merged }), attribution: why,
       fingerprint: fp, pr_fingerprint: prFingerprint(fp, number),
       evidence: {
         tested_sha: sha, base_sha: baseSha, exit_code: r?.exitCode, timed_out: Boolean(r?.timedOut),
-        first_run: 'fail', rerun: compareOn(rerun), base_run: compareOn(base), ...(latest ? { latest_main_run: compareOn(latest) } : {}),
+        first_run: 'fail', rerun: compareOn(rerun), base_run: baseRun, ...(latest ? { latest_main_run: compareOn(latest) } : {}),
         command: (step.cmd ?? []).join(' '), log_tail: evidenceTail(r, named ? test : null), log_file: join(evDir, 'h1/logs', `${stepId}.log`),
         ...(baseComparison?.compared ? { base_log_file: join(evDir, 'b/logs', `${stepId}.log`) } : {}),
       },
@@ -459,7 +467,7 @@ async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, commo
   for (let round = 1; round <= caps.maxCalls && remaining.length; round++) {
     const left = deadline - Date.now()
     if (left < 3 * 60_000) { ai.rounds.push({ round, skipped: 'wall-time cap reached' }); break }
-    const gen = await generateTargetedTests({ db, secrets, riskClass, pr, files, profile, gaps: remaining, maxTests: caps.maxTestsPerCall, highRiskFiles, feedback, timeoutMs: Math.min(8 * 60_000, left / 2), quota })
+    const gen = await generateTargetedTests({ db, secrets, riskClass, pr, files, profile, gaps: remaining, maxTests: caps.maxTestsPerCall, highRiskFiles, feedback, timeoutMs: Math.max(1, Math.floor(Math.min(8 * 60_000, left / 2))), quota })
     if (gen.status === 'capped') {
       // 每日 ai-test 额度用尽：这一轮及之后都不调模型；剩下的缺口维度记 capped（显示「额度用尽未补测」）
       ai.capped = true; ai.capped_gaps = [...remaining]; ai.quota = gen.quota

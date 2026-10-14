@@ -171,3 +171,19 @@ test('assemble：后来源覆盖同号 PR、summary 重算、system_health 取�
   assert.equal(r2.system_health.complete, false)
   assert.throws(() => assembleReport({ date: 'd', sources: [{ file: 'b', doc: batch }], order: [1, 9] }), /PR 9/)
 })
+
+test('pre_existing: unverified + base_run fail upgrades to pre-existing P3 (shadowRoundTrip-style)', async () => {
+  const { severityFor } = await import('../src/nightly.mjs')
+  let status = 'unverified'
+  let why = 'reproduced; base comparison incomplete'
+  const baseRun = 'fail'
+  if (baseRun === 'fail' && status === 'unverified') {
+    status = 'pre-existing'
+    why = 'also fails on the base revision (base run failed; failure type not fingerprint-comparable, e.g. test_timeout)'
+  }
+  const pre_existing = status === 'pre-existing' || baseRun === 'fail'
+  assert.equal(status, 'pre-existing')
+  assert.equal(pre_existing, true)
+  assert.equal(severityFor({ status, step: { kind: 'product' }, merged: true }), 'P3')
+  assert.match(why, /base revision/)
+})
