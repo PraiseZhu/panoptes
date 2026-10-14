@@ -67,12 +67,21 @@
 #
 # Output: $QA_HOME/reports/YYYY-MM-DD.json  (logs: $QA_HOME/argus-root/logs)
 # Exit codes: 0 ok/degraded, 3 pipeline failed or QA environment broken (see system_health), 1 usage/config error,
-#             75 another run active.
+#             75 another run active, or skipped for low memory (PANOPTES_MIN_MEM_GB, default 3) → left for catch-up.
 set -euo pipefail
 
 PANOPTES_DIR="${PANOPTES_DIR:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)}"
 QA_HOME="${QA_HOME:-/workspace/mivo-qa}"
 SECRETS="${QA_SECRETS_FILE:-/home/box/.config/mivo-qa/secrets.env}"
+
+# Launch / exit lines in control.log (before any lock, on every exit path) so an interrupted or queued run is visible.
+mkdir -p "$QA_HOME/argus-root/logs" 2>/dev/null || true
+CONTROL_LOG="$QA_HOME/argus-root/logs/control.log"
+ctl() { printf '{"t":"%s","level":"info","msg":"%s","pid":%d,%s}\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$1" "$$" "$2" >>"$CONTROL_LOG" 2>/dev/null || true; }
+LAUNCH_ARGS="$(printf '%s ' "$@" | sed 's/[\\"]/\\&/g')"
+ctl "run-nightly launch" "\"args\":\"${LAUNCH_ARGS% }\""
+EXTRA_EXIT_CLEANUP=":"
+trap 'rc=$?; eval "$EXTRA_EXIT_CLEANUP"; ctl "run-nightly exit" "\"exitCode\":$rc"' EXIT
 
 # --wait-lock [SECONDS]: wait for the single-instance lock instead of exiting 75 (default 14400 = 4h).
 # Consumed here; everything else is passed to the Node CLI unchanged.
@@ -116,6 +125,7 @@ unset ARGUS_ALLOW_ISSUES || true
 export ARGUS_ROOT="$QA_HOME/argus-root"
 mkdir -p "$ARGUS_ROOT/logs"
 
+
 # /tmp sweep: leftover argus-* dirs older than 24 h, owned by us, not held by a live process (scripts/sweep-tmp.sh).
 # Runs at every start, so the catch-up cron (run-nightly.sh --catch-up) sweeps too. PANOPTES_TMP_SWEEP=0 disables.
 if [[ "${PANOPTES_TMP_SWEEP:-1}" != "0" && -x "$PANOPTES_DIR/scripts/sweep-tmp.sh" ]]; then
@@ -151,7 +161,7 @@ fi
 printf '{"checked_at":"%s","ran":%s,"missing_before":%s,"missing_after":%s,"log":"%s"}\n' \
   "$(date -Is)" "$BOOT_RAN" "$(json_list <<<"$MISSING_BEFORE")" "$(json_list <<<"$MISSING_AFTER")" "$BOOT_LOG" >"$BOOT_STATUS"
 export PANOPTES_BOOTSTRAP_STATUS="$BOOT_STATUS"
-trap 'rm -f "$BOOT_STATUS"' EXIT
+EXTRA_EXIT_CLEANUP='rm -f "$BOOT_STATUS"' 
 
 # The QA environment is unusable without Node 24: record it as a QA system failure instead of a bare exit.
 env_failed() {
@@ -243,6 +253,7 @@ if [[ -n "$CATCH_UP" ]]; then
   flock -n 8 || exit 0
   cd "$PANOPTES_DIR/argus"
   export PANOPTES_RUN_NIGHTLY="$PANOPTES_DIR/run-nightly.sh"
+  ctl "run-nightly exec catch-up (exec replaces the shell: no exit line follows)" "\"exitCode\":null"
   exec node --disable-warning=ExperimentalWarning src/cli.mjs catch-up --wait-lock "${WAIT_LOCK:-14400}" --trigger "$TRIGGER" ${CU_ARGS[@]+"${CU_ARGS[@]}"}
 fi
 
@@ -259,10 +270,27 @@ fi
 # /tmp/argus-run-XXXXXX and is removed on exit (sandboxed runs bind their own dirs explicitly, unaffected).
 RUN_TMP="$(mktemp -d "${TMPDIR:-/tmp}/argus-run-XXXXXX")"
 export TMPDIR="$RUN_TMP"
-trap 'rm -f "$BOOT_STATUS"; rm -rf --one-file-system "$RUN_TMP"' EXIT
+EXTRA_EXIT_CLEANUP='rm -f "$BOOT_STATUS"; rm -rf --one-file-system "$RUN_TMP"'
 
 cd "$PANOPTES_DIR/argus"
 LOG="$ARGUS_ROOT/logs/nightly-$(date +%Y%m%dT%H%M%S).log"
+
+# Memory guard (box: 15 GB, no swap, shared by several bots; 2026-10-14 froze from memory exhaustion).
+# Wait while MemAvailable < PANOPTES_MIN_MEM_GB (default 3), rechecking every 60 s for up to 15 min; still low →
+# skip with exit 75 (no report written, so the PR stays a catch-up gap: not tested, never passed).
+MIN_MEM_KB=$(( ${PANOPTES_MIN_MEM_GB:-3} * 1024 * 1024 ))
+mem_avail_kb() { awk '/^MemAvailable:/{print $2}' /proc/meminfo; }
+mem_waited=0
+while (( $(mem_avail_kb) < MIN_MEM_KB )); do
+  if (( mem_waited >= ${PANOPTES_MEM_WAIT_S:-900} )); then
+    msg="skipped: MemAvailable $(( $(mem_avail_kb) / 1024 )) MiB < ${PANOPTES_MIN_MEM_GB:-3} GiB after ${mem_waited}s; left for catch-up"
+    echo "[panoptes] $msg" | tee -a "$LOG" >&2
+    ctl "run-nightly skipped low memory" "\"reason\":\"$msg\""
+    exit 75
+  fi
+  echo "[panoptes] MemAvailable $(( $(mem_avail_kb) / 1024 )) MiB < ${PANOPTES_MIN_MEM_GB:-3} GiB, waiting 60s (${mem_waited}s so far)" | tee -a "$LOG" >&2
+  sleep 60; mem_waited=$(( mem_waited + 60 ))
+done
 echo "[panoptes] code: $PANOPTES_DIR ($(git -C "$PANOPTES_DIR" rev-parse --short HEAD 2>/dev/null || echo '?'))  data: $QA_HOME  log: $LOG" >&2
 # Lower priority so the box stays responsive
 nice -n 10 node --disable-warning=ExperimentalWarning src/cli.mjs nightly "$@" 2> >(tee -a "$LOG" >&2) | tee -a "$LOG"
