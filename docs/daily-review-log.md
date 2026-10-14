@@ -75,3 +75,6 @@ SCHEMA (`docs/report-schema.md` + `$QA_HOME/reports/SCHEMA.md`) and REPORT-STYLE
 - Commit pending REPORT-STYLE (e821f64) + track-followups feedbackBlock; daily-review-log.
 
 **For the 日报 bot.** New field `prs[].findings[]` / `failed_checks[]` **`pre_existing`** (boolean): true when status is `pre-existing` or `evidence.base_run === "fail"`. Read it to label 老问题/合并前就有. Severity for such upgraded cases is P3 going forward.
+
+
+**Rerun.** Manual `--pr 938 --quota-pool test --wait-lock` after the fix: bench passed (was timeout on 10-13), verdict **review-suggested P2 → clean P3**. Old report at `history/PR-938.v1.json`. Conclusion change vs what the 日报 already sent for 10-13.
