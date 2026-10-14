@@ -31,7 +31,16 @@ function buildDiff(files) {
   return truncate(out, DIFF_CHAR_CAP)
 }
 
-export async function analyzePr({ db, secrets, riskClass, pr, files, profile, results, outcome, quota = null }) {
+// 网关瞬时故障：5xx / 429，以及 LiteLLM 路由在 failover 时把自己的内部字段（以 _ 开头，如
+// '_retry_last_failed_deployment_id'）漏进上游请求而被 Azure 以 400「Unknown parameter」拒绝——
+// 那不是我们发的参数，重发一次通常落回健康部署（#16，PR #950）。其他 400 是真请求错误，不重试。
+const PR_SUMMARY_ATTEMPTS = 3
+export function isTransientGatewayError(status, message) {
+  if (status >= 500 || status === 429) return true
+  return status === 400 && /unknown parameter:\s*'_[a-z0-9_]+'/i.test(String(message ?? ''))
+}
+
+export async function analyzePr({ db, secrets, riskClass, pr, files, profile, results, outcome, quota = null, fetchImpl = fetch, retryDelayMs = 2000 }) {
   if (riskClass !== 'B' && riskClass !== 'C') return { status: 'skipped' }
   if (!secrets.ARGUS_LLM_BASE_URL || !secrets.ARGUS_LLM_API_KEY) return { status: 'unavailable', reasonZh: '模型凭证没配置' }
   const day = toShanghaiDay()
@@ -55,22 +64,29 @@ export async function analyzePr({ db, secrets, riskClass, pr, files, profile, re
 
   const started = Date.now()
   try {
-    const resp = await fetch(toChatCompletionsUrl(secrets.ARGUS_LLM_BASE_URL), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${secrets.ARGUS_LLM_API_KEY}` },
-      body: JSON.stringify({
-        model: MODEL,
-        reasoning_effort: EFFORT[riskClass],
-        response_format: { type: 'json_object' },
-        max_completion_tokens: 12_000,
-        messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: user }],
-      }),
-      signal: AbortSignal.timeout(8 * 60_000),
+    const body = JSON.stringify({
+      model: MODEL,
+      reasoning_effort: EFFORT[riskClass],
+      response_format: { type: 'json_object' },
+      max_completion_tokens: 12_000,
+      messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: user }],
     })
-    const data = await resp.json().catch(() => ({}))
+    let resp, data
+    for (let attempt = 1; attempt <= PR_SUMMARY_ATTEMPTS; attempt++) {
+      resp = await fetchImpl(toChatCompletionsUrl(secrets.ARGUS_LLM_BASE_URL), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${secrets.ARGUS_LLM_API_KEY}` },
+        body,
+        signal: AbortSignal.timeout(8 * 60_000),
+      })
+      data = await resp.json().catch(() => ({}))
+      const tokens = data?.usage?.total_tokens ?? 0
+      if (quota) quota.consume('pr-summary', tokens)
+      else addAiUsage(db, day, tokens)
+      if (resp.ok || !isTransientGatewayError(resp.status, data?.error?.message) || attempt === PR_SUMMARY_ATTEMPTS) break
+      if (retryDelayMs > 0) await new Promise((r) => setTimeout(r, Math.floor(retryDelayMs * attempt)))
+    }
     const tokens = data?.usage?.total_tokens ?? 0
-    if (quota) quota.consume('pr-summary', tokens)
-    else addAiUsage(db, day, tokens)
     if (!resp.ok) return { status: 'error', reasonZh: `模型网关返回 ${resp.status}`, detail: redact(String(data?.error?.message ?? '').slice(0, 300)) }
     const parsed = JSON.parse(data.choices?.[0]?.message?.content ?? '{}')
     return {
