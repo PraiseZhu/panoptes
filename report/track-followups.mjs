@@ -22,6 +22,7 @@ const HOLDS = process.env.MIVO_QA_FOLLOWUP_HOLDS || join(QA, 'followup/holds.jso
 const SENDER = join(QA, 'scripts/send-feishu-dm.mjs')
 const MAX_REMINDERS = 7
 const DRY = process.argv.includes('--dry-run')
+const NO_REMIND = process.argv.includes('--no-remind') // 只查回复、发感谢，不发提醒
 
 const readJson = (p, d) => (existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : d)
 const bjDate = (d = new Date()) => new Date(d.getTime() + 8 * 3600e3).toISOString().slice(0, 10)
@@ -102,9 +103,9 @@ function detect(it) {
   const ref = new RegExp(`#${it.pr}(?!\\d)`)
   for (const p of authorPrsSince(who, since)) {
     if (p.number === it.pr) continue
+    // 只改到同一文件不算跟进；必须引用原 PR 号，改到的文件仅作附注
     const touched = p.files.filter(f => it.files.includes(f))
-    if (touched.length) ev.push({ type: 'pr-touches-file', pr: p.number, at: p.createdAt, url: p.url, files: touched })
-    if (ref.test(`${p.title}\n${p.body || ''}`)) ev.push({ type: 'pr-references', pr: p.number, at: p.createdAt, url: p.url })
+    if (ref.test(`${p.title}\n${p.body || ''}`)) ev.push({ type: 'pr-references', pr: p.number, at: p.createdAt, url: p.url, files: touched })
   }
   return ev
 }
@@ -162,7 +163,7 @@ for (const [login, g] of byAuthor) {
     else summary.errors.push({ login, error: r.error, key })
   }
   const due = g.remind.filter(it => !it.reminder_dates.includes(today))
-  if (g.remind.length) {
+  if (g.remind.length && !NO_REMIND) {
     const key = `followup-remind:${login}:${today}`
     const r = send(g.openId, remindText(g.remind), key)
     if (r.ok) { summary.reminded.push({ login, prs: g.remind.map(i => i.pr), skipped: r.skipped || false }); if (!DRY && !r.skipped) for (const it of due) { it.reminders++; it.reminder_dates.push(today) } }
