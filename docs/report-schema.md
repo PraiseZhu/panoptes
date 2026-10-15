@@ -387,7 +387,10 @@ Reports written **before** this change (`basis: "triage (prs[].triage)"`) comput
 **no** `ai_tests`, `dimension_status`, `applicable_total` or `covered_total` at all (see *Older reports*).
 
 - `status`: `ok` · `empty` (model wrote nothing usable) · `error` (gateway error, also in `system_health.llm_errors`
-  stage `ai-tests`) · `skipped` (no gap, triage not decided, no `aiTests` profile config, install failed, …) ·
+  stage `ai-tests`; since 2026-10-15 also an empty or truncated model reply, reason `AI 补测失败（模型返回空内容，finish_reason=…）`
+  / `（模型返回的 JSON 不完整…）` instead of the old bare `Unexpected end of JSON input` — such a round is retried when the
+  PR still has model calls left, and is kept in `system_health.llm_errors` only if no later round produced tests;
+  `rounds[]` always keeps the failed round) · `skipped` (no gap, triage not decided, no `aiTests` profile config, install failed, …) ·
   `disabled` (`--no-ai-tests` / `ARGUS_AITESTS=0`) · **`capped`** (the day's ai-test quota was used up before the first
   model call: nothing generated, every gap dimension gets `dimension_status` `capped`, display **额度用尽未补测**). When the
   quota runs out after round 1, `status` reflects round 1 and **`capped: true`** + **`capped_gaps`** list the dimensions

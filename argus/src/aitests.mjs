@@ -76,7 +76,23 @@ export function toAiTestSteps(tests, profile, { offset = 0 } = {}) {
   } })
 }
 
-export async function generateTargetedTests({ db, secrets, riskClass, pr, files, profile, gaps, now = new Date(), maxTests = MAX_TESTS, highRiskFiles = [], feedback = [], timeoutMs = 8 * 60_000, quota = null }) {
+// 模型回包 → JSON。回包缺 choices（网关没给内容）照旧当空对象；但 content 是空串或半截 JSON
+// （常见于推理把 max_completion_tokens 用完，finish_reason=length）以前直接 JSON.parse 抛
+// 「Unexpected end of JSON input」，原因看不出来（PR #966，2026-10-14）。现在明确说出是空内容还是被截断，
+// 并标 retryable：同一 PR 还有调用次数时，nightly 会再试一轮。
+export function parseModelJson(data) {
+  const choice = data?.choices?.[0]
+  const finish = choice?.finish_reason ?? null
+  const content = choice?.message?.content
+  if (content == null) return { ok: true, value: {}, finish_reason: finish }
+  const text = String(content)
+  const fr = finish ? `，finish_reason=${finish}` : ''
+  if (!text.trim()) return { ok: false, kind: 'empty', finish_reason: finish, reasonZh: `AI 补测失败（模型返回空内容${fr}）` }
+  try { return { ok: true, value: JSON.parse(text), finish_reason: finish } }
+  catch { return { ok: false, kind: 'truncated', finish_reason: finish, reasonZh: `AI 补测失败（模型返回的 JSON 不完整${fr}）` } }
+}
+
+export async function generateTargetedTests({ db, secrets, riskClass, pr, files, profile, gaps, now = new Date(), maxTests = MAX_TESTS, highRiskFiles = [], feedback = [], timeoutMs = 8 * 60_000, quota = null, fetchImpl = fetch }) {
   if (!profile.aiTests) return { status: 'skipped', reasonZh: '这个项目还没配置 AI 补测', tests: [] }
   if (riskClass !== 'B' && riskClass !== 'C') return { status: 'skipped', reasonZh: '只改文档', tests: [] }
   if (!gaps.length) return { status: 'skipped', reasonZh: '涉及的方面现有检查都覆盖了', tests: [] }
@@ -100,7 +116,7 @@ export async function generateTargetedTests({ db, secrets, riskClass, pr, files,
     `改动内容：${buildDiff(files)}`,
   ].filter((x) => x != null).join('\n\n'))
   try {
-    const resp = await fetch(toChatCompletionsUrl(secrets.ARGUS_LLM_BASE_URL), {
+    const resp = await fetchImpl(toChatCompletionsUrl(secrets.ARGUS_LLM_BASE_URL), {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${secrets.ARGUS_LLM_API_KEY}` },
       body: JSON.stringify({ model: MODEL, reasoning_effort: EFFORT[riskClass], response_format: { type: 'json_object' }, max_completion_tokens: 16_000, messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: user }] }),
@@ -110,7 +126,9 @@ export async function generateTargetedTests({ db, secrets, riskClass, pr, files,
     if (quota) quota.consume('ai-test', data?.usage?.total_tokens ?? 0)
     else addAiUsage(db, day, data?.usage?.total_tokens ?? 0)
     if (!resp.ok) return { status: 'error', reasonZh: `模型网关返回 ${resp.status}`, tests: [] }
-    const raw = JSON.parse(data.choices?.[0]?.message?.content ?? '{}')
+    const parsed = parseModelJson(data)
+    if (!parsed.ok) return { status: 'error', retryable: true, reasonZh: parsed.reasonZh, finish_reason: parsed.finish_reason, usage: data?.usage ?? null, model: MODEL, tests: [] }
+    const raw = parsed.value
     const tests = toValidTests(raw, { profile, gaps, maxTests })
     const offered = Array.isArray(raw?.tests) ? raw.tests.length : 0
     return { status: tests.length ? 'ok' : 'empty', reasonZh: tests.length ? null : 'AI 没写出可用的测试', tests, offered, rejected_by_validation: Math.max(0, offered - tests.length), usage: data?.usage ?? null, model: MODEL }

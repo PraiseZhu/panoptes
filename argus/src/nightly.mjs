@@ -464,6 +464,7 @@ async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, commo
   const feedback = []
   let offset = 0
   const stepDefs = new Map()
+  const pendingLlmErrors = []
   for (let round = 1; round <= caps.maxCalls && remaining.length; round++) {
     const left = deadline - Date.now()
     if (left < 3 * 60_000) { ai.rounds.push({ round, skipped: 'wall-time cap reached' }); break }
@@ -479,8 +480,11 @@ async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, commo
     if (gen.model) ai.model = gen.model
     const rr = { round, gaps: [...remaining], status: gen.status, reason: gen.reasonZh ?? null, offered: gen.offered ?? 0, rejected_by_validation: gen.rejected_by_validation ?? 0, tokens: gen.usage?.total_tokens ?? null, tests: [] }
     ai.rounds.push(rr)
-    if (gen.status === 'error') health.llm_errors.push({ pr: number, stage: 'ai-tests', model: gen.model ?? null, message: gen.reasonZh })
-    if (!gen.tests?.length) { if (gen.status === 'skipped' || gen.status === 'error') break; continue }
+    // 可重试的模型错误（空内容 / 半截 JSON）：还有调用次数就再试一轮；之后有一轮写出了测试就不算 QA 故障（rounds 里仍留记录）
+    if (gen.status === 'error' && gen.retryable) pendingLlmErrors.push({ pr: number, stage: 'ai-tests', model: gen.model ?? null, message: gen.reasonZh })
+    else if (gen.status === 'error') health.llm_errors.push({ pr: number, stage: 'ai-tests', model: gen.model ?? null, message: gen.reasonZh })
+    else if (gen.status === 'ok') pendingLlmErrors.length = 0
+    if (!gen.tests?.length) { if (gen.status === 'skipped' || (gen.status === 'error' && !gen.retryable)) break; continue }
     const steps = toAiTestSteps(gen.tests, profile, { offset }).map((st) => ({ ...st, timeoutMin: Math.max(1, Math.min(10, Math.floor((deadline - Date.now()) / 60_000))) }))
     offset += steps.length
     for (const st of steps) stepDefs.set(st.id, st)
@@ -497,6 +501,7 @@ async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, commo
     const keptCovers = new Set(ai.tests.filter((t) => t.result === 'kept').flatMap((t) => t.covers))
     remaining = ai.gaps.filter((k) => !keptCovers.has(k))
   }
+  health.llm_errors.push(...pendingLlmErrors)
   // 在当前代码上失败的补测：再单独跑一次确认是否复现（仍然只记 P2、test_backed=false；升级要人确认）
   const failing = ai.tests.filter((t) => t.result === 'fails-on-current')
   if (failing.length && deadline - Date.now() > 2 * 60_000) {
