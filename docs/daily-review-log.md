@@ -130,6 +130,8 @@ never part of the verdict).
 - `58383c6` committed the 日报 bot's uncommitted `report/track-followups.mjs` change (references-only follow-up,
   `--no-remind`).
 - `$QA_HOME/reports/SCHEMA.md` re-synced (it had missed `118113d`'s shard text).
+- `c5d4b8a` panoptes CI had been red since `d66c082` (shellcheck SC2016 on the intentionally single-quoted
+  `EXTRA_EXIT_CLEANUP`, eval'd in the EXIT trap); added `# shellcheck disable=SC2016`. CI green again.
 
 **Re-runs (manual, test pool, `--no-reuse --no-issues`, `--wait-lock`).**
 - #959: review-suggested P2 → **clean P3** (bench passed; AI tests no error, 1 call, nothing usable). Old: `history/PR-959.v1.json`.
