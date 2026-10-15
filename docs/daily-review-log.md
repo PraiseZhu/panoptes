@@ -78,3 +78,67 @@ SCHEMA (`docs/report-schema.md` + `$QA_HOME/reports/SCHEMA.md`) and REPORT-STYLE
 
 
 **Rerun.** Manual `--pr 938 --quota-pool test --wait-lock` after the fix: bench passed (was timeout on 10-13), verdict **review-suggested P2 → clean P3**. Old report at `history/PR-938.v1.json`. Conclusion change vs what the 日报 already sent for 10-13.
+
+## 2026-10-15 review — data day 2026-10-14
+
+**Reconcile.** GitHub: 12 PRs merged into `xindong/mivo-canvas-plugin` on 2026-10-14 (Shanghai; `merged_at`
+2026-10-13T16:00Z–2026-10-14T15:59:59Z): #956 #959 #962 #941 #926 #945 #964 #968 #967 #950 #966 #927 (merge order).
+Every one has `reports/merged/PR-N.json` (schema 1.0, parses, `sha_consistent`). Triggers: event for 10; **#967 and
+#966 = catch-up** — no event run at all (no `nightly pr start` in control.log at merge time; both by zhongxingtian-ai;
+#966's matches the on-merge routine failure at 21:40 CST noted before the reset). #967 filled by the 20:07 catch-up
+tick (tested 20:21); #966's 22:07 catch-up attempt was killed by the box reset (~23:25), filled by the 23:56 catch-up
+(tested 00:25 10-15). #927 event run started 51 min after merge (23:55, right after the box came back). #945 waited
+8 min for #926's lock. Catch-up reused in-flight event results for #964/#968/#927 (1–2 s, no second test) — harmless.
+No duplicates. #970 (00:27 10-15) is out of window.
+Verdicts as sent / current: #956 #964 partially-verified P3 (black-box triaged out) · #962 docs-only · #945 clean P3 ·
+#967 clean P3 (bench pre-existing P3) · #941 needs-attention P1 (code review only; new-code 82.52 %) · #926
+needs-attention P1 (2 review P1; new-code 52.62 %; bench pre-existing) · #966 needs-attention P1 (2 review P1) · #927
+review-suggested P2 (review P2; new-code 68.93 %) · #950 P1 → P2 and #968 P2 → P3 (calibrated 10-14 21:27 / 18:25,
+already told) · **#959 review-suggested P2 → clean P3 after re-run (below)**.
+
+**Field consistency.** No verdict ↔ findings ↔ severity, coverage totals ↔ dimension_status, or test_backed ↔ issue
+contradictions, except: (1) `PR-950.json` `issues.results[]` still lists the two review findings as `P1 not-eligible`
+after the hand calibration to P2 (action unchanged, so no effect); (2) #950 and #968 were calibrated by editing the
+file in place with a `.bak-*` copy left in `reports/merged/` — no `history/` version, no `previous_version`, which is
+not what *Report preservation* in the schema says. Readers ignore `.bak` (filename rule), so nothing breaks. Not changed.
+
+**Stability.** Code-PR runs 824–1177 s, docs-only 9 s. MemAvailable 3.5–9.5 GB (< 8 GB on #941 #967 #950 #966 #927 →
+coverage serial). No qa_errors, timeouts, capped quotas, not-tested. `system_health: degraded` on #959 (AI-test
+`delay 299999.5`, fixed by `eb5469b` on 10-14 after #959 ran), #950 (pr-summary LiteLLM 400, fixed `7ff0704`), #966
+(AI-test `Unexpected end of JSON input`, fixed today). Two box resets: ~23:25 10-14 (killed #966 catch-up; its
+4-shard unit run had one 30 s timeout in `task-plugin/control.test.mjs` under load, never reported; the final 2-shard
+run passed) and ~00:41 10-15 (logs restored 00:41, bootstrap 00:55 reinstalling chromium; #970's first launch died,
+the relaunch ran while chromium was missing → e2e-browser unavailable, issue #16 reopened with 6 env items).
+env-guard hourly since then: healthy. Coverage-run unit shards exit 1 on every PR (v8 instrumentation; documented,
+never part of the verdict).
+
+**Accuracy.**
+- #959 bench `shadowRoundTrip` timeout: first run, rerun and base all failed → old problem; graded P2 `unverified`
+  only because the `pre_existing` upgrade (`base_run=fail` → P3) shipped after #959 ran. Same case as #938.
+- #966 review P1 ×2 look high: (a) branch-renamed candidate PR → duplicate PR needs a maintainer renaming the bot's
+  branch in the company repo (repo-write only → P2 by the grading rule); (b) "verify then `gh pr edit`" window is
+  milliseconds (verify runs right before the edit) and only loses a maintainer note → P2/P3. Not calibrated (not
+  Praise's PR, no issue effect); left for the group review.
+- #941 / #926 review P1 (data-consistency in legacy migration; inline image data vs text length cap) plausible, kept.
+- Issues: none created on 10-14 in pr-qa-agent-deploy. #16 (system_health) commented 01:38 (#959), closed 11:11 (`eb5469b`),
+  reopened 21:20 (#950) and closed 21:25 (`7ff0704`), reopened 01:13 10-15 (#970 env). No PR issues: all P1 are review-only / not Praise's. Correct per rules.
+
+**Changes pushed this review.**
+- `5750e29` fix(ai-tests): empty / truncated model reply → clear reason with finish_reason, retried when calls are
+  left; kept in `llm_errors` only if no later round produced tests. Regression test `ai-test-empty-content.test.mjs`;
+  report-schema `ai_tests.status` note. No new report fields.
+- `58383c6` committed the 日报 bot's uncommitted `report/track-followups.mjs` change (references-only follow-up,
+  `--no-remind`).
+- `$QA_HOME/reports/SCHEMA.md` re-synced (it had missed `118113d`'s shard text).
+
+**Re-runs (manual, test pool, `--no-reuse --no-issues`, `--wait-lock`).**
+- #959: review-suggested P2 → **clean P3** (bench passed; AI tests no error, 1 call, nothing usable). Old: `history/PR-959.v1.json`.
+  Conclusion change vs the 10-15 日报.
+- #970 (data day 10-15): partially-verified P3 / degraded → **clean P3 / ok** (e2e-browser ran). Old:
+  `history/PR-970.v1.json`. The on-merge summary already sent had the old result.
+
+**For the 日报 bot.** #959 correction (P2 → clean P3, bench timeout is an old problem); #970 read the current file
+for the 10-15 report. No field changes.
+
+**For Praise.** On-merge routine missed #967 and #966 (catch-up covered both, with 45 min / 2 h 45 min delay); routine
+run history is not visible from the box. #16 still open though env-guard has been healthy since ~01:30.
