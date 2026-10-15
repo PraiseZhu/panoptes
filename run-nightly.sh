@@ -162,7 +162,9 @@ fi
 printf '{"checked_at":"%s","ran":%s,"missing_before":%s,"missing_after":%s,"log":"%s"}\n' \
   "$(date -Is)" "$BOOT_RAN" "$(json_list <<<"$MISSING_BEFORE")" "$(json_list <<<"$MISSING_AFTER")" "$BOOT_LOG" >"$BOOT_STATUS"
 export PANOPTES_BOOTSTRAP_STATUS="$BOOT_STATUS"
-EXTRA_EXIT_CLEANUP='rm -f "$BOOT_STATUS"' 
+# Single quotes on purpose: expanded later by eval in the EXIT trap.
+# shellcheck disable=SC2016
+EXTRA_EXIT_CLEANUP='rm -f "$BOOT_STATUS"'
 
 # The QA environment is unusable without Node 24: record it as a QA system failure instead of a bare exit.
 env_failed() {
@@ -271,6 +273,8 @@ fi
 # /tmp/argus-run-XXXXXX and is removed on exit (sandboxed runs bind their own dirs explicitly, unaffected).
 RUN_TMP="$(mktemp -d "${TMPDIR:-/tmp}/argus-run-XXXXXX")"
 export TMPDIR="$RUN_TMP"
+# Single quotes on purpose: expanded later by eval in the EXIT trap.
+# shellcheck disable=SC2016
 EXTRA_EXIT_CLEANUP='rm -f "$BOOT_STATUS"; rm -rf --one-file-system "$RUN_TMP"'
 
 cd "$PANOPTES_DIR/argus"
