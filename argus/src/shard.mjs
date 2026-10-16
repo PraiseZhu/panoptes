@@ -51,11 +51,16 @@ export function mergeVitestJson(reports) {
 
 // istanbul coverage-final.json 合并：同一文件按语句 / 函数 / 分支的位置对齐后命中数相加（各片加载的源文件可能重叠）
 const locKey = (l) => `${l?.start?.line}:${l?.start?.column}-${l?.end?.line}:${l?.end?.column}`
+// statementMap 的条目本身就是 {start,end}；fnMap 条目是 {name, decl, loc}，branchMap 条目是 {loc, locations}。
+// 之前 fnMap 直接拿条目当位置 → 所有函数的键都是 "undefined:undefined-…"，后续分片的函数命中全被并进同一个函数，
+// 函数覆盖率随分片数递减（1 片 ≈80%，2 片 ≈67%，3 片 ≈57%，6 片 ≈46%）。
+const entryLoc = (e) => (e?.start ? e : e?.loc ?? e?.decl ?? e?.locations?.[0])
+const entryKey = (e) => `${e?.name ?? ''}@${locKey(entryLoc(e))}`
 function mergeCounters(target, tMap, src, sMap, mapName, cntName, isBranch = false) {
-  const index = new Map(Object.entries(tMap).map(([id, loc]) => [locKey(isBranch ? loc.loc ?? loc.locations?.[0] : loc), id]))
+  const index = new Map(Object.entries(tMap).map(([id, loc]) => [entryKey(loc), id]))
   let next = Object.keys(tMap).length
   for (const [id, loc] of Object.entries(sMap)) {
-    const key = locKey(isBranch ? loc.loc ?? loc.locations?.[0] : loc)
+    const key = entryKey(loc)
     let tid = index.get(key)
     if (tid == null) { tid = String(next++); target[mapName][tid] = loc; index.set(key, tid); target[cntName][tid] = isBranch ? (src[cntName][id] ?? []).map(() => 0) : 0 }
     if (isBranch) {

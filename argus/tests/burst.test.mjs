@@ -62,6 +62,16 @@ test('分片覆盖率合并：同一文件在两片都被加载 → 命中数按
   assert.equal(r.status, 'ok'); assert.equal(r.total.lines, 50); assert.deepEqual(r.files['x.ts'], { lines: [1, 2, 3], covered: [1, 2] })
 })
 
+test('分片覆盖率合并：多个函数按各自位置对齐（fnMap 条目是 {name,decl,loc}），不会全挤进同一个函数', () => {
+  const loc = (l) => ({ start: { line: l, column: 0 }, end: { line: l, column: 9 } })
+  const fn = (n, l) => ({ name: n, decl: loc(l), loc: loc(l), line: l })
+  const file = (f) => ({ path: '/src/z.ts', statementMap: {}, s: {}, fnMap: { 0: fn('a', 1), 1: fn('b', 5), 2: fn('c', 9) }, f, branchMap: {}, b: {} })
+  const m = shard.mergeCoverageFinal([{ z: file({ 0: 1, 1: 0, 2: 0 }) }, { z: file({ 0: 0, 1: 2, 2: 0 }) }])
+  assert.deepEqual(m.z.f, { 0: 1, 1: 2, 2: 0 })
+  const sum = shard.coverageSummaryOf(m).total
+  assert.deepEqual([sum.functions.total, sum.functions.covered], [3, 2])
+})
+
 function gitRepo(files) {
   const d = mkdtempSync(join(tmpdir(), 'cache-repo-'))
   const g = (...a) => spawnSync('git', ['-C', d, ...a], { encoding: 'utf8' })

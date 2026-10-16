@@ -400,7 +400,8 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   // 覆盖率门禁不达标 → P2 建议复查（source: coverage-gate，不是失败的检查，按规则永远不会单独开 issue）
   const gate = out.coverage_gate
   if (gate?.status === 'fail') {
-    const fp = fingerprintOf(repo, ['coverage-gate', gate.step, gate.failed.join(',')])
+    // 新代码覆盖率是 PR 自己的 diff 算出来的，不同 PR 不是「同一问题」：指纹带 PR 号（否则所有 PR 共用一个去重键）
+    const fp = fingerprintOf(repo, ['coverage-gate', `pr=${number}`, gate.step, gate.failed.join(',')])
     out.findings.push({
       source: 'coverage-gate', test_backed: false, check_id: 'coverage-gate', dimension: 'white-box', severity: 'P2',
       title: `new-code coverage ${gate.values.new_code}% < ${gate.thresholds.new_code}%`,

@@ -17,6 +17,8 @@
 #   ming-qa Python venv  $QA_HOME/.venv                 (stdlib only)
 #   system (apt, sudo)   chromium, bubblewrap, jq, git, util-linux (flock), python3-venv, Playwright's chromium deps
 #   chromium launcher    /usr/local/bin/chromium  ←  scripts/chromium-linux.sh (see README "Why a wrapper")
+#   system Node         /opt/node (v24.22.0 from nodejs.org .tar.gz; box has no xz) + /usr/local/bin/{node,npm,npx,corepack}
+#                        symlinks — the box-wide default `node` (mivo engines >=22.6, CI uses lts). Independent of nvm above.
 #   catch-up timer       /etc/cron.d/panoptes-catch-up ← scripts/catch-up.cron (every 2 h) + a running cron daemon
 #                        (the box has no systemd; PANOPTES_CATCHUP_TIMER=0 skips the timer)
 #
@@ -41,6 +43,10 @@ WANT_TIMER="${PANOPTES_CATCHUP_TIMER:-1}"
 render_cron() {
   sed -e "s#@USER@#$(id -un)#g" -e "s#@QA_HOME@#$QA_HOME#g" -e "s#@PANOPTES_DIR@#$PANOPTES_DIR#g" "$CRON_SRC"
 }
+SYS_NODE_VERSION="${PANOPTES_SYS_NODE_VERSION:-v24.22.0}"
+SYS_NODE_DIR="${PANOPTES_SYS_NODE_DIR:-/opt/node}"
+SYS_NODE_BIN_DIR="${PANOPTES_SYS_NODE_BIN_DIR:-/usr/local/bin}"
+SYS_NODE_TOOLS=(node npm npx corepack)
 CHECK_ONLY=""
 [[ "${1:-}" == "--check" ]] && CHECK_ONLY=1
 
@@ -88,6 +94,26 @@ apt_get() {
 [[ -n "${PANOPTES_BOOTSTRAP_LIB:-}" ]] && return 0 2>/dev/null   # sourced by tests: functions only
 unset NPM_CONFIG_PREFIX npm_config_prefix
 
+# System default Node (/opt/node + /usr/local/bin links). Idempotent: re-downloads only when /opt/node is not the wanted
+# version; verifies the tarball against nodejs.org SHASUMS256.txt; swaps the directory in atomically-ish (mv).
+install_system_node() {
+  local name="node-$SYS_NODE_VERSION-linux-x64" base="https://nodejs.org/dist/$SYS_NODE_VERSION" tmp t
+  if [[ "$("$SYS_NODE_DIR/bin/node" --version 2>/dev/null)" != "$SYS_NODE_VERSION" ]]; then
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/sysnode-XXXXXX") || return 1
+    if ! curl -fsSL --retry 3 -o "$tmp/$name.tar.gz" "$base/$name.tar.gz" \
+       || ! curl -fsSL --retry 3 -o "$tmp/SHASUMS256.txt" "$base/SHASUMS256.txt" \
+       || ! (cd "$tmp" && grep " $name.tar.gz\$" SHASUMS256.txt | sha256sum -c --status) \
+       || ! tar -xzf "$tmp/$name.tar.gz" -C "$tmp"; then
+      log "system Node: download / checksum / extract failed"; rm -rf "$tmp"; return 1
+    fi
+    $SUDO rm -rf "$SYS_NODE_DIR.old" && { [[ ! -e "$SYS_NODE_DIR" ]] || $SUDO mv "$SYS_NODE_DIR" "$SYS_NODE_DIR.old"; } \
+      && $SUDO mv "$tmp/$name" "$SYS_NODE_DIR" && $SUDO rm -rf "$SYS_NODE_DIR.old" || { rm -rf "$tmp"; return 1; }
+    rm -rf "$tmp"
+  fi
+  for t in "${SYS_NODE_TOOLS[@]}"; do $SUDO ln -sfn "$SYS_NODE_DIR/bin/$t" "$SYS_NODE_BIN_DIR/$t" || return 1; done
+  [[ "$("$SYS_NODE_BIN_DIR/node" --version 2>/dev/null)" == "$SYS_NODE_VERSION" ]]
+}
+
 load_node() {
   [[ -s "$NVM_DIR/nvm.sh" ]] || return 1
   # shellcheck disable=SC1091
@@ -105,6 +131,12 @@ check_all() {
   command -v bwrap >/dev/null || { echo "missing: bwrap — bubblewrap not on PATH"; bad=1; }
   [[ -x /usr/lib/chromium/chromium ]] || { echo "missing: chromium — /usr/lib/chromium/chromium"; bad=1; }
   cmp -s "$WRAPPER_SRC" "$WRAPPER" || { echo "missing: chromium-wrapper — $WRAPPER differs from scripts/chromium-linux.sh"; bad=1; }
+  local t ok_links=1
+  [[ "$("$SYS_NODE_DIR/bin/node" --version 2>/dev/null)" == "$SYS_NODE_VERSION" ]] || ok_links=0
+  for t in "${SYS_NODE_TOOLS[@]}"; do
+    [[ "$(readlink "$SYS_NODE_BIN_DIR/$t" 2>/dev/null)" == "$SYS_NODE_DIR/bin/$t" && -e "$SYS_NODE_BIN_DIR/$t" ]] || ok_links=0
+  done
+  (( ok_links )) || { echo "missing: system-node — $SYS_NODE_DIR not Node $SYS_NODE_VERSION or $SYS_NODE_BIN_DIR/{${SYS_NODE_TOOLS[*]}} links absent"; bad=1; }
   load_node || { echo "missing: node$NODE_MAJOR — no Node $NODE_MAJOR under $NVM_DIR"; bad=1; }
   if [[ ! -f "$PANOPTES_DIR/argus/node_modules/.package-lock.json" ]] \
      || [[ "$PANOPTES_DIR/argus/package-lock.json" -nt "$PANOPTES_DIR/argus/node_modules/.package-lock.json" ]]; then
@@ -151,6 +183,10 @@ if has chromium-wrapper || has chromium; then
   if [[ -x /usr/lib/chromium/chromium ]]; then
     $SUDO install -m 755 "$WRAPPER_SRC" "$WRAPPER" || FAILED+=("chromium wrapper install")
   else FAILED+=("chromium wrapper: Debian chromium not installed"); fi
+fi
+if has system-node; then
+  log "system Node $SYS_NODE_VERSION → $SYS_NODE_DIR (+ links in $SYS_NODE_BIN_DIR)"
+  install_system_node || FAILED+=("system Node $SYS_NODE_VERSION")
 fi
 if has "node$NODE_MAJOR"; then
   if [[ ! -s "$NVM_DIR/nvm.sh" ]]; then
