@@ -144,3 +144,46 @@ for the 10-15 report. No field changes.
 
 **For Praise.** On-merge routine missed #967 and #966 (catch-up covered both, with 45 min / 2 h 45 min delay); routine
 run history is not visible from the box. #16 still open though env-guard has been healthy since ~01:30.
+
+## 2026-10-16 (data day 2026-10-15, Asia/Shanghai)
+
+**Reconciliation.** 17 PRs merged on 10-15 (#915 #935 #970 #972 #973 #975 #977 #979 #980 #981 #983 #986 #987 #988
+#989 #990 #991); all 17 have a valid `reports/merged/PR-N.json`, schema 1.0, `run.trigger` `event` (16) and `manual`
+(#970, the 10-15 re-run after the box reset). No miss, no duplicate: the three catch-up runs (14:07/16:07/18:07 PT
+crons) only reused existing reports (2 s each). No issue created; #915's code-review P1 correctly `not-eligible`
+(not Praise's PR, review-only).
+
+**Consistency.** Global check over all merged reports (PR severity = max finding severity = summary
+`prs_by_severity`) found one hand-calibration error: **#972** — the 10-15 calibration lowered the code-review finding
+P2→P3 and also set the PR severity to P3, but the coverage-gate finding (new code 89.33% < 90%) is still P2, so the PR
+is P2 (summary already said P2). Fixed by hand (`prs[0].severity` P2, `calibration.note`), old file
+`PR-972.json.bak-20261016-severity`. Lesson: after a calibration, recompute PR severity from all findings.
+
+**Stability.** system_health ok on every run; no qa_errors, timeouts, capped quota. Memory pressure: #991 waited the
+full 30 min for MemAvailable ≥ 3 GiB and ran with 1 unit shard (other agents' processes hold ~12 GB); #975 waited 1 min.
+Durations 16–21 min for product PRs, queueing up to 41 min (#977 behind #979/#980). env-guard all ok, nothing restored.
+Issue #16 (system_health, reopened 10-15 01:13 for the chromium-missing reset) closed today as fixed: every run since
+the 00:55 bootstrap is healthy.
+
+**Accuracy.** #915 AI test `canvasSyncRuntime.accountSwitch.argus.test.ts` failed with vitest
+`No "namespacedKey" export is defined on the "../../lib/persistUserId" mock` — the test's own `vi.mock` was
+incomplete, so it was a test defect reported as a P2 "fails on the tested commit". #915 review P1 (sync progress
+persisted before asset side effects → crash in between loses the side effects on replay) is plausible, kept.
+P2 reviews on #979/#980/#987/#991 plausible. #990 AI-test failure (eval of `REVEAL_DOM_WAIT_SCRIPT` in the test) was
+already calibrated to P3 on 10-15; left.
+
+**Changes pushed.**
+- `0ef42d9` fix(ai-tests): vitest's "No "x" export is defined on the "…" mock" now classified 测试无效
+  (`invalid_kind: missing-module`, existing value — no field change). Regression case in `qa-items.test.mjs`.
+- `a9c4578` committed the 日报 bot's uncommitted `report/track-followups.mjs` fix (sender prints pretty JSON → parse
+  whole stdout; dedupe PR numbers in the thanks key).
+- `03d6f82` (日报 bot's REPORT-STYLE edit, committed locally earlier) pushed with them. Unit 262/263 pass (1 skipped),
+  gitleaks clean, CI green on `a9c4578`. No schema change.
+
+**Re-runs (manual, test pool, `--no-reuse --no-issues`, `--wait-lock`).**
+- #915: needs-attention P1 → **needs-attention P1**, but the P2 AI-test finding is gone (new AI tests: 4 kept,
+  0 failing). Old: `history/PR-915.v1.json`. The regenerated tests didn't hit the mock gap, so the new rule was not
+  exercised live; the regression test covers it.
+
+**For the 日报 bot.** #915: drop the P2 "AI-generated test fails on the tested commit" (it was the test's own mock
+mistake); still P1 from code review. #972: PR level is P2 (coverage 89.33% < 90%), not P3. No field changes.
