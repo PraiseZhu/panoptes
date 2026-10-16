@@ -130,8 +130,9 @@ function send(openId, text, key) {
     let outp
     try { outp = execFileSync('node', [SENDER, '--open-id', openId, '--text-file', tf, '--dedupe-key', key], { encoding: 'utf8' }) }
     catch (e) { outp = e.stdout || '' }
-    let r; try { r = JSON.parse(outp.trim().split('\n').pop()) } catch { r = { ok: false, error: 'unparseable sender output' } }
-    return { ok: !!r.ok, skipped: !!r.skipped, error: r.ok ? null : (r.error || 'send failed') }
+    // send-feishu-dm.mjs prints pretty-printed JSON (multi-line); parse the whole stdout, not the last line.
+    let r; try { r = JSON.parse(String(outp).trim()) } catch { r = { ok: false, error: 'unparseable sender output' } }
+    return { ok: !!r.ok, skipped: !!r.skipped, error: r.ok ? null : (r.error || r.msg || 'send failed') }
   } finally { rmSync(d, { recursive: true, force: true }) }
 }
 
@@ -157,7 +158,7 @@ for (const [key, it] of Object.entries(state.items)) {
 }
 for (const [login, g] of byAuthor) {
   if (g.thank.length) {
-    const key = `followup-thanks:${login}:${g.thank.map(i => i.pr).sort((a, b) => a - b).join(',')}`
+    const key = `followup-thanks:${login}:${[...new Set(g.thank.map(i => i.pr))].sort((a, b) => a - b).join(',')}`
     const r = send(g.openId, thanksText(g.thank), key)
     if (r.ok) { summary.thanked.push({ login, prs: g.thank.map(i => i.pr), skipped: r.skipped || false }); if (!DRY) for (const it of g.thank) { it.status = 'closed'; it.closed_at = new Date().toISOString(); it.evidence = summary.items.find(x => x._it === it)?.evidence } }
     else summary.errors.push({ login, error: r.error, key })
