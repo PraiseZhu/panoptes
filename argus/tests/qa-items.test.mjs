@@ -323,6 +323,10 @@ test('AI 补测「测试无效」：断言前就因缺测试数据 / 文件、�
   assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: "Error: Failed to resolve import \"../x/nope.mjs\" from \"src/a.argus.test.ts\". Does the file exist?" }).invalid_kind, 'missing-module')
   assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: "Error: Cannot find module '/w/src/missing.mjs'" }).invalid_kind, 'missing-module')
   assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: "SyntaxError: The requested module '../state.mjs' does not provide an export named 'nope'" }).invalid_kind, 'missing-module')
+  // 测试自己的 vi.mock 少导出被测代码用到的函数（#915 10-15）：同样是测试自身前提缺失
+  const mockGap = '\x1b[31m\x1b[1mError\x1b[22m: [vitest] No "namespacedKey" export is defined on the "../../lib/persistUserId" mock. Did you forget to return it from "vi.mock"?\n ❯ createIdbFrozenTarget src/lib/persistIdbStorage.ts:415:21'
+  const rm = ai.toAiTestResult({ ok: false, exitCode: 1, tail: mockGap })
+  assert.equal(rm.result, 'discarded'); assert.equal(rm.invalid_kind, 'missing-module'); assert.equal(rm.display_zh, '测试无效')
   // 断言失败（哪怕信息里带 ENOENT）仍是「在当前代码上失败」：可能是真问题，留给人确认
   const asserted = "AssertionError: expected [Function] to throw error including 'EVIDENCE_FILE_TOO_LARGE' but got 'ENOENT: no such file or directory'"
   assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: asserted }).result, 'fails-on-current')

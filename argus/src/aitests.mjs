@@ -163,9 +163,10 @@ export function toAiGaps({ applicability, profile, results }) {
 // 还没走到断言。这类失败说明不了被测代码有问题 → 按 discarded 处理（invalid: true，显示「测试无效」），不产生 finding。
 // 只要输出里有断言失败（AssertionError / expected … to …）就不算无效：例如 expect(...).toThrow('X') 却收到 ENOENT，仍是 fails-on-current。
 export const AI_TEST_INVALID_ZH = '测试无效'
+// missing-module 也包括测试自己的 vi.mock 工厂少导出了被测代码要用的函数（vitest: No "x" export is defined on the "…" mock，#915 10-15）
 const INVALID_SIGNATURES = [
   { kind: 'missing-file', re: /\bENOENT\b|no such file or directory/i },
-  { kind: 'missing-module', re: /Cannot find module ['"]|Cannot find package ['"]|Failed to resolve import|Failed to load url|Does the file exist\?|does not provide an export named/ },
+  { kind: 'missing-module', re: /Cannot find module ['"]|Cannot find package ['"]|Failed to resolve import|Failed to load url|Does the file exist\?|does not provide an export named|No "[^"]+" export is defined on the "[^"]+" mock/ },
 ]
 const ASSERTION_FAILURE = /AssertionError|\bexpected\b[^\n]*\bto (be|equal|throw|have|contain|match|deep|strictly|include|satisfy)/i
 export function toInvalidTest(tail) {
