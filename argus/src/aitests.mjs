@@ -5,7 +5,7 @@ import { aiUsageToday, addAiUsage } from './db.mjs'
 import { globToRegExp } from './classify.mjs'
 import { toDimensionLabel } from './matrix.mjs'
 import { redact, toShanghaiDay, truncate } from './util.mjs'
-import { toChatCompletionsUrl } from './util.mjs'
+import { toChatCompletionsUrl, fetchRetryingNetwork, isNetworkError } from './util.mjs'
 
 const MODEL = 'openai/gpt-6-luna'
 const EFFORT = { B: 'high', C: 'xhigh' }
@@ -92,7 +92,7 @@ export function parseModelJson(data) {
   catch { return { ok: false, kind: 'truncated', finish_reason: finish, reasonZh: `AI 补测失败（模型返回的 JSON 不完整${fr}）` } }
 }
 
-export async function generateTargetedTests({ db, secrets, riskClass, pr, files, profile, gaps, now = new Date(), maxTests = MAX_TESTS, highRiskFiles = [], feedback = [], timeoutMs = 8 * 60_000, quota = null, fetchImpl = fetch }) {
+export async function generateTargetedTests({ db, secrets, riskClass, pr, files, profile, gaps, now = new Date(), maxTests = MAX_TESTS, highRiskFiles = [], feedback = [], timeoutMs = 8 * 60_000, quota = null, fetchImpl = fetch, netRetryDelayMs = 2000 }) {
   if (!profile.aiTests) return { status: 'skipped', reasonZh: '这个项目还没配置 AI 补测', tests: [] }
   if (riskClass !== 'B' && riskClass !== 'C') return { status: 'skipped', reasonZh: '只改文档', tests: [] }
   if (!gaps.length) return { status: 'skipped', reasonZh: '涉及的方面现有检查都覆盖了', tests: [] }
@@ -116,12 +116,13 @@ export async function generateTargetedTests({ db, secrets, riskClass, pr, files,
     `改动内容：${buildDiff(files)}`,
   ].filter((x) => x != null).join('\n\n'))
   try {
-    const resp = await fetchImpl(toChatCompletionsUrl(secrets.ARGUS_LLM_BASE_URL), {
+    const body = JSON.stringify({ model: MODEL, reasoning_effort: EFFORT[riskClass], response_format: { type: 'json_object' }, max_completion_tokens: 16_000, messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: user }] })
+    const resp = await fetchRetryingNetwork(fetchImpl, toChatCompletionsUrl(secrets.ARGUS_LLM_BASE_URL), () => ({
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${secrets.ARGUS_LLM_API_KEY}` },
-      body: JSON.stringify({ model: MODEL, reasoning_effort: EFFORT[riskClass], response_format: { type: 'json_object' }, max_completion_tokens: 16_000, messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: user }] }),
+      body,
       signal: AbortSignal.timeout(Math.max(30_000, Math.floor(Number(timeoutMs)) || 30_000)),
-    })
+    }), { delayMs: netRetryDelayMs })
     const data = await resp.json().catch(() => ({}))
     if (quota) quota.consume('ai-test', data?.usage?.total_tokens ?? 0)
     else addAiUsage(db, day, data?.usage?.total_tokens ?? 0)
@@ -133,12 +134,11 @@ export async function generateTargetedTests({ db, secrets, riskClass, pr, files,
     const offered = Array.isArray(raw?.tests) ? raw.tests.length : 0
     return { status: tests.length ? 'ok' : 'empty', reasonZh: tests.length ? null : 'AI 没写出可用的测试', tests, offered, rejected_by_validation: Math.max(0, offered - tests.length), usage: data?.usage ?? null, model: MODEL }
   } catch (err) {
-    // 连不上网关（fetch failed / 连接被重置 / DNS 临时失败）没用掉模型额度，还有调用次数就重试（#1008 10-17 重跑时遇到）；超时不重试
-    const network = err?.name !== 'TimeoutError' && err?.name !== 'AbortError' && NETWORK_ERROR.test(`${err?.message ?? ''} ${err?.cause?.code ?? ''}`)
+    // 原地重试 3 次后仍连不上网关（fetch failed / 连接被重置 / DNS 临时失败）：没用掉模型额度，还有调用次数就下一轮再试（#1008 10-17 重跑时遇到）；超时不重试
+    const network = isNetworkError(err)
     return { status: 'error', ...(network ? { retryable: true } : {}), reasonZh: `AI 补测失败（${redact(err.message).slice(0, 80)}）`, tests: [] }
   }
 }
-const NETWORK_ERROR = /fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|UND_ERR_SOCKET|UND_ERR_CONNECT_TIMEOUT|socket hang up/i
 
 // ── 夜间流程（Linux）用的补测编排参数与纯函数 ───────────────────────
 // 补测只针对这些「现有检查常覆盖不到」的维度（Jev 判为 applicable 且没有已跑的检查声明覆盖）

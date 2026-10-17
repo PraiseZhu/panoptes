@@ -101,6 +101,20 @@ export function tail(text, max) {
   return s.length <= max ? s : `…（前面省略）\n${s.slice(s.length - max)}`
 }
 
+// 模型网关偶发断开连接（10-17：undici "fetch failed" / UND_ERR_SOCKET other side closed，约三成请求）：
+// 这类网络错误没拿到回包、没用掉额度，原地重试；超时（TimeoutError / AbortError）不重试。makeInit 每次新建（含新的超时 signal）。
+export const NETWORK_ERROR_RE = /fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|UND_ERR_SOCKET|UND_ERR_CONNECT_TIMEOUT|socket hang up|other side closed/i
+export const isNetworkError = (err) => err?.name !== 'TimeoutError' && err?.name !== 'AbortError' &&
+  NETWORK_ERROR_RE.test(`${err?.message ?? ''} ${err?.cause?.code ?? ''} ${err?.cause?.message ?? ''}`)
+export async function fetchRetryingNetwork(fetchImpl, url, makeInit, { attempts = 3, delayMs = 2000 } = {}) {
+  for (let i = 1; ; i++) {
+    try { return await fetchImpl(url, makeInit()) } catch (err) {
+      if (i >= attempts || !isNetworkError(err)) throw err
+      if (delayMs > 0) await new Promise((r) => setTimeout(r, Math.floor(delayMs * i)))
+    }
+  }
+}
+
 // OpenAI 兼容网关地址 → chat/completions 完整地址（与 ming-qa 的补全规则一致：/v1 结尾只补 /chat/completions）
 export function toChatCompletionsUrl(baseUrl) {
   const base = String(baseUrl ?? '').replace(/\/+$/, '')

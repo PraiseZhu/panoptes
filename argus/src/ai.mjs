@@ -1,6 +1,6 @@
 // AI 只做「人话解读 + 未覆盖风险提示 + 失败解释」，不参与通过/失败判定
 import { redact, truncate, tail, toShanghaiDay } from './util.mjs'
-import { toChatCompletionsUrl } from './util.mjs'
+import { toChatCompletionsUrl, fetchRetryingNetwork } from './util.mjs'
 import { aiUsageToday, addAiUsage } from './db.mjs'
 
 const MODEL = 'openai/gpt-6-luna'
@@ -73,12 +73,12 @@ export async function analyzePr({ db, secrets, riskClass, pr, files, profile, re
     })
     let resp, data
     for (let attempt = 1; attempt <= PR_SUMMARY_ATTEMPTS; attempt++) {
-      resp = await fetchImpl(toChatCompletionsUrl(secrets.ARGUS_LLM_BASE_URL), {
+      resp = await fetchRetryingNetwork(fetchImpl, toChatCompletionsUrl(secrets.ARGUS_LLM_BASE_URL), () => ({
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${secrets.ARGUS_LLM_API_KEY}` },
         body,
         signal: AbortSignal.timeout(8 * 60_000),
-      })
+      }), { delayMs: retryDelayMs })
       data = await resp.json().catch(() => ({}))
       const tokens = data?.usage?.total_tokens ?? 0
       if (quota) quota.consume('pr-summary', tokens)
