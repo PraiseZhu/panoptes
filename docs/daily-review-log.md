@@ -187,3 +187,58 @@ already calibrated to P3 on 10-15; left.
 
 **For the 日报 bot.** #915: drop the P2 "AI-generated test fails on the tested commit" (it was the test's own mock
 mistake); still P1 from code review. #972: PR level is P2 (coverage 89.33% < 90%), not P3. No field changes.
+
+## 2026-10-17 (data day 2026-10-16, Asia/Shanghai)
+
+**Reconciliation.** 20 PRs merged on 10-16 (#971 #982 #992 #993 #995 #1005 #1006 #1008 #1009 #1010 #1011 #1012 #1015
+#1016 #1017 #1018 #1024 #1026 #1028 #1029); all 20 have a valid `reports/merged/PR-N.json`, schema 1.0. `run.trigger`
+`event` for 17, `catch-up` for 3: the on-merge routine missed #1028 (merged 21:33, caught at 22:07) and #971 + #1017
+(merged together 22:12, caught only at 03:24 / 03:43 — the catch-up cron's `gh pr list` failed on the exhausted GraphQL
+quota of the shared PraiseZhu token from 00:07 on). No duplicates (the other "missing" lines in `catch-up-cron.log` were
+event runs still in progress; reused). Docs-only #1005 #1012 #1016 in 12–15 s. No issue created on 10-16 — correct:
+the only P1 on Praise's PRs (#993, #1006) are review-only.
+
+**Stability.** system_health ok on every 10-16 run; no qa_errors, timeouts, capped quota. Product PRs 900–1520 s; #1018
+waited 1 min for memory. Box rebooted ~07:11 10-17 (logs/reports restored 07:14, env-guard repaired chromium at 08:30,
+see journal). 10-17 ~11:00: outbound network is flaky (model gateway `fetch failed` / `UND_ERR_SOCKET other side closed`
+on ~1 in 3 requests, `git push` TLS reset once, `gh` "unexpected EOF") — two #1008 re-runs lost their AI tests to it.
+
+**Accuracy.**
+- #1008 AI test (P2 "fails on the tested commit"): `TypeError: renderAutomationBody is not a function` at the test's own
+  line 8 — the test imported `renderAutomationBody` from `org-market-pack.mjs`, it lives in
+  `org-market-open-company-pr.mjs`. Test defect → new rule (below) and re-run.
+- #1017 AI test (P2): `effects[kind].get is not a function` — the test passed the journal shape (arrays) where
+  `settleOwedAssetEffects` takes Maps; with Maps the account check returns false as the test expects. Calibrated by
+  hand to P3 false positive → **#1017 review-suggested P2 → clean P3** (`PR-1017.json.bak-20261017-calibration`). Not
+  covered by the new rule (error is inside the code under test).
+- #971 review P1 ("company repo snapshot uploaded as source-repo artifact"): conditional on the source repo being public;
+  both repos are `internal` in the same org, so the artifact widens nobody's access → P3 false positive. **#971
+  needs-attention P1 → review-suggested P2** (coverage 62.5% < 90% remains). `PR-971.json.bak-20261017-calibration`.
+- #993 was already calibrated in the 10:15 group review (P1 → P3/P2).
+- #995 / #1006 review P1 plausible, kept. #1006 AI-test P3s calibrated 10-16 19:20, fine.
+- `shadowRoundTrip` bench timeout again on #992 #1018 #1028 #1029 (P2). On #1018/#1029 it also failed on base
+  (`pre_existing: true`) but stays P2 because flaky entries keep P2 by design, while the same test failing twice + on
+  base is P3 (#959 rule) — inconsistent; proposed to Praise, not changed.
+
+**Changes pushed.**
+- `d5f15bc` ai-tests: `TypeError: x is not a function` whose first frame is in the generated test and `x` is a name the
+  test imports with `import { x }` → 测试无效 (`invalid_kind: missing-module`, existing value; no field change).
+  catch-up: `gh pr list` failure → fall back to REST `pulls?state=closed&sort=updated` (separate quota); verified live
+  (same 20 PRs). Regression tests for both. SCHEMA (both copies) updated.
+- `66181c8` network errors from the model gateway are `retryable` (next round if the per-PR call cap allows).
+- `bbe1bea` network errors retried in place (3 tries, 2 s / 4 s) for AI tests and PR summary.
+- `3661387` (日报 bot's REPORT-STYLE line, committed locally at 10:02) pushed with them. Unit 265/266 pass (1 skipped),
+  gitleaks clean, CI green.
+
+**Re-runs (manual, test pool, `--no-reuse --no-issues`, `--wait-lock`).**
+- #1008: review-suggested P2 → **clean P3**, system_health ok (`bbe1bea`). The model again imported
+  `renderAutomationBody` from the wrong module and the new rule marked it 测试无效 live; the other AI test was kept.
+  Old: `history/PR-1008.v1.json` (original). `v2` / `v3` are two re-runs at 11:09 / 11:12 whose AI tests failed on the
+  flaky network (degraded, never reported) — ignore them.
+
+**For the 日报 bot.** Conclusion changes vs the 10-17 日报: #1008 P2 → clean P3 (AI-test failure was the test's own
+wrong import); #1017 P2 → clean P3 (AI test passed data in the wrong shape); #971 P1 → P2 (review P1 does not hold,
+both repos internal; new-code coverage 62.5% still P2). No field changes.
+
+**For Praise.** (1) On-merge routine missed 3 of 20 merges again (#1028, #971, #1017). (2) Should a flaky check that also
+fails on base (`pre_existing: true`) be P3 like other old problems? Today it stays P2 (#1018, #1029).
