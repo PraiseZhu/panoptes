@@ -28,10 +28,12 @@ async function gitAuth(repo) {
 const MANIFEST = 'argus-run.json'
 
 // git 取码要用真实 HOME 找 gh 登录；测试步骤在 stepEnv 里把 HOME 换成 run 目录
-const baseEnv = () => ({
+export const baseEnv = () => ({
   PATH: process.env.PATH,
   HOME: process.env.HOME,
   LANG: 'en_US.UTF-8',
+  // 测试按上海时区写的断言：子进程固定 TZ（run-nightly.sh 导出 Asia/Shanghai；未设置时也兜底），不跟随本机时区
+  TZ: process.env.TZ || 'Asia/Shanghai',
   GIT_TERMINAL_PROMPT: '0',
   // 大文件（LFS）默认不在检出时下载，需要的项目在 profile 里声明 lfs: true 后单独拉取
   GIT_LFS_SKIP_SMUDGE: '1',
@@ -101,7 +103,7 @@ const subst = (value, runDir, vars = {}) => {
   return out
 }
 
-function stepEnv(runDir, profile) {
+export function stepEnv(runDir, profile) {
   const extra = Object.fromEntries(Object.entries(profile.env ?? {}).map(([k, v]) => [k, subst(v, runDir)]))
   const prepend = (profile.pathPrepend ?? []).map((p) => subst(p, runDir))
   return {
