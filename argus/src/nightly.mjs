@@ -1216,6 +1216,12 @@ export async function processTargets(targets, { opts = {}, health, startedAt = n
 export function finalizeHealth(health, prs, startedAt = new Date(), now = () => Date.now()) {
   health.status = health.qa_tool_failures.some((f) => ['discovery', 'pipeline'].includes(f.stage)) || prs.some((p) => p.verdict === 'qa-error') ? 'failed'
     : (health.qa_tool_failures.length || health.env_problems.length || health.llm_errors.length || health.quota?.capped?.length) ? 'degraded' : 'ok'
+  // 复用合并即测结果的 PR：结论来自那次运行，它的 system_health 不是 ok 时本次至少记 degraded（否则单 PR 副本与原报告不一致）
+  if (health.status === 'ok' && prs.some((p) => p.reused && p.reused_report_system_health && p.reused_report_system_health !== 'ok')) {
+    health.status = 'degraded'
+    health.notes ??= []
+    health.notes.push(`reused on-merge results came from runs whose system_health was not ok: ${prs.filter((p) => p.reused && p.reused_report_system_health && p.reused_report_system_health !== 'ok').map((p) => `#${p.number} (${p.reused_report_system_health})`).join(', ')}`)
+  }
   // complete：发现成功，且本次要测的每个 PR 都有最终结论（没有 qa-error，没有因超时 / 截止时间而没测）。
   // all_discovered_tested：当天发现的每个 PR 都有最终结论（--pr / --limit 排除的也算没测）。
   const unfinished = (p) => p.verdict === 'qa-error' || (p.verdict === 'not-tested' && ['pr-timeout', 'deadline'].includes(p.not_tested_code))

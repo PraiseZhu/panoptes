@@ -280,3 +280,13 @@ test('每个条目都有 merged_at（没测的也从发现结果带上）与 mer
   const [o] = annotateTestBacked([{ number: 1, findings: [] }])
   assert.ok('merged_at' in o && o.merged_at === null && o.merged_at_shanghai === null)
 })
+
+test('finalizeHealth：复用的合并即测结果来自 degraded 运行时，本次 system_health 至少 degraded', async () => {
+  const { finalizeHealth } = await import('../src/nightly.mjs')
+  const mk = () => ({ status: 'ok', qa_tool_failures: [], env_problems: [], llm_errors: [], notes: [] })
+  const h = finalizeHealth(mk(), [{ number: 7, verdict: 'clean', reused: true, reused_report_system_health: 'degraded' }])
+  assert.equal(h.status, 'degraded')
+  assert.match(h.notes.at(-1), /#7 \(degraded\)/)
+  assert.equal(finalizeHealth(mk(), [{ number: 8, verdict: 'clean', reused: true, reused_report_system_health: 'ok' }]).status, 'ok')
+  assert.equal(finalizeHealth(mk(), [{ number: 9, verdict: 'clean' }]).status, 'ok')
+})
