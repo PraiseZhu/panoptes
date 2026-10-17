@@ -323,6 +323,14 @@ test('AI 补测缺口：只取 Jev 判为适用、在补测维度清单里、且
   assert.equal(ai.AI_GAP_DIMENSIONS.length, 12)
 })
 
+test('AI 补测：连不上模型网关（fetch failed）→ error + retryable（还有调用次数就再试）；超时不重试', async () => {
+  const base = { db: null, secrets: { ARGUS_LLM_BASE_URL: 'https://llm.example/v1', ARGUS_LLM_API_KEY: 'k' }, riskClass: 'B', pr: { title: 't', body: '' }, files: [], profile: { aiTests: { frameworkZh: 'vitest', pathGlobs: ['src/**/*.argus.test.ts'], run: 'x' } }, gaps: ['boundary'], quota: { check: () => ({ ok: true }), consume: () => {} } }
+  const net = await ai.generateTargetedTests({ ...base, fetchImpl: async () => { throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } }) } })
+  assert.equal(net.status, 'error'); assert.equal(net.retryable, true); assert.match(net.reasonZh, /fetch failed/)
+  const to = await ai.generateTargetedTests({ ...base, fetchImpl: async () => { throw Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }) } })
+  assert.equal(to.status, 'error'); assert.equal(to.retryable, undefined)
+})
+
 test('AI 补测上限：默认 2 次模型调用 / 25 分钟 / 每次 3 个，可用环境变量改；ARGUS_AITESTS=0 关闭', () => {
   assert.deepEqual(ai.aiTestCaps({}), { enabled: true, maxCalls: 2, maxWallMin: 25, maxTestsPerCall: 3 })
   assert.deepEqual(ai.aiTestCaps({ ARGUS_AITEST_MAX_CALLS: '1', ARGUS_AITEST_MAX_MIN: '10', ARGUS_AITEST_MAX_TESTS: '2', ARGUS_AITESTS: '0' }), { enabled: false, maxCalls: 1, maxWallMin: 10, maxTestsPerCall: 2 })

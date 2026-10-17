@@ -133,9 +133,12 @@ export async function generateTargetedTests({ db, secrets, riskClass, pr, files,
     const offered = Array.isArray(raw?.tests) ? raw.tests.length : 0
     return { status: tests.length ? 'ok' : 'empty', reasonZh: tests.length ? null : 'AI 没写出可用的测试', tests, offered, rejected_by_validation: Math.max(0, offered - tests.length), usage: data?.usage ?? null, model: MODEL }
   } catch (err) {
-    return { status: 'error', reasonZh: `AI 补测失败（${redact(err.message).slice(0, 80)}）`, tests: [] }
+    // 连不上网关（fetch failed / 连接被重置 / DNS 临时失败）没用掉模型额度，还有调用次数就重试（#1008 10-17 重跑时遇到）；超时不重试
+    const network = err?.name !== 'TimeoutError' && err?.name !== 'AbortError' && NETWORK_ERROR.test(`${err?.message ?? ''} ${err?.cause?.code ?? ''}`)
+    return { status: 'error', ...(network ? { retryable: true } : {}), reasonZh: `AI 补测失败（${redact(err.message).slice(0, 80)}）`, tests: [] }
   }
 }
+const NETWORK_ERROR = /fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|UND_ERR_SOCKET|UND_ERR_CONNECT_TIMEOUT|socket hang up/i
 
 // ── 夜间流程（Linux）用的补测编排参数与纯函数 ───────────────────────
 // 补测只针对这些「现有检查常覆盖不到」的维度（Jev 判为 applicable 且没有已跑的检查声明覆盖）
