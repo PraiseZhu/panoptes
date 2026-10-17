@@ -327,7 +327,11 @@ are deleted after the run; nothing is written to the target repo.
 **Invalid tests — 测试无效 (since 2026-10-13).** A case that fails on the tested commit **before any assertion** because
 the test's own precondition is missing is not evidence about the code: a missing fixture / data file (`ENOENT`,
 `no such file or directory`) or a missing module / export (`Cannot find module`, `Failed to resolve import`,
-`Failed to load url`, `does not provide an export named`). Such a case gets `result: "discarded"` (so it is never a
+`Failed to load url`, `does not provide an export named`, vitest `No "x" export is defined on the "…" mock` when the
+test's own `vi.mock` factory lacks an export the code under test uses (since 2026-10-16), and — since 2026-10-17 —
+`TypeError: x is not a function` whose first stack frame is in the generated test file itself and where `x` is a name the
+test imports with `import { x } from '…'`, i.e. the test imported a name that module does not export, as on #1008
+10-16; the same TypeError thrown inside the code under test is **not** matched). Such a case gets `result: "discarded"` (so it is never a
 finding and never counts as coverage) plus **`invalid: true`**, **`invalid_kind`** (`missing-file` | `missing-module`),
 **`display_zh: "测试无效"`** and a `reason` starting with `test invalid (测试无效)` that quotes the matched line. If the
 output contains an assertion failure (`AssertionError`, `expected … to …`) the case stays `fails-on-current` even when the

@@ -251,6 +251,29 @@ test('listMergedPrs：gh pr list（只读），按上海窗口过滤、按合并
   assert.ok(!calls[0].some((a) => /create|edit|comment/.test(a)))
 })
 
+test('listMergedPrs：GraphQL 额度用光（gh pr list 失败）时退回 REST pulls 接口，结果一样；REST 也失败才报错', () => {
+  const calls = []
+  const rest = [
+    ...PRS.map((p) => ({ number: p.number, title: `t${p.number}`, merged_at: p.merged_at, merge_commit_sha: p.merge_sha, updated_at: p.merged_at, base: { ref: 'main' } })),
+    { number: 7, title: 'closed, not merged', merged_at: null, merge_commit_sha: 'x', updated_at: '2026-10-11T02:00:00Z' },
+    { number: 9, title: 'old', merged_at: '2026-10-08T10:00:00Z', merge_commit_sha: 'z', updated_at: '2026-10-08T10:00:00Z' },
+  ]
+  const run = (cmd, args) => {
+    calls.push(args.join(' '))
+    if (args[0] === 'pr') return { status: 1, stderr: 'GraphQL: API rate limit already exceeded for user ID 1.' }
+    return { status: 0, stdout: JSON.stringify(rest) }
+  }
+  const orig = process.stderr.write; let logged = ''
+  process.stderr.write = (m) => { logged += m; return true }
+  let list
+  try { list = catchup.listMergedPrs('o/r', ['2026-10-10', '2026-10-11'], { gh: 'gh', run }) } finally { process.stderr.write = orig }
+  assert.deepEqual(list.map((p) => p.number), [1, 2, 3])
+  assert.ok(list.every((p) => p.merge_sha))
+  assert.equal(calls.length, 2); assert.match(calls[1], /^api repos\/o\/r\/pulls\?state=closed&sort=updated&direction=desc/)
+  assert.match(logged, /via REST/)
+  assert.throws(() => catchup.listMergedPrs('o/r', ['2026-10-10'], { gh: 'gh', run: () => ({ status: 1, stderr: 'boom' }) }), /gh pr list failed.*REST fallback failed/)
+})
+
 test('补测：没缺口时什么都不做（不跑、不写文件）', () => {
   const { reportsDir, write } = catchFixture()
   for (const p of PRS) write(p.number, { tested_sha: p.merge_sha })
@@ -327,6 +350,20 @@ test('AI 补测「测试无效」：断言前就因缺测试数据 / 文件、�
   const mockGap = '\x1b[31m\x1b[1mError\x1b[22m: [vitest] No "namespacedKey" export is defined on the "../../lib/persistUserId" mock. Did you forget to return it from "vi.mock"?\n ❯ createIdbFrozenTarget src/lib/persistIdbStorage.ts:415:21'
   const rm = ai.toAiTestResult({ ok: false, exitCode: 1, tail: mockGap })
   assert.equal(rm.result, 'discarded'); assert.equal(rm.invalid_kind, 'missing-module'); assert.equal(rm.display_zh, '测试无效')
+  // 测试从错的模块按名导入（ESM 拿到 undefined）并在测试文件里直接调用 → TypeError: x is not a function（#1008 10-16）
+  const content = "import { describe, it } from 'vitest'\nimport { resolveCompanyTarget } from '../../scripts/ops/org-market-open-company-pr.mjs'\nimport { renderAutomationBody, type Pack } from '../../scripts/ops/org-market-pack.mjs'\n"
+  const filePath = 'src/ops/org-market-comment-history.argus.test.ts'
+  const wrongImport = ' FAIL  src/ops/org-market-comment-history.argus.test.ts > 公司仓候选评论历史 > 停止筛选\n\x1b[31mTypeError\x1b[39m: renderAutomationBody is not a function\n ❯ src/ops/org-market-comment-history.argus.test.ts:8:18\n      8|     const body = renderAutomationBody('
+  const wi = ai.toAiTestResult({ ok: false, exitCode: 1, tail: wrongImport }, { content, filePath })
+  assert.equal(wi.result, 'discarded'); assert.equal(wi.invalid_kind, 'missing-module'); assert.match(wi.reason, /renderAutomationBody is not a function/)
+  assert.deepEqual([...ai.importedNames(content)].sort(), ['describe', 'it', 'renderAutomationBody', 'resolveCompanyTarget'])
+  // 没有测试代码可对照、名字不是测试导入的、或报错在被测代码里 → 仍是 fails-on-current（可能是真问题）
+  assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: wrongImport }).result, 'fails-on-current')
+  assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: wrongImport.replaceAll('renderAutomationBody', 'makeBody') }, { content, filePath }).result, 'fails-on-current')
+  const inProduct = 'TypeError: renderAutomationBody is not a function\n ❯ build scripts/ops/org-market-open-company-pr.mjs:407:15\n ❯ src/ops/org-market-comment-history.argus.test.ts:8:18'
+  assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: inProduct }, { content, filePath }).result, 'fails-on-current')
+  // #1017 10-16：effects[kind].get is not a function 抛在被测代码里（测试传错了数据形状）→ 不在这条规则里，留给人确认
+  assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: 'TypeError: effects[kind].get is not a function\n ❯ op src/canvas/actions/canvasSyncAssetEffects.ts:44:35' }, { content: "import { op } from './x'", filePath: 'src/canvas/actions/canvasSyncAssetEffects.argus.test.ts' }).result, 'fails-on-current')
   // 断言失败（哪怕信息里带 ENOENT）仍是「在当前代码上失败」：可能是真问题，留给人确认
   const asserted = "AssertionError: expected [Function] to throw error including 'EVIDENCE_FILE_TOO_LARGE' but got 'ENOENT: no such file or directory'"
   assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: asserted }).result, 'fails-on-current')

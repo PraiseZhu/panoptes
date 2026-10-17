@@ -30,12 +30,33 @@ export function listMergedPrs(repo, days, { gh = process.env.ARGUS_GH_BIN ?? 'gh
   const windows = days.map(shanghaiDayWindow)
   const since = new Date(windows[0].startMs - 86400_000).toISOString().slice(0, 10)
   const r = run(gh, ['pr', 'list', '-R', repo, '--state', 'merged', '--search', `merged:>=${since}`, '--limit', '200', '--json', 'number,title,mergedAt,mergeCommit,baseRefName'], { encoding: 'utf8', timeout: 120_000 })
-  if (r.status !== 0) throw new Error(`gh pr list failed (exit ${r.status}): ${String(r.stderr ?? '').slice(0, 300)}`)
-  const rows = JSON.parse(r.stdout || '[]')
+  let rows
+  if (r.status === 0) rows = JSON.parse(r.stdout || '[]')
+  else {
+    // gh pr list 走 GraphQL；同一账号的 GraphQL 额度常被别的 bot 用光（10-16 22:28–03:24 连续失败，#971/#1017 晚补 5 小时）。
+    // 退回 REST（额度单独计）：按更新时间倒序翻已关闭 PR，更新时间早于 since 就停（合并必然发生在最后一次更新之前）。
+    const first = `gh pr list failed (exit ${r.status}): ${String(r.stderr ?? '').trim().slice(0, 300)}`
+    try { rows = listMergedViaRest(repo, since, { gh, run }) } catch (e) { throw new Error(`${first}; REST fallback failed: ${e.message}`) }
+    log(`[catch-up] ${first.split('\n')[0]} → listed ${rows.length} merged PR(s) via REST instead`)
+  }
   return rows
     .map((p) => ({ number: p.number, title: p.title, merged_at: p.mergedAt, merge_sha: p.mergeCommit?.oid ?? null, day: windows.find((w) => { const t = Date.parse(p.mergedAt); return t >= w.startMs && t < w.endMs })?.day ?? null }))
     .filter((p) => p.day && p.merge_sha)
     .sort((a, b) => Date.parse(a.merged_at) - Date.parse(b.merged_at) || a.number - b.number)
+}
+
+const log = (m) => process.stderr.write(`${m}\n`)
+export function listMergedViaRest(repo, since, { gh = 'gh', run = spawnSync, maxPages = 5 } = {}) {
+  const sinceMs = Date.parse(`${since}T00:00:00Z`)
+  const rows = []
+  for (let page = 1; page <= maxPages; page++) {
+    const r = run(gh, ['api', `repos/${repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=${page}`, '--jq', '[.[] | {number, title, merged_at, merge_commit_sha, updated_at, base: {ref: .base.ref}}]'], { encoding: 'utf8', timeout: 120_000, maxBuffer: 64 * 1024 * 1024 })
+    if (r.status !== 0) throw new Error(`gh api pulls exit ${r.status}${r.error ? ` (${r.error.code ?? r.error.message})` : ''}: ${String(r.stderr ?? '').trim().slice(0, 200)}`)
+    const items = JSON.parse(r.stdout || '[]')
+    for (const p of items) if (p.merged_at && Date.parse(p.merged_at) >= sinceMs) rows.push({ number: p.number, title: p.title, mergedAt: p.merged_at, mergeCommit: p.merge_commit_sha ? { oid: p.merge_commit_sha } : null, baseRefName: p.base?.ref ?? null })
+    if (items.length < 100 || items.some((p) => Date.parse(p.updated_at) < sinceMs)) break
+  }
+  return rows
 }
 
 const UNFINISHED = new Set(['qa-error', 'not-tested'])

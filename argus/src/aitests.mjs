@@ -169,25 +169,48 @@ const INVALID_SIGNATURES = [
   { kind: 'missing-module', re: /Cannot find module ['"]|Cannot find package ['"]|Failed to resolve import|Failed to load url|Does the file exist\?|does not provide an export named|No "[^"]+" export is defined on the "[^"]+" mock/ },
 ]
 const ASSERTION_FAILURE = /AssertionError|\bexpected\b[^\n]*\bto (be|equal|throw|have|contain|match|deep|strictly|include|satisfy)/i
-export function toInvalidTest(tail) {
+// missing-module 还包括：测试从某个模块按名导入了该模块没有的导出（ESM 里拿到 undefined），并在测试文件里直接调用它
+// → TypeError: x is not a function，且报错位置（第一帧）就在这个补测文件里（#1008 10-16：renderAutomationBody 从错的模块导入）。
+// 只看测试代码里 import { … } 的名字；被测代码里抛出的 "is not a function" 不算（可能是真问题）。
+const NOT_A_FUNCTION = /TypeError: ([A-Za-z_$][\w$]*) is not a function/
+export function importedNames(content) {
+  const names = new Set()
+  for (const m of String(content ?? '').matchAll(/import\s+(?!type\b)(?:[A-Za-z_$][\w$]*\s*,\s*)?\{([^}]*)\}\s*from\s*['"][^'"]+['"]/g)) {
+    for (const part of m[1].split(',')) {
+      const p = part.trim().replace(/^type\s+/, '')
+      if (!p || part.trim().startsWith('type ')) continue
+      names.add(p.split(/\s+as\s+/).pop().trim())
+    }
+  }
+  return names
+}
+function missingImportCall(text, { content, filePath } = {}) {
+  const m = text.match(NOT_A_FUNCTION)
+  if (!m || !content || !importedNames(content).has(m[1])) return null
+  const frame = text.slice(m.index).split('\n').slice(1).find((l) => /^\s*❯\s/.test(l))
+  const base = filePath ? String(filePath).split('/').pop() : null
+  if (!frame || !(base ? frame.includes(`${base}:`) : /\.test\.[cm]?[jt]sx?:\d+/.test(frame))) return null
+  return { kind: 'missing-module', line: `${m[0]} (imported by the test; not exported by that module) ${frame.trim()}`.slice(0, 240) }
+}
+export function toInvalidTest(tail, test = {}) {
   const text = String(tail ?? '').replace(/\x1b\[[0-9;]*m/g, '')
   if (!text || ASSERTION_FAILURE.test(text)) return null
   for (const { kind, re } of INVALID_SIGNATURES) {
     const line = text.split('\n').find((l) => re.test(l))
     if (line) return { kind, line: line.trim().slice(0, 240) }
   }
-  return null
+  return missingImportCall(text, test)
 }
 
 // 补测执行结果 → 判定：kept（当前代码通过且植入错误后失败）/ discarded（植入错误对不上、植入后仍通过、没法跑、测试无效）/
 // fails-on-current（在当前代码上就失败：可能是缺陷，P2、test_backed=false，复现后才可升级）
-export function toAiTestResult(r) {
+export function toAiTestResult(r, test = {}) {
   if (!r) return { result: 'discarded', reason: 'not run (time budget / setup failed)' }
   if (r.timedOut) return { result: 'discarded', reason: 'timed out' }
   if (r.ok) return { result: 'kept', reason: 'passes on the tested commit and fails with the injected bug' }
   if (r.unavailable && r.exitCode === 4) return { result: 'discarded', reason: 'mutation check failed (injected bug not caught, or mutation did not match the source)' }
   if (r.unavailable) return { result: 'discarded', reason: `could not run: ${r.unavailableReasonZh ?? `exit ${r.exitCode}`}` }
-  const invalid = toInvalidTest(r.tail)
+  const invalid = toInvalidTest(r.tail, test)
   if (invalid) return { result: 'discarded', invalid: true, invalid_kind: invalid.kind, display_zh: AI_TEST_INVALID_ZH,
     reason: `test invalid (${AI_TEST_INVALID_ZH}): failed before any assertion because the test's own precondition is missing (${invalid.kind}: ${invalid.line})` }
   return { result: 'fails-on-current', reason: 'fails on the tested commit' }

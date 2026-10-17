@@ -494,7 +494,7 @@ async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, commo
     const run = await executeOnSha({ ...common, profile: aiProfile, label: `ai${round}`, sha, stepIds: [...setupIds, ...steps.map((s) => s.id)] })
     for (const st of steps) {
       const r = run.find((x) => x.id === st.id)
-      const verdict = toAiTestResult(setupFailed(run) ? null : r)
+      const verdict = toAiTestResult(setupFailed(run) ? null : r, st.aiTest)
       const t = { id: st.id, round, kind: st.aiKind, purpose: st.aiTest.purposeZh, covers: st.covers, file: st.aiTest.filePath, mutation_file: st.aiTest.mutation.file, ...verdict, exit_code: r?.exitCode ?? null, duration_ms: r?.durationMs ?? null, log_tail: r ? tail(redact(String(r.tail ?? '')), 1500) : null }
       ai.tests.push(t); rr.tests.push(st.id)
       if (verdict.result !== 'kept') feedback.push(`${st.aiTest.purposeZh}（${st.aiTest.filePath}）：${verdict.reason}`)
@@ -510,7 +510,7 @@ async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, commo
     const again = await executeOnSha({ ...common, profile: { ...profile, steps: [...profile.steps, ...steps] }, label: 'air', sha, stepIds: [...setupIds, ...steps.map((s) => s.id)] })
     for (const t of failing) {
       const r = again.find((x) => x.id === t.id)
-      t.reproduced = r ? toAiTestResult(r).result === 'fails-on-current' : null
+      t.reproduced = r ? toAiTestResult(r, stepDefs.get(t.id)?.aiTest).result === 'fails-on-current' : null
     }
   } else for (const t of failing) t.reproduced = null
   ai.kept = ai.tests.filter((t) => t.result === 'kept').length
