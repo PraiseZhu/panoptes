@@ -147,6 +147,12 @@ export function flakyBaseComparison({ baseSha, baseRun }) {
   if (baseRun === 'fail') return { compared: true, base_sha: baseSha, base_run: baseRun, result: 'also-fails-on-base', note: 'also failed on the base (pre-merge) revision in one run: instability predates this PR', note_zh: '合并前版本上同样失败：不稳定在这个 PR 之前就有' }
   return { compared: true, base_sha: baseSha, base_run: baseRun, result: 'passes-on-base', note: 'passed on the base (pre-merge) revision in one run; a single run cannot rule out the same instability on base', note_zh: '合并前版本上跑一次通过；单次运行不能排除合并前也偶发失败' }
 }
+// 试运行检查里的超时（整步超时，或用例 failure_type test_timeout）
+export function isTrialTimeout(step, r, test) {
+  if (!step?.trialOnly) return false
+  if (r?.timedOut) return true
+  return Boolean(test && test !== '*' && r?.failureDetails?.find((f) => f.name === test)?.type === 'test_timeout')
+}
 export function severityFor({ status, step, merged }) {
   let sev
   if (status === 'introduced') sev = step.kind === 'quality' ? 'P2' : merged ? 'P0' : 'P1'
@@ -271,10 +277,12 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   const startCov = () => ensureMirror(repo, sha, { extraRefspecs }).then(() => executeOnSha({ ...common, label: 'cov', sha, stepIds: covIds })).catch((err) => ({ error: err }))
   if (par) out.run_mode = { coverage_parallel: par.parallel, reason: par.reason }
   let covRun = wantCov && par.parallel ? startCov() : Promise.resolve(null)
-  let first = await executeOnSha({ ...common, label: 'h1', sha, stepIds: plan.stepIds })
+  // afterCoverage 的步骤（bench：对机器负载敏感）等并行的覆盖率轮次（单测分片）跑完再开始
+  const beforeStep = (st) => (st.afterCoverage && par?.parallel ? covRun : null)
+  let first = await executeOnSha({ ...common, label: 'h1', sha, stepIds: plan.stepIds, beforeStep })
   if (setupFailed(first)) {
     health.qa_tool_failures.push({ pr: number, stage: 'setup', message: 'dependency install failed, retrying once', detail: tail(redact(first.find((r) => r.kind === 'setup')?.tail ?? ''), 600) })
-    first = await executeOnSha({ ...common, label: 'h1r', sha, stepIds: plan.stepIds })
+    first = await executeOnSha({ ...common, label: 'h1r', sha, stepIds: plan.stepIds, beforeStep })
   }
   // 不适用于这个版本的步骤（appliesIf 不满足）：不进 checks、不参与判定，记进 skipped_steps
   for (const r of first.filter((x) => x.notApplicable)) plan.skipped.push({ id: r.id, nameZh: r.nameZh, reason: `not applicable to this revision: ${r.notApplicableReason}` })
@@ -353,6 +361,8 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     const step = stepById[stepId] ?? { id: stepId, kind: r?.kind }
     let { status, why } = classifyKey(key, { first, rerun, base, latest, latestIsSame, skipLatest: Boolean(step.noLatestRecheck) })
     if (r?.timedOut) { status = 'timeout'; why = 'check timed out; no comparable failure evidence' }
+    // 试运行检查（trialOnly，如 bench）里的超时：多半是机器负载（审计 2026-10-18 S3），不算这个 PR 的发现
+    const envTimeout = isTrialTimeout(step, r, test)
     const named = test !== '*'
     const fp = fingerprintOf(repo, ['check', stepId, named ? test : wholeStepSignature(r)])
     const type = r?.failureDetails?.find((f) => f.name === test)?.type ?? null
@@ -373,7 +383,8 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
       check_id: stepId, check_name: r?.nameZh, dimension: toBox(step, profile), qa_dimensions: step.covers ?? [],
       test: named ? test : null, failure_type: type, status, flaky: status === 'flaky', related_to_pr: status === 'flaky' ? false : undefined,
       pre_existing: preExisting,
-      severity: severityFor({ status, step, merged }), attribution: why,
+      severity: envTimeout ? 'P3' : severityFor({ status, step, merged }), attribution: envTimeout ? `${why}; timeout in a trial-only check: treated as environment load, not a PR finding` : why,
+      ...(envTimeout ? { not_a_pr_finding: true, env_suspected: 'trial-timeout' } : {}),
       fingerprint: fp, pr_fingerprint: prFingerprint(fp, number),
       evidence: {
         tested_sha: sha, base_sha: baseSha, exit_code: r?.exitCode, timed_out: Boolean(r?.timedOut),
@@ -424,7 +435,8 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
       evidence: { tested_sha: sha, base_sha: baseSha, values: gate.values, thresholds: gate.thresholds, baseline: gate.baseline, new_code_files: (gate.new_code?.files ?? []).slice(0, 20) },
     })
   }
-  out.findings = [...out.failed_checks.map((c) => ({ source: 'check', test_backed: checkIsTestBacked(c), ...c })), ...out.findings]
+  for (const c of out.failed_checks.filter((x) => x.not_a_pr_finding)) health.env_problems.push({ pr: number, message: `trial check '${c.check_id}' timed out${c.test ? ` (${c.test})` : ''}: treated as environment load, not a PR finding` })
+  out.findings = [...out.failed_checks.filter((c) => !c.not_a_pr_finding).map((c) => ({ source: 'check', test_backed: checkIsTestBacked(c), ...c })), ...out.findings]
   out.severity = out.findings.length ? maxSev(out.findings.map((f) => f.severity)) : 'P3'
   Object.assign(out, dimensionsOf(out.checks))
   out.tested = true

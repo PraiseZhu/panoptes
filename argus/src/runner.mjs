@@ -360,7 +360,8 @@ function readProbeReport(specPath) {
   } catch { return null }
 }
 
-export async function runSteps(profile, src, runDir, { stepIds = null, execution = null } = {}) {
+// beforeStep(step)：每步开跑前等它返回的 promise（nightly 用来让 afterCoverage 的步骤等覆盖率轮次的单测分片跑完）
+export async function runSteps(profile, src, runDir, { stepIds = null, execution = null, beforeStep = null } = {}) {
   const env = stepEnv(runDir, profile)
   const needsBase = profile.steps.some((s) => /\$\{(?:BASE_SHA|DIFF_BASE_SHA)\}/.test(JSON.stringify(s)))
   const parent = needsBase ? await toParentSha(src) : ''
@@ -371,6 +372,7 @@ export async function runSteps(profile, src, runDir, { stepIds = null, execution
   for (const step of profile.steps) {
     if (isStopping() || overBudget()) break
     if (stepIds && step.kind !== 'setup' && !stepIds.includes(step.id)) continue
+    if (beforeStep) await beforeStep(step)
     const stepVarsForReport = prepareTestReport(step, runDir)
     const stepSubstitutions = { ...vars, ...stepVarsForReport }
     const identity = { ...(execution ?? {}), commandTemplate: [...step.cmd], covers: [...(step.covers ?? [])], aiGenerated: Boolean(step.aiGenerated) }
@@ -590,7 +592,7 @@ export async function cleanupRun(mirror, runDir) {
 }
 
 // 一次完整执行：检出 → 跑步骤 → 清理；清理失败只记日志，由 janitor 兜底
-export async function executeOnSha({ repo, jobId, label, sha, profile, stepIds, extraRefspecs = [], keepTo = null, diffBase = null }) {
+export async function executeOnSha({ repo, jobId, label, sha, profile, stepIds, extraRefspecs = [], keepTo = null, diffBase = null, beforeStep = null }) {
   const mirror = await ensureMirror(repo, sha, { extraRefspecs })
   const runDir = newRunDir(jobId, label)
   try {
@@ -606,7 +608,7 @@ export async function executeOnSha({ repo, jobId, label, sha, profile, stepIds, 
   async function runCheckout() {
     const src = await checkout(mirror, sha, runDir, { repo, lfs: Boolean(profile.lfs), mode: profile.checkoutMode ?? 'worktree' })
     const checkedOutSha = await verifyCheckoutSha(src, sha)
-    return await runSteps(profile, src, runDir, { stepIds, execution: { jobId, runLabel: label, requestedSha: sha, checkedOutSha, diffBase } })
+    return await runSteps(profile, src, runDir, { stepIds, beforeStep, execution: { jobId, runLabel: label, requestedSha: sha, checkedOutSha, diffBase } })
   }
 }
 
