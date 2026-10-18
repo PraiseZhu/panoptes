@@ -1,7 +1,7 @@
 // 白盒覆盖率门禁：单测步骤用 vitest --coverage（v8）跑，读 coverage-summary.json（总体）与 coverage-final.json
 // （逐行），再与 PR diff 的新增行求交，得到「新代码覆盖率」。低于门槛 → P2（只是建议复查，永远不会单独变成 issue）。
 import { readFileSync, existsSync, statSync, rmSync, readdirSync } from 'node:fs'
-import { join, relative, isAbsolute, resolve, sep } from 'node:path'
+import { join, relative, isAbsolute, resolve, sep, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 
@@ -134,6 +134,15 @@ export function mapToRepo(absPath, srcRoot, index) {
   }
   return null
 }
+// 复制到临时目录、目录名也改了的（gh-app-router 测试把代码复制进 /tmp/x/praisebuild/）：文件名在仓里唯一、
+// 且 V8 顶层脚本长度与仓里文件一致才认
+function sameFileByName(abs, sc, srcRoot, index) {
+  const name = basename(abs)
+  const hits = index.filter((f) => f === name || f.endsWith(`/${name}`))
+  if (hits.length !== 1) return null
+  const len = Math.max(0, ...(sc.functions ?? []).flatMap((fn) => fn.ranges ?? []).map((r) => r.endOffset))
+  try { return readFileSync(join(srcRoot, hits[0]), 'utf8').length === len ? hits[0] : null } catch { return null }
+}
 export function readV8Dir(dir, srcRoot, { index = null, maxBytes = 512 * 1024 * 1024 } = {}) {
   if (!dir || !existsSync(dir)) return {}
   const idx = index ?? repoFileIndex(srcRoot)
@@ -150,7 +159,7 @@ export function readV8Dir(dir, srcRoot, { index = null, maxBytes = 512 * 1024 * 
       let abs
       try { abs = fileURLToPath(sc.url) } catch { continue }
       if (abs.includes(`${sep}node_modules${sep}`)) continue
-      const rel = mapToRepo(abs, srcRoot, idx)
+      const rel = mapToRepo(abs, srcRoot, idx) ?? sameFileByName(abs, sc, srcRoot, idx)
       if (!rel || !isCoverageSource(rel)) continue
       ;(byFile.get(rel) ?? byFile.set(rel, []).get(rel)).push(sc.functions ?? [])
     }
@@ -182,11 +191,15 @@ export function readV8Dir(dir, srcRoot, { index = null, maxBytes = 512 * 1024 * 
   return files
 }
 
-// 主报告（vitest istanbul）里没有的文件，用 V8 数据补上
+// 主报告（vitest istanbul）里没有的文件，用 V8 数据补上；主报告里有的文件，子进程跑到的行也算覆盖（只认主报告的可执行行）
 export function mergeCoverageFiles(primary, ...extras) {
   const out = { ...(primary ?? {}) }
   for (const ex of extras) for (const [f, fc] of Object.entries(ex ?? {})) {
-    if (primary?.[f]) continue
+    if (primary?.[f]) {
+      const exec = new Set(primary[f].lines)
+      out[f] = { ...out[f], covered: [...new Set([...out[f].covered, ...fc.covered.filter((l) => exec.has(l))])].sort((a, b) => a - b) }
+      continue
+    }
     const cur = out[f]
     out[f] = cur ? { lines: [...new Set([...cur.lines, ...fc.lines])].sort((a, b) => a - b), covered: [...new Set([...cur.covered, ...fc.covered])].sort((a, b) => a - b), source: 'v8' } : fc
   }
@@ -195,7 +208,7 @@ export function mergeCoverageFiles(primary, ...extras) {
 
 export const NEW_CODE_METHOD = 'ming-qa newCode = line coverage of new code. Changed lines: git diff <base_sha> <tested_sha> (merged: first parent of the merge commit; open: merge-base with the target branch); '
   + 'added/modified lines in non-test JS/TS source files are intersected with v8 statement start lines from coverage-final.json; '
-  + 'lines that are not executable statements are ignored; files vitest did not load are taken from raw NODE_V8_COVERAGE data of the same run (node --test steps and child processes; code-like lines, covered = the last non-blank character of the line is inside a V8 block with count > 0; copies run from a temp dir are mapped back by path suffix); '
+  + 'lines that are not executable statements are ignored; files vitest did not load are taken from raw NODE_V8_COVERAGE data of the same run (node --test steps and child processes; code-like lines, covered = the last non-blank character of the line is inside a V8 block with count > 0; copies run from a temp dir are mapped back by path suffix, or by a repo-unique file name when the script length matches; for files vitest did load, lines covered only by child processes are added to covered); '
   + 'files with no data at all count their code-like added lines as uncovered, except plain .js/.mjs/.cjs files (node entry scripts / host entry), which are listed as not_measurable and left out of pct. '
   + 'pct = covered / executable changed lines; null (not evaluated) when the diff has no executable source lines.'
 
