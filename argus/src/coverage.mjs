@@ -170,6 +170,8 @@ export function readV8Dir(dir, srcRoot, { index = null, maxBytes = 512 * 1024 * 
     try { src = readFileSync(join(srcRoot, rel), 'utf8') } catch { continue }
     const hit = new Uint8Array(src.length)
     for (const fns of runs) {
+      // 脚本长度和仓里源文件不一致（转译过的 TS、被改过的副本）：偏移对不上，这次运行的数据不认
+      if (Math.max(0, ...fns.flatMap((fn) => fn.ranges ?? []).map((r) => r.endOffset)) !== src.length) continue
       const cnt = new Int32Array(src.length).fill(-1)
       const ranges = fns.flatMap((fn) => fn.ranges ?? []).sort((a, b) => (b.endOffset - b.startOffset) - (a.endOffset - a.startOffset))
       for (const r of ranges) cnt.fill(r.count, Math.max(0, r.startOffset), Math.min(r.endOffset, src.length))

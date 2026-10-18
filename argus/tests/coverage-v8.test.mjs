@@ -103,3 +103,22 @@ process.exit(spawnSync('/bin/sh', ['-c', 'exec "$0" "$1"', process.execPath, ${J
   assert.equal(runNode(join(root, 'parent.mjs'), cov2).status, 0)
   assert.equal(readV8Dir(cov2, root)['scripts/ops/lib/a.mjs'], undefined)
 })
+
+test('child V8 data whose script length differs from the repo file (transpiled / modified copy) is not credited', async () => {
+  const { mkdtempSync, writeFileSync, mkdirSync } = await import('node:fs')
+  const { join } = await import('node:path')
+  const { tmpdir } = await import('node:os')
+  const { pathToFileURL } = await import('node:url')
+  const { readV8Dir, mergeCoverageFiles } = await import('../src/coverage.mjs')
+  const root = mkdtempSync(join(tmpdir(), 'cov-len-'))
+  mkdirSync(join(root, 'src'))
+  const src = 'export function a() {\n  return 1\n}\nexport function b() {\n  return 2\n}\n'
+  writeFileSync(join(root, 'src/x.ts'), src)
+  const v8 = join(root, 'v8'); mkdirSync(v8)
+  const url = pathToFileURL(join(root, 'src/x.ts')).href
+  writeFileSync(join(v8, 'c.json'), JSON.stringify({ result: [{ url, functions: [{ ranges: [{ startOffset: 0, endOffset: src.length - 10, count: 1 }] }] }] }))
+  const got = readV8Dir(v8, root, { index: ['src/x.ts'] })
+  const merged = mergeCoverageFiles({ 'src/x.ts': { lines: [2, 5], covered: [] } }, got)
+  const assert = (await import('node:assert/strict')).default
+  assert.deepEqual(merged['src/x.ts'].covered, [])
+})
