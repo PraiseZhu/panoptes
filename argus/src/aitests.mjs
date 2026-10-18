@@ -21,7 +21,8 @@ const SYSTEM = `你是资深测试工程师。给一个已合并的 PR 补写针
 2. 测试必须在「PR 合并后的正确代码」上通过。
 3. 每个测试必须附一个「植入错误」：对某个被测源文件做一次文本替换（find 在文件中恰好出现一次），替换后测试应当失败。用来证明测试真的测到了东西。
 4. 如果改动和 PR 目标或产品意图看起来矛盾，可以写一个验证预期行为的测试，并把 kind 标为 suspicion。
-5. 写不出可靠测试就返回空数组，不要硬写。
+5. 给了「改动里没被现有测试执行到的行」时，优先让测试执行这些行：这类测试的 mutation.file 必须是其中一个文件，covers 可以为空。
+6. 写不出可靠测试就返回空数组，不要硬写。
 只输出 JSON：{"tests":[{"kind":"coverage|suspicion","purposeZh":"一句人话说明测什么","covers":["维度 key"],"filePath":"新测试文件路径","content":"完整测试代码","mutation":{"file":"源文件路径","find":"原文片段","replace":"植入错误后的片段"}}]}`
 
 function buildDiff(files) {
@@ -41,10 +42,27 @@ export function toGapDimensions({ profile, triage, stepIds }) {
   return (triage?.rows ?? []).filter((r) => r.verdict === 'applicable' && !covered.has(r.key)).map((r) => r.key)
 }
 
-// 校验模型给出的测试：路径必须落在项目允许的补测位置，覆盖的维度必须在缺口里，植入错误要完整
-export function toValidTests(raw, { profile, gaps, maxTests = MAX_TESTS }) {
+// 改动里没覆盖到的行 → 给模型看的目标：[{ file, lines }]，行号压成区间（12-15, 20）
+export function toUncoveredTargets(newCode, { maxFiles = 10 } = {}) {
+  return (newCode?.files ?? []).filter((f) => f.uncovered_lines?.length)
+    .sort((a, b) => b.uncovered_lines.length - a.uncovered_lines.length).slice(0, maxFiles)
+    .map((f) => ({ file: f.file, lines: f.uncovered_lines }))
+}
+export function toLineRanges(lines) {
+  const out = []
+  for (const n of [...lines].sort((a, b) => a - b)) {
+    const last = out.at(-1)
+    if (last && n === last[1] + 1) last[1] = n
+    else out.push([n, n])
+  }
+  return out.map(([a, b]) => (a === b ? `${a}` : `${a}-${b}`)).join(', ')
+}
+
+// 校验模型给出的测试：路径必须落在项目允许的补测位置，覆盖的维度必须在缺口里（或植入错误落在没覆盖到的文件上），植入错误要完整
+export function toValidTests(raw, { profile, gaps, maxTests = MAX_TESTS, uncovered = [] }) {
   const allowed = (profile.aiTests?.pathGlobs ?? []).map(globToRegExp)
   const gapSet = new Set(gaps)
+  const targetFiles = new Set(uncovered.map((u) => u.file))
   const out = []
   for (const t of Array.isArray(raw?.tests) ? raw.tests : []) {
     if (out.length >= maxTests) break
@@ -54,8 +72,9 @@ export function toValidTests(raw, { profile, gaps, maxTests = MAX_TESTS }) {
     const m = t.mutation ?? {}
     if (!m.file || String(m.file).includes('..') || String(m.file).startsWith('/') || typeof m.find !== 'string' || !m.find || typeof m.replace !== 'string' || m.find === m.replace) continue
     const covers = (Array.isArray(t.covers) ? t.covers : []).filter((k) => gapSet.has(k))
-    if (!covers.length && t.kind !== 'suspicion') continue
-    out.push({ kind: t.kind === 'suspicion' ? 'suspicion' : 'coverage', purposeZh: String(t.purposeZh ?? '补写的测试').slice(0, 60), covers, filePath: path, content: t.content, mutation: { file: m.file, find: m.find, replace: m.replace } })
+    const target = targetFiles.has(m.file)
+    if (!covers.length && !target && t.kind !== 'suspicion') continue
+    out.push({ kind: t.kind === 'suspicion' ? 'suspicion' : 'coverage', purposeZh: String(t.purposeZh ?? '补写的测试').slice(0, 60), covers, filePath: path, content: t.content, mutation: { file: m.file, find: m.find, replace: m.replace }, ...(target ? { targetsUncovered: m.file } : {}) })
   }
   return out
 }
@@ -92,10 +111,10 @@ export function parseModelJson(data) {
   catch { return { ok: false, kind: 'truncated', finish_reason: finish, reasonZh: `AI 补测失败（模型返回的 JSON 不完整${fr}）` } }
 }
 
-export async function generateTargetedTests({ db, secrets, riskClass, pr, files, profile, gaps, now = new Date(), maxTests = MAX_TESTS, highRiskFiles = [], feedback = [], timeoutMs = 8 * 60_000, quota = null, fetchImpl = fetch, netRetryDelayMs = 2000 }) {
+export async function generateTargetedTests({ db, secrets, riskClass, pr, files, profile, gaps, now = new Date(), maxTests = MAX_TESTS, highRiskFiles = [], uncovered = [], feedback = [], timeoutMs = 8 * 60_000, quota = null, fetchImpl = fetch, netRetryDelayMs = 2000 }) {
   if (!profile.aiTests) return { status: 'skipped', reasonZh: '这个项目还没配置 AI 补测', tests: [] }
   if (riskClass !== 'B' && riskClass !== 'C') return { status: 'skipped', reasonZh: '只改文档', tests: [] }
-  if (!gaps.length) return { status: 'skipped', reasonZh: '涉及的方面现有检查都覆盖了', tests: [] }
+  if (!gaps.length && !uncovered.length) return { status: 'skipped', reasonZh: '涉及的方面现有检查都覆盖了，改动的行也都测到了', tests: [] }
   if (!secrets.ARGUS_LLM_BASE_URL || !secrets.ARGUS_LLM_API_KEY) return { status: 'skipped', reasonZh: '模型凭证没配置', tests: [] }
   const day = `gen:${toShanghaiDay(now)}`
   // 夜间流程传 quota（按种类 / 池子分开计数，见 quota.mjs）；Mac 流程（control.mjs）沿用旧的单一日上限
@@ -107,7 +126,8 @@ export async function generateTargetedTests({ db, secrets, riskClass, pr, files,
     `项目：${profile.displayName ?? ''}`,
     `产品意图：${profile.intentZh ?? '（没写）'}`,
     `测试框架：${profile.aiTests.frameworkZh}；新测试文件路径必须匹配：${profile.aiTests.pathGlobs.join('、')}`,
-    `需要补测的方面（维度 key → 含义）：${gaps.map((k) => `${k} → ${toDimensionLabel(k)}`).join('；')}`,
+    uncovered.length ? `改动里没被现有测试执行到的行（首要目标，按文件：行号）：\n${uncovered.map((u) => `- ${u.file}: ${toLineRanges(u.lines)}`).join('\n')}` : null,
+    gaps.length ? `需要补测的方面（维度 key → 含义）：${gaps.map((k) => `${k} → ${toDimensionLabel(k)}`).join('；')}` : null,
     `最多写 ${maxTests} 个测试。`,
     highRiskFiles.length ? `高风险改动（C 类路径，优先给这些写测试）：${highRiskFiles.slice(0, 30).join('、')}` : null,
     feedback.length ? `上一轮写的测试没有通过有效性验证（不要重复同样的写法）：\n${feedback.map((f) => `- ${f}`).join('\n')}` : null,
@@ -130,7 +150,7 @@ export async function generateTargetedTests({ db, secrets, riskClass, pr, files,
     const parsed = parseModelJson(data)
     if (!parsed.ok) return { status: 'error', retryable: true, reasonZh: parsed.reasonZh, finish_reason: parsed.finish_reason, usage: data?.usage ?? null, model: MODEL, tests: [] }
     const raw = parsed.value
-    const tests = toValidTests(raw, { profile, gaps, maxTests })
+    const tests = toValidTests(raw, { profile, gaps, maxTests, uncovered })
     const offered = Array.isArray(raw?.tests) ? raw.tests.length : 0
     return { status: tests.length ? 'ok' : 'empty', reasonZh: tests.length ? null : 'AI 没写出可用的测试', tests, offered, rejected_by_validation: Math.max(0, offered - tests.length), usage: data?.usage ?? null, model: MODEL }
   } catch (err) {

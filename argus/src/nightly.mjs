@@ -22,7 +22,7 @@ import { log, redact, tail, toShanghaiDay, toShanghaiIso } from './util.mjs'
 import { setBudget, overBudget } from './exec.mjs'
 import { coverageGate, parseAddedLines, COVERAGE_THRESHOLDS } from './coverage.mjs'
 import { recentGiveUps } from './catchup.mjs'
-import { generateTargetedTests, toAiTestSteps, toAiGaps, toAiTestResult, aiTestCaps, aiTestTier, degradeForQuota } from './aitests.mjs'
+import { generateTargetedTests, toAiTestSteps, toAiGaps, toUncoveredTargets, toAiTestResult, aiTestCaps, aiTestTier, degradeForQuota } from './aitests.mjs'
 import { globToRegExp } from './classify.mjs'
 import { createQuota, memoryQuota, resolvePool, CAPPED_ZH } from './quota.mjs'
 
@@ -456,20 +456,23 @@ async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, commo
   if (setupFailed(results)) return finish('skipped', 'dependency install failed')
   if (out.triage?.status !== 'ok') return finish('skipped', `dimension applicability not decided (triage ${out.triage?.status ?? 'missing'})`)
   ai.gaps = toAiGaps({ applicability: out.triage, profile, results })
-  if (!ai.gaps.length) return finish('skipped', 'no applicable gap dimension: every applicable dimension in the AI-test set is covered by a check')
+  // 首要目标：覆盖率门禁算出的「改动里没被执行到的行」（门禁在补测之前算好）
+  ai.uncovered_targets = toUncoveredTargets(out.coverage_gate?.new_code)
+  if (!ai.gaps.length && !ai.uncovered_targets.length) return finish('skipped', 'no applicable gap dimension and no uncovered changed lines')
   if (caps.maxCalls < 1) return finish(tiered.tier.tier === 'none' ? 'skipped' : tiered.tier.degraded ? 'capped' : 'skipped', tiered.tier.tier === 'none' ? `ai-test tier none: ${tiered.tier.reason}` : tiered.tier.degraded ? `${CAPPED_ZH}: ${tiered.tier.reason}` : 'ARGUS_AITEST_MAX_CALLS=0')
   const cGlobs = (profile.cPaths ?? []).map(globToRegExp)
   const highRiskFiles = files.map((f) => f.filename).filter((f) => cGlobs.some((re) => re.test(f)))
   const setupIds = profile.steps.filter((s) => s.kind === 'setup').map((s) => s.id)
   let remaining = [...ai.gaps]
+  let targets = [...ai.uncovered_targets]
   const feedback = []
   let offset = 0
   const stepDefs = new Map()
   const pendingLlmErrors = []
-  for (let round = 1; round <= caps.maxCalls && remaining.length; round++) {
+  for (let round = 1; round <= caps.maxCalls && (remaining.length || targets.length); round++) {
     const left = deadline - Date.now()
     if (left < 3 * 60_000) { ai.rounds.push({ round, skipped: 'wall-time cap reached' }); break }
-    const gen = await generateTargetedTests({ db, secrets, riskClass, pr, files, profile, gaps: remaining, maxTests: caps.maxTestsPerCall, highRiskFiles, feedback, timeoutMs: Math.max(1, Math.floor(Math.min(8 * 60_000, left / 2))), quota })
+    const gen = await generateTargetedTests({ db, secrets, riskClass, pr, files, profile, gaps: remaining, uncovered: targets, maxTests: caps.maxTestsPerCall, highRiskFiles, feedback, timeoutMs: Math.max(1, Math.floor(Math.min(8 * 60_000, left / 2))), quota })
     if (gen.status === 'capped') {
       // 每日 ai-test 额度用尽：这一轮及之后都不调模型；剩下的缺口维度记 capped（显示「额度用尽未补测」）
       ai.capped = true; ai.capped_gaps = [...remaining]; ai.quota = gen.quota
@@ -495,12 +498,14 @@ async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, commo
     for (const st of steps) {
       const r = run.find((x) => x.id === st.id)
       const verdict = toAiTestResult(setupFailed(run) ? null : r, st.aiTest)
-      const t = { id: st.id, round, kind: st.aiKind, purpose: st.aiTest.purposeZh, covers: st.covers, file: st.aiTest.filePath, mutation_file: st.aiTest.mutation.file, ...verdict, exit_code: r?.exitCode ?? null, duration_ms: r?.durationMs ?? null, log_tail: r ? tail(redact(String(r.tail ?? '')), 1500) : null }
+      const t = { id: st.id, round, kind: st.aiKind, purpose: st.aiTest.purposeZh, covers: st.covers, file: st.aiTest.filePath, mutation_file: st.aiTest.mutation.file, ...(st.aiTest.targetsUncovered ? { targets_uncovered: st.aiTest.targetsUncovered } : {}), ...verdict, exit_code: r?.exitCode ?? null, duration_ms: r?.durationMs ?? null, log_tail: r ? tail(redact(String(r.tail ?? '')), 1500) : null }
       ai.tests.push(t); rr.tests.push(st.id)
       if (verdict.result !== 'kept') feedback.push(`${st.aiTest.purposeZh}（${st.aiTest.filePath}）：${verdict.reason}`)
     }
     const keptCovers = new Set(ai.tests.filter((t) => t.result === 'kept').flatMap((t) => t.covers))
     remaining = ai.gaps.filter((k) => !keptCovers.has(k))
+    const keptFiles = new Set(ai.tests.filter((t) => t.result === 'kept').map((t) => t.mutation_file))
+    targets = targets.filter((u) => !keptFiles.has(u.file))
   }
   health.llm_errors.push(...pendingLlmErrors)
   // 在当前代码上失败的补测：再单独跑一次确认是否复现（仍然只记 P2、test_backed=false；升级要人确认）
