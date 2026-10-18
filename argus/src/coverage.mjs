@@ -1,7 +1,9 @@
 // 白盒覆盖率门禁：单测步骤用 vitest --coverage（v8）跑，读 coverage-summary.json（总体）与 coverage-final.json
 // （逐行），再与 PR diff 的新增行求交，得到「新代码覆盖率」。低于门槛 → P2（只是建议复查，永远不会单独变成 issue）。
-import { readFileSync, existsSync, statSync, rmSync } from 'node:fs'
-import { join, relative, isAbsolute, resolve } from 'node:path'
+import { readFileSync, existsSync, statSync, rmSync, readdirSync } from 'node:fs'
+import { join, relative, isAbsolute, resolve, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { execFileSync } from 'node:child_process'
 
 // 门槛与指标取自 ming-qa G2「Unit Tests And Coverage」（skills/quality-assurance-agent/references/quality-gates.md；
 // 配置键 qualityGates.coverage.{lines, branches, functions, newCode}）。ming-qa 把 New-code coverage 定义为
@@ -78,10 +80,14 @@ export const isCoverageSource = (file) => SOURCE_RE.test(file) && !NOT_SOURCE_RE
 // 未被测试加载的文件没有可执行行信息：按「像代码的新增行」保守计为未覆盖
 const looksLikeCode = (t) => { const s = t.trim(); return Boolean(s) && !/^(?:\/\/|\/\*|\*|\*\/)/.test(s) && !/^(?:import\b|export\s+(?:type|interface)\b|type\s|interface\s|[{}()[\];,]+$)/.test(s) }
 
+// 普通 JS（.js/.mjs/.cjs）多是 node 直接跑的脚本或宿主入口（cindyplugin/main.js、scripts/*.mjs）：vitest 不加载、
+// V8 也没收到数据时说不清测没测 → 标「无法度量」，不进分母。TS/TSX 都能被 vitest 加载，没加载就是没测，照旧按 0 计。
+const PLAIN_JS_RE = /\.[cm]?js$/
 export function newCodeCoverage(added, files) {
   let executable = 0, covered = 0
   const perFile = []
   const unloaded = []
+  const notMeasurable = []
   for (const [file, rows] of Object.entries(added ?? {})) {
     if (!isCoverageSource(file)) continue
     const fc = files?.[file]
@@ -91,21 +97,106 @@ export function newCodeCoverage(added, files) {
       const c = e.filter((r) => cov.has(r.line))
       if (!e.length) continue
       executable += e.length; covered += c.length
-      perFile.push({ file, executable: e.length, covered: c.length, uncovered_lines: e.filter((r) => !cov.has(r.line)).map((r) => r.line).slice(0, 50) })
+      perFile.push({ file, executable: e.length, covered: c.length, uncovered_lines: e.filter((r) => !cov.has(r.line)).map((r) => r.line).slice(0, 50), ...(fc.source ? { source: fc.source } : {}) })
     } else {
       const e = rows.filter((r) => looksLikeCode(r.text))
       if (!e.length) continue
+      if (PLAIN_JS_RE.test(file)) {
+        notMeasurable.push(file)
+        perFile.push({ file, executable: e.length, covered: null, not_measurable: true, reason: 'not loaded by vitest and no V8 data from node --test / subprocess runs' })
+        continue
+      }
       executable += e.length
       unloaded.push(file)
       perFile.push({ file, executable: e.length, covered: 0, not_loaded_by_tests: true, uncovered_lines: e.map((r) => r.line).slice(0, 50) })
     }
   }
-  return { pct: executable ? Math.round((covered / executable) * 10000) / 100 : null, executable_lines: executable, covered_lines: covered, unloaded_files: unloaded, files: perFile }
+  return { pct: executable ? Math.round((covered / executable) * 10000) / 100 : null, executable_lines: executable, covered_lines: covered, unloaded_files: unloaded, not_measurable_files: notMeasurable, files: perFile }
+}
+
+// ── NODE_V8_COVERAGE 原始数据（node --test、子进程）→ 与 compactFinal 同形的 { file: { lines, covered } } ──
+// 只收源码树里的 JS/TS；测试把文件复制到临时目录再跑的（file:///tmp/xxx/a/b.mjs），按路径后缀对回仓里的同名文件。
+// 可执行行：像代码的非空行（与未加载文件同一口径）；已覆盖：行尾字符落在执行次数 > 0 的最内层块里（多个进程取并集）。
+export function repoFileIndex(srcRoot) {
+  try { return execFileSync('git', ['-C', srcRoot, 'ls-files'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] }).split('\n').filter(Boolean) }
+  catch { return [] }
+}
+export function mapToRepo(absPath, srcRoot, index) {
+  const root = resolve(srcRoot)
+  if (absPath.startsWith(root + sep)) return relative(root, absPath).split(sep).join('/')
+  const segs = absPath.split(sep).filter(Boolean)
+  // 最长后缀优先；至少两段（目录/文件），且在仓里唯一
+  for (let k = segs.length - 1; k >= 2; k--) {
+    const suffix = segs.slice(-k).join('/')
+    const hits = index.filter((f) => f === suffix || f.endsWith(`/${suffix}`))
+    if (hits.length === 1) return hits[0]
+    if (hits.length > 1) return null
+  }
+  return null
+}
+export function readV8Dir(dir, srcRoot, { index = null, maxBytes = 512 * 1024 * 1024 } = {}) {
+  if (!dir || !existsSync(dir)) return {}
+  const idx = index ?? repoFileIndex(srcRoot)
+  const byFile = new Map()
+  let bytes = 0
+  for (const name of readdirSync(dir).filter((n) => n.endsWith('.json'))) {
+    const f = join(dir, name)
+    bytes += statSync(f).size
+    if (bytes > maxBytes) break
+    let doc
+    try { doc = JSON.parse(readFileSync(f, 'utf8')) } catch { continue }
+    for (const sc of doc.result ?? []) {
+      if (!String(sc.url).startsWith('file://')) continue
+      let abs
+      try { abs = fileURLToPath(sc.url) } catch { continue }
+      if (abs.includes(`${sep}node_modules${sep}`)) continue
+      const rel = mapToRepo(abs, srcRoot, idx)
+      if (!rel || !isCoverageSource(rel)) continue
+      ;(byFile.get(rel) ?? byFile.set(rel, []).get(rel)).push(sc.functions ?? [])
+    }
+  }
+  const files = {}
+  for (const [rel, runs] of byFile) {
+    let src
+    try { src = readFileSync(join(srcRoot, rel), 'utf8') } catch { continue }
+    const hit = new Uint8Array(src.length)
+    for (const fns of runs) {
+      const cnt = new Int32Array(src.length).fill(-1)
+      const ranges = fns.flatMap((fn) => fn.ranges ?? []).sort((a, b) => (b.endOffset - b.startOffset) - (a.endOffset - a.startOffset))
+      for (const r of ranges) cnt.fill(r.count, Math.max(0, r.startOffset), Math.min(r.endOffset, src.length))
+      for (let i = 0; i < src.length; i++) if (cnt[i] > 0) hit[i] = 1
+    }
+    const lines = [], cov = []
+    let off = 0
+    src.split('\n').forEach((text, i) => {
+      if (looksLikeCode(text)) {
+        lines.push(i + 1)
+        // 行尾最后一个非空字符所在的块执行过才算（`export function f() {` 的声明在顶层执行，但函数体没进去）
+        const k = off + text.trimEnd().length - 1
+        if (hit[k]) cov.push(i + 1)
+      }
+      off += text.length + 1
+    })
+    files[rel] = { lines, covered: cov, source: 'v8' }
+  }
+  return files
+}
+
+// 主报告（vitest istanbul）里没有的文件，用 V8 数据补上
+export function mergeCoverageFiles(primary, ...extras) {
+  const out = { ...(primary ?? {}) }
+  for (const ex of extras) for (const [f, fc] of Object.entries(ex ?? {})) {
+    if (primary?.[f]) continue
+    const cur = out[f]
+    out[f] = cur ? { lines: [...new Set([...cur.lines, ...fc.lines])].sort((a, b) => a - b), covered: [...new Set([...cur.covered, ...fc.covered])].sort((a, b) => a - b), source: 'v8' } : fc
+  }
+  return out
 }
 
 export const NEW_CODE_METHOD = 'ming-qa newCode = line coverage of new code. Changed lines: git diff <base_sha> <tested_sha> (merged: first parent of the merge commit; open: merge-base with the target branch); '
   + 'added/modified lines in non-test JS/TS source files are intersected with v8 statement start lines from coverage-final.json; '
-  + 'lines that are not executable statements are ignored; files never loaded by the unit tests count their code-like added lines as uncovered. '
+  + 'lines that are not executable statements are ignored; files vitest did not load are taken from raw NODE_V8_COVERAGE data of the same run (node --test steps and child processes; code-like lines, covered = the last non-blank character of the line is inside a V8 block with count > 0; copies run from a temp dir are mapped back by path suffix); '
+  + 'files with no data at all count their code-like added lines as uncovered, except plain .js/.mjs/.cjs files (node entry scripts / host entry), which are listed as not_measurable and left out of pct. '
   + 'pct = covered / executable changed lines; null (not evaluated) when the diff has no executable source lines.'
 
 // 门禁结论：任何一项低于门槛 → fail（P2）；拿不到覆盖率 → unavailable（不判 fail，单独说明）
