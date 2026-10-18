@@ -149,7 +149,7 @@ Merged reports written by nightly also carry `run.source_report` (path of the ni
 | `sha_consistent` | `true` when `reviewed_sha` is null or equals `tested_sha` (docs-only, where nothing is tested: equals `merge_sha` for merged / `head_sha` for open PRs); `false` also adds a `system_health.notes` entry |
 | `test_started_at`, **`tested_at`** | see *Timestamps* |
 | `changed_files`, `additions`, `deletions` | |
-| `risk_class` (`A` docs-only / `B` / `C` high-risk), `risk_reason` | |
+| `risk_class` (`A` docs-only / `B` / `C` high-risk), `risk_reason`, `change_kind` | `change_kind: "agent-docs"` (only present then) = an `A` diff that touches agent instruction docs (`AGENTS.md` / `CLAUDE.md`): code review only, no checks. Test files, `ghost.json` and agent docs inside `cPaths` do not make a PR `C`; on `C`, optional steps are forced only when a high-risk file is within the step's `exercises` |
 | `severity` | `P0`…`P3`, or **`"untested"`** for `verdict: not-tested`. Never `null`. An untested PR is never shown as P3. |
 | **`tested`** | `true` when checks actually ran for this PR; `false` for `not-tested`, `qa-error`, `docs-only`, `skipped` |
 | **`dimensions_run`** | `{ "white-box": [check ids], "gray-box": [...], "black-box": [...] }` — checks that really executed (status pass or fail) |

@@ -1,6 +1,6 @@
 // 适用性矩阵：ming-qa 的 29 个维度（4 执行层 / 10 用例类型 / 10 风险 / 5 判定依据）。
 // 三件事分开：Jev 判断「涉及 / 拿不准」；「不适用」只来自 profile 明文；「测到没有」由代码按步骤的 covers 和真实结果计算。
-import { globToRegExp } from './classify.mjs'
+import { globToRegExp, highRiskFiles } from './classify.mjs'
 import { toReadableTitle } from './util.mjs'
 
 const q = (what) => `Could this code change plausibly affect ${what}? Answer yes only if the changed files, title or description clearly touch it.`
@@ -111,16 +111,18 @@ export function stepExercises(step, paths) {
 // 改动里有这一步自己执行的测试文件（step.runsFiles）：这一步必须跑
 export const stepRunsChangedFile = (step, paths) => (paths ?? []).find((p) => matchesAny(p, step.runsFiles ?? []))
 
-// 选步骤：基线（非 optional）步骤 B/C 级都跑；可选步骤在改动含它执行的测试文件、C 级、分诊没做、或覆盖的维度里有「涉及 / 拿不准」时才跑
+// 选步骤：基线（非 optional）步骤 B/C 级都跑；可选步骤在改动含它执行的测试文件、C 级且高风险文件落在它测的路径（exercises）里、
+// 分诊没做、或覆盖的维度里有「涉及 / 拿不准」时才跑
 export function toStepPlan({ profile, riskClass, triage, files = [] }) {
   const verdictOf = Object.fromEntries((triage?.rows ?? []).map((r) => [r.key, r.verdict]))
   const paths = files.map((f) => f.filename)
+  const cHits = highRiskFiles(paths, profile)
   const run = []
   const skipped = []
   for (const s of profile.steps) {
     if (s.kind === 'setup' || !s.optional) { run.push(s.id); continue }
     if (stepRunsChangedFile(s, paths)) { run.push(s.id); continue }
-    if (riskClass === 'C') { run.push(s.id); continue }
+    if (riskClass === 'C' && stepExercises(s, cHits)) { run.push(s.id); continue }
     if (!triage || triage.status !== 'ok') { run.push(s.id); continue }
     const wanted = (s.covers ?? []).filter((k) => ['applicable', 'undetermined'].includes(verdictOf[k]))
     if (wanted.length) run.push(s.id)

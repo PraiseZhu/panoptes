@@ -194,9 +194,10 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   out.evidence_dir = evDir
   if (!merged && pr.state !== 'open') { out.tested = false; out.verdict = 'skipped'; out.outcome_reason = 'PR is closed without merge'; out.tested_at = toShanghaiIso(); return out }
 
-  const { riskClass, reasonZh: classReason } = classifyChange(files, baseProfile)
+  const { riskClass, reasonZh: classReason, changeKind } = classifyChange(files, baseProfile)
   out.risk_class = riskClass
   out.risk_reason = classReason
+  if (changeKind) out.change_kind = changeKind
   if (riskClass === 'A') {
     out.skipped_steps = baseProfile.steps.filter((x) => x.kind !== 'setup').map((x) => ({ id: x.id, nameZh: x.nameZh, reason: 'docs-only change: no checks run', dimension: toBox(x, baseProfile) }))
     out.triage = toApplicability({ status: 'skipped', jevStatus: 'not-run', reasonZh: 'docs-only change: no checks run, dimension triage not needed', rows: toTriage({ profile: baseProfile, files, jev: null }).rows })
