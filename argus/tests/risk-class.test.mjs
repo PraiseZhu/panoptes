@@ -72,6 +72,8 @@ test('只改注释的反例：看起来像注释的代码行、拿不到全文�
   real('`*/ run()`', { filename: 'src/x.js', before: '/* a\n*/\n', after: '/* a\n*/ run()\n' })
   real('模板字符串里的 `// text`', { filename: 'src/x.ts', before: 'const s = `\na\n`\n', after: 'const s = `\na\n// text\n`\n' })
   real('#private 字段', { filename: 'src/x.ts', before: 'class A { #a = 1 }\n', after: 'class A { #a = 2 }\n' })
+  real('ASI：`return /*换行*/ x` 返回 undefined', { filename: 'src/x.ts', before: 'function f() {\n  return x\n}\n', after: 'function f() {\n  return /*\n*/ x\n}\n' })
+  real('ASI：`return` 后换行', { filename: 'src/x.ts', before: 'function f() {\n  return x\n}\n', after: 'function f() {\n  return\nx\n}\n' })
   real('只有 patch、没有全文', { filename: 'src/x.ts', patch: '@@ -1 +1 @@\n-// a\n+// b' })
   real('拿不到 patch 也拿不到全文', { filename: 'server/x.ts', patch: null })
   real('解析失败', { filename: 'src/x.ts', before: 'f(\n// a\n', after: 'f(\n// b\n' })

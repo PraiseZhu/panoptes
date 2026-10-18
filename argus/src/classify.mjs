@@ -41,8 +41,8 @@ function codeTokens(text, kind) {
   const sf = ts.createSourceFile(`x.${kind.toLowerCase()}`, text, ts.ScriptTarget.Latest, true, ts.ScriptKind[kind])
   if (sf.parseDiagnostics?.length) return null
   const out = []
-  // getChildren 会把 /** */ 也当成子节点，跳过
-  const walk = (n) => { if (n.kind >= ts.SyntaxKind.FirstJSDocNode && n.kind <= ts.SyntaxKind.LastJSDocNode) return; const kids = n.getChildren(sf); if (!kids.length) out.push(`${n.kind}:${n.getText(sf)}`); else kids.forEach(walk) }
+  // getChildren 会把 /** */ 也当成子节点，跳过；父节点也记进去，ASI 改变语法结构（如 `return` 后换行）时 token 相同也能区分
+  const walk = (n) => { if (n.kind >= ts.SyntaxKind.FirstJSDocNode && n.kind <= ts.SyntaxKind.LastJSDocNode) return; const kids = n.getChildren(sf); if (!kids.length) out.push(`${n.kind}:${n.getText(sf)}`); else { out.push(`(${n.kind}`); kids.forEach(walk); out.push(')') } }
   walk(sf)
   return out.join('\n')
 }
