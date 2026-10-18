@@ -148,14 +148,15 @@ export function flakyBaseComparison({ baseSha, baseRun }) {
   return { compared: true, base_sha: baseSha, base_run: baseRun, result: 'passes-on-base', note: 'passed on the base (pre-merge) revision in one run; a single run cannot rule out the same instability on base', note_zh: '合并前版本上跑一次通过；单次运行不能排除合并前也偶发失败' }
 }
 // 试运行检查（bench）里单个用例 test_timeout，且在空闲机器上重跑通过 → 才算环境负载、降成 P3。
-// 整步超时、introduced、重跑仍失败 / 超时：保持原级别
-export function isTrialTimeout(step, r, test, { status, rerun } = {}) {
+// 整步超时、introduced、重跑没有严格 pass（含 not-failing）、等满 10 分钟机器仍没空下来：保持原级别
+export function isTrialTimeout(step, r, test, { status, rerun, idle } = {}) {
   if (!step?.trialOnly || r?.timedOut || status === 'introduced' || !test || test === '*') return false
   if (r?.failureDetails?.find((f) => f.name === test)?.type !== 'test_timeout') return false
-  return rerun === 'pass' || rerun === 'not-failing'
+  return idle === true && rerun === 'pass'
 }
-// 重跑前等机器空闲（最多 maxWaitMs、不超时间预算）；返回最后一次负载快照和等了多久
-export async function waitForIdle({ maxWaitMs = 10 * 60_000, everyMs = 15_000, sample = machineLoad, wait = sleep } = {}) {
+// 重跑前等机器空闲（最多 maxWaitMs、不超时间预算）；返回最后一次负载快照和等了多久。idleHooks 供测试替换
+export const idleHooks = { sample: machineLoad, wait: sleep }
+export async function waitForIdle({ maxWaitMs = 10 * 60_000, everyMs = 15_000, sample = idleHooks.sample, wait = idleHooks.wait } = {}) {
   const t0 = Date.now()
   let m = sample()
   while (!isIdle(m) && Date.now() - t0 < maxWaitMs && !overBudget()) { await wait(everyMs); m = sample() }
@@ -307,7 +308,11 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   const failed = failedIds(first)
   if (!setupFailed(first) && failed.length) {
     // 有试运行检查（bench）失败：重跑前先等机器空闲
-    if (failed.some((id) => profile.steps.find((x) => x.id === id)?.trialOnly)) out.rerun_idle_wait = await waitForIdle()
+    if (failed.some((id) => profile.steps.find((x) => x.id === id)?.trialOnly)) {
+      out.rerun_idle_wait = await waitForIdle()
+      // 等空闲可能很久：等完再看一次时间预算，超了就不重跑
+      if (overBudget()) return out
+    }
     rerun = await executeOnSha({ ...common, label: 'h2', sha, stepIds: failed })
     const still = failed.filter((id) => failedIds(rerun).includes(id))
     // 首跑失败、重跑通过（不稳定）的步骤也在合并前版本（base）上跑一次，记下基线结果；
@@ -390,7 +395,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     }
     const preExisting = status === 'pre-existing' || baseRun === 'fail'
     // 试运行检查（bench）的用例超时、空闲机器上重跑通过：机器负载（审计 2026-10-18 S3），不算这个 PR 的发现
-    const envTimeout = isTrialTimeout(step, r, test, { status, rerun: compareOn(rerun) })
+    const envTimeout = isTrialTimeout(step, r, test, { status, rerun: compareOn(rerun), idle: out.rerun_idle_wait?.idle })
     out.failed_checks.push({
       check_id: stepId, check_name: r?.nameZh, dimension: toBox(step, profile), qa_dimensions: step.covers ?? [],
       test: named ? test : null, failure_type: type, status, flaky: status === 'flaky', related_to_pr: status === 'flaky' ? false : undefined,

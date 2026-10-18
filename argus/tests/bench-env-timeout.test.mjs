@@ -37,16 +37,18 @@ test('isTrialTimeout：只有试运行检查的 test_timeout 用例、且空闲�
   const bench = { id: 'bench', trialOnly: true, kind: 'product' }
   const name = 'src/kernel/shadowRoundTrip.bench.test.ts > S6d kernel=new shadow round-trip'
   const r = { failureDetails: [{ name, type: 'test_timeout' }] }
-  assert.equal(isTrialTimeout(bench, r, name, { status: 'flaky', rerun: 'pass' }), true, '重跑通过 → 降级')
-  assert.equal(isTrialTimeout(bench, r, name, { status: 'flaky', rerun: 'not-failing' }), true)
-  assert.equal(isTrialTimeout(bench, r, name, { status: 'unverified', rerun: 'fail' }), false, '重跑还超时 → 保持原级别')
-  assert.equal(isTrialTimeout(bench, r, name, { status: 'unverified', rerun: 'timeout' }), false)
-  assert.equal(isTrialTimeout(bench, r, name, { status: 'unverified', rerun: 'not-run' }), false, '没重跑不降级')
-  assert.equal(isTrialTimeout(bench, r, name, { status: 'introduced', rerun: 'pass' }), false, 'introduced 不降级')
-  assert.equal(isTrialTimeout(bench, { timedOut: true, failureDetails: r.failureDetails }, name, { status: 'timeout', rerun: 'pass' }), false, '整步超时不降级')
-  assert.equal(isTrialTimeout(bench, { timedOut: true }, '*', { status: 'timeout', rerun: 'pass' }), false)
-  assert.equal(isTrialTimeout(bench, { failureDetails: [{ name, type: 'assertion' }] }, name, { status: 'flaky', rerun: 'pass' }), false, '非超时失败照旧')
-  assert.equal(isTrialTimeout({ id: 'unit', kind: 'product' }, r, name, { status: 'flaky', rerun: 'pass' }), false, '非试运行检查照旧')
+  assert.equal(isTrialTimeout(bench, r, name, { status: 'flaky', rerun: 'pass', idle: true }), true, '空闲重跑通过 → 降级')
+  assert.equal(isTrialTimeout(bench, r, name, { status: 'flaky', rerun: 'not-failing', idle: true }), false, 'not-failing 不是 pass，不降级')
+  assert.equal(isTrialTimeout(bench, r, name, { status: 'flaky', rerun: 'pass', idle: false }), false, '等满 10 分钟机器没空下来：重跑通过也不降级')
+  assert.equal(isTrialTimeout(bench, r, name, { status: 'flaky', rerun: 'pass' }), false, '没等空闲不降级')
+  assert.equal(isTrialTimeout(bench, r, name, { status: 'unverified', rerun: 'fail', idle: true }), false, '重跑还超时 → 保持原级别')
+  assert.equal(isTrialTimeout(bench, r, name, { status: 'unverified', rerun: 'timeout', idle: true }), false)
+  assert.equal(isTrialTimeout(bench, r, name, { status: 'unverified', rerun: 'not-run', idle: true }), false, '没重跑不降级')
+  assert.equal(isTrialTimeout(bench, r, name, { status: 'introduced', rerun: 'pass', idle: true }), false, 'introduced 不降级')
+  assert.equal(isTrialTimeout(bench, { timedOut: true, failureDetails: r.failureDetails }, name, { status: 'timeout', rerun: 'pass', idle: true }), false, '整步超时不降级')
+  assert.equal(isTrialTimeout(bench, { timedOut: true }, '*', { status: 'timeout', rerun: 'pass', idle: true }), false)
+  assert.equal(isTrialTimeout(bench, { failureDetails: [{ name, type: 'assertion' }] }, name, { status: 'flaky', rerun: 'pass', idle: true }), false, '非超时失败照旧')
+  assert.equal(isTrialTimeout({ id: 'unit', kind: 'product' }, r, name, { status: 'flaky', rerun: 'pass', idle: true }), false, '非试运行检查照旧')
   assert.equal(severityFor({ status: 'flaky', step: bench, merged: true }), 'P2', '非降级的试运行失败仍最高 P2')
 })
 
