@@ -160,7 +160,7 @@ export async function processJob({ db, reg, secrets, job }) {
   if (riskClass === 'A') return { outcome: 'docs_only', riskClass, detail: { classReason } }
 
   const triage = await triagePr({ db, secrets, pr, files, profile: baseProfile })
-  const plan = toStepPlan({ profile: baseProfile, riskClass, triage })
+  const plan = toStepPlan({ profile: baseProfile, riskClass, triage, files })
   // AI 补测：分诊说涉及、但要跑的检查覆盖不到的方面；补测步骤放在最后
   const gaps = toGapDimensions({ profile: baseProfile, triage, stepIds: plan.stepIds })
   const gen = await generateTargetedTests({ db, secrets, riskClass, pr, files, profile: baseProfile, gaps })

@@ -102,13 +102,24 @@ export function toTriage({ profile, files, jev }) {
   return { status: jev?.ok ? 'ok' : 'skipped', reasonZh: jev?.ok ? null : jev?.reasonZh ?? '没做分诊', model: jev?.model ?? null, rows }
 }
 
-// 选步骤：基线（非 optional）步骤 B/C 级都跑；可选步骤在 C 级、分诊没做、或覆盖的维度里有「涉及 / 拿不准」时才跑
-export function toStepPlan({ profile, riskClass, triage }) {
+const matchesAny = (path, globs) => globs.some((g) => globToRegExp(g).test(path))
+// 步骤实际测的路径（step.exercises）：没写 = 整个仓；改动文件列表拿不到时也按碰到算（保守）
+export function stepExercises(step, paths) {
+  if (!step.exercises || !paths?.length) return true
+  return paths.some((p) => matchesAny(p, step.exercises))
+}
+// 改动里有这一步自己执行的测试文件（step.runsFiles）：这一步必须跑
+export const stepRunsChangedFile = (step, paths) => (paths ?? []).find((p) => matchesAny(p, step.runsFiles ?? []))
+
+// 选步骤：基线（非 optional）步骤 B/C 级都跑；可选步骤在改动含它执行的测试文件、C 级、分诊没做、或覆盖的维度里有「涉及 / 拿不准」时才跑
+export function toStepPlan({ profile, riskClass, triage, files = [] }) {
   const verdictOf = Object.fromEntries((triage?.rows ?? []).map((r) => [r.key, r.verdict]))
+  const paths = files.map((f) => f.filename)
   const run = []
   const skipped = []
   for (const s of profile.steps) {
     if (s.kind === 'setup' || !s.optional) { run.push(s.id); continue }
+    if (stepRunsChangedFile(s, paths)) { run.push(s.id); continue }
     if (riskClass === 'C') { run.push(s.id); continue }
     if (!triage || triage.status !== 'ok') { run.push(s.id); continue }
     const wanted = (s.covers ?? []).filter((k) => ['applicable', 'undetermined'].includes(verdictOf[k]))
@@ -120,12 +131,14 @@ export function toStepPlan({ profile, riskClass, triage }) {
 
 // 覆盖：某维度被判「涉及」，且有一步 covers 含它、该步真实跑过且没有这个 PR 带来的新失败，才算测到。
 // knownOnlyStepIds：判定已确认只含合并前就有的老失败的步骤（例如单测里有几个老失败），它仍然测到了东西
-export function toCoverage({ profile, triage, results, knownOnlyStepIds = [] }) {
+// exercises：只有改动碰到步骤实际测的路径，这一步才算测到（files 不传 = 不做这层过滤）
+export function toCoverage({ profile, triage, results, knownOnlyStepIds = [], files = [] }) {
+  const paths = files.map((f) => f.filename)
   const knownOnly = new Set(knownOnlyStepIds)
   const aiSteps = new Set(profile.steps.filter((s) => s.aiGenerated).map((s) => s.id))
   // AI 补测只有通过当前代码和植入错误验证后才有效；合并前也失败不能替代有效性验证。
   const okSteps = new Set((results ?? []).filter((r) => r.kind !== 'setup' && !r.unavailable && !r.timedOut && r.testOutcomeStatus !== 'incomplete' && (r.ok || (knownOnly.has(r.id) && !aiSteps.has(r.id)))).map((r) => r.id))
-  const coveredBy = (key) => profile.steps.filter((s) => okSteps.has(s.id) && (s.covers ?? []).includes(key)).map((s) => s.id)
+  const coveredBy = (key) => profile.steps.filter((s) => okSteps.has(s.id) && (s.covers ?? []).includes(key) && stepExercises(s, paths)).map((s) => s.id)
   const applicable = (triage?.rows ?? []).filter((r) => r.verdict === 'applicable')
   const covered = applicable.filter((r) => coveredBy(r.key).length > 0)
   const ran = (results ?? []).filter((r) => r.kind !== 'setup' && !r.unavailable)
