@@ -9,7 +9,7 @@ import { gitTokenFor } from './github.mjs'
 import { fileURLToPath } from 'node:url'
 import { validateTestReport } from './config.mjs'
 import { normalizeTestOutcomes } from './test-outcomes.mjs'
-import { vitestCoverageArgs, readCoverageDir } from './coverage.mjs'
+import { vitestCoverageArgs, readCoverageDir, readV8Dir, mergeCoverageFiles } from './coverage.mjs'
 import { stepCacheEnabled, stepCacheKey, lookupStepResult, storeStepResult, reusedResult } from './stepcache.mjs'
 import { shardPlan, reserveShards, shardArgs, mergeVitestJson, mergeCoverageFinal, coverageSummaryOf, readJsonOrNull } from './shard.mjs'
 
@@ -398,9 +398,16 @@ export async function runSteps(profile, src, runDir, { stepIds = null, execution
     const logFile = join(runDir, 'logs', `${step.id}.log`)
     const covDir = coverageDirFor(step, runDir, execution)
     const cmd = step.cmd.map((a) => subst(a, runDir, { ...stepSubstitutions, ...bin.vars }))
-    if (covDir) { rmSync(covDir, { recursive: true, force: true }); mkdirSync(dirname(covDir), { recursive: true }); cmd.push(...vitestCoverageArgs(covDir)) }
+    // 覆盖率轮次同时设 NODE_V8_COVERAGE：收 node --test 步骤和测试起的子进程的原始 V8 数据（vitest 主报告里没有的文件用它补）。
+    // coverage.kind 'v8'（node --test 等非 vitest 步骤）只收 V8 数据，不加 vitest 参数
+    const v8Dir = covDir ? `${covDir}-v8` : null
+    if (covDir) {
+      rmSync(covDir, { recursive: true, force: true }); rmSync(v8Dir, { recursive: true, force: true })
+      mkdirSync(dirname(covDir), { recursive: true }); mkdirSync(v8Dir, { recursive: true })
+      if (step.coverage.kind !== 'v8') cmd.push(...vitestCoverageArgs(covDir))
+    }
     const argv = sandboxed(cmd, runDir, profile, bin.ro)
-    const stepVars = { ...passEnvFor(step), ...Object.fromEntries(Object.entries(step.env ?? {}).map(([k, v]) => [k, subst(v, runDir, vars)])) }
+    const stepVars = { ...passEnvFor(step), ...Object.fromEntries(Object.entries(step.env ?? {}).map(([k, v]) => [k, subst(v, runDir, vars)])), ...(v8Dir ? { NODE_V8_COVERAGE: v8Dir } : {}) }
     // step.envUnset：这一步不要继承的公共变量（例如单测要求 MIVO_ASSET_STORE_DIR 未设置）
     const stepEnvBase = { ...env }
     for (const k of step.envUnset ?? []) delete stepEnvBase[k]
@@ -417,7 +424,7 @@ export async function runSteps(profile, src, runDir, { stepIds = null, execution
     Object.assign(result, readTestReport(step, result, src, runDir, stepVarsForReport, execution))
     if (disturbed) result.disturbedDesktop = true
     if (step.probe) { const pr = readProbeReport(join(runDir, `probe-${step.id}.json`)); if (pr) result.probeReport = pr }
-    if (covDir) result.coverage = res.timedOut ? { status: 'unavailable', reason: 'unit step timed out' } : readCoverageDir(covDir, src)
+    if (covDir) result.coverage = res.timedOut ? { status: 'unavailable', reason: 'unit step timed out' } : withV8Coverage(step.coverage.kind === 'v8' ? null : readCoverageDir(covDir, src), v8Dir, src)
     try { storeStepResult(ck, result, { job: execution?.jobId ?? null, label: execution?.runLabel ?? null, sha: execution?.checkedOutSha ?? execution?.requestedSha ?? null, run_dir: basename(runDir) }) } catch (err) { log('warn', 'step cache store failed', { step: step.id, error: err.message }) }
     results.push(result)
     log('info', 'step done', { ...execution, step: step.id, ok: result.ok, unavailable: Boolean(result.unavailable), exitCode: res.exitCode, ms: res.durationMs })
@@ -492,6 +499,16 @@ export async function runSharded({ step, plan, cmd, covDir, reportFile, runDir, 
 // 覆盖率只在专门的覆盖率轮次（label 'cov'，与首轮并行、独立检出）开启：v8 插桩会让少数测试改变行为
 // （实测 main 上有 6 个用例只在 --coverage 下失败），所以判定用的首轮 / 重跑 / 基线都不带覆盖率。
 // ARGUS_COVERAGE=0 全局关闭。目录必须落在 run 目录内。
+// vitest 报告 + 同一步的 V8 原始数据；原始目录读完即删（可能很大）。kind 'v8' 的步骤没有 vitest 报告，只有逐文件数据
+export function withV8Coverage(vitest, v8Dir, src) {
+  let v8 = {}
+  try { v8 = readV8Dir(v8Dir, src) } catch { v8 = {} }
+  rmSync(v8Dir, { recursive: true, force: true })
+  if (!vitest) return { status: 'ok', kind: 'v8', total: null, files: v8 }
+  if (vitest.status !== 'ok' || !vitest.files) return vitest
+  return { ...vitest, files: mergeCoverageFiles(vitest.files, v8) }
+}
+
 export function coverageDirFor(step, runDir, execution) {
   if (!step.coverage || process.env.ARGUS_COVERAGE === '0') return null
   const labels = step.coverage.labels ?? ['cov']

@@ -20,7 +20,7 @@ import { codeReview, toBox, BOXES, LLM_MODEL, mingQaVersion, mingQaAvailable, re
 import { ALL_DIRS, CACHE_DIR, EVIDENCE_DIR, REPORTS_DIR, CODE_DIR } from './paths.mjs'
 import { log, redact, tail, toShanghaiDay, toShanghaiIso } from './util.mjs'
 import { setBudget, overBudget } from './exec.mjs'
-import { coverageGate, parseAddedLines, COVERAGE_THRESHOLDS } from './coverage.mjs'
+import { coverageGate, parseAddedLines, mergeCoverageFiles, COVERAGE_THRESHOLDS } from './coverage.mjs'
 import { recentGiveUps } from './catchup.mjs'
 import { generateTargetedTests, toAiTestSteps, toAiGaps, toAiTestResult, aiTestCaps, aiTestTier, degradeForQuota } from './aitests.mjs'
 import { globToRegExp } from './classify.mjs'
@@ -258,11 +258,13 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   const common = { repo, jobId: `n${number}`, profile, extraRefspecs, keepTo: evDir, diffBase: baseSha }
 
   // 覆盖率轮次：独立检出、只跑单测（带 --coverage），与首轮并行；它的通过 / 失败不参与任何判定
-  const covStep = profile.steps.find((x) => x.coverage && plan.stepIds.includes(x.id))
+  const covStep = profile.steps.find((x) => x.coverage && x.coverage.kind !== 'v8' && plan.stepIds.includes(x.id))
   // 内存护栏：可用内存低于 ARGUS_PARALLEL_MIN_FREE_GB（默认 8）或 ARGUS_MAX_PARALLEL=1 时，覆盖率轮次排到首轮之后串行跑
   const wantCov = Boolean(covStep) && process.env.ARGUS_COVERAGE !== '0'
   const par = wantCov ? parallelDecision() : null
-  const startCov = () => ensureMirror(repo, sha, { extraRefspecs }).then(() => executeOnSha({ ...common, label: 'cov', sha, stepIds: [covStep.id] })).catch((err) => ({ error: err }))
+  // 覆盖率轮次跑所有计划内带 coverage 的步骤（单测 vitest + node --test 等 V8 步骤）
+  const covIds = profile.steps.filter((x) => x.coverage && plan.stepIds.includes(x.id)).map((x) => x.id)
+  const startCov = () => ensureMirror(repo, sha, { extraRefspecs }).then(() => executeOnSha({ ...common, label: 'cov', sha, stepIds: covIds })).catch((err) => ({ error: err }))
   if (par) out.run_mode = { coverage_parallel: par.parallel, reason: par.reason }
   let covRun = wantCov && par.parallel ? startCov() : Promise.resolve(null)
   let first = await executeOnSha({ ...common, label: 'h1', sha, stepIds: plan.stepIds })
@@ -742,7 +744,10 @@ export function splitDiffFiles(text) {
 
 // 覆盖率门禁：取首轮里带 coverage 的步骤（单测），与 base..tested 的 diff 新增行求交
 function computeCoverageGate({ first, prDiff, covError = null }) {
-  const r = first.find((x) => x.coverage)
+  const main = first.find((x) => x.coverage && x.coverage.kind !== 'v8')
+  // node --test 等 V8 步骤的逐文件数据并进主报告（主报告已有的文件不动）
+  const v8 = first.filter((x) => x.coverage?.kind === 'v8').map((x) => x.coverage.files)
+  const r = main && main.coverage.status === 'ok' && main.coverage.files && v8.length ? { ...main, coverage: { ...main.coverage, files: mergeCoverageFiles(main.coverage.files, ...v8) } } : main
   if (!r) {
     const setup = first.find((x) => x.kind === 'setup' && !x.ok)
     return coverageGate({ coverage: { status: 'unavailable', reason: covError ? `coverage run failed: ${redact(String(covError.message)).slice(0, 200)}` : setup ? 'coverage run: dependency install failed' : 'unit step not planned or coverage disabled' } })

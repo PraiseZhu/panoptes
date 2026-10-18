@@ -1666,7 +1666,14 @@
         "format": "node-events",
         "path": "${RUN}/reports/node-test.jsonl"
       },
-      "noteZh": "对齐 ci.yml「Review-machine guard tests」里的 node --test；vitest 不收 *.node-test.mjs"
+      "noteZh": "对齐 ci.yml「Review-machine guard tests」里的 node --test；vitest 不收 *.node-test.mjs",
+      "coverage": {
+        "kind": "v8",
+        "dir": "${RUN}/coverage/node-test",
+        "labels": [
+          "cov"
+        ]
+      }
     },
     {
       "id": "pytest",
@@ -1735,7 +1742,14 @@
         "run",
         "verify:logging"
       ],
-      "timeoutMin": 10
+      "timeoutMin": 10,
+      "coverage": {
+        "kind": "v8",
+        "dir": "${RUN}/coverage/logging",
+        "labels": [
+          "cov"
+        ]
+      }
     },
     {
       "id": "i18n",

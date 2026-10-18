@@ -269,8 +269,14 @@ Older reports without the field: treat `source == "check"` and `status != "flaky
   `qualityGates.coverage.newCode: 90`) and gives no formula. panoptes measures it as line coverage restricted to the
   PR's new code (the same line definition as `lines`): lines added/modified by `git diff base_sha..tested_sha` in
   non-test JS/TS source files; a line is executable if it starts a v8 statement (istanbul's line metric uses the same
-  rule) and covered if that statement executed. Files no test loads count their code-like added lines as uncovered
-  (`unloaded_files`). `null` / `not-evaluated` when the diff has no executable lines. Threshold 90 (pass at ≥ 90).
+  rule) and covered if that statement executed. Files vitest did not load are filled from raw `NODE_V8_COVERAGE` data
+  collected in the same coverage round (steps with `coverage.kind: "v8"` such as `node-test` / `logging`, and child
+  processes of the unit run that inherit the env; copies run from a temp dir are mapped back by unique path suffix):
+  code-like lines, covered when the line's last non-blank character lies in a V8 block with count > 0; such
+  `files[]` rows carry `source: "v8"`. Files with no data at all count their code-like added lines as uncovered
+  (`unloaded_files`), except plain `.js/.mjs/.cjs` (node entry scripts, host entry such as `cindyplugin/main.js`):
+  those are listed in `not_measurable_files` (row `not_measurable: true`, `covered: null`) and left out of `pct`.
+  Tests that spawn children with a hand-built env (only PATH/HOME) cannot pass `NODE_V8_COVERAGE` on. `null` / `not-evaluated` when the diff has no executable lines. Threshold 90 (pass at ≥ 90).
 - **Only new-code coverage is gated.** `thresholds` is `{ "new_code": 90 }`; `gated_metrics: ["new_code"]`.
   Repo-wide `lines` / `branches` / `functions` are **baseline trend data only**: recorded in
   `baseline { role, lines, branches, functions, reference: { lines: 80, branches: 70, functions: 80 } }`
