@@ -7,7 +7,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from '
 import { join } from 'node:path'
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { redact, truncate, tail, toChatCompletionsUrl } from './util.mjs'
+import { redact, truncate, tail, toChatCompletionsUrl, fetchRetryingNetwork } from './util.mjs'
 import { CODE_DIR, CACHE_DIR } from './paths.mjs'
 
 export const MINGQA_DIR = process.env.ARGUS_MINGQA_DIR ?? join(CODE_DIR, '..', 'ming-qa') // panoptes: submodule next to argus/
@@ -79,17 +79,18 @@ status must be "failed" if any P0/P1 finding exists, else "passed".`
 // 确定性参数：temperature 0 + 固定 seed（网关 2026-10-11 实测接受）。网关若以 400 拒绝这两个参数，去掉重试一次并记下 'unsupported'
 export const REVIEW_SAMPLING = { temperature: 0, seed: 20261011 }
 let samplingSupported = true
-async function chat({ secrets, messages, effort = 'high', timeoutMs = 8 * 60_000, attempts = 2 }) {
+// 网关断连（fetch failed / UND_ERR_SOCKET）先用 fetchRetryingNetwork 原地重试 3 次（2 s/4 s，与 AI 补测、PR 摘要一致，bbe1bea 漏了代码审查）
+export async function chat({ secrets, messages, effort = 'high', timeoutMs = 8 * 60_000, attempts = 2, fetchImpl = fetch, netRetryDelayMs = 2000 }) {
   let lastErr = null
   for (let i = 1; i <= attempts; i++) {
     const started = Date.now()
     try {
-      const resp = await fetch(toChatCompletionsUrl(secrets.ARGUS_LLM_BASE_URL), {
+      const resp = await fetchRetryingNetwork(fetchImpl, toChatCompletionsUrl(secrets.ARGUS_LLM_BASE_URL), () => ({
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${secrets.ARGUS_LLM_API_KEY}` },
         body: JSON.stringify({ model: LLM_MODEL, reasoning_effort: effort, response_format: { type: 'json_object' }, max_completion_tokens: 16_000, messages, ...(samplingSupported ? REVIEW_SAMPLING : {}) }),
         signal: AbortSignal.timeout(Math.max(1, Math.floor(Number(timeoutMs)) || 1)),
-      })
+      }), { delayMs: netRetryDelayMs })
       const data = await resp.json().catch(() => ({}))
       if (!resp.ok) {
         lastErr = { kind: 'http', status: resp.status, message: redact(String(data?.error?.message ?? '')).slice(0, 300) }

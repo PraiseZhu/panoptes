@@ -1,0 +1,33 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { chat } from '../src/mingqa.mjs'
+
+// 10-18: PR #943 / #1081 code review failed with "fetch failed" after bbe1bea — the review call used bare fetch with no network retry.
+const secrets = { ARGUS_LLM_BASE_URL: 'http://gw.invalid/v1', ARGUS_LLM_API_KEY: 'k' }
+const ok = () => new Response(JSON.stringify({ choices: [{ message: { content: '{"status":"passed","findings":[]}' } }], usage: { total_tokens: 5 } }), { status: 200 })
+const netErr = () => Object.assign(new TypeError('fetch failed'), { cause: { code: 'UND_ERR_SOCKET', message: 'other side closed' } })
+
+test('code-review chat retries gateway socket drops in place and succeeds', async () => {
+  let calls = 0
+  const fetchImpl = async () => { calls++; if (calls < 3) throw netErr(); return ok() }
+  const res = await chat({ secrets, messages: [], fetchImpl, netRetryDelayMs: 0 })
+  assert.equal(res.ok, true)
+  assert.equal(calls, 3)
+})
+
+test('code-review chat gives up after network retries on every attempt and reports kind=network', async () => {
+  let calls = 0
+  const fetchImpl = async () => { calls++; throw netErr() }
+  const res = await chat({ secrets, messages: [], fetchImpl, netRetryDelayMs: 0 })
+  assert.equal(res.ok, false)
+  assert.equal(res.error.kind, 'network')
+  assert.equal(calls, 6) // 2 outer attempts x 3 in-place tries
+})
+
+test('code-review chat does not retry timeouts in place', async () => {
+  let calls = 0
+  const fetchImpl = async () => { calls++; throw Object.assign(new Error('timed out'), { name: 'TimeoutError' }) }
+  const res = await chat({ secrets, messages: [], fetchImpl, netRetryDelayMs: 0 })
+  assert.equal(res.ok, false)
+  assert.equal(calls, 2)
+})
