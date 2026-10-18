@@ -242,3 +242,31 @@ both repos internal; new-code coverage 62.5% still P2). No field changes.
 
 **For Praise.** (1) On-merge routine missed 3 of 20 merges again (#1028, #971, #1017). (2) Should a flaky check that also
 fails on base (`pre_existing: true`) be P3 like other old problems? Today it stays P2 (#1018, #1029).
+
+## 2026-10-18 (data day 2026-10-17, Asia/Shanghai)
+
+**Reconciliation.** 10 PRs merged on 10-17 (#1014 #1031 #1032 #1043 #1037 #1076 #1059 #1075 #943 #1081); all 10 have a valid `reports/merged/PR-N.json`, schema 1.0. `run.trigger` was `event` for all on-merge launches; catch-up also touched #1076 / #943 while the event run was still in progress (reused, no duplicate test). Current files: #1014/#1075 re-ran today as `manual` after the agent-docs fix; #943 current tip is a later `manual` re-run (CR/AI network). No miss. No issue opened for test-backed P0/P1 (none); #1037/#1081 only commented on system_health #16. Correct per rules.
+
+**Stability.** Product runs 120–1166 s (docs-only #1059 = 22 s; mis-classified #1014/#1075 originally ~800 s). MemAvailable usually ≥8 GB (parallel coverage) except #1031 (6.3 GB). Outbound model gateway flaky again: AI `fetch failed` on #1037 (×2 rounds) and #943 (400 + CR `fetch failed`); #1081 CR + pr-summary `fetch failed` (AI still kept 2 tests). `system_health: degraded` on #1037/#943/#1081. Recurring bench `shadowRoundTrip` flaky on #1076 (fail then pass; base pass → P2 flaky). Box reboot ~17:29 PT 10-17 / 08:29 CST 10-18 (after the data day); env-guard restored chromium/cron/Node; catch-up found nothing pending for 10-17 after on-merge. Code-review in-place network retry shipped `10fca0b` (10-18 10:05 CST) — was missing from `bbe1bea` which only covered AI tests / PR summary.
+
+**Accuracy.**
+- #1031 review P1/P2 (ruleset required context; `pull_request_target` base checkout) already calibrated 10-16 → P3; coverage 0% on unloaded `.github/scripts/pr-gate-rerun.cjs` also → P3 (`false_positive`). Acceptance under current main: new-code 100% (node-test / measurable path).
+- #1043 structure-guard new-code 0% (source unloaded by vitest despite `structure-guard.test.mjs`) calibrated P2→P3. Root: coverage blind spot for script/`node --test` style suites — fixed on main (`0d7831a` / `a2a90aa`).
+- #1075 review P2 (auto-approve still requires review account report) calibrated → P3; kept after today's docs-only re-run.
+- #1081 coverage 79.94% calibrated → P3 (`false_positive`); subprocess / temp-dir V8 credit landed on main (`f1a852c`/`2f558e3`); acceptance re-run new-code **92.48% pass**. 10-18 CR re-review P1×2 on #1081 were false positives (Bearer JWT / absolute keyPath) → leave P3.
+- #943 large canvas PR: published report still CR/AI error (gateway); 10-18 acceptance re-review found **P1** (cancel batch may leave library images) + P2 (hidden-stack recount) + coverage 87% P2. Not Praise's PR → no issue. Merged file not overwritten (acceptance only).
+- #1076 comment-only across 33 files (incl. cindyplugin) → risk C, ran bench → flaky P2. Correct assignment: `change_kind=comment-only`, skip bench (branch `qa/comment-only-no-bench` `a9bfb05`, **not on main**). Acceptance with that branch: risk B comment-only, bench skipped, P3.
+
+**Test-assignment (10 reviewed).** Fully correct on the day: #1059 (docs-only), #1032 (scripts/loops, cov 100%, AI on gap), #943 (product XL full suite — env failure ≠ assignment). Mis-assignment / blind spots:
+- agent-docs over-tested (AGENTS.md was `NEVER_A` → risk B full suite): #1014 #1075 — **fixed on main** `491e304`; re-ran both → docs-only / `change_kind=agent-docs` (2 s).
+- coverage 0% / unloaded own tests: #1031 #1043 — **fixed on main** runners + not_measurable.
+- comment-only still runs bench / risk C: #1076 — **handoff** Praise PR (`qa/comment-only-no-bench`).
+- env/network degraded (not assignment): #1037 #943 #1081.
+
+**Changes today (already on main before/during this review; not authored here).** `491e304` agent-docs; `0d7831a` node-test/pytest + coverage credit by touched steps; `a2a90aa` not_measurable plain-JS; `dfecd70` AI targets uncovered lines; `10fca0b` CR network retry; `f1a852c`/`2f558e3` subprocess / temp-dir V8 coverage. This review only re-ran #1014/#1075 into `reports/merged/` and re-applied #1075 P3 calibration.
+
+**Re-runs.** `#1014` partially-verified P3 (~770 s full suite) → **docs-only P3** (2 s). `#1075` partially-verified P3 → **docs-only P3** (2 s, review finding kept at calibrated P3). Old tips under `history/PR-1075.v1.json` / bak files.
+
+**For the 日报 bot.** Conclusion deltas vs anything already sent for 10-17: #1014 / #1075 are docs-only (agent-docs), not full-suite partially-verified; #1076 stays flaky P2 in the published file until comment-only lands; #943 published file still lacks the P1 from the 10-18 CR re-review (see `reports/acceptance/review-PR-943.json`); #1081 coverage gate would pass under current main (92%) — published file still shows calibrated P3 coverage finding. Field notices already in REPORT-STYLE / schema (10-18): `change_kind`, `own-tests`, `not_measurable_files`, `ai_tests.uncovered_targets`; `not_a_pr_finding` reserved (bench branch not deployed).
+
+**For Praise.** (1) Merge `qa/comment-only-no-bench` (`a9bfb05`) — unblocks #1076-class PRs. (2) Bench flaky vs `pre_existing` P3 rule still open (from 10-16 review). (3) system_health #16 still open (LLM gateway noise). (4) On-merge catch-up "missing" while event in flight (#1076/#943) is cosmetic.
