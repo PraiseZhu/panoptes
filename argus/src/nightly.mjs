@@ -26,6 +26,9 @@ import { generateTargetedTests, toAiTestSteps, toAiGaps, toAiTestResult, aiTestC
 import { globToRegExp } from './classify.mjs'
 import { createQuota, memoryQuota, resolvePool, CAPPED_ZH } from './quota.mjs'
 
+// 代码版本在进程启动（模块加载）时记下：运行中 checkout 前进不会让报告冒认新提交（#1086 曾在 dfbc980 之前启动，却记成 153e03e）
+const LOADED_ARGUS_COMMIT = (() => { try { return execFileSync('git', ['-C', CODE_DIR, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim() } catch { return null } })()
+
 const SCHEMA_VERSION = '1.0'
 const SEV_RANK = { P0: 0, P1: 1, P2: 2, P3: 3 }
 const maxSev = (list) => list.reduce((m, s) => (SEV_RANK[s] < SEV_RANK[m] ? s : m), 'P3')
@@ -1314,7 +1317,7 @@ export async function runNightly(opts = {}) {
       duration_s: Math.round((Date.now() - startedAt.getTime()) / 1000),
       trigger: normalizeTrigger(opts.trigger),
       args: { date: opts.date ?? null, date_source: dateSource, prs: opts.prs ?? null, out: opts.out ?? null, reuse_merged: opts.reuseMerged !== false, create_issues: Boolean(opts.createIssues), limit: opts.limit ?? null, pr_timeout_min: opts.prTimeoutMin ?? null, deadline: opts.deadline ?? null, burst_cutoff: opts.deadlineKind === 'burst-cutoff' ? opts.deadline : null, step_cache: process.env.ARGUS_STEP_CACHE !== '0', write_merged: writeMergedEnabled(opts), write_open: writeOpenEnabled(opts), ai_tests: !opts.noAiTests && aiTestCaps().enabled, ai_test_caps: runAiTestCaps(prs), ai_test_tier: runAiTestTier(prs), quota_pool: quota.pool, quota_caps: quota.caps, fresh_review: Boolean(opts.freshReview) },
-      argus_commit: (() => { try { return execFileSync('git', ['-C', CODE_DIR, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim() } catch { return null } })(),
+      argus_commit: LOADED_ARGUS_COMMIT,
       ming_qa_commit: await mingQaVersion(), llm_model: LLM_MODEL, evidence_root: evidenceRoot,
     },
     dimensions: BOXES,

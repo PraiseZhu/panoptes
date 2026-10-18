@@ -237,7 +237,9 @@ export ARGUS_MINGQA_DIR="${ARGUS_MINGQA_DIR:-$PANOPTES_DIR/ming-qa}"
 export ARGUS_PYTHON="${ARGUS_PYTHON:-$QA_HOME/.venv/bin/python}"
 export ARGUS_LLM_MODEL="${ARGUS_LLM_MODEL:-openai/gpt-6-luna}"
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$QA_HOME/cache/ms-playwright}"
+# argus itself runs in Shanghai time; test subprocesses get TZ from runner.mjs testTz() (Asia/Shanghai, or an explicit PANOPTES_TEST_TZ), never from this TZ
 export TZ=Asia/Shanghai
+[[ -n "${PANOPTES_TEST_TZ:-}" ]] && export PANOPTES_TEST_TZ
 mkdir -p "$ARGUS_ROOT/logs" "$ARGUS_REPORTS_DIR"
 
 if [[ -n "$CATCH_UP" ]]; then
