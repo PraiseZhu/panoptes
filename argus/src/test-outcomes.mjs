@@ -59,10 +59,28 @@ function nodeOutcomes(raw, root) {
   return rows
 }
 
+// pytest --junitxml -o junit_family=xunit1：每个 <testcase> 带 file / classname / name
+const xmlAttr = (attrs, k) => attrs.match(new RegExp(`\\s${k}="([^"]*)"`))?.[1]
+function junitOutcomes(raw, root) {
+  const rows = []
+  for (const m of String(raw).matchAll(/<testcase\b([^>]*?)(?:\/>|>([\s\S]*?)<\/testcase>)/g)) {
+    const [, attrs, body = ''] = m
+    const file = xmlAttr(attrs, 'file'), name = xmlAttr(attrs, 'name')
+    if (!text(name)) invalid()
+    const path = sourcePath(file, root)
+    const status = /<(failure|error)\b/.test(body) ? 'failed' : /<skipped\b/.test(body) ? 'skipped' : 'passed'
+    const id = [path, xmlAttr(attrs, 'classname'), name].filter(Boolean).join(' > ')
+    rows.push({ caseId: id, failureName: id, status })
+  }
+  if (!rows.length && !/<testsuites?\b/.test(raw)) invalid()
+  return rows
+}
+
 export function normalizeTestOutcomes({ format, raw, sourceRoot, runId, stepId, checkedOutSha }) {
   try {
     const rows = format === 'vitest-json' ? vitestOutcomes(JSON.parse(raw), sourceRoot)
-      : format === 'node-events' ? nodeOutcomes(raw, sourceRoot) : invalid()
+      : format === 'node-events' ? nodeOutcomes(raw, sourceRoot)
+        : format === 'junit-xml' ? junitOutcomes(raw, sourceRoot) : invalid()
     return { testOutcomes: rows, testOutcomeStatus: 'complete', testOutcomeSource: { format, runId, stepId, checkedOutSha } }
   } catch {
     return { testOutcomes: [], testOutcomeStatus: 'incomplete', testOutcomeReason: 'invalid-test-report' }

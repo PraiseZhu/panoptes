@@ -62,7 +62,7 @@ export function applyPlatformOverrides(prof, platform = process.platform) {
 
 export function validateTestReport(report) {
   if (report === undefined) return
-  if (!report || !['vitest-json', 'node-events'].includes(report.format)
+  if (!report || !['vitest-json', 'node-events', 'junit-xml'].includes(report.format)
     || typeof report.path !== 'string' || !report.path.startsWith('${RUN}/')
     || report.path.includes('\\') || report.path.slice(7).includes('${')
     || report.path.split('/').some((part) => ['.', '..', ''].includes(part))) {

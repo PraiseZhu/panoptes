@@ -3,7 +3,7 @@
 // 补测发现的问题在试运行期只记「拿不准，要你看」，不自动提 issue。
 import { aiUsageToday, addAiUsage } from './db.mjs'
 import { globToRegExp } from './classify.mjs'
-import { toDimensionLabel } from './matrix.mjs'
+import { toDimensionLabel, stepExercises } from './matrix.mjs'
 import { redact, toShanghaiDay, truncate } from './util.mjs'
 import { toChatCompletionsUrl, fetchRetryingNetwork, isNetworkError } from './util.mjs'
 
@@ -155,10 +155,11 @@ export function aiTestCaps(env = process.env) {
   }
 }
 
-// 缺口维度：适用（Jev 明确判定 applicable）∩ 补测维度清单 ∩ 没有已跑成（pass / fail）的检查声明覆盖
-export function toAiGaps({ applicability, profile, results }) {
+// 缺口维度：适用（Jev 明确判定 applicable）∩ 补测维度清单 ∩ 没有已跑成（pass / fail）且改动碰到它所测路径（exercises）的检查声明覆盖
+export function toAiGaps({ applicability, profile, results, files = [] }) {
   const ran = new Set((results ?? []).filter((r) => r.kind !== 'setup' && !r.unavailable && !r.timedOut).map((r) => r.id))
-  const covered = new Set(profile.steps.filter((s) => ran.has(s.id)).flatMap((s) => s.covers ?? []))
+  const paths = files.map((f) => f.filename)
+  const covered = new Set(profile.steps.filter((s) => ran.has(s.id) && stepExercises(s, paths)).flatMap((s) => s.covers ?? []))
   return (applicability?.applicable ?? []).filter((k) => AI_GAP_DIMENSIONS.includes(k) && !covered.has(k))
 }
 
@@ -234,10 +235,10 @@ const TIER_RE = {
   lock: /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|uv\.lock|poetry\.lock|Pipfile\.lock|Cargo\.lock|go\.sum|composer\.lock|Gemfile\.lock)$/,
   generated: /(^|\/)(dist|build|out|coverage|vendor|node_modules|__generated__|generated)\/|\.min\.(js|css)$|\.map$|\.snap$|\.generated\.|\.pb\.go$|_pb2\.py$/,
   docs: /\.(md|mdx|rst|txt|adoc)$|^docs\/|(^|\/)(LICENSE|CHANGELOG|CHANGES|NOTICE|AUTHORS)(\.[^/]*)?$/i,
-  ci: /^\.github\/|^\.gitlab-ci\.yml$|^\.circleci\/|(^|\/)Jenkinsfile$|^\.buildkite\//,
+  ci: /^\.github\/|^scripts\/ci\/|^\.gitlab-ci\.yml$|^\.circleci\/|(^|\/)Jenkinsfile$|^\.buildkite\//,
   tests: /(^|\/)(tests?|__tests__|spec|e2e|fixtures)\/|\.(test|spec)\.[^/]+$|(^|\/)test_[^/]+\.py$|_test\.(go|py)$/,
   depManifest: /(^|\/)(package\.json|pyproject\.toml|requirements[^/]*\.txt|Cargo\.toml|go\.mod|Gemfile)$/,
-  config: /(^|\/)\.[^/]+rc(\.[^/]+)?$|(^|\/)\.(editorconfig|gitignore|gitattributes|npmrc|nvmrc|prettierignore|eslintignore|dockerignore)$|\.(ya?ml|toml|ini|cfg|conf|env\.example)$|(^|\/)(tsconfig|jsconfig)[^/]*\.json$/,
+  config: /(^|\/)\.[^/]+rc(\.[^/]+)?$|(^|\/)\.(editorconfig|gitignore|gitattributes|npmrc|nvmrc|prettierignore|eslintignore|dockerignore)$|\.(ya?ml|toml|ini|cfg|conf|env\.example)$|(^|\/)(tsconfig|jsconfig)[^/]*\.json$|(^|\/)ghost\.json$/,
 }
 export function fileKind(path) {
   if (TIER_RE.lock.test(path)) return 'lock'

@@ -15,7 +15,7 @@ import { executeOnSha, ensureMirror, mergeBase, sandboxMode, janitor } from './r
 import { decideOutcome, failedIds, setupFailed, failureKeys, compareKey } from './decide.mjs'
 import { analyzePr } from './ai.mjs'
 import { evaluateJev } from './jev.mjs'
-import { toMatrixQuestions, toMatrixState, toTriage, toStepPlan, toCoverage, toApplicability } from './matrix.mjs'
+import { toMatrixQuestions, toMatrixState, toTriage, toStepPlan, toCoverage, toApplicability, stepExercises, stepRunsChangedFile } from './matrix.mjs'
 import { codeReview, toBox, BOXES, LLM_MODEL, mingQaVersion, mingQaAvailable, reviewCacheKey, lookupReviewVerdict } from './mingqa.mjs'
 import { ALL_DIRS, CACHE_DIR, EVIDENCE_DIR, REPORTS_DIR, CODE_DIR } from './paths.mjs'
 import { log, redact, tail, toShanghaiDay, toShanghaiIso } from './util.mjs'
@@ -241,7 +241,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   triage.jevStatus = jev.ok ? 'ok' : jev.capped ? 'capped' : jevConfigured ? 'failed' : 'not-configured'
   out.triage = { ...toApplicability(triage), duration_ms: jevConfigured ? Date.now() - jevT0 : null, usage: jev.usage ?? null }
   recordTriage(health, number, out.triage)
-  const plan = toStepPlan({ profile: baseProfile, riskClass, triage })
+  const plan = toStepPlan({ profile: baseProfile, riskClass, triage, files })
   for (const sk of plan.skipped) sk.reason ??= 'triage: change does not touch what this optional step covers'
   if (opts.skipSteps?.length) {
     for (const id of plan.stepIds.filter((x) => opts.skipSteps.includes(x))) {
@@ -302,7 +302,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   const decision = decideOutcome({ first, rerun, base, latest, baseKnown: Boolean(baseSha), latestIsSame })
   out.outcome = decision.outcome
   out.outcome_reason = decision.reasonZh
-  out.coverage = toCoverage({ profile, triage, results: first })
+  out.coverage = toCoverage({ profile, triage, results: first, files })
   // 计划要跑却没有结果的步骤（安装失败后中止、时间预算用完等）也列进 skipped_steps
   const ranIds = new Set(first.map((r) => r.id))
   for (const id of plan.stepIds) {
@@ -379,10 +379,19 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     })
   }
 
+  // PR 自己改过的测试文件：所有检查的测试报告里都找不到 → P2（没有任何一步执行它）
+  const notRun = setupFailed(first) ? [] : ownTestsNotRun({ files, results: first, profile })
+  if (notRun.length) {
+    const fp = fingerprintOf(repo, ['own-tests-not-run', `pr=${number}`, notRun.join(',')])
+    out.findings.push({ source: 'own-tests', test_backed: false, check_id: 'own-tests-not-run', dimension: 'white-box', severity: 'P2',
+      title: `changed test file(s) not executed by any check: ${notRun.slice(0, 5).join(', ')}${notRun.length > 5 ? ` (+${notRun.length - 5})` : ''}`,
+      fingerprint: fp, pr_fingerprint: prFingerprint(fp, number), evidence: { tested_sha: sha, files: notRun } })
+  }
+
   // AI 补测：Jev 判为适用、但没有检查覆盖的维度 → 生成 vitest 用例，经「当前通过 + 植入错误失败」验证后才保留。
   // 独立的执行轮次（ai1、ai2…），结果不参与 outcome 判定；在当前代码上失败的只记 P2、test_backed=false。
   if (!opts.noAiTests) await runAiTests({ out, repo, pr, files, profile, riskClass, sha, common, db, secrets, health, number, results: first, quota })
-  out.coverage = withDimensionStatus(out.coverage, out.triage, out.ai_tests, profile, first)
+  out.coverage = withDimensionStatus(out.coverage, out.triage, out.ai_tests, profile, first, files)
   // Jev 因额度没跑：没判定的维度记 capped；AI 补测因额度没做完：剩下的缺口维度记 capped（不是普通 gap）
   if (out.triage?.status === 'capped') out.quota_capped.push(quota.markCapped('jev', { pr: number, dimensions: out.coverage?.capped ?? out.triage.undetermined }))
   if (out.ai_tests?.capped) out.quota_capped.push(quota.markCapped('ai-test', { pr: number, dimensions: out.ai_tests.capped_gaps }))
@@ -455,7 +464,7 @@ async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, commo
   if (!profile.aiTests) return finish('skipped', 'profile has no aiTests config')
   if (setupFailed(results)) return finish('skipped', 'dependency install failed')
   if (out.triage?.status !== 'ok') return finish('skipped', `dimension applicability not decided (triage ${out.triage?.status ?? 'missing'})`)
-  ai.gaps = toAiGaps({ applicability: out.triage, profile, results })
+  ai.gaps = toAiGaps({ applicability: out.triage, profile, results, files })
   if (!ai.gaps.length) return finish('skipped', 'no applicable gap dimension: every applicable dimension in the AI-test set is covered by a check')
   if (caps.maxCalls < 1) return finish(tiered.tier.tier === 'none' ? 'skipped' : tiered.tier.degraded ? 'capped' : 'skipped', tiered.tier.tier === 'none' ? `ai-test tier none: ${tiered.tier.reason}` : tiered.tier.degraded ? `${CAPPED_ZH}: ${tiered.tier.reason}` : 'ARGUS_AITEST_MAX_CALLS=0')
   const cGlobs = (profile.cPaths ?? []).map(globToRegExp)
@@ -534,11 +543,26 @@ async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, commo
   finish(ai.generated ? 'ok' : ai.rounds.some((r) => r.status === 'error') ? 'error' : 'empty', ai.generated ? (ai.capped ? `${CAPPED_ZH} (partly): ${ai.rounds.at(-1)?.reason}` : null) : (ai.rounds.at(-1)?.reason ?? ai.rounds.at(-1)?.skipped ?? null))
 }
 
+// 改动（非删除）的测试文件里，哪些不在任何一步的测试报告里。可能执行它的步骤（runsFiles 命中，或有报告且没写 runsFiles）
+// 报告不完整（失败时报告与日志对不上等）→ 说不清，不报
+export const TEST_FILE_RE = /\.(test|spec)\.[cm]?[jt]sx?$|\.node-test\.[cm]?js$|(^|\/)test_[^/]+\.py$|_test\.py$/
+export function ownTestsNotRun({ files, results, profile }) {
+  const changed = (files ?? []).filter((f) => f.status !== 'removed' && TEST_FILE_RE.test(f.filename)).map((f) => f.filename)
+  if (!changed.length) return []
+  const stepOf = Object.fromEntries(profile.steps.map((s) => [s.id, s]))
+  const reported = (results ?? []).filter((r) => stepOf[r.id]?.testReport && !r.unavailable)
+  const seen = new Set(reported.flatMap((r) => (r.testOutcomes ?? []).map((t) => String(t.caseId).split(' > ')[0])))
+  const unclear = (file) => reported.some((r) => r.testOutcomeStatus !== 'complete' && (!stepOf[r.id].runsFiles || stepRunsChangedFile(stepOf[r.id], [file])))
+  return changed.filter((f) => !seen.has(f) && !unclear(f))
+}
+
 // coverage（QA 维度覆盖，不是代码覆盖率）补上：applicable_total / covered_total 与逐维度状态
-export function withDimensionStatus(cov, triage, ai, profile, results) {
+// 只有改动碰到步骤实际测的路径（step.exercises）时，这一步才算覆盖它声明的维度
+export function withDimensionStatus(cov, triage, ai, profile, results, files = []) {
   if (!cov || !triage?.dimensions) return cov
   const ran = new Set((results ?? []).filter((r) => r.kind !== 'setup' && !r.unavailable && !r.timedOut).map((r) => r.id))
-  const byChecks = (k) => profile.steps.filter((s) => ran.has(s.id) && (s.covers ?? []).includes(k)).map((s) => s.id)
+  const paths = files.map((f) => f.filename)
+  const byChecks = (k) => profile.steps.filter((s) => ran.has(s.id) && (s.covers ?? []).includes(k) && stepExercises(s, paths)).map((s) => s.id)
   const byAi = (k) => (ai?.tests ?? []).filter((t) => t.result === 'kept' && t.covers.includes(k)).map((t) => t.id)
   const dims = {}
   // capped（额度用尽未补测）：Jev 因额度没跑时没判定的维度；AI 补测因额度没做的缺口维度。和普通 gap 分开计
