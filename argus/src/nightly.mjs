@@ -1,7 +1,7 @@
 // 夜间 QA（Linux / Mivo QA）：发现前一天（上海时区）的 PR → 在隔离沙箱里跑项目检查 → 失败三重对照 →
 // ming-qa 代码审查 → 写 reports/YYYY-MM-DD.json。默认绝不写 GitHub；提 issue 只在 --create-issues 且
 // ARGUS_ALLOW_ISSUES=1 时才可能发生。
-import { memAvailableGb } from './memory.mjs'
+import { memAvailableGb, machineLoad, isIdle } from './memory.mjs'
 import { mkdirSync, writeFileSync, renameSync, existsSync, readFileSync, statfsSync, readdirSync } from 'node:fs'
 import { join, resolve, dirname, basename } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
@@ -18,7 +18,7 @@ import { evaluateJev } from './jev.mjs'
 import { toMatrixQuestions, toMatrixState, toTriage, toStepPlan, toCoverage, toApplicability, stepExercises, stepRunsChangedFile } from './matrix.mjs'
 import { codeReview, toBox, BOXES, LLM_MODEL, mingQaVersion, mingQaAvailable, reviewCacheKey, lookupReviewVerdict } from './mingqa.mjs'
 import { ALL_DIRS, CACHE_DIR, EVIDENCE_DIR, REPORTS_DIR, CODE_DIR } from './paths.mjs'
-import { log, redact, tail, toShanghaiDay, toShanghaiIso } from './util.mjs'
+import { log, redact, sleep, tail, toShanghaiDay, toShanghaiIso } from './util.mjs'
 import { setBudget, overBudget } from './exec.mjs'
 import { coverageGate, parseAddedLines, mergeCoverageFiles, COVERAGE_THRESHOLDS } from './coverage.mjs'
 import { recentGiveUps } from './catchup.mjs'
@@ -147,11 +147,19 @@ export function flakyBaseComparison({ baseSha, baseRun }) {
   if (baseRun === 'fail') return { compared: true, base_sha: baseSha, base_run: baseRun, result: 'also-fails-on-base', note: 'also failed on the base (pre-merge) revision in one run: instability predates this PR', note_zh: '合并前版本上同样失败：不稳定在这个 PR 之前就有' }
   return { compared: true, base_sha: baseSha, base_run: baseRun, result: 'passes-on-base', note: 'passed on the base (pre-merge) revision in one run; a single run cannot rule out the same instability on base', note_zh: '合并前版本上跑一次通过；单次运行不能排除合并前也偶发失败' }
 }
-// 试运行检查里的超时（整步超时，或用例 failure_type test_timeout）
-export function isTrialTimeout(step, r, test) {
-  if (!step?.trialOnly) return false
-  if (r?.timedOut) return true
-  return Boolean(test && test !== '*' && r?.failureDetails?.find((f) => f.name === test)?.type === 'test_timeout')
+// 试运行检查（bench）里单个用例 test_timeout，且在空闲机器上重跑通过 → 才算环境负载、降成 P3。
+// 整步超时、introduced、重跑仍失败 / 超时：保持原级别
+export function isTrialTimeout(step, r, test, { status, rerun } = {}) {
+  if (!step?.trialOnly || r?.timedOut || status === 'introduced' || !test || test === '*') return false
+  if (r?.failureDetails?.find((f) => f.name === test)?.type !== 'test_timeout') return false
+  return rerun === 'pass' || rerun === 'not-failing'
+}
+// 重跑前等机器空闲（最多 maxWaitMs、不超时间预算）；返回最后一次负载快照和等了多久
+export async function waitForIdle({ maxWaitMs = 10 * 60_000, everyMs = 15_000, sample = machineLoad, wait = sleep } = {}) {
+  const t0 = Date.now()
+  let m = sample()
+  while (!isIdle(m) && Date.now() - t0 < maxWaitMs && !overBudget()) { await wait(everyMs); m = sample() }
+  return { ...m, idle: isIdle(m), waited_ms: Date.now() - t0 }
 }
 export function severityFor({ status, step, merged }) {
   let sev
@@ -291,11 +299,15 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   const prDiff = await diffForReview({ repo, sha, baseSha, extraRefspecs })
   if (wantCov && !par.parallel) covRun = startCov()
   const cov = await covRun
+  // 覆盖率轮次可能很久：跑完再看一次时间预算，超了就不再重跑 / 跑基线（外层按 pr-timeout 记未测完）
+  if (overBudget()) return out
   out.coverage_gate = computeCoverageGate({ first: Array.isArray(cov) ? cov : [], prDiff, covError: cov?.error })
 
   let rerun = null, base = null, latest = null, latestIsSame = true
   const failed = failedIds(first)
   if (!setupFailed(first) && failed.length) {
+    // 有试运行检查（bench）失败：重跑前先等机器空闲
+    if (failed.some((id) => profile.steps.find((x) => x.id === id)?.trialOnly)) out.rerun_idle_wait = await waitForIdle()
     rerun = await executeOnSha({ ...common, label: 'h2', sha, stepIds: failed })
     const still = failed.filter((id) => failedIds(rerun).includes(id))
     // 首跑失败、重跑通过（不稳定）的步骤也在合并前版本（base）上跑一次，记下基线结果；
@@ -361,8 +373,6 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     const step = stepById[stepId] ?? { id: stepId, kind: r?.kind }
     let { status, why } = classifyKey(key, { first, rerun, base, latest, latestIsSame, skipLatest: Boolean(step.noLatestRecheck) })
     if (r?.timedOut) { status = 'timeout'; why = 'check timed out; no comparable failure evidence' }
-    // 试运行检查（trialOnly，如 bench）里的超时：多半是机器负载（审计 2026-10-18 S3），不算这个 PR 的发现
-    const envTimeout = isTrialTimeout(step, r, test)
     const named = test !== '*'
     const fp = fingerprintOf(repo, ['check', stepId, named ? test : wholeStepSignature(r)])
     const type = r?.failureDetails?.find((f) => f.name === test)?.type ?? null
@@ -379,17 +389,20 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
       why = 'also fails on the base revision (base run failed; failure type not fingerprint-comparable, e.g. test_timeout)'
     }
     const preExisting = status === 'pre-existing' || baseRun === 'fail'
+    // 试运行检查（bench）的用例超时、空闲机器上重跑通过：机器负载（审计 2026-10-18 S3），不算这个 PR 的发现
+    const envTimeout = isTrialTimeout(step, r, test, { status, rerun: compareOn(rerun) })
     out.failed_checks.push({
       check_id: stepId, check_name: r?.nameZh, dimension: toBox(step, profile), qa_dimensions: step.covers ?? [],
       test: named ? test : null, failure_type: type, status, flaky: status === 'flaky', related_to_pr: status === 'flaky' ? false : undefined,
       pre_existing: preExisting,
-      severity: envTimeout ? 'P3' : severityFor({ status, step, merged }), attribution: envTimeout ? `${why}; timeout in a trial-only check: treated as environment load, not a PR finding` : why,
+      severity: envTimeout ? 'P3' : severityFor({ status, step, merged }), attribution: envTimeout ? `${why}; test timed out in a trial-only check and passed on the idle-machine rerun: treated as environment load, not a PR finding` : why,
       ...(envTimeout ? { not_a_pr_finding: true, env_suspected: 'trial-timeout' } : {}),
       fingerprint: fp, pr_fingerprint: prFingerprint(fp, number),
       evidence: {
         tested_sha: sha, base_sha: baseSha, exit_code: r?.exitCode, timed_out: Boolean(r?.timedOut),
         first_run: 'fail', rerun: compareOn(rerun), base_run: baseRun, ...(latest ? { latest_main_run: compareOn(latest) } : {}),
         command: (step.cmd ?? []).join(' '), log_tail: evidenceTail(r, named ? test : null), log_file: join(evDir, 'h1/logs', `${stepId}.log`),
+        ...(step.trialOnly ? { machine_load: { first_run: r?.machine ?? null, rerun_wait: out.rerun_idle_wait ?? null, rerun: rerun?.find((y) => y.id === stepId)?.machine ?? null } } : {}),
         ...(baseComparison?.compared ? { base_log_file: join(evDir, 'b/logs', `${stepId}.log`) } : {}),
       },
       ...(baseComparison ? { base_comparison: baseComparison } : {}),
@@ -435,7 +448,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
       evidence: { tested_sha: sha, base_sha: baseSha, values: gate.values, thresholds: gate.thresholds, baseline: gate.baseline, new_code_files: (gate.new_code?.files ?? []).slice(0, 20) },
     })
   }
-  for (const c of out.failed_checks.filter((x) => x.not_a_pr_finding)) health.env_problems.push({ pr: number, message: `trial check '${c.check_id}' timed out${c.test ? ` (${c.test})` : ''}: treated as environment load, not a PR finding` })
+  for (const c of out.failed_checks.filter((x) => x.not_a_pr_finding)) health.env_problems.push({ pr: number, message: `trial check '${c.check_id}' timed out${c.test ? ` (${c.test})` : ''} and passed on the idle-machine rerun: treated as environment load, not a PR finding` })
   out.findings = [...out.failed_checks.filter((c) => !c.not_a_pr_finding).map((c) => ({ source: 'check', test_backed: checkIsTestBacked(c), ...c })), ...out.findings]
   out.severity = out.findings.length ? maxSev(out.findings.map((f) => f.severity)) : 'P3'
   Object.assign(out, dimensionsOf(out.checks))

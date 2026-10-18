@@ -5,6 +5,7 @@ import { homedir, tmpdir } from 'node:os'
 import { run, isStopping, overBudget } from './exec.mjs'
 import { RUNS_DIR, MIRRORS_DIR, NPM_CACHE_DIR, UV_CACHE_DIR, UV_PYTHON_DIR, CACHE_DIR, CODE_DIR } from './paths.mjs'
 import { log, sleep, toPlainZh } from './util.mjs'
+import { machineLoad } from './memory.mjs'
 import { gitTokenFor } from './github.mjs'
 import { fileURLToPath } from 'node:url'
 import { validateTestReport } from './config.mjs'
@@ -424,6 +425,7 @@ export async function runSteps(profile, src, runDir, { stepIds = null, execution
     const disturbed = await watch.stop()
     if (disturbed) log('error', 'step disturbed desktop', { step: step.id })
     const result = { ...identity, id: step.id, nameZh: step.nameZh, kind: step.kind, cmdText: step.cmd.join(' '), ok: res.ok, exitCode: res.exitCode, timedOut: res.timedOut, durationMs: res.durationMs, tail: res.tail, failures: res.ok ? [] : res.failures, failureDetails: res.ok ? [] : res.failureDetails, failureParseStatus: res.failureParseStatus, ...(res.shards ? { shards: res.shards } : {}) }
+    if (step.trialOnly) result.machine = machineLoad()
     toStepOutcome(step, result, runDir)
     Object.assign(result, readTestReport(step, result, src, runDir, stepVarsForReport, execution))
     if (disturbed) result.disturbedDesktop = true
