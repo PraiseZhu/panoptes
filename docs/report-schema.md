@@ -323,7 +323,9 @@ For B/C PRs with a decided triage, panoptes asks the model (argus `src/aitests.m
 cases for the **gap dimensions**: Jev says applicable, the dimension is in the AI-test set (`integration, boundary,
 exception, security, permission-boundary, state-transition, async-callback-retry, data-consistency, concurrency,
 business-rule, privacy, db`), and no check that ran declares it in `covers`. High-risk (class-C path) files are listed
-first. Each case comes with an injected bug (a one-occurrence text replacement in a source file) and runs in its own
+first. The **primary target** is the PR's uncovered changed lines from `coverage_gate.new_code.files[].uncovered_lines`
+(top 10 files, `ai_tests.uncovered_targets: [{ file, lines }]`); the model runs even with no gap dimension when such lines
+exist, and a case with no gap dimension is accepted when its injected bug is in one of those files (`tests[].targets_uncovered`). Each case comes with an injected bug (a one-occurrence text replacement in a source file) and runs in its own
 sandboxed run (`ai1`, `ai2`, …, never part of the verdict runs). **Mutation discipline:** a case is **kept** only if it
 passes on the tested commit **and** fails with the injected bug; otherwise it is **discarded**. A case that fails on
 the tested commit is re-run once (`reproduced`) and becomes a `source: "ai-test"` finding: always P2,
