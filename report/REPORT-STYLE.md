@@ -133,6 +133,15 @@
   每个 PR 的汇总在 `prs[].quota_capped[]`（`kind`、`dimensions`）。群里统一写「额度用尽未补测」，和"测了没覆盖"分开说；
   审查被额度挡住时（verdict 最多 `partially-verified`，不会是 clean），P 级只反映真实跑过的检查，要写「代码审查额度用尽，今天没审」，不能写成「审查无问题」。
   额度池、上限、用量（`system_health.quota`）只进给 Praise 的私下补充；`system_health.status` 会因此是 degraded，系统状态一句写「有 N 个 PR 额度用尽未补测」。
+- **代码审查调用失败**（`code_review.status:"error"` 或 `system_health.llm_errors[]` 里 `stage:"code-review"`，2026-10-18 复盘补）：和额度用尽同理，P 级只反映跑过的检查。
+  条目里写「这次代码审查没跑成（调用审查模型时连不上），还没审」，不能写「审查无问题」或「审查只有小提醒」；系统状态点出是哪几个 PR。
+- **2026-10-18 起的新字段**（argus 合入 qa/integration-20261018 之后的报告才有；旧报告没有就当不存在，不要写「未统计」）：
+  - `findings[].source:"own-tests"`（P2，`check_id:"own-tests-not-run"`，`test_backed:false`）= 这个 PR 改了测试文件，但没有任何检查的测试结果里有它。
+    群里写在该 PR 的 P2 条目：「P2 这个 PR 改过的测试没被测试系统跑到，改的测试有没有生效还不确定（见下）」；不写文件名、路径。
+    @ 和私信暂按「测试补得不够」一类处理（同只有新代码覆盖率不够的 P2：不 @、不私信），等 Praise 另定。
+  - `coverage_gate.new_code.not_measurable_files`：量不出覆盖率的纯 JS 文件，不再按 0% 算。有时在「测试覆盖情况」写「有 N 个文件是纯 JS 脚本，量不出覆盖率，没算进新代码覆盖率」，不算问题。
+  - `change_kind`：只用来判断是否按「纯文档或说明改动」写，字段值不进群。`ai_tests.uncovered_targets`（AI 补测瞄准的未覆盖行）只进私下补充。
+  - `failed_checks[].not_a_pr_finding`：保留字段，当前版本不产出，缺省当 false。若出现 true：这条不算 PR 的问题、不进级别节、不 @ 不私信，只在「测试覆盖情况」一句话说「性能测试超时疑似环境原因，不算这个 PR 的问题」，并在私下补充提醒 Praise 规则已上线。
 
 ## 代码审查的复用（since 2026-10-11）
 
