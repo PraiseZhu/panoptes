@@ -1,6 +1,6 @@
 // 适用性矩阵：ming-qa 的 29 个维度（4 执行层 / 10 用例类型 / 10 风险 / 5 判定依据）。
 // 三件事分开：Jev 判断「涉及 / 拿不准」；「不适用」只来自 profile 明文；「测到没有」由代码按步骤的 covers 和真实结果计算。
-import { globToRegExp, highRiskFiles } from './classify.mjs'
+import { classifyChange, globToRegExp, highRiskFiles } from './classify.mjs'
 import { toReadableTitle } from './util.mjs'
 
 const q = (what) => `Could this code change plausibly affect ${what}? Answer yes only if the changed files, title or description clearly touch it.`
@@ -116,12 +116,14 @@ export const stepRunsChangedFile = (step, paths) => (paths ?? []).find((p) => ma
 export function toStepPlan({ profile, riskClass, triage, files = [] }) {
   const verdictOf = Object.fromEntries((triage?.rows ?? []).map((r) => [r.key, r.verdict]))
   const paths = files.map((f) => f.filename)
-  const cHits = highRiskFiles(paths, profile)
+  const cHits = highRiskFiles(files, profile)
+  const commentOnly = classifyChange(files, profile).changeKind === 'comment-only'
   const run = []
   const skipped = []
   for (const s of profile.steps) {
     if (s.kind === 'setup' || !s.optional) { run.push(s.id); continue }
     if (stepRunsChangedFile(s, paths)) { run.push(s.id); continue }
+    if (commentOnly && (s.covers ?? []).includes('performance')) { skipped.push({ id: s.id, nameZh: s.nameZh, reasonZh: '只改了注释，不跑性能基准' }); continue }
     if (riskClass === 'C' && stepExercises(s, cHits)) { run.push(s.id); continue }
     if (!triage || triage.status !== 'ok') { run.push(s.id); continue }
     const wanted = (s.covers ?? []).filter((k) => ['applicable', 'undetermined'].includes(verdictOf[k]))
