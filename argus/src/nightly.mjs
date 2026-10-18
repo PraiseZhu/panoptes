@@ -9,8 +9,8 @@ import { hostname } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { loadRegistry, loadSecrets } from './config.mjs'
 import { openDb } from './db.mjs'
-import { listNightlyPrs, getPull, getCommit, getBranchHead, listPullFiles, shanghaiDayWindow, findIssuesByMarkerLabel, createIssue, commentIssue, reopenIssue, findCommentByMarker } from './github.mjs'
-import { classifyChange } from './classify.mjs'
+import { listNightlyPrs, getPull, getCommit, getBranchHead, listPullFiles, addFullText, shanghaiDayWindow, findIssuesByMarkerLabel, createIssue, commentIssue, reopenIssue, findCommentByMarker } from './github.mjs'
+import { classifyChange, highRiskFiles } from './classify.mjs'
 import { executeOnSha, ensureMirror, mergeBase, sandboxMode, janitor } from './runner.mjs'
 import { decideOutcome, failedIds, setupFailed, failureKeys, compareKey } from './decide.mjs'
 import { analyzePr } from './ai.mjs'
@@ -23,7 +23,6 @@ import { setBudget, overBudget } from './exec.mjs'
 import { coverageGate, parseAddedLines, mergeCoverageFiles, COVERAGE_THRESHOLDS } from './coverage.mjs'
 import { recentGiveUps } from './catchup.mjs'
 import { generateTargetedTests, toAiTestSteps, toAiGaps, toUncoveredTargets, toAiTestResult, aiTestCaps, aiTestTier, degradeForQuota } from './aitests.mjs'
-import { globToRegExp } from './classify.mjs'
 import { createQuota, memoryQuota, resolvePool, CAPPED_ZH } from './quota.mjs'
 
 // 代码版本在进程启动（模块加载）时记下：运行中 checkout 前进不会让报告冒认新提交（#1086 曾在 dfbc980 之前启动，却记成 153e03e）
@@ -168,7 +167,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   const startedAt = Date.now()
   const baseProfile = { ...project.profileData, displayName: project.displayName }
   const pr = await getPull(repo, number)
-  const files = await listPullFiles(repo, number)
+  const files = await addFullText(repo, pr, await listPullFiles(repo, number))
   const merged = Boolean(pr.merged_at)
   const out = {
     number, title: pr.title, author: pr.user?.login ?? null, url: pr.html_url,
@@ -475,8 +474,7 @@ async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, commo
   ai.uncovered_targets = toUncoveredTargets(out.coverage_gate?.new_code)
   if (!ai.gaps.length && !ai.uncovered_targets.length) return finish('skipped', 'no applicable gap dimension and no uncovered changed lines')
   if (caps.maxCalls < 1) return finish(tiered.tier.tier === 'none' ? 'skipped' : tiered.tier.degraded ? 'capped' : 'skipped', tiered.tier.tier === 'none' ? `ai-test tier none: ${tiered.tier.reason}` : tiered.tier.degraded ? `${CAPPED_ZH}: ${tiered.tier.reason}` : 'ARGUS_AITEST_MAX_CALLS=0')
-  const cGlobs = (profile.cPaths ?? []).map(globToRegExp)
-  const highRiskFiles = files.map((f) => f.filename).filter((f) => cGlobs.some((re) => re.test(f)))
+  const cHits = highRiskFiles(files, profile)
   const setupIds = profile.steps.filter((s) => s.kind === 'setup').map((s) => s.id)
   let remaining = [...ai.gaps]
   let targets = [...ai.uncovered_targets]
@@ -487,7 +485,7 @@ async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, commo
   for (let round = 1; round <= caps.maxCalls && (remaining.length || targets.length); round++) {
     const left = deadline - Date.now()
     if (left < 3 * 60_000) { ai.rounds.push({ round, skipped: 'wall-time cap reached' }); break }
-    const gen = await generateTargetedTests({ db, secrets, riskClass, pr, files, profile, gaps: remaining, uncovered: targets, maxTests: caps.maxTestsPerCall, highRiskFiles, feedback, timeoutMs: Math.max(1, Math.floor(Math.min(8 * 60_000, left / 2))), quota })
+    const gen = await generateTargetedTests({ db, secrets, riskClass, pr, files, profile, gaps: remaining, uncovered: targets, maxTests: caps.maxTestsPerCall, highRiskFiles: cHits, feedback, timeoutMs: Math.max(1, Math.floor(Math.min(8 * 60_000, left / 2))), quota })
     if (gen.status === 'capped') {
       // 每日 ai-test 额度用尽：这一轮及之后都不调模型；剩下的缺口维度记 capped（显示「额度用尽未补测」）
       ai.capped = true; ai.capped_gaps = [...remaining]; ai.quota = gen.quota

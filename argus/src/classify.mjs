@@ -1,4 +1,5 @@
 // 改动分级：A 只改说明文档 / B 常规 / C 高风险。未知路径永远不进 A。
+import { createRequire } from 'node:module'
 
 export function globToRegExp(glob) {
   let re = ''
@@ -31,9 +32,28 @@ const AGENT_DOCS = ['**/AGENTS.md', '**/CLAUDE.md']
 // 测试文件、纯版本号数据、智能体说明文档即使落在高风险目录里，也不把 PR 推到 C
 const NEVER_C = ['**/*.test.*', '**/__tests__/**', 'tests/**', '**/ghost.json', ...AGENT_DOCS]
 
-// 增删的每一行都是空行或注释（//、/*、*、*/、#）；拿不到 patch 按真实改动算
-const COMMENT_LINE = /^\s*(?:$|\/\/|\/\*|\*|#(?:\s|$))/
-export const isCommentOnly = (f) => typeof f.patch === 'string' && f.patch.split('\n').every((l) => !/^[+-]/.test(l) || COMMENT_LINE.test(l.slice(1)))
+// 只改注释：改动前后的完整文件（f.before / f.after，新增文件 before 为 ''、删除文件 after 为 ''）用 typescript 解析，
+// 去掉注释后的 token 序列相同才算。拿不到全文、解析失败、不认识的语言、没装 typescript，一律按真实改动算
+let ts = null
+try { ts = createRequire(import.meta.url)('typescript') } catch {}
+const TS_KIND = { js: 'JS', mjs: 'JS', cjs: 'JS', jsx: 'JSX', ts: 'TS', mts: 'TS', cts: 'TS', tsx: 'TSX' }
+function codeTokens(text, kind) {
+  const sf = ts.createSourceFile(`x.${kind.toLowerCase()}`, text, ts.ScriptTarget.Latest, true, ts.ScriptKind[kind])
+  if (sf.parseDiagnostics?.length) return null
+  const out = []
+  // getChildren 会把 /** */ 也当成子节点，跳过
+  const walk = (n) => { if (n.kind >= ts.SyntaxKind.FirstJSDocNode && n.kind <= ts.SyntaxKind.LastJSDocNode) return; const kids = n.getChildren(sf); if (!kids.length) out.push(`${n.kind}:${n.getText(sf)}`); else kids.forEach(walk) }
+  walk(sf)
+  return out.join('\n')
+}
+export function isCommentOnly(f) {
+  const kind = TS_KIND[/\.([a-z]+)$/i.exec(f.filename ?? '')?.[1]?.toLowerCase()]
+  if (!ts || !kind || typeof f.before !== 'string' || typeof f.after !== 'string') return false
+  try {
+    const a = codeTokens(f.before, kind), b = codeTokens(f.after, kind)
+    return a !== null && a === b
+  } catch { return false }
+}
 
 // 命中 profile.cPaths 的改动文件（去掉测试文件、ghost.json 和只改注释的文件）；files 是 [{ filename, patch }]
 export const highRiskFiles = (files, profile = {}) => files.filter((f) => matchAny(f.filename, profile.cPaths ?? []) && !matchAny(f.filename, NEVER_C) && !isCommentOnly(f)).map((f) => f.filename)

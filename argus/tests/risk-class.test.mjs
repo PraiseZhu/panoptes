@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 process.env.ARGUS_ROOT ??= mkdtempSync(join(tmpdir(), 'argus-risk-'))
-const { classifyChange } = await import('../src/classify.mjs')
+const { classifyChange, isCommentOnly } = await import('../src/classify.mjs')
 const { toStepPlan } = await import('../src/matrix.mjs')
 const { loadProfile } = await import('../src/config.mjs')
 const F = (...names) => names.map((filename) => ({ filename }))
@@ -45,8 +45,8 @@ test('只改注释（#1076）→ change_kind comment-only，不强制也不跑 b
   const rows = ['performance'].map((key) => ({ key, verdict: 'undetermined' }))
   const triage = { status: 'ok', rows }
   const comment = [
-    { filename: 'src/store/persistQueue.ts', patch: '@@ -1,3 +1,3 @@\n-// 结构守卫 120 行\n+// 结构守卫 150 行\n const a = 1\n-  * old\n+  * new\n+' },
-    { filename: 'cindyplugin/src/agent/generationSourceEntry.ts', patch: '@@ -1 +1 @@\n-/* old */\n+/* new */' },
+    { filename: 'src/store/persistQueue.ts', before: '// 结构守卫 120 行\nconst a = 1\n/**\n  * old\n */\n', after: '// 结构守卫 150 行\nconst a = 1\n/**\n  * new\n */\n\n' },
+    { filename: 'cindyplugin/src/agent/generationSourceEntry.ts', status: 'added', before: '', after: '/* new */\n' },
     { filename: 'docs/a.md', patch: '@@ -1 +1 @@\n-x\n+y' },
   ]
   const r = classifyChange(comment, mivo)
@@ -56,9 +56,25 @@ test('只改注释（#1076）→ change_kind comment-only，不强制也不跑 b
     assert.ok(!plan.stepIds.includes('bench'), `${rc}: 只改注释不跑 bench`)
     assert.ok(plan.skipped.some((s) => s.id === 'bench'))
   }
-  const code = [...comment, { filename: 'src/store/persistQueue.ts', patch: '@@ -1 +1 @@\n-const a = 1\n+const a = 2' }]
+  const code = [...comment, { filename: 'src/store/persistQueue.ts', before: 'const a = 1\n', after: 'const a = 2\n' }]
   assert.equal(classifyChange(code, mivo).riskClass, 'C'); assert.equal(classifyChange(code, mivo).changeKind, undefined)
   assert.ok(toStepPlan({ profile: mivo, riskClass: 'C', triage: { status: 'ok', rows: [{ key: 'performance', verdict: 'looks_unrelated' }] }, files: code }).stepIds.includes('bench'), '真实代码改动照常强制 bench')
-  assert.equal(classifyChange([{ filename: 'src/x.ts', patch: '@@ -1 +1 @@\n-#a = 1\n+#a = 2' }], mivo).changeKind, undefined, '#private 字段不是注释')
-  assert.equal(classifyChange([{ filename: 'server/x.ts', patch: null }], mivo).riskClass, 'C', '拿不到 patch 按真实改动算')
+})
+
+test('只改注释的反例：看起来像注释的代码行、拿不到全文、解析失败、不认识的语言都按真实改动算', () => {
+  const real = (name, f) => {
+    assert.equal(isCommentOnly(f), false, name)
+    assert.equal(classifyChange([f], mivo).changeKind, undefined, name)
+  }
+  real('乘法续行 `  * 2`', { filename: 'src/store/persistQueue.ts', before: 'const n = a\n  * 2\n', after: 'const n = a\n  * 3\n' })
+  assert.equal(classifyChange([{ filename: 'src/store/persistQueue.ts', before: 'const n = a\n  * 2\n', after: 'const n = a\n  * 3\n' }], mivo).riskClass, 'C', '改了代码的高风险文件仍是 C 级')
+  real('`/* x */ doEvil()`', { filename: 'src/x.ts', before: 'a()\n', after: 'a()\n/* x */ doEvil()\n' })
+  real('`*/ run()`', { filename: 'src/x.js', before: '/* a\n*/\n', after: '/* a\n*/ run()\n' })
+  real('模板字符串里的 `// text`', { filename: 'src/x.ts', before: 'const s = `\na\n`\n', after: 'const s = `\na\n// text\n`\n' })
+  real('#private 字段', { filename: 'src/x.ts', before: 'class A { #a = 1 }\n', after: 'class A { #a = 2 }\n' })
+  real('只有 patch、没有全文', { filename: 'src/x.ts', patch: '@@ -1 +1 @@\n-// a\n+// b' })
+  real('拿不到 patch 也拿不到全文', { filename: 'server/x.ts', patch: null })
+  real('解析失败', { filename: 'src/x.ts', before: 'f(\n// a\n', after: 'f(\n// b\n' })
+  real('不认识的语言', { filename: 'scripts/x.py', before: '# a\nx = 1\n', after: '# b\nx = 1\n' })
+  assert.equal(classifyChange([{ filename: 'server/x.ts', patch: null }], mivo).riskClass, 'C')
 })

@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { loadRegistry, loadSecrets } from './config.mjs'
 import { openDb, insertJob, nextQueuedJob, markRunning, finishJob, requeueJob, recoverRunning, setMeta, getMeta, getOutbox, aiUsageToday, addAiUsage } from './db.mjs'
-import { listMergedByAuthor, getPull, getCommit, getBranchHead, listPullFiles } from './github.mjs'
+import { listMergedByAuthor, getPull, getCommit, getBranchHead, listPullFiles, addFullText } from './github.mjs'
 import { classifyChange } from './classify.mjs'
 import { executeOnSha, janitor } from './runner.mjs'
 import { decideOutcome, failedIds, setupFailed } from './decide.mjs'
@@ -155,7 +155,7 @@ export async function processJob({ db, reg, secrets, job }) {
   if (!pr?.merged_at || pr.merge_commit_sha !== job.merge_sha || pr.user?.id !== reg.owner.id) {
     return { outcome: 'blocked', detail: { reasonZh: '复核 PR 时发现合并状态或作者对不上，没有测试' } }
   }
-  const files = await listPullFiles(job.repo, job.pr_number)
+  const files = await addFullText(job.repo, pr, await listPullFiles(job.repo, job.pr_number))
   const { riskClass, reasonZh: classReason } = classifyChange(files, baseProfile)
   if (riskClass === 'A') return { outcome: 'docs_only', riskClass, detail: { classReason } }
 

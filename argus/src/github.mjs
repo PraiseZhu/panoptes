@@ -163,6 +163,27 @@ export async function listPullFiles(repo, n, { maxPages = 30 } = {}) {
   return files
 }
 
+// 给 JS/TS 改动文件补上改动前后的完整内容（f.before / f.after），供「只改注释」判断用。
+// 前 = merge base，后 = PR head（和 files 接口的 patch 同一对版本）。任何一步失败就不补，判断时按真实改动算
+const fileAt = async (repo, path, ref) => {
+  const r = await apiGet(`repos/${repo}/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${ref}`)
+  return r?.encoding === 'base64' ? Buffer.from(r.content, 'base64').toString('utf8') : null
+}
+export async function addFullText(repo, pr, files, { maxFiles = 50 } = {}) {
+  const js = files.filter((f) => /\.[cm]?[jt]sx?$/i.test(f.filename))
+  if (!js.length || js.length > maxFiles) return files
+  try {
+    const base = (await apiGet(`repos/${repo}/compare/${pr.base.sha}...${pr.head.sha}`))?.merge_base_commit?.sha
+    if (!base) return files
+    for (const f of js) {
+      const before = f.status === 'added' ? '' : await fileAt(repo, f.previous_filename ?? f.filename, base)
+      const after = f.status === 'removed' ? '' : await fileAt(repo, f.filename, pr.head.sha)
+      if (typeof before === 'string' && typeof after === 'string') Object.assign(f, { before, after })
+    }
+  } catch {}
+  return files
+}
+
 export const createIssue = (repo, { title, body, labels }) => apiSend('POST', `repos/${repo}/issues`, { title, body, labels })
 export const commentIssue = (repo, number, body) => apiSend('POST', `repos/${repo}/issues/${number}/comments`, { body })
 export const getIssue = (repo, number) => apiGet(`repos/${repo}/issues/${number}`)
