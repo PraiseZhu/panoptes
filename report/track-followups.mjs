@@ -9,7 +9,7 @@ import { execFileSync } from 'node:child_process'
 import { matchesItem, isCoverage } from './followup-match.mjs'
 const feedbackBlock = (pr) => `怎么告诉我处理好了：
 · 改了：提修复 PR，标题或描述里写上原 PR 号（比如 #${pr}）
-· 不用改：在原 PR 下留言写一句原因
+· 不用改：在原 PR 下留言写一句原因，留言里点名是哪条，或写‘都不用改’
 · 飞书私信回复我收不到，别回这里
 这两种我每天都会自动查，看到了就不再提醒 🙃`;
 
@@ -83,6 +83,7 @@ for (const [key, v] of Object.entries(sent)) {
   it.files = [...new Set(hit.map(f => f.file).filter(Boolean))]
   it.problems = hit.map(f => f.title || f.test || f.check_name).filter(Boolean)
   it.coverage = hit.length > 0 && isCoverage(hit[0]) // DM 主问题是否覆盖率
+  it.main_files = hit[0]?.file ? [hit[0].file] : [] // 回应只按主问题自己的文件判断
   if (!it.login) summary.errors.push({ key, error: 'author not found in report' })
 }
 
@@ -122,13 +123,25 @@ const evidenceFor = (ev, item) => ev.filter(e => matchesItem(e, item)).map(({ te
 
 // --- messages (template B voice: cool, restrained, no pressure)
 const oneLine = (s) => String(s).replace(/\s+/g, ' ').trim()
-function remindText(items) {
-  const lines = items.map(it => `· #${it.pr} https://github.com/${REPO}/pull/${it.pr} — ${oneLine(it.problems[0] || '上次私聊提到的问题')}`)
-  return `之前私聊提过的${items.length > 1 ? '几处' : '这处'}，还没看到动静 👀\n\n${lines.join('\n')}\n\n不催你，就是提一下，免得${items.length > 1 ? '它们' : '它'}自己躺到下周~\n\n${feedbackBlock(items[0].pr)}`
+const label = (it) => it.coverage ? '覆盖率' : oneLine(it.problems[0] || '上次私聊提到的问题').slice(0, 24)
+// 按 PR 合并、去重：#926（覆盖率、xxx）
+function byPr(items) {
+  const m = new Map()
+  for (const it of items) { const s = m.get(it.pr) || new Set(); s.add(label(it)); m.set(it.pr, s) }
+  return [...m].sort((a, b) => a[0] - b[0]).map(([pr, ls]) => ({ pr, labels: [...ls] }))
 }
-function thanksText(items) {
-  const prs = items.map(it => `#${it.pr}`).join('、')
-  return `${prs} 那边看到你跟进了，我这边就收起来了，不会再来提醒。\n谢了，省得我惦记 😌`
+function remindText(items) {
+  const prs = byPr(items)
+  const lines = prs.map(x => `· #${x.pr} https://github.com/${REPO}/pull/${x.pr} — ${x.labels.join('；')}`)
+  const many = items.length > 1
+  return `之前私聊提过的${many ? '几处' : '这处'}，还没看到动静 👀\n\n${lines.join('\n')}\n\n不催你，就是提一下，免得${many ? '它们' : '它'}自己躺到下周~\n\n${feedbackBlock(prs[0].pr)}`
+}
+// 感谢只点名已收起的那几条；同 PR 还有没收起的，明说那些照常跟进，不说“不再提醒”该 PR
+function thanksText(items, stillOpen) {
+  const closed = byPr(items).map(x => `#${x.pr}（${x.labels.join('、')}）`).join('、')
+  const open = [...new Set(stillOpen.map(it => it.pr))].filter(pr => items.some(it => it.pr === pr))
+  const tail = open.length ? `${open.map(pr => `#${pr}`).join('、')} 其余几条还开着，照常跟进。` : '这几条不会再来提醒。'
+  return `${closed} 看到你跟进了，我这边收起来了。${tail}\n谢了，省得我惦记 😌`
 }
 
 function send(openId, text, key) {
@@ -148,13 +161,16 @@ function send(openId, text, key) {
 
 // --- main
 const byAuthor = new Map()
+// 每个 PR 还开着的非覆盖率问题数；只剩一条时作者任何回复都算回应它
+const openNonCov = {}
+for (const it of Object.values(state.items)) if (it.status === 'open' && !it.coverage) openNonCov[it.pr] = (openNonCov[it.pr] || 0) + 1
 for (const [key, it] of Object.entries(OVERDUE_ONLY ? {} : state.items)) {
   const rec = { key, pr: it.pr, login: it.login, status_before: it.status, reminders: it.reminders }
   summary.items.push(rec)
   if (it.status !== 'open' || !it.login) continue
   const person = byLogin.get(it.login)
   if (!person || person.feishu_open_id !== it.open_id) { rec.skip = 'author not in author-map (notify-enabled) or open_id mismatch'; summary.errors.push({ key, error: rec.skip }); continue }
-  try { rec.evidence = evidenceFor(detect(it), { problems: it.problems.slice(0, 1), files: it.files, coverage: it.coverage }) } catch (e) { summary.errors.push({ key, error: `gh: ${oneLine(e.message).slice(0, 200)}` }); continue }
+  try { rec.evidence = evidenceFor(detect(it), { problems: it.problems.slice(0, 1), files: it.main_files || [], coverage: it.coverage, sole: openNonCov[it.pr] === 1 }) } catch (e) { summary.errors.push({ key, error: `gh: ${oneLine(e.message).slice(0, 200)}` }); continue }
   rec.followed_up = rec.evidence.length > 0
   const g = byAuthor.get(it.login) || { openId: it.open_id, remind: [], thank: [] }
   const hold = holdFor(it)
@@ -168,16 +184,16 @@ for (const [key, it] of Object.entries(OVERDUE_ONLY ? {} : state.items)) {
 }
 for (const [login, g] of byAuthor) {
   if (g.thank.length) {
-    const key = `followup-thanks:${login}:${[...new Set(g.thank.map(i => i.pr))].sort((a, b) => a - b).join(',')}`
-    const r = send(g.openId, thanksText(g.thank), key)
-    if (r.ok) { summary.thanked.push({ login, prs: g.thank.map(i => i.pr), skipped: r.skipped || false }); if (!DRY) for (const it of g.thank) { it.status = 'closed'; it.closed_at = new Date().toISOString(); it.evidence = summary.items.find(x => x._it === it)?.evidence } }
+    const key = `followup-thanks:${login}:${g.thank.map(i => `${i.pr}:${i.fingerprints[0]}`).sort().join(',')}`
+    const r = send(g.openId, thanksText(g.thank, g.remind), key)
+    if (r.ok) { summary.thanked.push({ login, items: byPr(g.thank), skipped: r.skipped || false }); if (!DRY) for (const it of g.thank) { it.status = 'closed'; it.closed_at = new Date().toISOString(); it.evidence = summary.items.find(x => x._it === it)?.evidence } }
     else summary.errors.push({ login, error: r.error, key })
   }
   const due = g.remind.filter(it => !it.reminder_dates.includes(today))
   if (g.remind.length && !NO_REMIND) {
     const key = `followup-remind:${login}:${today}`
     const r = send(g.openId, remindText(g.remind), key)
-    if (r.ok) { summary.reminded.push({ login, prs: g.remind.map(i => i.pr), skipped: r.skipped || false }); if (!DRY && !r.skipped) for (const it of due) { it.reminders++; it.reminder_dates.push(today) } }
+    if (r.ok) { summary.reminded.push({ login, items: byPr(g.remind), skipped: r.skipped || false }); if (!DRY && !r.skipped) for (const it of due) { it.reminders++; it.reminder_dates.push(today) } }
     else summary.errors.push({ login, error: r.error, key })
   }
 }
@@ -228,7 +244,9 @@ if (GROUP_OVERDUE) {
     const fresh = qual.filter(f => !state.overdue_notified[`${REPO}#${pr}:${f.fingerprint}`])
     if (!fresh.length) { rec.skip = 'already notified'; continue }
     let ev; try { ev = detect(it) } catch (e) { ghFailed++; summary.errors.push({ pr, error: `overdue gh: ${oneLine(e.message).slice(0, 200)}` }); continue }
-    const open = fresh.filter(f => !evidenceFor(ev, { problems: [f.title], files: [f.file].filter(Boolean), coverage: isCoverage(f) }).length)
+    const unmatched = qual.filter(f => !evidenceFor(ev, { problems: [f.title], files: [f.file].filter(Boolean), coverage: isCoverage(f) }).length)
+    const sole = unmatched.length === 1 && !isCoverage(unmatched[0]) && ev.some(e => e.type !== 'pr-references')
+    const open = sole ? [] : fresh.filter(f => unmatched.includes(f))
     rec.evidence = evidenceFor(ev, { problems: qual.map(f => f.title), files: it.files })
     if (!open.length) { rec.skip = 'responded'; continue }
     const person = allByLogin.get(login)
