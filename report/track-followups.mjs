@@ -6,6 +6,7 @@ import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, mkdtem
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
+import { matchesItem, isCoverage } from './followup-match.mjs'
 const feedbackBlock = (pr) => `怎么告诉我处理好了：
 · 改了：提修复 PR，标题或描述里写上原 PR 号（比如 #${pr}）
 · 不用改：在原 PR 下留言写一句原因
@@ -81,6 +82,7 @@ for (const [key, v] of Object.entries(sent)) {
   it.fingerprints = [...fps]
   it.files = [...new Set(hit.map(f => f.file).filter(Boolean))]
   it.problems = hit.map(f => f.title || f.test || f.check_name).filter(Boolean)
+  it.coverage = hit.length > 0 && isCoverage(hit[0]) // DM 主问题是否覆盖率
   if (!it.login) summary.errors.push({ key, error: 'author not found in report' })
 }
 
@@ -103,9 +105,9 @@ function detect(it) {
   const ev = []
   const since = it.dm_sent_at, who = it.login
   const after = (x) => (x.created_at || x.submitted_at || '') > since && x.user?.login === who
-  for (const c of ghPaged(`repos/${REPO}/issues/${it.pr}/comments?per_page=100`)) if (after(c)) ev.push({ type: 'pr-comment', at: c.created_at, url: c.html_url })
-  for (const c of ghPaged(`repos/${REPO}/pulls/${it.pr}/reviews?per_page=100`)) if (after(c)) ev.push({ type: 'pr-review', at: c.submitted_at, url: c.html_url })
-  for (const c of ghPaged(`repos/${REPO}/pulls/${it.pr}/comments?per_page=100`)) if (after(c)) ev.push({ type: 'pr-review-comment', at: c.created_at, url: c.html_url })
+  for (const c of ghPaged(`repos/${REPO}/issues/${it.pr}/comments?per_page=100`)) if (after(c)) ev.push({ type: 'pr-comment', at: c.created_at, url: c.html_url, text: c.body })
+  for (const c of ghPaged(`repos/${REPO}/pulls/${it.pr}/reviews?per_page=100`)) if (after(c)) ev.push({ type: 'pr-review', at: c.submitted_at, url: c.html_url, text: c.body })
+  for (const c of ghPaged(`repos/${REPO}/pulls/${it.pr}/comments?per_page=100`)) if (after(c)) ev.push({ type: 'pr-review-comment', at: c.created_at, url: c.html_url, text: c.body, path: c.path })
   const ref = new RegExp(`#${it.pr}(?!\\d)`)
   for (const p of authorPrsSince(who, since)) {
     if (p.number === it.pr) continue
@@ -115,6 +117,8 @@ function detect(it) {
   }
   return ev
 }
+// 只保留针对这条问题的回应（不落 text 进 state）
+const evidenceFor = (ev, item) => ev.filter(e => matchesItem(e, item)).map(({ text, path, ...e }) => e)
 
 // --- messages (template B voice: cool, restrained, no pressure)
 const oneLine = (s) => String(s).replace(/\s+/g, ' ').trim()
@@ -150,7 +154,7 @@ for (const [key, it] of Object.entries(OVERDUE_ONLY ? {} : state.items)) {
   if (it.status !== 'open' || !it.login) continue
   const person = byLogin.get(it.login)
   if (!person || person.feishu_open_id !== it.open_id) { rec.skip = 'author not in author-map (notify-enabled) or open_id mismatch'; summary.errors.push({ key, error: rec.skip }); continue }
-  try { rec.evidence = detect(it) } catch (e) { summary.errors.push({ key, error: `gh: ${oneLine(e.message).slice(0, 200)}` }); continue }
+  try { rec.evidence = evidenceFor(detect(it), { problems: it.problems.slice(0, 1), files: it.files, coverage: it.coverage }) } catch (e) { summary.errors.push({ key, error: `gh: ${oneLine(e.message).slice(0, 200)}` }); continue }
   rec.followed_up = rec.evidence.length > 0
   const g = byAuthor.get(it.login) || { openId: it.open_id, remind: [], thank: [] }
   const hold = holdFor(it)
@@ -223,11 +227,13 @@ if (GROUP_OVERDUE) {
     if (age < OVERDUE_MS) { rec.skip = 'not yet 72h'; continue }
     const fresh = qual.filter(f => !state.overdue_notified[`${REPO}#${pr}:${f.fingerprint}`])
     if (!fresh.length) { rec.skip = 'already notified'; continue }
-    try { rec.evidence = detect(it) } catch (e) { ghFailed++; summary.errors.push({ pr, error: `overdue gh: ${oneLine(e.message).slice(0, 200)}` }); continue }
-    if (rec.evidence.length) { rec.skip = 'responded'; continue }
+    let ev; try { ev = detect(it) } catch (e) { ghFailed++; summary.errors.push({ pr, error: `overdue gh: ${oneLine(e.message).slice(0, 200)}` }); continue }
+    const open = fresh.filter(f => !evidenceFor(ev, { problems: [f.title], files: [f.file].filter(Boolean), coverage: isCoverage(f) }).length)
+    rec.evidence = evidenceFor(ev, { problems: qual.map(f => f.title), files: it.files })
+    if (!open.length) { rec.skip = 'responded'; continue }
     const person = allByLogin.get(login)
     if (!person?.feishu_open_id) ov.gaps.push({ pr, login, gap: '作者没有 open_id，无法 @，改写名字' })
-    ov.notices.push({ pr, login, title, person, days: Math.floor(age / 86400e3), notified_at: n.at, via: [...n.via], issues: fresh })
+    ov.notices.push({ pr, login, title, person, days: Math.floor(age / 86400e3), notified_at: n.at, via: [...n.via], issues: open })
   }
   if (ghFailed) { ov.blocked = `${ghFailed} 个 PR 的 GitHub 回应没查成，本次不发通报，下次重跑`; summary.errors.push({ error: ov.blocked }) }
   if (ov.notices.length && !ghFailed) {
