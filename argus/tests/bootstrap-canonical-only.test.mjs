@@ -35,3 +35,16 @@ test('canonical checkout installs the cron (proves the injected target is what g
   assert.notEqual(r.cron, 'ORIGINAL\n')
   assert.ok(r.cron.includes(r.wt), r.cron)
 })
+
+test('--check from a worktree also logs the skip before checking (no exit before the log)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'argus-bootcanon-'))
+  const wt = join(dir, 'wt'), canon = join(dir, 'canonical'), cron = join(dir, 'panoptes-catch-up')
+  mkdirSync(wt); mkdirSync(canon); writeFileSync(cron, 'ORIGINAL\n')
+  const r = spawnSync('bash', [join(SCRIPTS, 'bootstrap-box.sh'), '--check'], {
+    encoding: 'utf8',
+    env: { ...process.env, PANOPTES_DIR: wt, PANOPTES_CANONICAL_DIR: canon, PANOPTES_CRON_FILE: cron, QA_HOME: dir,
+      PANOPTES_BOOTSTRAP: '0', PANOPTES_CATCHUP_TIMER: '0' } })
+  assert.ok(r.status === 0 || r.status === 2, `exit ${r.status}: ${r.stderr}`)
+  assert.match(r.stderr, /not the canonical checkout.*skipping/)
+  assert.equal(readFileSync(cron, 'utf8'), 'ORIGINAL\n')
+})

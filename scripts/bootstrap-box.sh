@@ -169,7 +169,10 @@ check_all() {
   return $bad
 }
 
-if [[ -n "$CHECK_ONLY" ]]; then check_all; exit $(( $? ? 2 : 0 )); fi
+if [[ -n "$CHECK_ONLY" ]]; then
+  is_canonical || log "not the canonical checkout ($PANOPTES_DIR != $CANONICAL_DIR): skipping shared system files (chromium wrapper, system Node, $CRON_FILE)"
+  check_all; exit $(( $? ? 2 : 0 ))
+fi
 
 # One bootstrap at a time (two runs noticing the same gap would otherwise race apt / npm)
 mkdir -p "$PANOPTES_TOOLS" "$QA_HOME/cache"
