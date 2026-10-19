@@ -24,15 +24,20 @@ const MAX_REMINDERS = 7
 const DRY = process.argv.includes('--dry-run')
 const NO_REMIND = process.argv.includes('--no-remind') // 只查回复、发感谢，不发提醒
 const GROUP_OVERDUE = process.argv.includes('--group-overdue') // 逾期未回应群通报，默认关
+const OVERDUE_ONLY = process.argv.includes('--overdue-only') // 只跑逾期通报，跳过私信提醒/感谢
+// PR 作者之外一起 @ 的负责人（Praise 2026-10-19：路滨宇的 PR 由 aj 负责）
+const OVERDUE_CC = { 'lubinyu-lab': ['aj0928'] }
 
 const readJson = (p, d) => (existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : d)
 const bjDate = (d = new Date()) => new Date(d.getTime() + 8 * 3600e3).toISOString().slice(0, 10)
 const today = bjDate()
 const summary = { dry_run: DRY, held: [], date: today, reminded: [], thanked: [], escalated: [], errors: [], drafts: [], items: [] }
 
-function gh(args) { return JSON.parse(execFileSync('gh', args, { encoding: 'utf8', maxBuffer: 64 << 20 }) || 'null') }
+// GitHub 偶发 EOF：每次调用最多重试 3 次
+function ghx(args, opts) { for (let i = 0; ; i++) { try { return execFileSync('gh', args, opts) } catch (e) { if (i >= 3 || !/EOF|timeout|502|503|ECONNRESET/i.test(String(e.stderr || e.message))) throw e; execFileSync('sleep', [String(2 * (i + 1))]) } } }
+function gh(args) { return JSON.parse(ghx(args, { encoding: 'utf8', maxBuffer: 64 << 20 }) || 'null') }
 function ghPaged(path) {
-  const out = execFileSync('gh', ['api', '--paginate', '--jq', '.[] | tojson', path], { encoding: 'utf8', maxBuffer: 64 << 20 })
+  const out = ghx(['api', '--paginate', '--jq', '.[] | tojson', path], { encoding: 'utf8', maxBuffer: 64 << 20 })
   return out.split('\n').filter(Boolean).map(l => JSON.parse(l))
 }
 
@@ -139,7 +144,7 @@ function send(openId, text, key) {
 
 // --- main
 const byAuthor = new Map()
-for (const [key, it] of Object.entries(state.items)) {
+for (const [key, it] of Object.entries(OVERDUE_ONLY ? {} : state.items)) {
   const rec = { key, pr: it.pr, login: it.login, status_before: it.status, reminders: it.reminders }
   summary.items.push(rec)
   if (it.status !== 'open' || !it.login) continue
@@ -203,6 +208,7 @@ if (GROUP_OVERDUE) {
     return !!oneLine(f.evidence?.recommendation || '')
   }
   const now = Date.now()
+  let ghFailed = 0
   for (const [pr, n] of [...notices].sort((a, b) => a[0] - b[0])) {
     const { author, title, findings } = findingsFor(pr)
     const login = author || n.login
@@ -217,13 +223,14 @@ if (GROUP_OVERDUE) {
     if (age < OVERDUE_MS) { rec.skip = 'not yet 72h'; continue }
     const fresh = qual.filter(f => !state.overdue_notified[`${REPO}#${pr}:${f.fingerprint}`])
     if (!fresh.length) { rec.skip = 'already notified'; continue }
-    try { rec.evidence = detect(it) } catch (e) { summary.errors.push({ pr, error: `overdue gh: ${oneLine(e.message).slice(0, 200)}` }); continue }
+    try { rec.evidence = detect(it) } catch (e) { ghFailed++; summary.errors.push({ pr, error: `overdue gh: ${oneLine(e.message).slice(0, 200)}` }); continue }
     if (rec.evidence.length) { rec.skip = 'responded'; continue }
     const person = allByLogin.get(login)
     if (!person?.feishu_open_id) ov.gaps.push({ pr, login, gap: '作者没有 open_id，无法 @，改写名字' })
     ov.notices.push({ pr, login, title, person, days: Math.floor(age / 86400e3), notified_at: n.at, via: [...n.via], issues: fresh })
   }
-  if (ov.notices.length) {
+  if (ghFailed) { ov.blocked = `${ghFailed} 个 PR 的 GitHub 回应没查成，本次不发通报，下次重跑`; summary.errors.push({ error: ov.blocked }) }
+  if (ov.notices.length && !ghFailed) {
     const R = `https://github.com/${REPO}/pull/`
     const t = s => ({ tag: 'text', text: s })
     const short = (s) => oneLine(s || '').replace(/^\w+(\([^)]*\))?!?:\s*/, '').slice(0, 40)
@@ -232,6 +239,7 @@ if (GROUP_OVERDUE) {
     for (const x of ov.notices) {
       const head = [{ tag: 'a', text: `#${x.pr}`, href: R + x.pr }, t(` ${short(x.title)} — `)]
       head.push(x.person?.feishu_open_id ? { tag: 'at', user_id: x.person.feishu_open_id, user_name: x.person.name } : t(x.person?.name || x.login))
+      for (const cc of OVERDUE_CC[x.login] || []) { const p = allByLogin.get(cc); head.push(t(' '), p?.feishu_open_id ? { tag: 'at', user_id: p.feishu_open_id, user_name: p.name } : t(p?.name || cc)) }
       lines.push(head)
       for (const f of x.issues) lines.push([t(`· ${lvl[f.severity]}${f.test_backed ? '（自动测试已复现）' : '（审查结论，测试未复现）'}：${oneLine(f.title)}`)])
       lines.push([t(`· 已通知 ${x.days} 天（${x.via.join('、')}，${bjDate(new Date(x.notified_at)).slice(5).replace('-', '月')}日），至今未见回应。`)])
