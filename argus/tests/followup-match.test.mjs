@@ -34,5 +34,6 @@ test('sole open non-coverage item: any reply counts; fix PR closes', () => {
   assert.equal(matchesItem(c('不用改，误报'), { ...review, sole: true }), true)
   assert.equal(matchesItem(c('不用改，误报'), review), false)
   assert.equal(matchesItem(c('不用改，误报'), { ...cov, sole: true }), false)
+  assert.equal(matchesItem(c('维护者确认：覆盖率这条不改。'), { ...review, sole: true }), false)
   assert.equal(matchesItem({ type: 'pr-references' }, cov), true)
 })

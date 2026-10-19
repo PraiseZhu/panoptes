@@ -1,6 +1,6 @@
 // 回应与问题逐条匹配：一条回应只收起它明确针对的那条问题（Mivo QA 运维规则）。
 // item: { problems: [主问题标题], files: [主问题自己的文件], coverage: bool, sole: bool }
-//   sole = 该 PR 只剩这一条未关闭的非覆盖率问题 → 作者任何回复都算回应它。
+//   sole = 该 PR 只剩这一条未关闭的非覆盖率问题 → 作者任何回复（明说覆盖率的除外）都算回应它。
 // ev:   { type, text?, path? }  — pr-references（引用原 PR 号的修复 PR）视为覆盖全部。
 const norm = (s) => String(s || '').toLowerCase().replace(/\s+/g, '')
 // 只认明确的“全部”说法；'CI 全部通过'、'都不会' 不算
@@ -25,8 +25,8 @@ function mentionsFile(f, text) {
 
 export function matchesItem(ev, item) {
   if (ev.type === 'pr-references') return true
-  if (item.sole && !item.coverage) return true
   const text = `${ev.text || ''}\n${ev.path || ''}`
+  if (item.sole && !item.coverage && !COVERAGE.test(text)) return true // 明说覆盖率的回复只算覆盖率那条
   if (ALL.test(text)) return true
   if (item.coverage) return COVERAGE.test(text)
   if ((item.files || []).some(f => f && mentionsFile(f, text))) return true

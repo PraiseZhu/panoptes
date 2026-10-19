@@ -245,7 +245,7 @@ if (GROUP_OVERDUE) {
     if (!fresh.length) { rec.skip = 'already notified'; continue }
     let ev; try { ev = detect(it) } catch (e) { ghFailed++; summary.errors.push({ pr, error: `overdue gh: ${oneLine(e.message).slice(0, 200)}` }); continue }
     const unmatched = qual.filter(f => !evidenceFor(ev, { problems: [f.title], files: [f.file].filter(Boolean), coverage: isCoverage(f) }).length)
-    const sole = unmatched.length === 1 && !isCoverage(unmatched[0]) && ev.some(e => e.type !== 'pr-references')
+    const u = unmatched[0], sole = unmatched.length === 1 && !isCoverage(u) && evidenceFor(ev, { problems: [u.title], files: [u.file].filter(Boolean), sole: true }).length > 0
     const open = sole ? [] : fresh.filter(f => unmatched.includes(f))
     rec.evidence = evidenceFor(ev, { problems: qual.map(f => f.title), files: it.files })
     if (!open.length) { rec.skip = 'responded'; continue }
