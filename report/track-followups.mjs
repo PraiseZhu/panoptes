@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Follow-up tracker for Mivo QA Feishu DMs to PR authors of xindong/mivo-canvas-plugin.
-// Usage: node track-followups.mjs [--dry-run]
+// Usage: node track-followups.mjs [--dry-run] [--no-remind] [--group-overdue]
 // Runtime state lives outside the repo: $MIVO_QA_FOLLOWUP_STATE (default /workspace/mivo-qa/followup/state.json).
 import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { join, dirname } from 'node:path'
@@ -23,6 +23,7 @@ const SENDER = join(QA, 'scripts/send-feishu-dm.mjs')
 const MAX_REMINDERS = 7
 const DRY = process.argv.includes('--dry-run')
 const NO_REMIND = process.argv.includes('--no-remind') // 只查回复、发感谢，不发提醒
+const GROUP_OVERDUE = process.argv.includes('--group-overdue') // 逾期未回应群通报，默认关
 
 const readJson = (p, d) => (existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : d)
 const bjDate = (d = new Date()) => new Date(d.getTime() + 8 * 3600e3).toISOString().slice(0, 10)
@@ -172,6 +173,88 @@ for (const [login, g] of byAuthor) {
   }
 }
 for (const x of summary.items) delete x._it
+
+// --- 逾期未回应通报 (--group-overdue): P0/P1/有具体建议的 P2 通知作者（私信或群日报 @）后 72h 无回应 → 群里合并通报一次
+if (GROUP_OVERDUE) {
+  const GROUP_CHAT = 'oc_ecd450e0bed37d49bc033f3cd07cd9af'
+  const GROUP_SENDER = join(QA, 'report/send-feishu-report.mjs')
+  const PREVIEW = join(dirname(STATE), 'overdue-preview.post.json')
+  const OVERDUE_MS = 72 * 3600e3
+  const allByLogin = new Map((amap.mivo_authors || []).map(m => [m.github_login, m]))
+  const byOpenId = new Map((amap.mivo_authors || []).filter(m => m.feishu_open_id).map(m => [m.feishu_open_id, m]))
+  const ov = summary.overdue = { candidates: [], notices: [], gaps: [], sent: null }
+  state.overdue_notified ||= {}
+  // 通知事件：私信（feishu-sent 成功记录，含 PraiseZhu 自己）+ 群日报 @（report/sent/<发送日>/mentions.json，时间取当天 mivo-daily-report 发送时间）
+  const notices = new Map() // pr -> { login, at, via:Set }
+  const note = (pr, login, at, via) => { if (!login || !at) return; const n = notices.get(pr); if (!n) notices.set(pr, { login, at, via: new Set([via]) }); else { n.via.add(via); if (at < n.at) n.at = at } }
+  for (const [key, v] of Object.entries(sent)) { const m = key.match(re); if (m && v.message_id && v.open_id) note(Number(m[1]), byOpenId.get(v.open_id)?.github_login, v.sent_at, '私信') }
+  const groupSentAt = {}
+  for (const [k, v] of Object.entries(sent)) if (k.startsWith('mivo-daily-report:') && v.message_id) groupSentAt[bjDate(new Date(v.sent_at))] = v.sent_at
+  const sdir = join(QA, 'report/sent')
+  if (existsSync(sdir)) for (const d of readdirSync(sdir).filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d)).sort()) {
+    const ms = readJson(join(sdir, d, 'mentions.json'), [])
+    if (ms.length && !groupSentAt[d]) { ov.gaps.push({ date: d, gap: '有 mentions.json 但找不到当天群日报发送记录，通知时间未知，跳过' }); continue }
+    for (const x of ms) note(Number(x.pr), x.login, groupSentAt[d], '群日报@')
+  }
+  const isQualifying = (f) => {
+    if (f.severity === 'P0' || f.severity === 'P1') return f.source !== 'ai-test' || f.verified === true
+    if (f.severity !== 'P2') return false
+    if (f.source === 'coverage-gate' || f.source === 'ai-test' || /coverage/i.test(f.title || '')) return false
+    return !!oneLine(f.evidence?.recommendation || '')
+  }
+  const now = Date.now()
+  for (const [pr, n] of [...notices].sort((a, b) => a[0] - b[0])) {
+    const { author, title, findings } = findingsFor(pr)
+    const login = author || n.login
+    const seen = new Set(), qual = []
+    for (const f of findings) if (!seen.has(f.fingerprint) && seen.add(f.fingerprint) && isQualifying(f)) qual.push(f)
+    if (!qual.length) continue
+    const it = { pr, login, dm_sent_at: n.at, files: [...new Set(qual.map(f => f.file).filter(Boolean))], fingerprints: qual.map(f => f.fingerprint) }
+    const rec = { pr, login, notified_at: n.at, via: [...n.via], issues: qual.map(f => ({ severity: f.severity, title: f.title })) }
+    ov.candidates.push(rec)
+    const hold = holdFor(it); if (hold) { rec.skip = `hold: ${hold.reason}`; continue }
+    const age = now - Date.parse(n.at)
+    if (age < OVERDUE_MS) { rec.skip = 'not yet 72h'; continue }
+    const fresh = qual.filter(f => !state.overdue_notified[`${REPO}#${pr}:${f.fingerprint}`])
+    if (!fresh.length) { rec.skip = 'already notified'; continue }
+    try { rec.evidence = detect(it) } catch (e) { summary.errors.push({ pr, error: `overdue gh: ${oneLine(e.message).slice(0, 200)}` }); continue }
+    if (rec.evidence.length) { rec.skip = 'responded'; continue }
+    const person = allByLogin.get(login)
+    if (!person?.feishu_open_id) ov.gaps.push({ pr, login, gap: '作者没有 open_id，无法 @，改写名字' })
+    ov.notices.push({ pr, login, title, person, days: Math.floor(age / 86400e3), notified_at: n.at, via: [...n.via], issues: fresh })
+  }
+  if (ov.notices.length) {
+    const R = `https://github.com/${REPO}/pull/`
+    const t = s => ({ tag: 'text', text: s })
+    const short = (s) => oneLine(s || '').replace(/^\w+(\([^)]*\))?!?:\s*/, '').slice(0, 40)
+    const lvl = { P0: 'P0 阻断', P1: 'P1 严重', P2: 'P2 一般' }
+    const lines = [[t(`以下 ${ov.notices.length} 个 PR 的问题已通知作者超过 3 天，还没看到回应（PR 下留言/评审，或引用原 PR 号的修复 PR）。QA 结论和发版打包挂钩，这几条没有结论会卡在待确认状态。`)], [t(' ')]]
+    for (const x of ov.notices) {
+      const head = [{ tag: 'a', text: `#${x.pr}`, href: R + x.pr }, t(` ${short(x.title)} — `)]
+      head.push(x.person?.feishu_open_id ? { tag: 'at', user_id: x.person.feishu_open_id, user_name: x.person.name } : t(x.person?.name || x.login))
+      lines.push(head)
+      for (const f of x.issues) lines.push([t(`· ${lvl[f.severity]}${f.test_backed ? '（自动测试已复现）' : '（审查结论，测试未复现）'}：${oneLine(f.title)}`)])
+      lines.push([t(`· 已通知 ${x.days} 天（${x.via.join('、')}，${bjDate(new Date(x.notified_at)).slice(5).replace('-', '月')}日），至今未见回应。`)])
+      lines.push([t(' ')])
+    }
+    lines.push([t('修了就开修复 PR 并在描述里写原 PR 号，不修就在 PR 下留言说明就行（觉得是误报也可以直接留言说明）。看到回应后这条就收起，不会重复通报。')])
+    const post = { zh_cn: { title: `Mivo QA · 逾期未回应通报 · ${Number(today.slice(5, 7))}月${Number(today.slice(8))}日`, content: lines } }
+    ov.text = [post.zh_cn.title, ...lines.map(l => l.map(e => e.tag === 'at' ? `@${e.user_name}` : e.text).join(''))].join('\n')
+    if (DRY) { writeFileSync(PREVIEW, JSON.stringify(post, null, 2)); ov.preview = PREVIEW }
+    else {
+      const d = mkdtempSync(join(tmpdir(), 'mivo-ov-')); const cf = join(d, 'post.json')
+      try {
+        writeFileSync(cf, JSON.stringify(post))
+        let outp; try { outp = execFileSync('node', [GROUP_SENDER, '--chat-id', GROUP_CHAT, '--msg-type', 'post', '--content-file', cf, '--dedupe-key', `mivo-overdue-notice:${today}`], { encoding: 'utf8' }) } catch (e) { outp = e.stdout || '' }
+        let r; try { r = JSON.parse(String(outp).trim()) } catch { r = { ok: false, error: 'unparseable sender output' } }
+        ov.sent = { ok: !!r.ok, skipped: !!r.skipped, error: r.ok ? null : (r.error || 'send failed') }
+        if (r.ok) for (const x of ov.notices) for (const f of x.issues) state.overdue_notified[`${REPO}#${x.pr}:${f.fingerprint}`] = { at: new Date().toISOString(), date: today }
+      } finally { rmSync(d, { recursive: true, force: true }) }
+    }
+  }
+}
 if (!DRY) { mkdirSync(dirname(STATE), { recursive: true }); state.updated_at = new Date().toISOString(); writeFileSync(STATE, JSON.stringify(state, null, 2)) }
 if (summary.escalated.length) console.error(`ESCALATED (${MAX_REMINDERS} reminders, no follow-up): ${summary.escalated.map(e => `#${e.pr} @${e.login}`).join(', ')}`)
+if (summary.overdue?.text) console.error(`--- overdue notice${DRY ? ' (dry-run preview)' : ''} ---\n${summary.overdue.text}\n---`)
+for (const n of summary.overdue?.notices || []) delete n.person
 console.log(JSON.stringify(summary, null, 2))
