@@ -35,11 +35,15 @@ NODE_MAJOR=24
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$QA_HOME/cache/ms-playwright}"
 VENV="${ARGUS_VENV:-$QA_HOME/.venv}"
 WRAPPER_SRC="$PANOPTES_DIR/scripts/chromium-linux.sh"
-WRAPPER=/usr/local/bin/chromium
+WRAPPER="${PANOPTES_CHROMIUM_WRAPPER:-/usr/local/bin/chromium}"
 APT_PKGS=(chromium bubblewrap jq git util-linux python3 python3-venv ca-certificates curl cron)
 CRON_SRC="$PANOPTES_DIR/scripts/catch-up.cron"
-CRON_FILE=/etc/cron.d/panoptes-catch-up
+CRON_FILE="${PANOPTES_CRON_FILE:-/etc/cron.d/panoptes-catch-up}"
 WANT_TIMER="${PANOPTES_CATCHUP_TIMER:-1}"
+# Shared box-wide files (chromium wrapper, system Node in /opt/node + /usr/local/bin links, the catch-up cron) are only
+# installed / overwritten from the canonical checkout; a run from a git worktree skips them (else it would re-point them).
+CANONICAL_DIR="${PANOPTES_CANONICAL_DIR:-/workspace/panoptes}"
+is_canonical() { [[ "$(readlink -f "$PANOPTES_DIR")" == "$(readlink -f "$CANONICAL_DIR")" ]]; }
 render_cron() {
   sed -e "s#@USER@#$(id -un)#g" -e "s#@QA_HOME@#$QA_HOME#g" -e "s#@PANOPTES_DIR@#$PANOPTES_DIR#g" "$CRON_SRC"
 }
@@ -91,6 +95,11 @@ apt_get() {
     return "$rc"
   done
 }
+install_catchup_timer() {
+  is_canonical || { log "not the canonical checkout ($PANOPTES_DIR != $CANONICAL_DIR): skipping $CRON_FILE"; return 0; }
+  log "catch-up timer → $CRON_FILE"
+  render_cron | ${SUDO:-} tee "$CRON_FILE.tmp" >/dev/null && ${SUDO:-} chmod 644 "$CRON_FILE.tmp" && ${SUDO:-} mv "$CRON_FILE.tmp" "$CRON_FILE"
+}
 [[ -n "${PANOPTES_BOOTSTRAP_LIB:-}" ]] && return 0 2>/dev/null   # sourced by tests: functions only
 unset NPM_CONFIG_PREFIX npm_config_prefix
 
@@ -130,13 +139,14 @@ check_all() {
   done
   command -v bwrap >/dev/null || { echo "missing: bwrap — bubblewrap not on PATH"; bad=1; }
   [[ -x /usr/lib/chromium/chromium ]] || { echo "missing: chromium — /usr/lib/chromium/chromium"; bad=1; }
-  cmp -s "$WRAPPER_SRC" "$WRAPPER" || { echo "missing: chromium-wrapper — $WRAPPER differs from scripts/chromium-linux.sh"; bad=1; }
+  local shared=1; is_canonical || shared=0
+  (( shared )) && { cmp -s "$WRAPPER_SRC" "$WRAPPER" || { echo "missing: chromium-wrapper — $WRAPPER differs from scripts/chromium-linux.sh"; bad=1; }; }
   local t ok_links=1
   [[ "$("$SYS_NODE_DIR/bin/node" --version 2>/dev/null)" == "$SYS_NODE_VERSION" ]] || ok_links=0
   for t in "${SYS_NODE_TOOLS[@]}"; do
     [[ "$(readlink "$SYS_NODE_BIN_DIR/$t" 2>/dev/null)" == "$SYS_NODE_DIR/bin/$t" && -e "$SYS_NODE_BIN_DIR/$t" ]] || ok_links=0
   done
-  (( ok_links )) || { echo "missing: system-node — $SYS_NODE_DIR not Node $SYS_NODE_VERSION or $SYS_NODE_BIN_DIR/{${SYS_NODE_TOOLS[*]}} links absent"; bad=1; }
+  (( ok_links || ! shared )) || { echo "missing: system-node — $SYS_NODE_DIR not Node $SYS_NODE_VERSION or $SYS_NODE_BIN_DIR/{${SYS_NODE_TOOLS[*]}} links absent"; bad=1; }
   load_node || { echo "missing: node$NODE_MAJOR — no Node $NODE_MAJOR under $NVM_DIR"; bad=1; }
   if [[ ! -f "$PANOPTES_DIR/argus/node_modules/.package-lock.json" ]] \
      || [[ "$PANOPTES_DIR/argus/package-lock.json" -nt "$PANOPTES_DIR/argus/node_modules/.package-lock.json" ]]; then
@@ -152,7 +162,7 @@ check_all() {
   fi
   "$VENV/bin/python" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null \
     || { echo "missing: venv — $VENV"; bad=1; }
-  if [[ "$WANT_TIMER" != 0 ]]; then
+  if [[ "$WANT_TIMER" != 0 ]] && (( shared )); then
     cmp -s <(render_cron) "$CRON_FILE" || { echo "missing: catch-up-timer — $CRON_FILE absent or differs from scripts/catch-up.cron"; bad=1; }
     pgrep -x cron >/dev/null || { echo "missing: cron-daemon — cron is not running"; bad=1; }
   fi
@@ -166,6 +176,7 @@ mkdir -p "$PANOPTES_TOOLS" "$QA_HOME/cache"
 exec 7>"$PANOPTES_TOOLS/.bootstrap.lock"
 flock -w 1800 7 || { log "another bootstrap is still running after 30 min"; exit 2; }
 
+is_canonical || log "worktree run ($PANOPTES_DIR, canonical $CANONICAL_DIR): skipping shared system files (chromium wrapper, system Node, $CRON_FILE)"
 MISSING=$(check_all) && { log "everything present"; exit 0; }
 log "missing before install:"; printf '%s\n' "$MISSING" | sed 's/^/[bootstrap]   /' >&2
 FAILED=()
@@ -222,9 +233,7 @@ if load_node; then
   fi
 else FAILED+=("Node $NODE_MAJOR unavailable, skipped npm / Playwright"); fi
 if has catch-up-timer; then
-  log "catch-up timer → $CRON_FILE"
-  render_cron | $SUDO tee "$CRON_FILE.tmp" >/dev/null && $SUDO chmod 644 "$CRON_FILE.tmp" && $SUDO mv "$CRON_FILE.tmp" "$CRON_FILE" \
-    || FAILED+=("catch-up timer install")
+  install_catchup_timer || FAILED+=("catch-up timer install")
 fi
 if has cron-daemon || has catch-up-timer; then
   # no systemd on the box: start the daemon directly (it daemonizes itself); cron re-reads /etc/cron.d every minute
