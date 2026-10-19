@@ -4,7 +4,7 @@
 // ev:   { type, text?, path? }  — pr-references（引用原 PR 号的修复 PR）视为覆盖全部。
 const norm = (s) => String(s || '').toLowerCase().replace(/\s+/g, '')
 // 只认明确的“全部”说法；'CI 全部通过'、'都不会' 不算
-const ALL = /(这几条|这些|以上|上面|所有问题|几处).{0,6}(都|全部)|全部(不用改|不改|已修|已改|改了|修了|处理)|都(不用改|不改|已修|已改|改了|修了|处理了?)|\ball (of )?(these|the) (issues|findings|comments)\b|\bboth (are )?(fixed|addressed)\b/i
+const ALL = /(这几条|这些|以上|上面|所有问题|几处).{0,6}(都|全部)(不用改|不改|已修|已改|改了|修了|处理|是误报)|全部(不用改|不改|已修|已改|改了|修了|处理)|都(不用改|不改|已修|已改|改了|修了|处理了?)|\ball (of )?(these|the) (issues|findings|comments)\b|\bboth (are )?(fixed|addressed)\b/i
 const COVERAGE = /coverage|覆盖率|补测试|补单测|加测试/i
 // 太常见的文件名必须带目录才算引用
 const COMMON_FILE = /^(index\.\w+|main\.\w+|run\.mjs|readme\.md|agents\.md|claude\.md|package\.json|package-lock\.json|tsconfig\.json|types?\.ts|utils?\.\w+|constants?\.\w+|config\.\w+)$/i
@@ -25,6 +25,7 @@ function mentionsFile(f, text) {
 
 export function matchesItem(ev, item) {
   if (ev.type === 'pr-references') return true
+  if (!String(ev.text || '').trim()) return false // 空正文（如行内回复自动生成的空 review）不算回应
   const text = `${ev.text || ''}\n${ev.path || ''}`
   if (item.sole && !item.coverage && !COVERAGE.test(text)) return true // 明说覆盖率的回复只算覆盖率那条
   if (ALL.test(text)) return true
@@ -33,11 +34,11 @@ export function matchesItem(ev, item) {
   return (item.problems || []).some(p => quotesTitle(p, text))
 }
 
-// 感谢/提醒里的条目名：标题截到第一个句读（。；，：,;:），最多 30 字；超长按字截断但不切断英文单词，截断时加 '…'
+// 感谢/提醒里的条目名：标题截到第一个句读（。；，：,;:，切点前至少 8 字），最多 30 字；超长按字截断但不切断英文单词，截断时加 '…'
 export function shortTitle(title, max = 30) {
-  const t = String(title || '').replace(/\s+/g, ' ').trim()
+  const t = String(title || '').replace(/\s+/g, ' ').replace(/^[\s。；，：,;:]+/, '').trim() // 开头的句读去掉，不返回空串
   const cs = Array.from(t)
-  const p = cs.findIndex(ch => /[。；，：,;:]/.test(ch))
+  const p = cs.findIndex((ch, i) => i >= 8 && /[。；，：,;:]/.test(ch)) // 切点前至少留 8 字
   if (p >= 0 && p <= max) return cs.slice(0, p).join('').trim()
   if (cs.length <= max) return t
   let cut = max

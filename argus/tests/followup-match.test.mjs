@@ -49,3 +49,19 @@ test('shortTitle: punctuation cut, length cut without splitting English words', 
 test('shortTitle: never splits an English word at the cut', () => {
   assert.equal(shortTitle('部分目标校验失败绕过图片操作的处理逻辑和 DebugLogging'), '部分目标校验失败绕过图片操作的处理逻辑和…')
 })
+
+test('empty-body review never counts, even as the sole open item', () => {
+  assert.equal(matchesItem({ type: 'pr-review', text: '' }, { ...review, sole: true }), false)
+  assert.equal(matchesItem({ type: 'pr-review', text: '  \n' }, { ...review, sole: true }), false)
+})
+test('"all" phrases need a verb', () => {
+  assert.equal(matchesItem(c('修复后以上检查全部通过'), review), false)
+  assert.equal(matchesItem(c('这些用例都通过了'), review), false)
+  assert.equal(matchesItem(c('上面几条都不用改'), cov), true)
+  assert.equal(matchesItem(c('这几条全部已修'), cov), true)
+})
+test('shortTitle: leading punctuation and min 8 chars before cut', () => {
+  assert.equal(shortTitle('：缓存键缺少版本号导致旧数据被复用'), '缓存键缺少版本号导致旧数据被复用')
+  assert.equal(shortTitle('CI 失败：lint 报错，构建产物缺失'), 'CI 失败：lint 报错')
+  assert.equal(shortTitle('超时：部分请求在重试后仍然失败且没有任何日志可以排查问题的根因所在之处呢'), '超时：部分请求在重试后仍然失败且没有任何日志可以排查问题的根…')
+})
