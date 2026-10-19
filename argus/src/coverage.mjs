@@ -28,14 +28,21 @@ export function compactFinal(final, srcRoot) {
     const rel = isAbsolute(p) ? relative(root, p) : p
     if (!rel || rel.startsWith('..')) continue
     const exec = new Map()
+    const spans = [] // [起行, 止行, 执行过]：跨多行的语句与分支范围；改动落在语句中间（展开参数、JSX 里的三元）时按包住它的最内层范围算（#1096）
     for (const [id, loc] of Object.entries(fc.statementMap ?? {})) {
       const line = loc?.start?.line
       if (!Number.isInteger(line)) continue
       const hit = (fc.s?.[id] ?? 0) > 0
       exec.set(line, exec.get(line) || hit)
+      if (loc.end?.line > line) spans.push([line, loc.end.line, hit])
+    }
+    for (const [id, br] of Object.entries(fc.branchMap ?? {})) {
+      (br?.locations ?? []).forEach((loc, i) => {
+        if (Number.isInteger(loc?.start?.line) && loc.end?.line > loc.start.line) spans.push([loc.start.line, loc.end.line, (fc.b?.[id]?.[i] ?? 0) > 0])
+      })
     }
     const lines = [...exec.keys()].sort((a, b) => a - b)
-    files[rel.split('\\').join('/')] = { lines, covered: lines.filter((l) => exec.get(l)) }
+    files[rel.split('\\').join('/')] = { lines, covered: lines.filter((l) => exec.get(l)), ...(spans.length ? { spans } : {}) }
   }
   return files
 }
@@ -93,6 +100,12 @@ export function newCodeCoverage(added, files) {
     const fc = files?.[file]
     if (fc) {
       const exec = new Set(fc.lines), cov = new Set(fc.covered)
+      // 不是语句起始行、但落在多行语句或分支范围里的像代码的改动行 → 按包住它的最内层范围是否执行过计
+      const inner = (l) => (fc.spans ?? []).filter(([a, b]) => a <= l && l <= b).sort((x, y) => (x[1] - x[0]) - (y[1] - y[0]))[0]
+      for (const r of rows) {
+        const sp = !exec.has(r.line) && looksLikeCode(r.text) && inner(r.line)
+        if (sp) { exec.add(r.line); if (sp[2]) cov.add(r.line) }
+      }
       const e = rows.filter((r) => exec.has(r.line))
       const c = e.filter((r) => cov.has(r.line))
       if (!e.length) continue
@@ -209,7 +222,7 @@ export function mergeCoverageFiles(primary, ...extras) {
 }
 
 export const NEW_CODE_METHOD = 'ming-qa newCode = line coverage of new code. Changed lines: git diff <base_sha> <tested_sha> (merged: first parent of the merge commit; open: merge-base with the target branch); '
-  + 'added/modified lines in non-test JS/TS source files are intersected with v8 statement start lines from coverage-final.json; '
+  + 'added/modified lines in non-test JS/TS source files are intersected with v8 statement start lines from coverage-final.json; a code-like changed line that is not a statement start but lies inside a multi-line statement or a branch range counts as the innermost such range; '
   + 'lines that are not executable statements are ignored; files vitest did not load are taken from raw NODE_V8_COVERAGE data of the same run (node --test steps and child processes; code-like lines, covered = the last non-blank character of the line is inside a V8 block with count > 0; copies run from a temp dir are mapped back by path suffix, or by a repo-unique file name when the script length matches; for files vitest did load, lines covered only by child processes are added to covered); '
   + 'files with no data at all count their code-like added lines as uncovered, except plain .js/.mjs/.cjs files (node entry scripts / host entry), which are listed as not_measurable and left out of pct. '
   + 'pct = covered / executable changed lines; null (not evaluated) when the diff has no executable source lines.'

@@ -299,7 +299,7 @@ verdict run) adds `vitest --coverage` (v8, JSON reports). Verdict runs never car
 a few Mivo tests fail — and the coverage run's own pass/fail never affects the verdict. **Only new-code coverage is
 gated (90)**; repo-wide lines / branches / functions are recorded as baseline trend data (`coverage_gate.baseline`,
 reference lines 80 / 70 / 80) and never produce a finding. New code = added/modified lines of
-`git diff base_sha..tested_sha` in non-test JS/TS sources, intersected with v8 statement lines; files no test loads
+`git diff base_sha..tested_sha` in non-test JS/TS sources, intersected with v8 statement lines (a changed line inside a multi-line statement or branch range counts as the innermost one); files no test loads
 count as uncovered. New code < 90% → one **P2** finding (`source: "coverage-gate"`), which by the issue rules never
 becomes an issue. Result in
 `prs[].coverage_gate`. `ARGUS_COVERAGE=0` turns it off.

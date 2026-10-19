@@ -131,6 +131,35 @@ test('覆盖率：istanbul 逐行压缩、新代码覆盖率（未被加载的�
   assert.equal(newCodeCoverage({ 'docs/a.md': [{ line: 1, text: 'x' }] }, files).pct, null)
 })
 
+test('覆盖率：改动落在多行语句中间（展开参数 / JSX 三元 / 对象字面量的字段，#1096）→ 按包含它的最内层语句计；单行语句结果不变', () => {
+  const final = { '/r/src/x.tsx': { path: '/r/src/x.tsx',
+    statementMap: { 0: { start: { line: 179 }, end: { line: 183 } }, 1: { start: { line: 300 }, end: { line: 330 } }, 2: { start: { line: 316 }, end: { line: 320 } }, 3: { start: { line: 400 }, end: { line: 400 } } },
+    s: { 0: 1, 1: 1, 2: 0, 3: 0 } } }
+  const files = compactFinal(final, '/r/src')
+  assert.deepEqual(files['x.tsx'].lines, [179, 300, 316, 400])
+  const added = { 'x.tsx': [
+    { line: 181, text: '    ...(hideCount || layerDecomposition ? [] : [t(x)]),' },
+    { line: 317, text: '          {hideCount || layerDecomposition ? null : (' },
+    { line: 305, text: '    // 注释不算' },
+    { line: 400, text: 'f()' },
+    { line: 401, text: 'g()' },
+  ] }
+  const nc = newCodeCoverage(added, files)
+  assert.equal(nc.executable_lines, 3) // 181（语句执行过）、317（内层语句 316-320 没执行）、400；注释与语句外的 401 不算
+  assert.equal(nc.covered_lines, 1)
+  assert.deepEqual(nc.files[0].uncovered_lines, [317, 400])
+  // 没有多行语句信息（旧数据 / V8 原始数据）→ 与原来一样
+  const { spans, ...plain } = files['x.tsx']
+  assert.equal(newCodeCoverage(added, { 'x.tsx': plain }).executable_lines, 1)
+  // JSX 里没走到的三元分支：语句执行过，但包住改动行的分支范围没执行 → 按分支算未覆盖
+  const fb = compactFinal({ '/r/src/y.tsx': { path: '/r/src/y.tsx',
+    statementMap: { 0: { start: { line: 10 }, end: { line: 20 } } }, s: { 0: 1 },
+    branchMap: { 0: { locations: [{ start: { line: 12 }, end: { line: 12 } }, { start: { line: 13 }, end: { line: 15 } }] } }, b: { 0: [1, 0] } } }, '/r/src')
+  const nb = newCodeCoverage({ 'y.tsx': [{ line: 12, text: '  ? null' }, { line: 14, text: '  : <Badge n={count} />' }, { line: 18, text: '  <Footer />' }] }, fb)
+  assert.equal(nb.executable_lines, 3)
+  assert.deepEqual(nb.files[0].uncovered_lines, [14])
+})
+
 test('覆盖率门禁：只有新代码 < 90% 才 fail；全仓 lines/branches/functions 只记基线；拿不到覆盖率 unavailable', () => {
   assert.deepEqual(COVERAGE_THRESHOLDS, { lines: 80, branches: 70, functions: 80, new_code: 90 })
   const files = { 'src/a.ts': { lines: [1, 2], covered: [1, 2] } }
