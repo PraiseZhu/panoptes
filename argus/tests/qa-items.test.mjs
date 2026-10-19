@@ -337,6 +337,15 @@ test('AI 补测：连不上模型网关（fetch failed）→ error + retryable�
   assert.equal(n, 2); assert.equal(ok.status, 'empty')
 })
 
+test('AI 补测提示词：带上被测源文件开头（函数签名 / 配置字段），并要求传入的对象给全字段（#1013）', async () => {
+  let sent
+  const fetchImpl = async (_u, init) => { sent = JSON.parse(init.body); return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: '{"tests":[]}' } }] }) } }
+  await ai.generateTargetedTests({ db: null, secrets: { ARGUS_LLM_BASE_URL: 'https://llm.example/v1', ARGUS_LLM_API_KEY: 'k' }, riskClass: 'B', pr: { title: 't' }, files: [], profile: { aiTests: { frameworkZh: 'vitest', pathGlobs: ['src/**'], run: 'x' } }, gaps: ['boundary'], quota: { check: () => ({ ok: true }), consume: () => {} }, fetchImpl,
+    sources: [{ file: 'scripts/loops/issue-agent/transport.mjs', head: 'export function transport(c) { c.budgets.apiRequests }' }] })
+  assert.match(sent.messages[0].content, /配置 \/ 参数对象要给全/)
+  assert.match(sent.messages[1].content, /被测源文件开头[^]*--- scripts\/loops\/issue-agent\/transport\.mjs\nexport function transport\(c\)/)
+})
+
 test('AI 补测上限：默认 2 次模型调用 / 25 分钟 / 每次 3 个，可用环境变量改；ARGUS_AITESTS=0 关闭', () => {
   assert.deepEqual(ai.aiTestCaps({}), { enabled: true, maxCalls: 2, maxWallMin: 25, maxTestsPerCall: 3 })
   assert.deepEqual(ai.aiTestCaps({ ARGUS_AITEST_MAX_CALLS: '1', ARGUS_AITEST_MAX_MIN: '10', ARGUS_AITEST_MAX_TESTS: '2', ARGUS_AITESTS: '0' }), { enabled: false, maxCalls: 1, maxWallMin: 10, maxTestsPerCall: 2 })
@@ -378,6 +387,20 @@ test('AI 补测「测试无效」：断言前就因缺测试数据 / 文件、�
   assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: inProduct }, { content, filePath }).result, 'fails-on-current')
   // #1017 10-16：effects[kind].get is not a function 抛在被测代码里（测试传错了数据形状）→ 不在这条规则里，留给人确认
   assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: 'TypeError: effects[kind].get is not a function\n ❯ op src/canvas/actions/canvasSyncAssetEffects.ts:44:35' }, { content: "import { op } from './x'", filePath: 'src/canvas/actions/canvasSyncAssetEffects.argus.test.ts' }).result, 'fails-on-current')
+  // #1013 10-18：测试调 transport(c) 只给了 c.github，被测代码读 c.budgets.apiRequests → 测试无效（fixture-gap），哪怕包在断言失败里
+  const tContent = "import { transport } from '../../scripts/loops/issue-agent/transport.mjs';\nconst client = transport({ github: { tokenEnv: 'T', writerMode: 'token' } }, { env: {} });\n"
+  const tSource = "export function transport(c, {fetchImpl}={}) {\n  let requests=0;\n  function budget() { if(++requests>c.budgets.apiRequests) fail('READ_BUDGET_EXHAUSTED',4); }\n  const tok=c.github.tokenEnv;\n}\n"
+  const tTail = 'AssertionError: expected TypeError: Cannot read properties of unde… to match object { …(2) }\n+ TypeError {\n+   "message": "Cannot read properties of undefined (reading \'apiRequests\')",\n ❯ src/issue-agent/transport.argus.test.ts:23:48'
+  const fg = ai.toAiTestResult({ ok: false, exitCode: 1, tail: tTail }, { content: tContent, source: tSource })
+  assert.equal(fg.result, 'discarded'); assert.equal(fg.invalid_kind, 'fixture-gap'); assert.match(fg.reason, /transport\(c\) reads c\.budgets\.apiRequests/)
+  // 反例：没有源码对照、测试给了 budgets、或产品代码自己给 budgets 赋值（算成 undefined）→ 仍是 fails-on-current
+  assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: tTail }, { content: tContent }).result, 'fails-on-current')
+  assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: tTail }, { content: tContent.replace('github:', 'budgets: {}, github:'), source: tSource }).result, 'fails-on-current')
+  const computed = tSource.replace('let requests=0;', 'c.budgets=pickBudgets(c.env); let requests=0;')
+  assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: tTail }, { content: tContent, source: computed }).result, 'fails-on-current')
+  // 读的不是被测函数的参数（产品里的局部变量）→ 仍是 fails-on-current
+  const local = "export function transport(opts) {\n  const c = resolve(opts);\n  return c.budgets.apiRequests\n}\n"
+  assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: tTail }, { content: tContent, source: local }).result, 'fails-on-current')
   // 断言失败（哪怕信息里带 ENOENT）仍是「在当前代码上失败」：可能是真问题，留给人确认
   const asserted = "AssertionError: expected [Function] to throw error including 'EVIDENCE_FILE_TOO_LARGE' but got 'ENOENT: no such file or directory'"
   assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: asserted }).result, 'fails-on-current')

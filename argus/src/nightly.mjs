@@ -11,7 +11,7 @@ import { loadRegistry, loadSecrets } from './config.mjs'
 import { openDb } from './db.mjs'
 import { listNightlyPrs, getPull, getCommit, getBranchHead, listPullFiles, addFullText, shanghaiDayWindow, findIssuesByMarkerLabel, createIssue, commentIssue, reopenIssue, findCommentByMarker } from './github.mjs'
 import { classifyChange, highRiskFiles } from './classify.mjs'
-import { executeOnSha, ensureMirror, mergeBase, sandboxMode, janitor } from './runner.mjs'
+import { executeOnSha, ensureMirror, mergeBase, sandboxMode, janitor, mirrorPath } from './runner.mjs'
 import { decideOutcome, failedIds, setupFailed, failureKeys, compareKey } from './decide.mjs'
 import { analyzePr } from './ai.mjs'
 import { evaluateJev } from './jev.mjs'
@@ -476,6 +476,11 @@ async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, commo
   if (caps.maxCalls < 1) return finish(tiered.tier.tier === 'none' ? 'skipped' : tiered.tier.degraded ? 'capped' : 'skipped', tiered.tier.tier === 'none' ? `ai-test tier none: ${tiered.tier.reason}` : tiered.tier.degraded ? `${CAPPED_ZH}: ${tiered.tier.reason}` : 'ARGUS_AITEST_MAX_CALLS=0')
   const cHits = highRiskFiles(files, profile)
   const setupIds = profile.steps.filter((s) => s.kind === 'setup').map((s) => s.id)
+  // 被测源文件（镜像里该提交的版本）：开头几十行给模型看函数签名 / 配置字段；全文用来判「测试传入的对象缺字段」（#1013）
+  const sourceAt = (file) => { try { return execFileSync('git', ['-C', mirrorPath(repo), 'show', `${sha}:${file}`], { encoding: 'utf8', maxBuffer: 8 << 20 }) } catch { return null } }
+  const sources = files.filter((f) => f.status !== 'removed' && /\.[cm]?[jt]sx?$/.test(f.filename) && !TEST_FILE_RE.test(f.filename)).slice(0, 6)
+    .map((f) => ({ file: f.filename, head: sourceAt(f.filename)?.split('\n').slice(0, 60).join('\n') })).filter((x) => x.head)
+  const withSource = (t) => t && { ...t, source: sourceAt(t.mutation.file) }
   let remaining = [...ai.gaps]
   let targets = [...ai.uncovered_targets]
   const feedback = []
@@ -485,7 +490,7 @@ async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, commo
   for (let round = 1; round <= caps.maxCalls && (remaining.length || targets.length); round++) {
     const left = deadline - Date.now()
     if (left < 3 * 60_000) { ai.rounds.push({ round, skipped: 'wall-time cap reached' }); break }
-    const gen = await generateTargetedTests({ db, secrets, riskClass, pr, files, profile, gaps: remaining, uncovered: targets, maxTests: caps.maxTestsPerCall, highRiskFiles: cHits, feedback, timeoutMs: Math.max(1, Math.floor(Math.min(8 * 60_000, left / 2))), quota })
+    const gen = await generateTargetedTests({ db, secrets, riskClass, pr, files, profile, gaps: remaining, uncovered: targets, maxTests: caps.maxTestsPerCall, highRiskFiles: cHits, feedback, sources, timeoutMs: Math.max(1, Math.floor(Math.min(8 * 60_000, left / 2))), quota })
     if (gen.status === 'capped') {
       // 每日 ai-test 额度用尽：这一轮及之后都不调模型；剩下的缺口维度记 capped（显示「额度用尽未补测」）
       ai.capped = true; ai.capped_gaps = [...remaining]; ai.quota = gen.quota
@@ -510,7 +515,7 @@ async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, commo
     const run = await executeOnSha({ ...common, profile: aiProfile, label: `ai${round}`, sha, stepIds: [...setupIds, ...steps.map((s) => s.id)] })
     for (const st of steps) {
       const r = run.find((x) => x.id === st.id)
-      const verdict = toAiTestResult(setupFailed(run) ? null : r, st.aiTest)
+      const verdict = toAiTestResult(setupFailed(run) ? null : r, withSource(st.aiTest))
       const t = { id: st.id, round, kind: st.aiKind, purpose: st.aiTest.purposeZh, covers: st.covers, file: st.aiTest.filePath, mutation_file: st.aiTest.mutation.file, ...(st.aiTest.targetsUncovered ? { targets_uncovered: st.aiTest.targetsUncovered } : {}), ...verdict, exit_code: r?.exitCode ?? null, duration_ms: r?.durationMs ?? null, log_tail: r ? tail(redact(String(r.tail ?? '')), 1500) : null }
       ai.tests.push(t); rr.tests.push(st.id)
       if (verdict.result !== 'kept') feedback.push(`${st.aiTest.purposeZh}（${st.aiTest.filePath}）：${verdict.reason}`)
@@ -528,7 +533,7 @@ async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, commo
     const again = await executeOnSha({ ...common, profile: { ...profile, steps: [...profile.steps, ...steps] }, label: 'air', sha, stepIds: [...setupIds, ...steps.map((s) => s.id)] })
     for (const t of failing) {
       const r = again.find((x) => x.id === t.id)
-      t.reproduced = r ? toAiTestResult(r, stepDefs.get(t.id)?.aiTest).result === 'fails-on-current' : null
+      t.reproduced = r ? toAiTestResult(r, withSource(stepDefs.get(t.id)?.aiTest)).result === 'fails-on-current' : null
     }
   } else for (const t of failing) t.reproduced = null
   ai.kept = ai.tests.filter((t) => t.result === 'kept').length

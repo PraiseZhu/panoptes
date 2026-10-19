@@ -41,7 +41,7 @@ export const baseEnv = () => ({
   GIT_LFS_SKIP_SMUDGE: '1',
 })
 
-function mirrorPath(repo) {
+export function mirrorPath(repo) {
   return join(MIRRORS_DIR, `${repo.replace('/', '__')}.git`)
 }
 

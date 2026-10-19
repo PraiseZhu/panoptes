@@ -342,10 +342,14 @@ test's own `vi.mock` factory lacks an export the code under test uses (since 202
 `TypeError: x is not a function` whose first stack frame is in the generated test file itself and where `x` is a name the
 test imports with `import { x } from '…'`, i.e. the test imported a name that module does not export, as on #1008
 10-16; the same TypeError thrown inside the code under test is **not** matched). Such a case gets `result: "discarded"` (so it is never a
-finding and never counts as coverage) plus **`invalid: true`**, **`invalid_kind`** (`missing-file` | `missing-module`),
+finding and never counts as coverage) plus **`invalid: true`**, **`invalid_kind`** (`missing-file` | `missing-module` | `fixture-gap`),
 **`display_zh: "测试无效"`** and a `reason` starting with `test invalid (测试无效)` that quotes the matched line. If the
 output contains an assertion failure (`AssertionError`, `expected … to …`) the case stays `fails-on-current` even when the
 message mentions `ENOENT` (e.g. `toThrow('X')` received an ENOENT) — that may be a real defect and is left for a person.
+Exception, since 2026-10-19 (`fixture-gap`, #1013 10-18): `Cannot read properties of undefined (reading 'P')` counts as
+测试无效 even inside an assertion failure, but only when the source of `mutation.file` at the tested commit has
+`function NAME(X…)` reading `X.K.P`, the test imports `NAME`, `K` never appears in the test, and the source never assigns `K`
+— i.e. the undefined can only come from the object the test passed in. Anything else stays `fails-on-current`.
 `ai_tests.invalid` counts these cases; they are **included in** `ai_tests.discarded` (so `kept + discarded +
 fails_on_current = generated` still holds). The matching `checks[]` entry keeps `status: "discarded"` and adds
 `ai_invalid: true`, `display_zh: "测试无效"`. The reason is also fed back to the next generation round. Reports written
@@ -372,7 +376,7 @@ lead matched. `verified` is independent of `status` (`unconfirmed`) and `reprodu
   "generated": 5, "kept": 2, "discarded": 3, "invalid": 1, "fails_on_current": 0, "newly_covered": ["boundary"],
   "tests": [{ "id": "ai-test-1", "round": 1, "kind": "coverage", "purpose": "…", "covers": ["boundary"], "file": "src/x.argus.test.ts",
               "mutation_file": "src/x.ts", "result": "kept | discarded | fails-on-current", "reason": "…", "exit_code": 0, "duration_ms": 41000, "log_tail": "…", "reproduced": null,
-              "invalid": "true (only on 测试无效 cases)", "invalid_kind": "missing-file | missing-module", "display_zh": "测试无效" }],
+              "invalid": "true (only on 测试无效 cases)", "invalid_kind": "missing-file | missing-module | fixture-gap", "display_zh": "测试无效" }],
   "rounds": [{ "round": 1, "gaps": ["boundary", "exception"], "status": "ok", "offered": 3, "rejected_by_validation": 0, "tokens": 23000, "tests": ["ai-test-1", "…"] }]
 }
 ```

@@ -22,7 +22,8 @@ const SYSTEM = `你是资深测试工程师。给一个已合并的 PR 补写针
 3. 每个测试必须附一个「植入错误」：对某个被测源文件做一次文本替换（find 在文件中恰好出现一次），替换后测试应当失败。用来证明测试真的测到了东西。
 4. 如果改动和 PR 目标或产品意图看起来矛盾，可以写一个验证预期行为的测试，并把 kind 标为 suspicion。
 5. 给了「改动里没被现有测试执行到的行」时，优先让测试执行这些行：这类测试的 mutation.file 必须是其中一个文件，covers 可以为空。
-6. 写不出可靠测试就返回空数组，不要硬写。
+6. 调用被测函数时传入的配置 / 参数对象要给全被测代码会读到的字段（看给出的源文件开头和函数签名，能复用同模块已有的夹具就复用）。
+7. 写不出可靠测试就返回空数组，不要硬写。
 只输出 JSON：{"tests":[{"kind":"coverage|suspicion","purposeZh":"一句人话说明测什么","covers":["维度 key"],"filePath":"新测试文件路径","content":"完整测试代码","mutation":{"file":"源文件路径","find":"原文片段","replace":"植入错误后的片段"}}]}`
 
 function buildDiff(files) {
@@ -111,7 +112,7 @@ export function parseModelJson(data) {
   catch { return { ok: false, kind: 'truncated', finish_reason: finish, reasonZh: `AI 补测失败（模型返回的 JSON 不完整${fr}）` } }
 }
 
-export async function generateTargetedTests({ db, secrets, riskClass, pr, files, profile, gaps, now = new Date(), maxTests = MAX_TESTS, highRiskFiles = [], uncovered = [], feedback = [], timeoutMs = 8 * 60_000, quota = null, fetchImpl = fetch, netRetryDelayMs = 2000 }) {
+export async function generateTargetedTests({ db, secrets, riskClass, pr, files, profile, gaps, now = new Date(), maxTests = MAX_TESTS, highRiskFiles = [], uncovered = [], feedback = [], sources = [], timeoutMs = 8 * 60_000, quota = null, fetchImpl = fetch, netRetryDelayMs = 2000 }) {
   if (!profile.aiTests) return { status: 'skipped', reasonZh: '这个项目还没配置 AI 补测', tests: [] }
   if (riskClass !== 'B' && riskClass !== 'C') return { status: 'skipped', reasonZh: '只改文档', tests: [] }
   if (!gaps.length && !uncovered.length) return { status: 'skipped', reasonZh: '涉及的方面现有检查都覆盖了，改动的行也都测到了', tests: [] }
@@ -134,6 +135,7 @@ export async function generateTargetedTests({ db, secrets, riskClass, pr, files,
     `PR 标题：${pr.title}`,
     `PR 描述：\n${truncate(pr.body ?? '', 4000)}`,
     `改动内容：${buildDiff(files)}`,
+    sources.length ? `被测源文件开头（函数签名、要读的配置字段；测试传入的对象要给全这些字段）：${sources.map((x) => `\n--- ${x.file}\n${x.head}`).join('\n')}` : null,
   ].filter((x) => x != null).join('\n\n'))
   try {
     const body = JSON.stringify({ model: MODEL, reasoning_effort: EFFORT[riskClass], response_format: { type: 'json_object' }, max_completion_tokens: 16_000, messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: user }] })
@@ -216,9 +218,26 @@ function missingImportCall(text, { content, filePath } = {}) {
   if (!frame || !(base ? frame.includes(`${base}:`) : /\.test\.[cm]?[jt]sx?:\d+/.test(frame))) return null
   return { kind: 'missing-module', line: `${m[0]} (imported by the test; not exported by that module) ${frame.trim()}`.slice(0, 240) }
 }
+// fixture-gap：测试把对象传给它导入的函数 NAME(X, …)，被测代码读 X.K.P 时报 Cannot read properties of undefined (reading 'P')，
+// 而测试代码里根本没出现 K、被测代码也从不给 K 赋值 → undefined 只能来自测试传入的对象缺字段（#1013 10-18：transport(c) 缺 c.budgets）。
+// 需要被测源码（test.source）对照；对不上任何一条都仍算 fails-on-current（产品自己算出 undefined 是真问题）。
+function fixtureGap(text, { content, source } = {}) {
+  const p = text.match(/Cannot read properties of undefined \(reading '(\w+)'\)/)?.[1]
+  if (!p || !content || !source) return null
+  const names = importedNames(content)
+  for (const [, x, k] of source.matchAll(new RegExp(`\\b(\\w+)\\.(\\w+)\\.${p}\\b`, 'g'))) {
+    if (new RegExp(`\\b${k}\\b`).test(content) || new RegExp(`\\b${k}\\s*(=[^=]|:)`).test(source)) continue
+    const fn = [...source.matchAll(new RegExp(`function\\s+(\\w+)\\s*\\(\\s*${x}\\b`, 'g'))].find((m) => names.has(m[1]))
+    if (fn) return { kind: 'fixture-gap', line: `Cannot read properties of undefined (reading '${p}'): ${fn[1]}(${x}) reads ${x}.${k}.${p}, the test never passes ${k}` }
+  }
+  return null
+}
 export function toInvalidTest(tail, test = {}) {
   const text = String(tail ?? '').replace(/\x1b\[[0-9;]*m/g, '')
-  if (!text || ASSERTION_FAILURE.test(text)) return null
+  if (!text) return null
+  const gap = fixtureGap(text, test)
+  if (gap) return gap
+  if (ASSERTION_FAILURE.test(text)) return null
   for (const { kind, re } of INVALID_SIGNATURES) {
     const line = text.split('\n').find((l) => re.test(l))
     if (line) return { kind, line: line.trim().slice(0, 240) }
@@ -236,7 +255,7 @@ export function toAiTestResult(r, test = {}) {
   if (r.unavailable) return { result: 'discarded', reason: `could not run: ${r.unavailableReasonZh ?? `exit ${r.exitCode}`}` }
   const invalid = toInvalidTest(r.tail, test)
   if (invalid) return { result: 'discarded', invalid: true, invalid_kind: invalid.kind, display_zh: AI_TEST_INVALID_ZH,
-    reason: `test invalid (${AI_TEST_INVALID_ZH}): failed before any assertion because the test's own precondition is missing (${invalid.kind}: ${invalid.line})` }
+    reason: `test invalid (${AI_TEST_INVALID_ZH}): ${invalid.kind === 'fixture-gap' ? 'failed' : 'failed before any assertion'} because the test's own precondition is missing (${invalid.kind}: ${invalid.line})` }
   return { result: 'fails-on-current', reason: 'fails on the tested commit' }
 }
 
