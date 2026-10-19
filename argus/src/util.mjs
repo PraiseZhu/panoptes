@@ -111,18 +111,19 @@ export const isNetworkError = (err) => err?.name !== 'TimeoutError' && err?.name
   NETWORK_ERROR_RE.test(`${err?.message ?? ''} ${err?.cause?.code ?? ''} ${err?.cause?.message ?? ''}`)
 // 外层重试（代码审查 / PR 摘要）在网络错误后、再发下一轮前的等待：约 20 s × 第几轮
 export const NET_OUTER_WAIT_MS = 20_000
-// 等 ms 毫秒，除非等完会越过 deadline 或 PR 时间预算（此时不等，返回 false）。sleep 可注入（测试里不真等）
-export async function waitWithinBudget(ms, { sleep: wait = sleep, deadline = null } = {}) {
-  const end = Math.min(deadline ?? Infinity, budgetEndMs() ?? Infinity)
-  if (Date.now() + ms >= end) return false
+// 离 deadline 和 PR 时间预算中较早的那个还剩多少毫秒（都没设为 Infinity）。now 可注入（测试用假时钟）
+export const budgetLeftMs = (deadline = null, now = Date.now) => Math.min(deadline ?? Infinity, budgetEndMs() ?? Infinity) - now()
+// 等 ms 毫秒，除非等完会越过 deadline 或 PR 时间预算（此时不等，返回 false）。sleep / now 可注入（测试里不真等）
+export async function waitWithinBudget(ms, { sleep: wait = sleep, deadline = null, now = Date.now } = {}) {
+  if (ms >= budgetLeftMs(deadline, now)) return false
   if (ms > 0) await wait(ms)
   return true
 }
-export async function fetchRetryingNetwork(fetchImpl, url, makeInit, { attempts = 5, delayMs = 2000, sleep: wait = sleep, deadline = null } = {}) {
+export async function fetchRetryingNetwork(fetchImpl, url, makeInit, { attempts = 5, delayMs = 2000, sleep: wait = sleep, deadline = null, now = Date.now } = {}) {
   for (let i = 1; ; i++) {
     try { return await fetchImpl(url, makeInit()) } catch (err) {
       if (i >= attempts || !isNetworkError(err)) throw err
-      if (!await waitWithinBudget(Math.floor(delayMs * 2 ** (i - 1) * (0.75 + 0.5 * Math.random())), { sleep: wait, deadline })) throw err
+      if (!await waitWithinBudget(Math.floor(delayMs * 2 ** (i - 1) * (0.75 + 0.5 * Math.random())), { sleep: wait, deadline, now })) throw err
     }
   }
 }

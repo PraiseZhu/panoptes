@@ -7,7 +7,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from '
 import { join } from 'node:path'
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { redact, truncate, tail, toChatCompletionsUrl, fetchRetryingNetwork, waitWithinBudget, NET_OUTER_WAIT_MS, sleep as realSleep } from './util.mjs'
+import { redact, truncate, tail, toChatCompletionsUrl, fetchRetryingNetwork, isNetworkError, waitWithinBudget, budgetLeftMs, NET_OUTER_WAIT_MS, sleep as realSleep } from './util.mjs'
 import { CODE_DIR, CACHE_DIR } from './paths.mjs'
 
 export const MINGQA_DIR = process.env.ARGUS_MINGQA_DIR ?? join(CODE_DIR, '..', 'ming-qa') // panoptes: submodule next to argus/
@@ -80,18 +80,25 @@ status must be "failed" if any P0/P1 finding exists, else "passed".`
 export const REVIEW_SAMPLING = { temperature: 0, seed: 20261011 }
 let samplingSupported = true
 // 网关断连（fetch failed / UND_ERR_SOCKET）先用 fetchRetryingNetwork 原地重试（5 次指数退避，与 AI 补测、PR 摘要一致）；
-// 仍断连则等约 20 s × i 再开下一轮外层尝试（共 3 轮），等待不越过 PR 时间预算
-export async function chat({ secrets, messages, effort = 'high', timeoutMs = 8 * 60_000, attempts = 3, fetchImpl = fetch, netRetryDelayMs = 2000, sleep = realSleep }) {
-  let lastErr = null
-  for (let i = 1; i <= attempts; i++) {
-    const started = Date.now()
+// 仍断连则等约 20 s × i 再开下一轮外层尝试。外层最多 attempts（2）轮，只有上一轮是网络错误才开第 netAttempts（3）轮；超时 / 5xx 等仍只试 2 次。
+// 整体（含请求、等待、重试）最多 maxMs（默认 20 分钟），设了 PR 时间预算（--pr-timeout / --deadline）取较紧的；
+// 每次重试前按 now() 看还剩多少，不够就返回最后一次的失败；单次请求超时也缩到剩余时间
+export const REVIEW_MAX_MS = 20 * 60_000
+export async function chat({ secrets, messages, effort = 'high', timeoutMs = 8 * 60_000, attempts = 2, netAttempts = 3, fetchImpl = fetch, netRetryDelayMs = 2000, sleep = realSleep, now = Date.now, maxMs = REVIEW_MAX_MS }) {
+  const deadline = now() + maxMs
+  let lastErr = null, netFail = false
+  for (let i = 1; i <= netAttempts; i++) {
+    if (i > attempts && !netFail) break
+    if (i > 1 && budgetLeftMs(deadline, now) <= 0) break
+    netFail = false
+    const started = now()
     try {
       const resp = await fetchRetryingNetwork(fetchImpl, toChatCompletionsUrl(secrets.ARGUS_LLM_BASE_URL), () => ({
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${secrets.ARGUS_LLM_API_KEY}` },
         body: JSON.stringify({ model: LLM_MODEL, reasoning_effort: effort, response_format: { type: 'json_object' }, max_completion_tokens: 16_000, messages, ...(samplingSupported ? REVIEW_SAMPLING : {}) }),
-        signal: AbortSignal.timeout(Math.max(1, Math.floor(Number(timeoutMs)) || 1)),
-      }), { delayMs: netRetryDelayMs, sleep })
+        signal: AbortSignal.timeout(Math.max(1, Math.floor(Math.min(Number(timeoutMs) || 1, budgetLeftMs(deadline, now))))),
+      }), { delayMs: netRetryDelayMs, sleep, deadline, now })
       const data = await resp.json().catch(() => ({}))
       if (!resp.ok) {
         lastErr = { kind: 'http', status: resp.status, message: redact(String(data?.error?.message ?? '')).slice(0, 300) }
@@ -100,13 +107,14 @@ export async function chat({ secrets, messages, effort = 'high', timeoutMs = 8 *
         return { ok: false, error: lastErr }
       }
       const content = data.choices?.[0]?.message?.content ?? ''
-      try { return { ok: true, json: JSON.parse(content), tokens: data?.usage?.total_tokens ?? null, ms: Date.now() - started, model: data.model ?? LLM_MODEL, sampling: samplingSupported ? REVIEW_SAMPLING : 'unsupported' } }
+      try { return { ok: true, json: JSON.parse(content), tokens: data?.usage?.total_tokens ?? null, ms: now() - started, model: data.model ?? LLM_MODEL, sampling: samplingSupported ? REVIEW_SAMPLING : 'unsupported' } }
       catch { lastErr = { kind: 'bad_json', message: `model returned non-JSON (${content.length} chars)` } }
     } catch (err) {
       // 记下底层原因（undici cause.code / message）和这一轮耗时，否则只剩一句 "fetch failed"，查不出是断连、DNS 还是超时
       const cause = [err?.cause?.code, err?.cause?.message].filter(Boolean).join(' ')
-      lastErr = { kind: 'network', message: redact(`${err.message}${cause ? ` (${cause})` : ''} after ${Date.now() - started} ms`).slice(0, 300) }
-      if (i < attempts && !await waitWithinBudget(NET_OUTER_WAIT_MS * i, { sleep })) break
+      lastErr = { kind: 'network', message: redact(`${err.message}${cause ? ` (${cause})` : ''} after ${now() - started} ms`).slice(0, 300) }
+      netFail = isNetworkError(err)
+      if (netFail && i < netAttempts && !await waitWithinBudget(NET_OUTER_WAIT_MS * i, { sleep, deadline, now })) break
     }
   }
   return { ok: false, error: lastErr }

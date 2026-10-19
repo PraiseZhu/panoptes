@@ -9,8 +9,8 @@ import { join } from 'node:path'
 process.env.ARGUS_ROOT ??= mkdtempSync(join(tmpdir(), 'argus-netretry-'))
 const { fetchRetryingNetwork } = await import('../src/util.mjs')
 const { setBudget } = await import('../src/exec.mjs')
-const { chat } = await import('../src/mingqa.mjs')
-const { analyzePr } = await import('../src/ai.mjs')
+const { chat, REVIEW_MAX_MS } = await import('../src/mingqa.mjs')
+const { analyzePr, PR_SUMMARY_MAX_MS } = await import('../src/ai.mjs')
 const { runAiTests } = await import('../src/nightly.mjs')
 
 const secrets = { ARGUS_LLM_BASE_URL: 'http://gw.invalid/v1', ARGUS_LLM_API_KEY: 'k' }
@@ -61,6 +61,52 @@ test('代码审查 chat：一直断连 → 3 轮 × 5 次后 ok=false、kind=net
   assert.deepEqual(sleep.waits.filter((ms) => ms >= 20_000), [20_000, 40_000])
 })
 
+test('代码审查 chat：连续超时 2 次就停，不走第 3 轮（第 3 轮只给网络错误），超时后也不等 20 s', async () => {
+  let calls = 0; const sleep = recorder()
+  const fetchImpl = async () => { calls++; throw Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }) }
+  const res = await chat({ secrets, messages: [], fetchImpl, netRetryDelayMs: 0, sleep })
+  assert.equal(res.ok, false); assert.equal(calls, 2)
+  assert.deepEqual(sleep.waits, [])
+})
+
+// 假时钟：sleep 和每次请求都推进 clock.t；默认上限 / PR 时间预算都按 now() 算，请求本身花的时间也算进去
+const fakeClock = (requestMs) => {
+  const c = { t: Date.now() }
+  c.now = () => c.t
+  c.sleep = async (ms) => { c.t += ms }
+  c.fetch = async () => { c.fetch.calls++; c.t += requestMs; throw netErr() }
+  c.fetch.calls = 0
+  return c
+}
+
+test('代码审查 chat：只有默认上限 20 分钟——每次请求 5 分钟后断连，第 4 次结束时到 20 分钟就停', async () => {
+  assert.equal(REVIEW_MAX_MS, 20 * 60_000)
+  const c = fakeClock(5 * 60_000); const t0 = c.t
+  const res = await chat({ secrets, messages: [], fetchImpl: c.fetch, netRetryDelayMs: 0, sleep: c.sleep, now: c.now })
+  assert.equal(res.ok, false); assert.equal(res.error.kind, 'network')
+  assert.equal(c.fetch.calls, 4) // 没有上限时是 15 次
+  assert.ok(c.t - t0 <= REVIEW_MAX_MS)
+})
+
+test('代码审查 chat：外部 PR 预算（3 分钟）比默认上限紧——按预算停', async () => {
+  const c = fakeClock(60_000); const t0 = c.t
+  setBudget(t0 + 3 * 60_000)
+  try {
+    const res = await chat({ secrets, messages: [], fetchImpl: c.fetch, netRetryDelayMs: 0, sleep: c.sleep, now: c.now })
+    assert.equal(res.ok, false); assert.equal(res.error.kind, 'network')
+    assert.equal(c.fetch.calls, 3); assert.ok(c.t - t0 <= 3 * 60_000)
+  } finally { setBudget(null) }
+})
+
+test('代码审查 chat：外部 PR 预算（60 分钟）比默认上限松——按 20 分钟停', async () => {
+  const c = fakeClock(5 * 60_000); const t0 = c.t
+  setBudget(t0 + 60 * 60_000)
+  try {
+    const res = await chat({ secrets, messages: [], fetchImpl: c.fetch, netRetryDelayMs: 0, sleep: c.sleep, now: c.now })
+    assert.equal(res.ok, false); assert.equal(c.fetch.calls, 4); assert.ok(c.t - t0 <= REVIEW_MAX_MS)
+  } finally { setBudget(null) }
+})
+
 const prArgs = { db: null, secrets, riskClass: 'B', pr: { title: 't', body: '' }, files: [], profile: {}, results: [], outcome: 'ok', retryDelayMs: 0, quota: { check: () => ({ ok: true }), consume: () => {} } }
 
 test('PR 摘要：原地 5 次都断连时走外层重试（等约 20 s），第 2 轮成功', async () => {
@@ -76,6 +122,41 @@ test('PR 摘要：一直断连 → 3 轮 × 5 次后 status=error，原因写明
   assert.equal(r.status, 'error'); assert.match(r.reasonZh, /模型网关连不上/); assert.match(r.detail, /fetch failed/)
   assert.equal(f.calls, 15)
   assert.deepEqual(sleep.waits.filter((ms) => ms >= 20_000), [20_000, 40_000])
+})
+
+test('PR 摘要：只有默认上限 5 分钟——每次请求 2 分钟后断连，第 3 次结束时超过就停，status=error', async () => {
+  assert.equal(PR_SUMMARY_MAX_MS, 5 * 60_000)
+  const c = fakeClock(2 * 60_000); const t0 = c.t
+  const r = await analyzePr({ ...prArgs, fetchImpl: c.fetch, sleep: c.sleep, now: c.now })
+  assert.equal(r.status, 'error'); assert.match(r.reasonZh, /模型网关连不上/)
+  assert.equal(c.fetch.calls, 3) // 没有上限时是 15 次
+  assert.ok(c.t - t0 <= PR_SUMMARY_MAX_MS + 2 * 60_000) // 最后一次请求在上限内发出
+})
+
+test('PR 摘要：外部 PR 预算（90 s）比默认上限紧——按预算停', async () => {
+  const c = fakeClock(60_000); const t0 = c.t
+  setBudget(t0 + 90_000)
+  try {
+    const r = await analyzePr({ ...prArgs, fetchImpl: c.fetch, sleep: c.sleep, now: c.now })
+    assert.equal(r.status, 'error'); assert.equal(c.fetch.calls, 2)
+  } finally { setBudget(null) }
+})
+
+test('PR 摘要：外部 PR 预算（60 分钟）比默认上限松——按 5 分钟停', async () => {
+  const c = fakeClock(2 * 60_000); const t0 = c.t
+  setBudget(t0 + 60 * 60_000)
+  try {
+    const r = await analyzePr({ ...prArgs, fetchImpl: c.fetch, sleep: c.sleep, now: c.now })
+    assert.equal(r.status, 'error'); assert.equal(c.fetch.calls, 3)
+  } finally { setBudget(null) }
+})
+
+test('PR 摘要：网关 5xx 重试前也看剩余时间，超了就按网关错误返回', async () => {
+  const c = fakeClock(0); let calls = 0
+  const fetchImpl = async () => { calls++; c.t += 3 * 60_000; return { ok: false, status: 502, json: async () => ({ error: { message: 'bad gateway' } }) } }
+  const r = await analyzePr({ ...prArgs, retryDelayMs: 1000, fetchImpl, sleep: c.sleep, now: c.now })
+  assert.equal(r.status, 'error'); assert.match(r.reasonZh, /502/)
+  assert.equal(calls, 2) // 0→3 min, 3→6 min；第 3 次前已超 5 分钟
 })
 
 // S 档（只改测试文件 → maxCalls=1）：模型回空测试列表，不会去执行步骤

@@ -31,5 +31,5 @@ test('code-review chat does not retry timeouts in place', async () => {
   const fetchImpl = async () => { calls++; throw Object.assign(new Error('timed out'), { name: 'TimeoutError' }) }
   const res = await chat({ secrets, messages: [], fetchImpl, netRetryDelayMs: 0, sleep: async () => {} })
   assert.equal(res.ok, false)
-  assert.equal(calls, 3) // 3 outer attempts, no in-place retry
+  assert.equal(calls, 2) // timeouts: still only 2 outer attempts (the 3rd is for network errors only), no in-place retry
 })

@@ -1,6 +1,6 @@
 // AI 只做「人话解读 + 未覆盖风险提示 + 失败解释」，不参与通过/失败判定
 import { redact, truncate, tail, toShanghaiDay } from './util.mjs'
-import { toChatCompletionsUrl, fetchRetryingNetwork, isNetworkError, waitWithinBudget, NET_OUTER_WAIT_MS, sleep as realSleep } from './util.mjs'
+import { toChatCompletionsUrl, fetchRetryingNetwork, isNetworkError, waitWithinBudget, budgetLeftMs, NET_OUTER_WAIT_MS, sleep as realSleep } from './util.mjs'
 import { aiUsageToday, addAiUsage } from './db.mjs'
 
 const MODEL = 'openai/gpt-6-luna'
@@ -40,7 +40,11 @@ export function isTransientGatewayError(status, message) {
   return status === 400 && /unknown parameter:\s*'_[a-z0-9_]+'/i.test(String(message ?? ''))
 }
 
-export async function analyzePr({ db, secrets, riskClass, pr, files, profile, results, outcome, quota = null, fetchImpl = fetch, retryDelayMs = 2000, sleep = realSleep }) {
+// PR 摘要整体（含请求、等待、重试）最多 5 分钟；设了 PR 时间预算（--pr-timeout / --deadline）取较紧的。
+// 每次重试前按 now() 看还剩多少，不够就按最后一次的失败返回；单次请求超时也缩到剩余时间
+export const PR_SUMMARY_MAX_MS = 5 * 60_000
+
+export async function analyzePr({ db, secrets, riskClass, pr, files, profile, results, outcome, quota = null, fetchImpl = fetch, retryDelayMs = 2000, sleep = realSleep, now = Date.now, maxMs = PR_SUMMARY_MAX_MS }) {
   if (riskClass !== 'B' && riskClass !== 'C') return { status: 'skipped' }
   if (!secrets.ARGUS_LLM_BASE_URL || !secrets.ARGUS_LLM_API_KEY) return { status: 'unavailable', reasonZh: '模型凭证没配置' }
   const day = toShanghaiDay()
@@ -63,6 +67,7 @@ export async function analyzePr({ db, secrets, riskClass, pr, files, profile, re
   ].join('\n\n'))
 
   const started = Date.now()
+  const deadline = now() + maxMs
   try {
     const body = JSON.stringify({
       model: MODEL,
@@ -78,11 +83,11 @@ export async function analyzePr({ db, secrets, riskClass, pr, files, profile, re
           method: 'POST',
           headers: { 'content-type': 'application/json', authorization: `Bearer ${secrets.ARGUS_LLM_API_KEY}` },
           body,
-          signal: AbortSignal.timeout(8 * 60_000),
-        }), { delayMs: retryDelayMs, sleep })
+          signal: AbortSignal.timeout(Math.max(1, Math.floor(Math.min(8 * 60_000, budgetLeftMs(deadline, now))))),
+        }), { delayMs: retryDelayMs, sleep, deadline, now })
       } catch (err) {
         // 原地重试后仍断连：等约 20 s × attempt 再走下一轮外层尝试；最后一轮或预算不够等就交给下面的 catch 报错
-        if (!isNetworkError(err) || attempt === PR_SUMMARY_ATTEMPTS || !await waitWithinBudget(NET_OUTER_WAIT_MS * attempt, { sleep })) throw err
+        if (!isNetworkError(err) || attempt === PR_SUMMARY_ATTEMPTS || !await waitWithinBudget(NET_OUTER_WAIT_MS * attempt, { sleep, deadline, now })) throw err
         continue
       }
       data = await resp.json().catch(() => ({}))
@@ -90,7 +95,7 @@ export async function analyzePr({ db, secrets, riskClass, pr, files, profile, re
       if (quota) quota.consume('pr-summary', tokens)
       else addAiUsage(db, day, tokens)
       if (resp.ok || !isTransientGatewayError(resp.status, data?.error?.message) || attempt === PR_SUMMARY_ATTEMPTS) break
-      if (retryDelayMs > 0) await sleep(Math.floor(retryDelayMs * attempt))
+      if (!await waitWithinBudget(Math.max(0, Math.floor(retryDelayMs * attempt)), { sleep, deadline, now })) break
     }
     const tokens = data?.usage?.total_tokens ?? 0
     if (!resp.ok) return { status: 'error', reasonZh: `模型网关返回 ${resp.status}`, detail: redact(String(data?.error?.message ?? '').slice(0, 300)) }
