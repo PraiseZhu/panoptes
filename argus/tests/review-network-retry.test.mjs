@@ -22,6 +22,8 @@ test('code-review chat gives up after network retries on every attempt and repor
   assert.equal(res.ok, false)
   assert.equal(res.error.kind, 'network')
   assert.equal(calls, 6) // 2 outer attempts x 3 in-place tries
+  // 10-19: 10-18 runs only recorded "fetch failed"; keep the undici cause and elapsed time for diagnosis
+  assert.match(res.error.message, /^fetch failed \(UND_ERR_SOCKET other side closed\) after \d+ ms$/)
 })
 
 test('code-review chat does not retry timeouts in place', async () => {

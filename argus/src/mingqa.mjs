@@ -102,7 +102,9 @@ export async function chat({ secrets, messages, effort = 'high', timeoutMs = 8 *
       try { return { ok: true, json: JSON.parse(content), tokens: data?.usage?.total_tokens ?? null, ms: Date.now() - started, model: data.model ?? LLM_MODEL, sampling: samplingSupported ? REVIEW_SAMPLING : 'unsupported' } }
       catch { lastErr = { kind: 'bad_json', message: `model returned non-JSON (${content.length} chars)` } }
     } catch (err) {
-      lastErr = { kind: 'network', message: redact(err.message).slice(0, 300) }
+      // 记下底层原因（undici cause.code / message）和这一轮耗时，否则只剩一句 "fetch failed"，查不出是断连、DNS 还是超时
+      const cause = [err?.cause?.code, err?.cause?.message].filter(Boolean).join(' ')
+      lastErr = { kind: 'network', message: redact(`${err.message}${cause ? ` (${cause})` : ''} after ${Date.now() - started} ms`).slice(0, 300) }
     }
   }
   return { ok: false, error: lastErr }

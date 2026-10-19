@@ -270,3 +270,30 @@ fails on base (`pre_existing: true`) be P3 like other old problems? Today it sta
 **For the 日报 bot.** Conclusion deltas vs anything already sent for 10-17: #1014 / #1075 are docs-only (agent-docs), not full-suite partially-verified; #1076 stays flaky P2 in the published file until comment-only lands; #943 published file still lacks the P1 from the 10-18 CR re-review (see `reports/acceptance/review-PR-943.json`); #1081 coverage gate would pass under current main (92%) — published file still shows calibrated P3 coverage finding. Field notices already in REPORT-STYLE / schema (10-18): `change_kind`, `own-tests`, `not_measurable_files`, `ai_tests.uncovered_targets`; `not_a_pr_finding` reserved (bench branch not deployed).
 
 **For Praise.** (1) Merge `qa/comment-only-no-bench` (`a9bfb05`) — unblocks #1076-class PRs. (2) Bench flaky vs `pre_existing` P3 rule still open (from 10-16 review). (3) system_health #16 still open (LLM gateway noise). (4) On-merge catch-up "missing" while event in flight (#1076/#943) is cosmetic.
+
+## 2026-10-19 (data day 2026-10-18, Asia/Shanghai)
+
+**Reconciliation.** 15 PRs merged on 10-18 (#997 #998 #999 #1001 #1002 #1013 #1084 #1025 #1086 #1023 #1033 #1091 #1093 #1036 #1096); all 15 have a valid `reports/merged/PR-N.json`, schema 1.0, `run.trigger=event` (catch-up only re-touched #1013/#1084 while their event runs were queued). No miss, no duplicate. No issue opened (no test-backed P0/P1); all runs only commented on system_health #16. Correct per rules.
+
+**Stability.**
+- Model gateway key expired 2026-10-18 03:37 UTC (11:37 CST). Every run after that (#1023 #1033 #1091 #1093 #1036 #1096) got 401 on AI tests, code review and PR summary. Key works again today (probe 200). env-guard does not probe the key, so nobody was told for ~21 h.
+- Code review also failed with bare `fetch failed` on #997 #1001 #1002 #1013 #1084 (before the expiry). #1013/#1084 failed again in the 10-18 acceptance re-review and #1013 again in today's 10:53 re-run (CR took ~98 s for 6 tries). The same #1013 review called from a plain shell with the same code and key succeeded in 65 s — so it is something in the run context, not the PR. Net: 11 of 15 PRs have no code review in the published file.
+- Unit `gh-app-router.test.mjs > 新建当天日志时清掉 14 天前的旧文件` failed with `expected 2019 to be 2020` on #998 #999 #1001 #1025 #1086 (and on base) — test subprocess inherited America/Los_Angeles; fixed on main by `a9e8694` (TZ pinned to Asia/Shanghai). Graded P3 pre_existing, so not blamed on the PRs, but it left new-code coverage `not-evaluated` on #999 #1025 #1086.
+- Durations 4–1684 s; #1013/#1002 waited ~1.5 h for the lock behind the 00:40–01:02 burst.
+
+**Accuracy.**
+- #1013 AI-test P2 ("403 rate-limit → retryable read failure"): the generated test calls `transport(c, …)` without `c.budgets`; product reads `c.budgets.apiRequests` (`scripts/loops/issue-agent/transport.mjs:12`) → TypeError before the 403 path. Test fixture incomplete → 测试无效. Calibrated **#1013 review-suggested P2 → clean P3** (`PR-1013.json.bak-20261019-calibration`). Reproduced twice (event + 10:53 re-run), so the generator keeps missing required config it cannot see in the diff.
+- #1023 (84.82%) / #1036 (87.67%) new-code coverage P2 stand.
+
+**Test-assignment (15 reviewed, 10 fully correct).** Correct: #997 #998 #1001 #1084 #1013 #1023 #1033 #1093 #1036 (product/scripts full suite, AI tier matches size), #1002 #1091 docs-only (`public/changelog.json` is in profile aPaths by design). Problems:
+- #999 (`src/kernel/shadowRoundTrip.bench.test.ts` only) skipped bench — the one step that runs the changed file. Old code (72edb59); `runsFiles` forcing (`0d7831a`) is on main now. Needs re-run to verify the bench timeout fix.
+- #999 #1025 #1086 new-code coverage not evaluated because of the TZ unit failure (env, fixed `a9e8694`).
+- #1096 new-code coverage `not-evaluated` with 0 executable lines although it changes logic (`hideCount || layerDecomposition ? …` inside spread/JSX, `countMax: 4` in an object literal): line-start-only counting misses changed lines inside a multi-line statement. Blind spot, P3, proposed.
+
+**Changes pushed.** mingqa `chat()`: a network error now records the undici cause (code/message) and elapsed ms, so the next run-context `fetch failed` says what broke. Regression test in `review-network-retry.test.mjs`. Unit 292/293 pass (1 skipped), gitleaks clean.
+
+**Re-runs.** A batch re-run started 10:53 CST (`scratch/rerun-20261019/run.sh`: #1013 #1084 #1023 #1033 #1036 #1091 #1093 #1096 #1076 #970 #981, manual/test pool/`--wait-lock`) — recovers AI/CR lost to the key expiry. Queued after it (`scratch/rerun-20261019/queue2.sh`): #999 #1025 #1086 #997 #1001.
+
+**For the 日报 bot.** #1013 P2 → clean P3 (AI-test failure is the test's own missing config). Batch re-run results to follow. No field changes.
+
+**For Praise.** (1) Renewing the model key should be followed by an env-guard probe; whether env-guard may alert on 401 is a trigger/notification rule change. (2) Bench flaky vs `pre_existing` P3 rule still open (since 10-16). (3) `qa/bench-after-unit-env-timeouts` (3 commits, 10-18 11:15) still waiting for 运维 acceptance.
