@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
 process.env.ARGUS_ROOT = mkdtempSync(join(tmpdir(), 'argus-aitest-'))
-const { toGapDimensions, toValidTests, toAiTestSteps } = await import('../src/aitests.mjs')
+const { toGapDimensions, toValidTests, toAiTestSteps, toSourceHead, SOURCE_HEAD_CHARS } = await import('../src/aitests.mjs')
 const { toTrialDecision } = await import('../src/control.mjs')
 const RUNNER = join(here, '..', 'src', 'ai-test-run.mjs')
 
@@ -156,4 +156,15 @@ test('ai-test tier: env override and daily-quota degrade', () => {
   assert.deepEqual([d.caps.maxCalls, d.tier.degraded, d.tier.degraded_from_calls], [1, true, 3])
   assert.match(d.tier.reason, /degraded/)
   assert.equal(T.degradeForQuota(base, { cap: 50, used: 50 }).caps.maxCalls, 0)
+})
+
+test('被测源文件开头按字符截断：一行特别长（压缩过的 JS）也不超过 SOURCE_HEAD_CHARS；短文件原样、只取前 60 行', () => {
+  const minified = 'var a=1;'.repeat(500_000) // 一行 4 MB
+  const head = toSourceHead(minified)
+  assert.ok(head.length <= SOURCE_HEAD_CHARS, `head 长度 ${head.length} 超过 ${SOURCE_HEAD_CHARS}`)
+  assert.ok(head.startsWith('var a=1;'))
+  assert.match(head, /已截断/)
+  assert.equal(toSourceHead('a\nb'), 'a\nb')
+  assert.equal(toSourceHead(Array.from({ length: 100 }, (_, i) => `l${i}`).join('\n')).split('\n').length, 60)
+  assert.equal(toSourceHead(undefined), '')
 })

@@ -22,7 +22,7 @@ import { log, redact, tail, toShanghaiDay, toShanghaiIso } from './util.mjs'
 import { setBudget, overBudget } from './exec.mjs'
 import { coverageGate, parseAddedLines, mergeCoverageFiles, COVERAGE_THRESHOLDS } from './coverage.mjs'
 import { recentGiveUps } from './catchup.mjs'
-import { generateTargetedTests, toAiTestSteps, toAiGaps, toUncoveredTargets, toAiTestResult, aiTestCaps, aiTestTier, degradeForQuota } from './aitests.mjs'
+import { generateTargetedTests, toAiTestSteps, toAiGaps, toUncoveredTargets, toAiTestResult, aiTestCaps, aiTestTier, degradeForQuota, toSourceHead } from './aitests.mjs'
 import { createQuota, memoryQuota, resolvePool, CAPPED_ZH } from './quota.mjs'
 
 // 代码版本在进程启动（模块加载）时记下：运行中 checkout 前进不会让报告冒认新提交（#1086 曾在 dfbc980 之前启动，却记成 153e03e）
@@ -479,7 +479,7 @@ async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, commo
   // 被测源文件（镜像里该提交的版本）：开头几十行给模型看函数签名 / 配置字段；全文用来判「测试传入的对象缺字段」（#1013）
   const sourceAt = (file) => { try { return execFileSync('git', ['-C', mirrorPath(repo), 'show', `${sha}:${file}`], { encoding: 'utf8', maxBuffer: 8 << 20 }) } catch { return null } }
   const sources = files.filter((f) => f.status !== 'removed' && /\.[cm]?[jt]sx?$/.test(f.filename) && !TEST_FILE_RE.test(f.filename)).slice(0, 6)
-    .map((f) => ({ file: f.filename, head: sourceAt(f.filename)?.split('\n').slice(0, 60).join('\n') })).filter((x) => x.head)
+    .map((f) => ({ file: f.filename, head: toSourceHead(sourceAt(f.filename)) })).filter((x) => x.head)
   const withSource = (t) => t && { ...t, source: sourceAt(t.mutation.file) }
   let remaining = [...ai.gaps]
   let targets = [...ai.uncovered_targets]

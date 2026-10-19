@@ -13,6 +13,15 @@ const DAILY_CAP = Number(process.env.ARGUS_AITEST_DAILY_CAP ?? 20)
 const MAX_TESTS = 2 // Mac 流程（control.mjs）的默认值；夜间流程按 aiTestCaps().maxTestsPerCall 传入
 const MAX_TEST_CHARS = 20_000
 const DIFF_CAP = 40_000
+export const SOURCE_HEAD_LINES = 60
+export const SOURCE_HEAD_CHARS = 4000 // 压缩过的 JS 一行就可能几 MB：每个文件开头再按字符截断（含截断说明在内不超过这个数）
+
+// 给模型的被测源文件开头：前 SOURCE_HEAD_LINES 行，再按字符截断到 SOURCE_HEAD_CHARS 以内
+export function toSourceHead(text, { lines = SOURCE_HEAD_LINES, chars = SOURCE_HEAD_CHARS } = {}) {
+  if (text == null) return ''
+  const head = String(text).split('\n').slice(0, lines).join('\n')
+  return head.length <= chars ? head : truncate(head, Math.max(0, chars - 40)) // 40 = 截断说明「…（已截断，原长 N 字符）」的余量
+}
 const SKIP_DIFF = /(^|\/)(package-lock\.json|uv\.lock|pnpm-lock\.yaml|yarn\.lock)$|\.(png|jpg|jpeg|gif|webp|svg|ico|mp4|woff2?)$/i
 
 const SYSTEM = `你是资深测试工程师。给一个已合并的 PR 补写针对性自动化测试，只用项目已有的测试框架，不引入新依赖。
@@ -135,7 +144,7 @@ export async function generateTargetedTests({ db, secrets, riskClass, pr, files,
     `PR 标题：${pr.title}`,
     `PR 描述：\n${truncate(pr.body ?? '', 4000)}`,
     `改动内容：${buildDiff(files)}`,
-    sources.length ? `被测源文件开头（函数签名、要读的配置字段；测试传入的对象要给全这些字段）：${sources.map((x) => `\n--- ${x.file}\n${x.head}`).join('\n')}` : null,
+    sources.length ? `被测源文件开头（函数签名、要读的配置字段；测试传入的对象要给全这些字段）：${sources.map((x) => `\n--- ${x.file}\n${toSourceHead(x.head)}`).join('\n')}` : null,
   ].filter((x) => x != null).join('\n\n'))
   try {
     const body = JSON.stringify({ model: MODEL, reasoning_effort: EFFORT[riskClass], response_format: { type: 'json_object' }, max_completion_tokens: 16_000, messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: user }] })

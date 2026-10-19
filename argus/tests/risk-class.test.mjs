@@ -4,6 +4,13 @@ import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createRequire } from 'node:module'
+
+// 「只改注释→comment-only」要靠 typescript 解析；没装时 classify.mjs 保守地按真实改动算（不改），这里把依赖 TS 的用例标 skip 并打一行说明
+let hasTs = true
+try { createRequire(new URL('../src/classify.mjs', import.meta.url))('typescript') } catch { hasTs = false }
+const needsTs = hasTs ? {} : { skip: '缺依赖 typescript，跳过' }
+if (!hasTs) console.log('risk-class: 缺依赖 typescript，跳过依赖 TS 解析的用例（只改注释→comment-only）')
 
 process.env.ARGUS_ROOT ??= mkdtempSync(join(tmpdir(), 'argus-risk-'))
 const { classifyChange, isCommentOnly } = await import('../src/classify.mjs')
@@ -41,7 +48,7 @@ test('C 级：只强制跑 exercises 碰到高风险文件的可选步骤，其�
   assert.deepEqual(toStepPlan({ profile: legacy, riskClass: 'C', triage, files: F('a.ts') }).stepIds, ['unit', 'e2e'], '没写 exercises 的步骤：C 级照旧全跑')
 })
 
-test('只改注释（#1076）→ change_kind comment-only，不强制也不跑 bench；有真实代码改动照常跑 bench', () => {
+test('只改注释（#1076）→ change_kind comment-only，不强制也不跑 bench；有真实代码改动照常跑 bench', needsTs, () => {
   const rows = ['performance'].map((key) => ({ key, verdict: 'undetermined' }))
   const triage = { status: 'ok', rows }
   const comment = [
