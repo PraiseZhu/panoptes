@@ -18,7 +18,7 @@ import { evaluateJev } from './jev.mjs'
 import { toMatrixQuestions, toMatrixState, toTriage, toStepPlan, toCoverage, toApplicability, stepExercises, stepRunsChangedFile } from './matrix.mjs'
 import { codeReview, toBox, BOXES, LLM_MODEL, mingQaVersion, mingQaAvailable, reviewCacheKey, lookupReviewVerdict } from './mingqa.mjs'
 import { ALL_DIRS, CACHE_DIR, EVIDENCE_DIR, REPORTS_DIR, CODE_DIR } from './paths.mjs'
-import { log, redact, tail, toShanghaiDay, toShanghaiIso } from './util.mjs'
+import { log, redact, tail, toShanghaiDay, toShanghaiIso, waitWithinBudget } from './util.mjs'
 import { setBudget, overBudget } from './exec.mjs'
 import { coverageGate, parseAddedLines, mergeCoverageFiles, COVERAGE_THRESHOLDS } from './coverage.mjs'
 import { recentGiveUps } from './catchup.mjs'
@@ -455,7 +455,8 @@ export function runAiTestTier(prs) {
 }
 
 // ── AI 补测（夜间）────────────────────────────────────────
-async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, common, db, secrets, health, number, results, quota = memoryQuota() }) {
+// llm：测试注入（fetchImpl / netRetryDelayMs / sleep），生产不传
+export async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, common, db, secrets, health, number, results, quota = memoryQuota(), llm = {} }) {
   const tiered = degradeForQuota(aiTestTier({ files, riskClass }), quota.check('ai-test'))
   const caps = tiered.caps
   out.ai_test_tier = tiered.tier
@@ -487,17 +488,19 @@ async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, commo
   let offset = 0
   const stepDefs = new Map()
   const pendingLlmErrors = []
-  for (let round = 1; round <= caps.maxCalls && (remaining.length || targets.length); round++) {
+  // 网关断连（原地重试后仍失败）不计入 maxCalls：等约 30 s 后最多补 1 轮（S 档 maxCalls=1 断一次也还有一次机会）
+  let netExtra = 0
+  for (let round = 1; round <= caps.maxCalls + netExtra && (remaining.length || targets.length); round++) {
     const left = deadline - Date.now()
     if (left < 3 * 60_000) { ai.rounds.push({ round, skipped: 'wall-time cap reached' }); break }
-    const gen = await generateTargetedTests({ db, secrets, riskClass, pr, files, profile, gaps: remaining, uncovered: targets, maxTests: caps.maxTestsPerCall, highRiskFiles: cHits, feedback, sources, timeoutMs: Math.max(1, Math.floor(Math.min(8 * 60_000, left / 2))), quota })
+    const gen = await generateTargetedTests({ db, secrets, riskClass, pr, files, profile, gaps: remaining, uncovered: targets, maxTests: caps.maxTestsPerCall, highRiskFiles: cHits, feedback, sources, timeoutMs: Math.max(1, Math.floor(Math.min(8 * 60_000, left / 2))), quota, deadline, ...llm })
     if (gen.status === 'capped') {
       // 每日 ai-test 额度用尽：这一轮及之后都不调模型；剩下的缺口维度记 capped（显示「额度用尽未补测」）
       ai.capped = true; ai.capped_gaps = [...remaining]; ai.quota = gen.quota
       ai.rounds.push({ round, gaps: [...remaining], status: 'capped', reason: gen.reasonZh, offered: 0, rejected_by_validation: 0, tokens: null, tests: [] })
       break
     }
-    const called = !['skipped'].includes(gen.status)
+    const called = !['skipped'].includes(gen.status) && !gen.network
     if (called) ai.model_calls++
     if (gen.model) ai.model = gen.model
     const rr = { round, gaps: [...remaining], status: gen.status, reason: gen.reasonZh ?? null, offered: gen.offered ?? 0, rejected_by_validation: gen.rejected_by_validation ?? 0, tokens: gen.usage?.total_tokens ?? null, tests: [] }
@@ -506,6 +509,11 @@ async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, commo
     if (gen.status === 'error' && gen.retryable) pendingLlmErrors.push({ pr: number, stage: 'ai-tests', model: gen.model ?? null, message: gen.reasonZh })
     else if (gen.status === 'error') health.llm_errors.push({ pr: number, stage: 'ai-tests', model: gen.model ?? null, message: gen.reasonZh })
     else if (gen.status === 'ok') pendingLlmErrors.length = 0
+    if (gen.network && !netExtra) {
+      netExtra = 1
+      // 等完还要留够一轮的 3 分钟，否则不补
+      if (!await waitWithinBudget(30_000, { deadline: deadline - 3 * 60_000, sleep: llm.sleep })) { ai.rounds.push({ round: round + 1, skipped: 'wall-time cap reached' }); break }
+    }
     if (!gen.tests?.length) { if (gen.status === 'skipped' || (gen.status === 'error' && !gen.retryable)) break; continue }
     const steps = toAiTestSteps(gen.tests, profile, { offset }).map((st) => ({ ...st, timeoutMin: Math.max(1, Math.min(10, Math.floor((deadline - Date.now()) / 60_000))) }))
     offset += steps.length

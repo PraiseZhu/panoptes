@@ -2,6 +2,7 @@ import { appendFileSync, mkdirSync, renameSync, statSync, existsSync } from 'nod
 import { dirname } from 'node:path'
 import { createHash } from 'node:crypto'
 import { CONTROL_LOG } from './paths.mjs'
+import { budgetEndMs } from './exec.mjs'
 
 // logging
 
@@ -101,16 +102,27 @@ export function tail(text, max) {
   return s.length <= max ? s : `…（前面省略）\n${s.slice(s.length - max)}`
 }
 
-// 模型网关偶发断开连接（10-17：undici "fetch failed" / UND_ERR_SOCKET other side closed，约三成请求）：
+// 模型网关偶发断开连接（10-17：undici "fetch failed" / UND_ERR_SOCKET other side closed，约三成请求；10-19 约 45% 在 3 次 2 s/4 s 后仍失败）：
 // 这类网络错误没拿到回包、没用掉额度，原地重试；超时（TimeoutError / AbortError）不重试。makeInit 每次新建（含新的超时 signal）。
+// 退避：delayMs × 2^(i-1)，±25% 抖动（默认约 2/4/8/16 s）。每次等待都不越过 PR 时间预算（exec.setBudget：--pr-timeout / --deadline）
+// 和调用方给的 deadline；等不起就放弃，抛出最后一次的错误。
 export const NETWORK_ERROR_RE = /fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|UND_ERR_SOCKET|UND_ERR_CONNECT_TIMEOUT|socket hang up|other side closed/i
 export const isNetworkError = (err) => err?.name !== 'TimeoutError' && err?.name !== 'AbortError' &&
   NETWORK_ERROR_RE.test(`${err?.message ?? ''} ${err?.cause?.code ?? ''} ${err?.cause?.message ?? ''}`)
-export async function fetchRetryingNetwork(fetchImpl, url, makeInit, { attempts = 3, delayMs = 2000 } = {}) {
+// 外层重试（代码审查 / PR 摘要）在网络错误后、再发下一轮前的等待：约 20 s × 第几轮
+export const NET_OUTER_WAIT_MS = 20_000
+// 等 ms 毫秒，除非等完会越过 deadline 或 PR 时间预算（此时不等，返回 false）。sleep 可注入（测试里不真等）
+export async function waitWithinBudget(ms, { sleep: wait = sleep, deadline = null } = {}) {
+  const end = Math.min(deadline ?? Infinity, budgetEndMs() ?? Infinity)
+  if (Date.now() + ms >= end) return false
+  if (ms > 0) await wait(ms)
+  return true
+}
+export async function fetchRetryingNetwork(fetchImpl, url, makeInit, { attempts = 5, delayMs = 2000, sleep: wait = sleep, deadline = null } = {}) {
   for (let i = 1; ; i++) {
     try { return await fetchImpl(url, makeInit()) } catch (err) {
       if (i >= attempts || !isNetworkError(err)) throw err
-      if (delayMs > 0) await new Promise((r) => setTimeout(r, Math.floor(delayMs * i)))
+      if (!await waitWithinBudget(Math.floor(delayMs * 2 ** (i - 1) * (0.75 + 0.5 * Math.random())), { sleep: wait, deadline })) throw err
     }
   }
 }

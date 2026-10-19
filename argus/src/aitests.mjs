@@ -121,7 +121,7 @@ export function parseModelJson(data) {
   catch { return { ok: false, kind: 'truncated', finish_reason: finish, reasonZh: `AI 补测失败（模型返回的 JSON 不完整${fr}）` } }
 }
 
-export async function generateTargetedTests({ db, secrets, riskClass, pr, files, profile, gaps, now = new Date(), maxTests = MAX_TESTS, highRiskFiles = [], uncovered = [], feedback = [], sources = [], timeoutMs = 8 * 60_000, quota = null, fetchImpl = fetch, netRetryDelayMs = 2000 }) {
+export async function generateTargetedTests({ db, secrets, riskClass, pr, files, profile, gaps, now = new Date(), maxTests = MAX_TESTS, highRiskFiles = [], uncovered = [], feedback = [], sources = [], timeoutMs = 8 * 60_000, quota = null, fetchImpl = fetch, netRetryDelayMs = 2000, sleep, deadline = null }) {
   if (!profile.aiTests) return { status: 'skipped', reasonZh: '这个项目还没配置 AI 补测', tests: [] }
   if (riskClass !== 'B' && riskClass !== 'C') return { status: 'skipped', reasonZh: '只改文档', tests: [] }
   if (!gaps.length && !uncovered.length) return { status: 'skipped', reasonZh: '涉及的方面现有检查都覆盖了，改动的行也都测到了', tests: [] }
@@ -153,7 +153,7 @@ export async function generateTargetedTests({ db, secrets, riskClass, pr, files,
       headers: { 'content-type': 'application/json', authorization: `Bearer ${secrets.ARGUS_LLM_API_KEY}` },
       body,
       signal: AbortSignal.timeout(Math.max(30_000, Math.floor(Number(timeoutMs)) || 30_000)),
-    }), { delayMs: netRetryDelayMs })
+    }), { delayMs: netRetryDelayMs, sleep, deadline })
     const data = await resp.json().catch(() => ({}))
     if (quota) quota.consume('ai-test', data?.usage?.total_tokens ?? 0)
     else addAiUsage(db, day, data?.usage?.total_tokens ?? 0)
@@ -165,9 +165,9 @@ export async function generateTargetedTests({ db, secrets, riskClass, pr, files,
     const offered = Array.isArray(raw?.tests) ? raw.tests.length : 0
     return { status: tests.length ? 'ok' : 'empty', reasonZh: tests.length ? null : 'AI 没写出可用的测试', tests, offered, rejected_by_validation: Math.max(0, offered - tests.length), usage: data?.usage ?? null, model: MODEL }
   } catch (err) {
-    // 原地重试 3 次后仍连不上网关（fetch failed / 连接被重置 / DNS 临时失败）：没用掉模型额度，还有调用次数就下一轮再试（#1008 10-17 重跑时遇到）；超时不重试
+    // 原地重试 5 次后仍连不上网关（fetch failed / 连接被重置 / DNS 临时失败）：没用掉模型额度，还有调用次数就下一轮再试（夜间另补 1 轮，不计 maxCalls，见 nightly runAiTests）（#1008 10-17 重跑时遇到）；超时不重试
     const network = isNetworkError(err)
-    return { status: 'error', ...(network ? { retryable: true } : {}), reasonZh: `AI 补测失败（${redact(err.message).slice(0, 80)}）`, tests: [] }
+    return { status: 'error', ...(network ? { retryable: true, network: true } : {}), reasonZh: `AI 补测失败（${redact(err.message).slice(0, 80)}）`, tests: [] }
   }
 }
 

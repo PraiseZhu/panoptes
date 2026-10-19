@@ -7,7 +7,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from '
 import { join } from 'node:path'
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { redact, truncate, tail, toChatCompletionsUrl, fetchRetryingNetwork } from './util.mjs'
+import { redact, truncate, tail, toChatCompletionsUrl, fetchRetryingNetwork, waitWithinBudget, NET_OUTER_WAIT_MS, sleep as realSleep } from './util.mjs'
 import { CODE_DIR, CACHE_DIR } from './paths.mjs'
 
 export const MINGQA_DIR = process.env.ARGUS_MINGQA_DIR ?? join(CODE_DIR, '..', 'ming-qa') // panoptes: submodule next to argus/
@@ -79,8 +79,9 @@ status must be "failed" if any P0/P1 finding exists, else "passed".`
 // 确定性参数：temperature 0 + 固定 seed（网关 2026-10-11 实测接受）。网关若以 400 拒绝这两个参数，去掉重试一次并记下 'unsupported'
 export const REVIEW_SAMPLING = { temperature: 0, seed: 20261011 }
 let samplingSupported = true
-// 网关断连（fetch failed / UND_ERR_SOCKET）先用 fetchRetryingNetwork 原地重试 3 次（2 s/4 s，与 AI 补测、PR 摘要一致，bbe1bea 漏了代码审查）
-export async function chat({ secrets, messages, effort = 'high', timeoutMs = 8 * 60_000, attempts = 2, fetchImpl = fetch, netRetryDelayMs = 2000 }) {
+// 网关断连（fetch failed / UND_ERR_SOCKET）先用 fetchRetryingNetwork 原地重试（5 次指数退避，与 AI 补测、PR 摘要一致）；
+// 仍断连则等约 20 s × i 再开下一轮外层尝试（共 3 轮），等待不越过 PR 时间预算
+export async function chat({ secrets, messages, effort = 'high', timeoutMs = 8 * 60_000, attempts = 3, fetchImpl = fetch, netRetryDelayMs = 2000, sleep = realSleep }) {
   let lastErr = null
   for (let i = 1; i <= attempts; i++) {
     const started = Date.now()
@@ -90,7 +91,7 @@ export async function chat({ secrets, messages, effort = 'high', timeoutMs = 8 *
         headers: { 'content-type': 'application/json', authorization: `Bearer ${secrets.ARGUS_LLM_API_KEY}` },
         body: JSON.stringify({ model: LLM_MODEL, reasoning_effort: effort, response_format: { type: 'json_object' }, max_completion_tokens: 16_000, messages, ...(samplingSupported ? REVIEW_SAMPLING : {}) }),
         signal: AbortSignal.timeout(Math.max(1, Math.floor(Number(timeoutMs)) || 1)),
-      }), { delayMs: netRetryDelayMs })
+      }), { delayMs: netRetryDelayMs, sleep })
       const data = await resp.json().catch(() => ({}))
       if (!resp.ok) {
         lastErr = { kind: 'http', status: resp.status, message: redact(String(data?.error?.message ?? '')).slice(0, 300) }
@@ -105,6 +106,7 @@ export async function chat({ secrets, messages, effort = 'high', timeoutMs = 8 *
       // 记下底层原因（undici cause.code / message）和这一轮耗时，否则只剩一句 "fetch failed"，查不出是断连、DNS 还是超时
       const cause = [err?.cause?.code, err?.cause?.message].filter(Boolean).join(' ')
       lastErr = { kind: 'network', message: redact(`${err.message}${cause ? ` (${cause})` : ''} after ${Date.now() - started} ms`).slice(0, 300) }
+      if (i < attempts && !await waitWithinBudget(NET_OUTER_WAIT_MS * i, { sleep })) break
     }
   }
   return { ok: false, error: lastErr }

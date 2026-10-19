@@ -326,14 +326,14 @@ test('AI 补测缺口：只取 Jev 判为适用、在补测维度清单里、且
 test('AI 补测：连不上模型网关（fetch failed）→ error + retryable（还有调用次数就再试）；超时不重试', async () => {
   const base = { db: null, secrets: { ARGUS_LLM_BASE_URL: 'https://llm.example/v1', ARGUS_LLM_API_KEY: 'k' }, riskClass: 'B', pr: { title: 't', body: '' }, files: [], profile: { aiTests: { frameworkZh: 'vitest', pathGlobs: ['src/**/*.argus.test.ts'], run: 'x' } }, gaps: ['boundary'], quota: { check: () => ({ ok: true }), consume: () => {} } }
   let n = 0
-  const net = await ai.generateTargetedTests({ ...base, netRetryDelayMs: 0, fetchImpl: async () => { n++; throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'UND_ERR_SOCKET', message: 'other side closed' } }) } })
-  assert.equal(net.status, 'error'); assert.equal(net.retryable, true); assert.match(net.reasonZh, /fetch failed/); assert.equal(n, 3) // 原地试 3 次
+  const net = await ai.generateTargetedTests({ ...base, netRetryDelayMs: 0, sleep: async () => {}, fetchImpl: async () => { n++; throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'UND_ERR_SOCKET', message: 'other side closed' } }) } })
+  assert.equal(net.status, 'error'); assert.equal(net.retryable, true); assert.match(net.reasonZh, /fetch failed/); assert.equal(n, 5) // 原地试 5 次
   n = 0
-  const to = await ai.generateTargetedTests({ ...base, netRetryDelayMs: 0, fetchImpl: async () => { n++; throw Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }) } })
+  const to = await ai.generateTargetedTests({ ...base, netRetryDelayMs: 0, sleep: async () => {}, fetchImpl: async () => { n++; throw Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }) } })
   assert.equal(to.status, 'error'); assert.equal(to.retryable, undefined); assert.equal(n, 1)
   // 第一次断线、第二次成功 → 正常拿到结果
   n = 0
-  const ok = await ai.generateTargetedTests({ ...base, netRetryDelayMs: 0, fetchImpl: async () => { if (++n === 1) throw new TypeError('fetch failed'); return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: '{"tests":[]}' }, finish_reason: 'stop' }] }) } } })
+  const ok = await ai.generateTargetedTests({ ...base, netRetryDelayMs: 0, sleep: async () => {}, fetchImpl: async () => { if (++n === 1) throw new TypeError('fetch failed'); return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: '{"tests":[]}' }, finish_reason: 'stop' }] }) } } })
   assert.equal(n, 2); assert.equal(ok.status, 'empty')
 })
 

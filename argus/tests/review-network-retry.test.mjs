@@ -10,7 +10,7 @@ const netErr = () => Object.assign(new TypeError('fetch failed'), { cause: { cod
 test('code-review chat retries gateway socket drops in place and succeeds', async () => {
   let calls = 0
   const fetchImpl = async () => { calls++; if (calls < 3) throw netErr(); return ok() }
-  const res = await chat({ secrets, messages: [], fetchImpl, netRetryDelayMs: 0 })
+  const res = await chat({ secrets, messages: [], fetchImpl, netRetryDelayMs: 0, sleep: async () => {} })
   assert.equal(res.ok, true)
   assert.equal(calls, 3)
 })
@@ -18,10 +18,10 @@ test('code-review chat retries gateway socket drops in place and succeeds', asyn
 test('code-review chat gives up after network retries on every attempt and reports kind=network', async () => {
   let calls = 0
   const fetchImpl = async () => { calls++; throw netErr() }
-  const res = await chat({ secrets, messages: [], fetchImpl, netRetryDelayMs: 0 })
+  const res = await chat({ secrets, messages: [], fetchImpl, netRetryDelayMs: 0, sleep: async () => {} })
   assert.equal(res.ok, false)
   assert.equal(res.error.kind, 'network')
-  assert.equal(calls, 6) // 2 outer attempts x 3 in-place tries
+  assert.equal(calls, 15) // 3 outer attempts x 5 in-place tries
   // 10-19: 10-18 runs only recorded "fetch failed"; keep the undici cause and elapsed time for diagnosis
   assert.match(res.error.message, /^fetch failed \(UND_ERR_SOCKET other side closed\) after \d+ ms$/)
 })
@@ -29,7 +29,7 @@ test('code-review chat gives up after network retries on every attempt and repor
 test('code-review chat does not retry timeouts in place', async () => {
   let calls = 0
   const fetchImpl = async () => { calls++; throw Object.assign(new Error('timed out'), { name: 'TimeoutError' }) }
-  const res = await chat({ secrets, messages: [], fetchImpl, netRetryDelayMs: 0 })
+  const res = await chat({ secrets, messages: [], fetchImpl, netRetryDelayMs: 0, sleep: async () => {} })
   assert.equal(res.ok, false)
-  assert.equal(calls, 2)
+  assert.equal(calls, 3) // 3 outer attempts, no in-place retry
 })

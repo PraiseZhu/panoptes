@@ -1,6 +1,6 @@
 // AI 只做「人话解读 + 未覆盖风险提示 + 失败解释」，不参与通过/失败判定
 import { redact, truncate, tail, toShanghaiDay } from './util.mjs'
-import { toChatCompletionsUrl, fetchRetryingNetwork } from './util.mjs'
+import { toChatCompletionsUrl, fetchRetryingNetwork, isNetworkError, waitWithinBudget, NET_OUTER_WAIT_MS, sleep as realSleep } from './util.mjs'
 import { aiUsageToday, addAiUsage } from './db.mjs'
 
 const MODEL = 'openai/gpt-6-luna'
@@ -40,7 +40,7 @@ export function isTransientGatewayError(status, message) {
   return status === 400 && /unknown parameter:\s*'_[a-z0-9_]+'/i.test(String(message ?? ''))
 }
 
-export async function analyzePr({ db, secrets, riskClass, pr, files, profile, results, outcome, quota = null, fetchImpl = fetch, retryDelayMs = 2000 }) {
+export async function analyzePr({ db, secrets, riskClass, pr, files, profile, results, outcome, quota = null, fetchImpl = fetch, retryDelayMs = 2000, sleep = realSleep }) {
   if (riskClass !== 'B' && riskClass !== 'C') return { status: 'skipped' }
   if (!secrets.ARGUS_LLM_BASE_URL || !secrets.ARGUS_LLM_API_KEY) return { status: 'unavailable', reasonZh: '模型凭证没配置' }
   const day = toShanghaiDay()
@@ -73,18 +73,24 @@ export async function analyzePr({ db, secrets, riskClass, pr, files, profile, re
     })
     let resp, data
     for (let attempt = 1; attempt <= PR_SUMMARY_ATTEMPTS; attempt++) {
-      resp = await fetchRetryingNetwork(fetchImpl, toChatCompletionsUrl(secrets.ARGUS_LLM_BASE_URL), () => ({
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${secrets.ARGUS_LLM_API_KEY}` },
-        body,
-        signal: AbortSignal.timeout(8 * 60_000),
-      }), { delayMs: retryDelayMs })
+      try {
+        resp = await fetchRetryingNetwork(fetchImpl, toChatCompletionsUrl(secrets.ARGUS_LLM_BASE_URL), () => ({
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${secrets.ARGUS_LLM_API_KEY}` },
+          body,
+          signal: AbortSignal.timeout(8 * 60_000),
+        }), { delayMs: retryDelayMs, sleep })
+      } catch (err) {
+        // 原地重试后仍断连：等约 20 s × attempt 再走下一轮外层尝试；最后一轮或预算不够等就交给下面的 catch 报错
+        if (!isNetworkError(err) || attempt === PR_SUMMARY_ATTEMPTS || !await waitWithinBudget(NET_OUTER_WAIT_MS * attempt, { sleep })) throw err
+        continue
+      }
       data = await resp.json().catch(() => ({}))
       const tokens = data?.usage?.total_tokens ?? 0
       if (quota) quota.consume('pr-summary', tokens)
       else addAiUsage(db, day, tokens)
       if (resp.ok || !isTransientGatewayError(resp.status, data?.error?.message) || attempt === PR_SUMMARY_ATTEMPTS) break
-      if (retryDelayMs > 0) await new Promise((r) => setTimeout(r, Math.floor(retryDelayMs * attempt)))
+      if (retryDelayMs > 0) await sleep(Math.floor(retryDelayMs * attempt))
     }
     const tokens = data?.usage?.total_tokens ?? 0
     if (!resp.ok) return { status: 'error', reasonZh: `模型网关返回 ${resp.status}`, detail: redact(String(data?.error?.message ?? '').slice(0, 300)) }
@@ -101,6 +107,6 @@ export async function analyzePr({ db, secrets, riskClass, pr, files, profile, re
       failureZh: redact(String(parsed.failureZh ?? '')).slice(0, 300),
     }
   } catch (err) {
-    return { status: 'error', reasonZh: '模型调用失败', detail: redact(err.message).slice(0, 300) }
+    return { status: 'error', reasonZh: isNetworkError(err) ? '模型网关连不上（网络错误，重试后仍失败）' : '模型调用失败', detail: redact(err.message).slice(0, 300) }
   }
 }

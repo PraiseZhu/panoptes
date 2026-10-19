@@ -163,6 +163,7 @@ export const isStopping = () => stopping
 let budgetEnd = null
 export function setBudget(endMs) { budgetEnd = Number.isFinite(endMs) ? endMs : null }
 export const overBudget = () => budgetEnd != null && Date.now() >= budgetEnd
+export const budgetEndMs = () => budgetEnd
 
 export function killAllActive() {
   stopping = true

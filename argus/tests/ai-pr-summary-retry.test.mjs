@@ -21,7 +21,7 @@ const base = () => {
     consumed,
     args: {
       db: null, secrets: { ARGUS_LLM_BASE_URL: 'http://gw.invalid/v1', ARGUS_LLM_API_KEY: 'k' }, riskClass: 'B',
-      pr: { title: 't', body: '' }, files: [], profile: {}, results: [], outcome: 'ok', retryDelayMs: 0,
+      pr: { title: 't', body: '' }, files: [], profile: {}, results: [], outcome: 'ok', retryDelayMs: 0, sleep: async () => {},
       quota: { check: () => ({ ok: true }), consume: (k, t) => consumed.push([k, t]) },
     },
   }
