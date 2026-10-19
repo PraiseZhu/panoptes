@@ -6,7 +6,7 @@ import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, mkdtem
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
-import { matchesItem, isCoverage } from './followup-match.mjs'
+import { matchesItem, isCoverage, shortTitle } from './followup-match.mjs'
 const feedbackBlock = (pr) => `怎么告诉我处理好了：
 · 改了：提修复 PR，标题或描述里写上原 PR 号（比如 #${pr}）
 · 不用改：在原 PR 下留言写一句原因，留言里点名是哪条，或写‘都不用改’
@@ -123,7 +123,7 @@ const evidenceFor = (ev, item) => ev.filter(e => matchesItem(e, item)).map(({ te
 
 // --- messages (template B voice: cool, restrained, no pressure)
 const oneLine = (s) => String(s).replace(/\s+/g, ' ').trim()
-const label = (it) => it.coverage ? '覆盖率' : oneLine(it.problems[0] || '上次私聊提到的问题').slice(0, 24)
+const label = (it) => it.coverage ? '覆盖率' : shortTitle(it.problems[0] || '上次私聊提到的问题')
 // 按 PR 合并、去重：#926（覆盖率、xxx）
 function byPr(items) {
   const m = new Map()

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { matchesItem } from '../../report/followup-match.mjs'
+import { matchesItem, shortTitle } from '../../report/followup-match.mjs'
 
 const review = { problems: ['同名附件无法可靠保持节点 ID 与附件顺序的对应关系'], files: ['src/agent/canvasAgentVerbs.ts'], coverage: false }
 const cov = { problems: ['new-code coverage 47.54% < 90%'], files: [], coverage: true }
@@ -36,4 +36,16 @@ test('sole open non-coverage item: any reply counts; fix PR closes', () => {
   assert.equal(matchesItem(c('不用改，误报'), { ...cov, sole: true }), false)
   assert.equal(matchesItem(c('维护者确认：覆盖率这条不改。'), { ...review, sole: true }), false)
   assert.equal(matchesItem({ type: 'pr-references' }, cov), true)
+})
+
+test('shortTitle: punctuation cut, length cut without splitting English words', () => {
+  assert.equal(shortTitle('部分目标校验失败绕过图片操作的 Debug Log'), '部分目标校验失败绕过图片操作的 Debug Log')
+  assert.equal(shortTitle('部分目标校验失败后会绕过图片操作与画布节点写入的 Debug Logging'), '部分目标校验失败后会绕过图片操作与画布节点写入的 Debug…')
+  assert.equal(shortTitle('文本槽名称栏的 pointerdown 未阻止事件传播'), '文本槽名称栏的 pointerdown 未阻止事件传播')
+  assert.equal(shortTitle('多个文本槽同时编辑时名称栏的 pointerdown 未阻止事件传播'), '多个文本槽同时编辑时名称栏的 pointerdown 未阻止…')
+  assert.equal(shortTitle('滚动条拇指的移动范围按正文高度计算，而不是按实际轨道高度计算'), '滚动条拇指的移动范围按正文高度计算')
+  assert.equal(shortTitle('new-code coverage 47.54% < 90%'), 'new-code coverage 47.54% < 90%')
+})
+test('shortTitle: never splits an English word at the cut', () => {
+  assert.equal(shortTitle('部分目标校验失败绕过图片操作的处理逻辑和 DebugLogging'), '部分目标校验失败绕过图片操作的处理逻辑和…')
 })

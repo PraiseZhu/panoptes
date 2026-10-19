@@ -32,3 +32,16 @@ export function matchesItem(ev, item) {
   if ((item.files || []).some(f => f && mentionsFile(f, text))) return true
   return (item.problems || []).some(p => quotesTitle(p, text))
 }
+
+// 感谢/提醒里的条目名：标题截到第一个句读（。；，：,;:），最多 30 字；超长按字截断但不切断英文单词，截断时加 '…'
+export function shortTitle(title, max = 30) {
+  const t = String(title || '').replace(/\s+/g, ' ').trim()
+  const cs = Array.from(t)
+  const p = cs.findIndex(ch => /[。；，：,;:]/.test(ch))
+  if (p >= 0 && p <= max) return cs.slice(0, p).join('').trim()
+  if (cs.length <= max) return t
+  let cut = max
+  const word = /[A-Za-z0-9_]/
+  if (word.test(cs[cut - 1]) && word.test(cs[cut])) { const sp = cs.lastIndexOf(' ', cut - 1); if (sp > 0) cut = sp }
+  return cs.slice(0, cut).join('').trim() + '…'
+}
