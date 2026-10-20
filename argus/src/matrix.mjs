@@ -1,6 +1,6 @@
 // 适用性矩阵：ming-qa 的 29 个维度（4 执行层 / 10 用例类型 / 10 风险 / 5 判定依据）。
 // 三件事分开：Jev 判断「涉及 / 拿不准」；「不适用」只来自 profile 明文；「测到没有」由代码按步骤的 covers 和真实结果计算。
-import { classifyChange, globToRegExp, highRiskFiles } from './classify.mjs'
+import { classifyChange, globToRegExp, highRiskFiles, isTestsOnly } from './classify.mjs'
 import { toReadableTitle } from './util.mjs'
 
 const q = (what) => `Could this code change plausibly affect ${what}? Answer yes only if the changed files, title or description clearly touch it.`
@@ -86,14 +86,19 @@ export function toPathHits(profile, files) {
   return hits
 }
 
+export const TESTS_ONLY_APPLICABLE = Object.freeze(['unit', 'regression'])
+
 // 分诊结论：每个维度 applicable / not_applicable / looks_unrelated / undetermined
 // handoff（可选）：parseHandoff 的结果。作者写的风险 R 和边界 B 只作补充上下文（context）带出去，不改任何维度判定
 export function toTriage({ profile, files, jev, handoff = null }) {
   const skip = profile.notApplicable ?? {}
   const hits = toPathHits(profile, files)
+  // 只改测试的 PR（#1101 只删了测试里 2 行，Jev 把 29 个维度全判不涉及）：至少单测和回归是适用的
+  const testsOnly = isTestsOnly(files)
   const rows = DIMENSIONS.map((d) => {
     if (skip[d.key]) return { key: d.key, verdict: 'not_applicable', source: 'profile', reasonZh: skip[d.key] }
     if (hits.has(d.key)) return { key: d.key, verdict: 'applicable', source: 'path', reasonZh: `改到了 ${hits.get(d.key)}` }
+    if (testsOnly && TESTS_ONLY_APPLICABLE.includes(d.key)) return { key: d.key, verdict: 'applicable', source: 'tests-only', reasonZh: '只改了测试文件' }
     if (!jev?.ok) return { key: d.key, verdict: 'undetermined', source: 'none' }
     const p = jev.answers[d.key]?.noul
     if (typeof p !== 'number') return { key: d.key, verdict: 'undetermined', source: 'none' }
@@ -172,6 +177,7 @@ export function toApplicability(triage) {
     const r = (triage?.rows ?? []).find((x) => x.key === d.key) ?? { key: d.key, verdict: 'undetermined', source: 'none' }
     let row
     if (r.source === 'profile') row = { applicability: 'not-applicable', source: 'profile', confidence: 'high', reason: `profile notApplicable: ${r.reasonZh}` }
+    else if (r.source === 'tests-only') row = { applicability: 'applicable', source: 'tests-only', confidence: 'high', reason: 'tests-only change: the PR only changes test files, so unit and regression apply' }
     else if (r.source === 'path') row = { applicability: 'applicable', source: 'path', confidence: 'high', reason: `profile pathHints: ${r.reasonZh}` }
     else if (r.source === 'jev' && typeof r.p === 'number') {
       const p = r.p

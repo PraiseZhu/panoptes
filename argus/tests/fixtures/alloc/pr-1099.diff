@@ -1,0 +1,343 @@
+diff --git a/scripts/loops/automerge/notify.test.mjs b/scripts/loops/automerge/notify.test.mjs
+new file mode 100644
+index 00000000..f77a598f
+--- /dev/null
++++ b/scripts/loops/automerge/notify.test.mjs
+@@ -0,0 +1,50 @@
++// deliverNotice 的失败分支:回读评论失败、限流/预算耗尽时的处理。
++import { mkdtempSync, rmSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++
++import { afterEach, beforeEach, describe, expect, it } from 'vitest'
++
++import { GitHubError } from './lib/github.mjs'
++import { deliverNotice } from './lib/notify.mjs'
++import { openState, readJsonLines } from './lib/state.mjs'
++import { loadPolicy } from './run.mjs'
++
++const policy = loadPolicy()
++let dir
++let state
++beforeEach(() => {
++  dir = mkdtempSync(join(tmpdir(), 'automerge-notify-'))
++  state = openState(dir, { now: () => 1 })
++})
++afterEach(() => rmSync(dir, { recursive: true, force: true }))
++
++const notice = { number: 42, key: 'human:42:abc', body: '需要人工处理' }
++const audits = () => readJsonLines(join(dir, 'audit.jsonl'))
++
++describe('deliverNotice 回读', () => {
++  it('上次发送结果未知且回读失败:记审计,不重发,返回 false', async () => {
++    state.data.pendingNotices = { [notice.key]: true }
++    const writes = []
++    const client = { paginate: async () => { throw new Error('502') }, write: async (...a) => { writes.push(a) } }
++    expect(await deliverNotice({ client, policy, state }, notice)).toBe(false)
++    expect(writes).toEqual([])
++    expect(audits()).toEqual([{ at: 1, kind: 'notice-readback-failed', key: notice.key }])
++    expect(state.data.pendingNotices[notice.key]).toBe(true)
++  })
++  it('回读时被限流:原样抛出', async () => {
++    state.data.pendingNotices = { [notice.key]: true }
++    const client = { paginate: async () => { throw new GitHubError('RATE_LIMITED', 'limited') } }
++    await expect(deliverNotice({ client, policy, state }, notice)).rejects.toMatchObject({ code: 'RATE_LIMITED' })
++    expect(audits()).toEqual([])
++  })
++})
++
++describe('deliverNotice 发送', () => {
++  it('请求预算耗尽:撤掉待确认标记并抛出,下一轮可重发', async () => {
++    const client = { write: async () => { throw new GitHubError('REQUEST_BUDGET', 'budget') } }
++    await expect(deliverNotice({ client, policy, state }, notice)).rejects.toMatchObject({ code: 'REQUEST_BUDGET' })
++    expect(state.data.pendingNotices[notice.key]).toBeUndefined()
++    expect(state.data.notices[notice.key]).toBeFalsy()
++  })
++})
+diff --git a/scripts/loops/automerge/run-cli.test.mjs b/scripts/loops/automerge/run-cli.test.mjs
+new file mode 100644
+index 00000000..e94a064b
+--- /dev/null
++++ b/scripts/loops/automerge/run-cli.test.mjs
+@@ -0,0 +1,240 @@
++// run.mjs 命令行分派:参数解析、config 校验、各子命令的退出码与输出、round 的锁/PAUSED/限流处理、explain 的令牌与结论包。
++// GitHub 客户端、采集、判定、报表、一轮编排与 git 都换成替身,只看 run.mjs 自己的行为。
++import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++
++const mocks = vi.hoisted(() => ({
++  createClient: vi.fn(),
++  readTokenFile: vi.fn(),
++  collectGlobal: vi.fn(),
++  collectPr: vi.fn(),
++  fetchReviewResult: vi.fn(),
++  evaluate: vi.fn(),
++  evaluatePr: vi.fn(),
++  report: vi.fn(),
++  auditMerges: vi.fn(),
++  selftest: vi.fn(),
++  runRound: vi.fn(),
++  execFileSync: vi.fn(),
++}))
++
++vi.mock('node:child_process', () => ({ execFileSync: mocks.execFileSync }))
++vi.mock('./lib/github.mjs', async (importOriginal) => ({ ...(await importOriginal()), createClient: mocks.createClient, readTokenFile: mocks.readTokenFile }))
++vi.mock('./lib/collect.mjs', () => ({ collectGlobal: mocks.collectGlobal, collectPr: mocks.collectPr, fetchReviewResult: mocks.fetchReviewResult }))
++vi.mock('./lib/gate.mjs', () => ({ evaluate: mocks.evaluate, evaluatePr: mocks.evaluatePr }))
++vi.mock('./lib/report.mjs', () => ({ report: mocks.report, auditMerges: mocks.auditMerges, selftest: mocks.selftest }))
++vi.mock('./lib/round.mjs', () => ({ runRound: mocks.runRound }))
++
++const { GitHubError } = await import('./lib/github.mjs')
++const { readJsonLines } = await import('./lib/state.mjs')
++const { explain, loadPolicy, main, parseArgs, runRoundCommand } = await import('./run.mjs')
++
++const policy = loadPolicy()
++let dir
++let logs
++let errors
++const client = { rateRemaining: () => 4321 }
++
++function writeConfig(over = {}) {
++  const config = {
++    hostId: 'box', tokenPath: join(dir, 'token'), stateDir: join(dir, 'state'), pausedPath: join(dir, 'PAUSED'), statusIssue: 900, appDir: '/srv/app', ...over,
++  }
++  const path = join(dir, 'config.json')
++  writeFileSync(path, JSON.stringify(config))
++  return { path, config }
++}
++
++const lastJson = () => JSON.parse(logs.at(-1))
++
++beforeEach(() => {
++  dir = mkdtempSync(join(tmpdir(), 'automerge-cli-'))
++  logs = []
++  errors = []
++  vi.spyOn(console, 'log').mockImplementation((s) => { logs.push(s) })
++  vi.spyOn(console, 'error').mockImplementation((s) => { errors.push(s) })
++  mocks.createClient.mockReturnValue(client)
++  mocks.readTokenFile.mockReturnValue('file-token')
++  mocks.execFileSync.mockReturnValue('f'.repeat(40) + '\n')
++  mocks.collectGlobal.mockResolvedValue({ now: 1, errors: [], incomplete: [] })
++  mocks.collectPr.mockImplementation(async (c, p, number, { local }) => ({ number, local, errors: [], incomplete: [] }))
++  mocks.evaluatePr.mockReturnValue({ verdict: 'MERGE', scope: 'pr' })
++  mocks.evaluate.mockReturnValue({ verdict: 'MERGE', scope: 'pr' })
++})
++
++afterEach(() => {
++  vi.restoreAllMocks()
++  vi.clearAllMocks()
++  vi.unstubAllEnvs()
++  rmSync(dir, { recursive: true, force: true })
++})
++
++describe('parseArgs', () => {
++  it('解析带值参数与布尔参数', () => {
++    expect(parseArgs(['report', '--config', 'c.json', '--json', '--since', '2026-10-01T00:00:00Z']))
++      .toEqual({ command: 'report', opts: { config: 'c.json', json: true, since: '2026-10-01T00:00:00Z' } })
++  })
++  it('拒绝位置参数和缺值参数', () => {
++    expect(() => parseArgs(['round', 'extra'])).toThrow('无法识别的参数:extra')
++    expect(() => parseArgs(['round', '--config'])).toThrow('参数 --config 缺少值')
++    expect(() => parseArgs(['round', '--config', '--json'])).toThrow('参数 --config 缺少值')
++  })
++})
++
++describe('main 分派与 config 校验', () => {
++  it('未知命令打印用法并返回 1', async () => {
++    expect(await main(['bogus'])).toBe(1)
++    expect(errors[0]).toMatch(/^用法:run\.mjs/)
++    expect(mocks.createClient).not.toHaveBeenCalled()
++  })
++  it('缺 --config、缺字段、statusIssue 非整数都拒绝', async () => {
++    await expect(main(['round'])).rejects.toThrow('缺少 --config')
++    const { path } = writeConfig({ tokenPath: '', appDir: null })
++    await expect(main(['round', '--config', path])).rejects.toThrow('config 缺少字段:tokenPath, appDir')
++    writeConfig({ statusIssue: '900' })
++    await expect(main(['audit', '--config', path])).rejects.toThrow('config.statusIssue 必须是整数,收到 "900"')
++  })
++  it('--since 不是合法时间时拒绝', async () => {
++    const { path } = writeConfig()
++    await expect(main(['report', '--config', path, '--since', 'yesterday'])).rejects.toThrow('--since 不是合法时间:yesterday')
++  })
++})
++
++describe('main 子命令', () => {
++  it('report:读令牌文件建客户端,带上 since 与 annotations,打印 JSON', async () => {
++    const { path, config } = writeConfig()
++    const annotationsPath = join(dir, 'ann.json')
++    writeFileSync(annotationsPath, JSON.stringify({ 42: 'fp' }))
++    mocks.report.mockResolvedValue({ merged: 3 })
++    expect(await main(['report', '--config', path, '--since', '2026-10-01T00:00:00Z', '--annotations', annotationsPath, '--json'])).toBe(0)
++    expect(mocks.readTokenFile).toHaveBeenCalledWith(config.tokenPath)
++    expect(mocks.createClient).toHaveBeenCalledWith({ token: 'file-token', repo: policy.repo, statusIssue: 900, circuitLabel: policy.circuitLabel })
++    expect(mocks.report.mock.calls[0][0]).toMatchObject({ client, policy, sinceMs: Date.parse('2026-10-01T00:00:00Z'), annotations: { 42: 'fp' } })
++    expect(lastJson()).toEqual({ merged: 3 })
++  })
++  it('report 没有 annotations 时传空对象', async () => {
++    const { path } = writeConfig()
++    mocks.report.mockResolvedValue({})
++    await main(['report', '--config', path])
++    expect(mocks.report.mock.calls[0][0]).toMatchObject({ sinceMs: 0, annotations: {} })
++  })
++  it('audit:打印 auditMerges 的结果', async () => {
++    const { path } = writeConfig()
++    mocks.auditMerges.mockResolvedValue({ problems: [] })
++    expect(await main(['audit', '--config', path])).toBe(0)
++    expect(mocks.auditMerges.mock.calls[0][0]).toMatchObject({ client, policy, sinceMs: 0 })
++    expect(lastJson()).toEqual({ problems: [] })
++    expect(mocks.execFileSync).not.toHaveBeenCalled()
++  })
++  it('selftest:取部署 SHA,ok 返回 0,不 ok 返回 1', async () => {
++    const { path, config } = writeConfig()
++    mocks.selftest.mockResolvedValueOnce({ ok: true }).mockResolvedValueOnce({ ok: false })
++    expect(await main(['selftest', '--config', path])).toBe(0)
++    expect(mocks.execFileSync).toHaveBeenCalledWith('git', ['-C', '/srv/app', 'rev-parse', 'HEAD'], { encoding: 'utf8' })
++    expect(mocks.selftest.mock.calls[0][0]).toMatchObject({ client, policy, config, deploySha: 'f'.repeat(40) })
++    expect(await main(['selftest', '--config', path])).toBe(1)
++    expect(lastJson()).toEqual({ ok: false })
++  })
++  it('round:带 policy 哈希与部署 SHA 跑一轮,打印单行 JSON', async () => {
++    const { path } = writeConfig()
++    mocks.runRound.mockResolvedValue({ merged: null })
++    expect(await main(['round', '--config', path])).toBe(0)
++    const deps = mocks.runRound.mock.calls[0][0]
++    expect(deps).toMatchObject({ client, policy, hostId: 'box', statusIssue: 900, deploySha: 'f'.repeat(40) })
++    expect(deps.policyHash).toMatch(/^[0-9a-f]{16}$/)
++    expect(logs.at(-1)).toBe('{"merged":null}')
++  })
++})
++
++describe('runRoundCommand', () => {
++  const config = () => ({ hostId: 'box', stateDir: join(dir, 'state'), pausedPath: join(dir, 'PAUSED'), statusIssue: 900 })
++
++  it('isPaused 看 PAUSED 文件,writePaused 以 0600 写入原因与时刻,结束后放锁', async () => {
++    const now = () => Date.parse('2026-10-16T04:00:00Z')
++    mocks.runRound.mockImplementation(async (deps) => {
++      const before = deps.isPaused()
++      deps.writePaused('circuit')
++      return { before, after: deps.isPaused() }
++    })
++    const out = await runRoundCommand({ config: config(), policy, client, policyHash: 'x', deploySha: 'e', now })
++    expect(out).toEqual({ code: 0, summary: { before: false, after: true } })
++    expect(JSON.parse(readFileSync(join(dir, 'PAUSED'), 'utf8'))).toEqual({ reason: 'circuit', at: '2026-10-16T04:00:00.000Z' })
++    expect(existsSync(join(dir, 'state', 'lock'))).toBe(false)
++    expect(existsSync(join(dir, 'state', 'state.json'))).toBe(true)
++  })
++  it('被限流:记审计,返回 exit 3', async () => {
++    mocks.runRound.mockRejectedValue(new GitHubError('RATE_LIMITED', 'rate limited'))
++    const out = await runRoundCommand({ config: config(), policy, client, policyHash: 'x', deploySha: 'e', now: () => 5 })
++    expect(out).toMatchObject({ code: 3, summary: { skipped: 'rate-limited' } })
++    expect(readJsonLines(join(dir, 'state', 'audit.jsonl'))).toEqual([{ at: 5, kind: 'round-error', code: 'RATE_LIMITED', message: 'rate limited' }])
++    expect(existsSync(join(dir, 'state', 'lock'))).toBe(false)
++  })
++  it('其他错误:记审计后抛出,仍放锁', async () => {
++    mocks.runRound.mockRejectedValue(new Error('boom'))
++    await expect(runRoundCommand({ config: config(), policy, client, policyHash: 'x', deploySha: 'e', now: () => 5 })).rejects.toThrow('boom')
++    expect(readJsonLines(join(dir, 'state', 'audit.jsonl'))).toEqual([{ at: 5, kind: 'round-error', code: null, message: 'boom' }])
++    expect(existsSync(join(dir, 'state', 'lock'))).toBe(false)
++  })
++  it('stateDir 不可用时直接抛出,不跑一轮', async () => {
++    writeFileSync(join(dir, 'state'), 'not a dir')
++    await expect(runRoundCommand({ config: config(), policy, client, policyHash: 'x', deploySha: 'e' })).rejects.toThrow()
++    expect(mocks.runRound).not.toHaveBeenCalled()
++  })
++})
++
++describe('explain', () => {
++  it('--pr 必须是正整数', async () => {
++    await expect(main(['explain'])).rejects.toThrow('--pr 必须是正整数,收到 undefined')
++    await expect(main(['explain', '--pr', '0'])).rejects.toThrow('--pr 必须是正整数,收到 "0"')
++  })
++  it('没有 config 也没有环境变量令牌时拒绝', async () => {
++    vi.stubEnv('MIVO_AUTOMERGE_TOKEN', '')
++    await expect(main(['explain', '--pr', '42'])).rejects.toThrow('缺少令牌')
++  })
++  it('--at 与 --threads-stable-since 必须是合法时间', async () => {
++    vi.stubEnv('MIVO_AUTOMERGE_TOKEN', 'env-token')
++    await expect(main(['explain', '--pr', '42', '--at', 'x'])).rejects.toThrow('--at 不是合法时间:x')
++    await expect(main(['explain', '--pr', '42', '--threads-stable-since', 'y'])).rejects.toThrow('--threads-stable-since 不是合法时间:y')
++  })
++  it('用环境变量令牌,判定完整时 exit 0,并提示没有本机状态', async () => {
++    vi.stubEnv('MIVO_AUTOMERGE_TOKEN', 'env-token')
++    expect(await main(['explain', '--pr', '42', '--at', '2026-10-16T04:00:00Z'])).toBe(0)
++    expect(mocks.createClient).toHaveBeenCalledWith({ token: 'env-token', repo: policy.repo })
++    expect(mocks.collectGlobal.mock.calls[0][2]).toEqual({ hostId: 'explain' })
++    const out = lastJson()
++    expect(out).toMatchObject({ evaluation: { verdict: 'MERGE' }, rateRemaining: 4321, incomplete: [] })
++    expect(out.notes).toHaveLength(1)
++    expect(mocks.evaluate.mock.calls[0][0].now).toBe(Date.parse('2026-10-16T04:00:00Z'))
++  })
++  it('有 config 时读令牌文件、用 hostId,带上 thread 静置起点', async () => {
++    const { path, config } = writeConfig({ hostId: 'mac' })
++    expect(await main(['explain', '--pr', '7', '--config', path, '--threads-stable-since', '2026-10-16T02:00:00Z'])).toBe(0)
++    expect(mocks.readTokenFile).toHaveBeenCalledWith(config.tokenPath)
++    expect(mocks.collectGlobal.mock.calls[0][2]).toEqual({ hostId: 'mac' })
++    expect(mocks.collectPr.mock.calls[0][3]).toEqual({ local: { threadsStableSince: Date.parse('2026-10-16T02:00:00Z') } })
++    expect(lastJson().notes).toEqual([])
++  })
++  it('PR 门要结论包时下载;全局门不过时另给只看 PR 门的结论', async () => {
++    mocks.evaluatePr.mockReturnValueOnce({ verdict: 'NEED_ARTIFACT' }).mockReturnValueOnce({ verdict: 'MERGE', scope: 'pr' })
++    mocks.evaluate.mockReturnValue({ verdict: 'WAIT', scope: 'global' })
++    mocks.fetchReviewResult.mockResolvedValue({ pr: 42 })
++    const out = await explain({ client, policy, number: 42 })
++    expect(mocks.evaluate.mock.calls[0][1].reviewResult).toEqual({ pr: 42 })
++    expect(out.prOnly).toEqual({ verdict: 'MERGE', scope: 'pr' })
++  })
++  it('结论包下载失败与采集不完整都列进 incomplete,命令 exit 2', async () => {
++    vi.stubEnv('MIVO_AUTOMERGE_TOKEN', 'env-token')
++    mocks.collectGlobal.mockResolvedValue({ now: 1, errors: [], incomplete: ['circuit', 'circuit'] })
++    mocks.evaluatePr.mockReturnValue({ verdict: 'NEED_ARTIFACT' })
++    mocks.fetchReviewResult.mockRejectedValue(new Error('x'.repeat(400)))
++    expect(await main(['explain', '--pr', '42'])).toBe(2)
++    const { incomplete, prOnly } = lastJson()
++    expect(prOnly).toBeUndefined()
++    expect(incomplete).toEqual([
++      { field: 'circuit', message: '采集结果不完整' },
++      { field: 'reviewResult', message: 'x'.repeat(300) },
++    ])
++  })
++})
+diff --git a/scripts/loops/automerge/run.mjs b/scripts/loops/automerge/run.mjs
+index 3dc45bc4..e44d2c50 100644
+--- a/scripts/loops/automerge/run.mjs
++++ b/scripts/loops/automerge/run.mjs
+@@ -138,7 +138,7 @@ export async function runRoundCommand({ config, policy, client, policyHash, depl
+   }
+ }
+ 
+-async function main(argv) {
++export async function main(argv) {
+   const { command, opts } = parseArgs(argv)
+   const policy = loadPolicy()
+   if (command === 'explain') return mainExplain(opts, policy)
+diff --git a/scripts/loops/automerge/state-lock.test.mjs b/scripts/loops/automerge/state-lock.test.mjs
+new file mode 100644
+index 00000000..fb011155
+--- /dev/null
++++ b/scripts/loops/automerge/state-lock.test.mjs
+@@ -0,0 +1,22 @@
++// 锁回收的竞争分支:另一个进程正在回收时不抢。
++import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++
++import { afterEach, beforeEach, expect, it } from 'vitest'
++
++import { LockHeldError, openState } from './lib/state.mjs'
++
++let dir
++beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'automerge-lock-')) })
++afterEach(() => rmSync(dir, { recursive: true, force: true }))
++
++it('持锁进程已死但回收目录已存在:报锁被占用,不动原锁', () => {
++  mkdirSync(join(dir, 'lock'))
++  writeFileSync(join(dir, 'lock', 'owner.json'), JSON.stringify({ pid: 999999, startedAt: 1, token: 't' }))
++  mkdirSync(join(dir, 'lock.reclaim'))
++  const state = openState(dir, { alive: () => false })
++  expect(() => state.acquire()).toThrow(LockHeldError)
++  expect(() => state.acquire()).toThrow('另一个进程正在回收锁')
++})
++

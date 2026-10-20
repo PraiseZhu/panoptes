@@ -24,6 +24,12 @@ export function globToRegExp(glob) {
 
 const matchAny = (path, globs) => globs.some((g) => globToRegExp(g).test(path))
 
+// 测试文件（*.test.* / *.spec.* / *.node-test.* / __tests__/ / test_*.py / *_test.py）
+const TEST_PATH_RE = /\.(test|spec|node-test)\.[cm]?[jt]sx?$|(^|\/)__tests__\/|(^|\/)test_[^/]+\.py$|_test\.py$/
+export const isTestPath = (path) => TEST_PATH_RE.test(String(path ?? ''))
+// 只改了测试文件（至少一个，且全是测试文件；删掉的测试文件也算测试改动）
+export const isTestsOnly = (files) => (files ?? []).length > 0 && files.every((f) => isTestPath(f.filename))
+
 const DEFAULT_A = ['**/*.md', 'docs/**', 'LICENSE', '**/*.txt']
 // 测试、依赖、CI、脚本、配置即使长得像文档也不能进 A
 const NEVER_A = ['**/package.json', '**/package-lock.json', '**/pyproject.toml', '**/uv.lock', '.github/**', 'scripts/**', '**/*.test.*', 'tests/**']

@@ -1,0 +1,14 @@
+diff --git a/scripts/ops/gh-app-router/gh-app-router.test.mjs b/scripts/ops/gh-app-router/gh-app-router.test.mjs
+index 7d6d3bb2..4da9bbf2 100644
+--- a/scripts/ops/gh-app-router/gh-app-router.test.mjs
++++ b/scripts/ops/gh-app-router/gh-app-router.test.mjs
+@@ -410,9 +410,7 @@ describe('日志', () => {
+     mkdirSync(dir, { recursive: true, mode: 0o700 })
+     const old = join(dir, 'route-2020-01-01.jsonl')
+     writeFileSync(old, '{}\n')
+-    const longAgo = new Date('2020-01-01T00:00:00Z')
+     execFileSync('touch', ['-t', '202001010000', old])
+-    expect(longAgo.getFullYear()).toBe(2020)
+     app.run(READ_ARGS)
+     expect(existsSync(old)).toBe(false)
+   })

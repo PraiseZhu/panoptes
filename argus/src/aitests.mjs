@@ -4,6 +4,7 @@
 import { aiUsageToday, addAiUsage } from './db.mjs'
 import { globToRegExp } from './classify.mjs'
 import { toDimensionLabel, stepExercises } from './matrix.mjs'
+import { prTestDimensions } from './pr-tests.mjs'
 import { redact, toShanghaiDay, truncate } from './util.mjs'
 import { toChatCompletionsUrl, fetchRetryingNetwork, isNetworkError } from './util.mjs'
 
@@ -195,6 +196,8 @@ export function toAiGaps({ applicability, profile, results, files = [] }) {
   const ran = new Set((results ?? []).filter((r) => r.kind !== 'setup' && !r.unavailable && !r.timedOut).map((r) => r.id))
   const paths = files.map((f) => f.filename)
   const covered = new Set(profile.steps.filter((s) => ran.has(s.id) && stepExercises(s, paths)).flatMap((s) => s.covers ?? []))
+  // PR 自己新增 / 修改并跑过的测试覆盖到的维度先算进去（#1099）
+  for (const k of Object.keys(prTestDimensions({ files, results, profile }))) covered.add(k)
   return (applicability?.applicable ?? []).filter((k) => AI_GAP_DIMENSIONS.includes(k) && !covered.has(k))
 }
 
