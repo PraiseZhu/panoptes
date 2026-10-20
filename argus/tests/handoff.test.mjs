@@ -58,6 +58,16 @@ test('handoff parse: Mivo 轻档示例（valid-light）→ 第 5 节「无」行
   assert.equal(parseHandoff({ ...FULL, qa: FULL.qa.replace('层次: contract', '层次: Contract') }).cases[0].level, 'contract')
 })
 
+test('handoff parse: 层次按校验器整词匹配，自动层次优先；第 5 节「无（理由）」也跳过', () => {
+  const lv = (cell) => parseHandoff({ ...FULL, qa: FULL.qa.replace('层次: contract', `层次: ${cell}`) }).cases[0].level
+  assert.equal(lv('unit（vitest）'), 'unit')
+  assert.equal(lv('unit + macOS'), 'unit')
+  assert.equal(lv('cindy-mac + browser-fixture'), 'browser-fixture')
+  assert.equal(lv('cindy-windows（实机）'), 'cindy-windows')
+  const qa = fx('light-qa.md').replace('| 无 | 无 | 无 |', '| 无（纯文档） | 无 | 无 |')
+  assert.deepEqual(parseHandoff({ review: fx('light-review.md'), qa }).left, [])
+})
+
 test('handoff parse: 原样模板 → present:true，条目字段为空，不报错', () => {
   const h = parseHandoff(TEMPLATE)
   assert.equal(h.present, true)
