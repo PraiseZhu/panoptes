@@ -58,7 +58,13 @@ export function isCommentOnly(f) {
 // 命中 profile.cPaths 的改动文件（去掉测试文件、ghost.json 和只改注释的文件）；files 是 [{ filename, patch }]
 export const highRiskFiles = (files, profile = {}) => files.filter((f) => matchAny(f.filename, profile.cPaths ?? []) && !matchAny(f.filename, NEVER_C) && !isCommentOnly(f)).map((f) => f.filename)
 
-export function classifyChange(files, profile = {}) {
+// PR 交接文件（docs/pr/**）不参与分级：去掉后为空（只加了交接）按只改文档处理
+export const isHandoffFile = (path) => /^docs\/pr\//.test(path ?? '')
+export const withoutHandoff = (files) => files.filter((f) => !isHandoffFile(f.filename))
+
+export function classifyChange(allFiles, profile = {}) {
+  const files = withoutHandoff(allFiles)
+  if (allFiles.length && !files.length) return { riskClass: 'A', reasonZh: `只改了 PR 交接文件（docs/pr/**，${allFiles.length} 个文件）` }
   const paths = files.map((f) => f.filename)
   if (paths.length === 0) return { riskClass: 'B', reasonZh: '拿不到改动文件列表，按常规处理' }
   const aGlobs = profile.aPaths ?? DEFAULT_A

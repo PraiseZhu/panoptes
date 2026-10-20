@@ -13,6 +13,12 @@ if (!route || args.includes('-X')) throw new Error('E2E 禁止未声明的 GitHu
 let out
 if (/\/pulls\/\d+\/files\?/.test(route)) out = state.files ?? [{ filename: 'value.mjs', additions: 1, deletions: 1, patch: '+value' }]
 else if (/\/pulls\/\d+$/.test(route)) out = state.pr
+else if (/\/contents\//.test(route)) {
+  // state.contents：{ 'docs/pr/N/review.md': GitHub contents 接口的返回 }；没有 → 404
+  const c = state.contents?.[route.replace(/^repos\/[^/]+\/[^/]+\/contents\//, '').split('?')[0]]
+  if (!c) { process.stderr.write('gh: Not Found (HTTP 404)'); process.exit(1) }
+  out = c
+}
 else if (/\/commits\//.test(route)) out = { parents: [{ sha: state.baseSha }], commit: { message: `fixture (#${state.pr.number})` } }
 else if (/\/branches\//.test(route) || /\/git\/ref\//.test(route)) out = { commit: { sha: state.pr.merge_commit_sha }, object: { sha: state.pr.merge_commit_sha } }
 else if (/\/issues\?/.test(route)) {

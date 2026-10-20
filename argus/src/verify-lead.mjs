@@ -24,6 +24,8 @@ export function verifyLeads(report, { pr, fingerprint, checkId, by = null, note 
       if (unset) Object.assign(f, { verified: false, verified_at: null, verified_by: null, verified_note: null })
       else Object.assign(f, { verified: true, verified_at: at, verified_by: by, verified_note: note })
       changed.push({ pr: p.number, check_id: f.check_id, fingerprint: f.fingerprint })
+      // 交接用例的 failed 只是线索：同一条补测被确认后才把 confirmed 置 true
+      for (const c of p.handoff?.cases ?? []) if (c.qa_status === 'failed' && f.check_id && c.evidence?.check_id === f.check_id) c.confirmed = !unset
     }
   }
   return changed

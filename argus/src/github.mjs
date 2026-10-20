@@ -169,6 +169,26 @@ const fileAt = async (repo, path, ref) => {
   const r = await apiGet(`repos/${repo}/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${ref}`)
   return r?.encoding === 'base64' ? Buffer.from(r.content, 'base64').toString('utf8') : null
 }
+// PR 交接文件 docs/pr/<number>/review.md、qa.md（ref = 合并提交）。404 → null；不是普通文件（symlink、目录、子模块，
+// 或 contents 接口跟随 symlink 返回了别的路径）→ null，并记一条 env_problems。返回 { review, qa }（各为文本或 null）
+export async function getHandoff(repo, number, sha, { health = null, get = apiGet } = {}) {
+  const out = {}
+  for (const kind of ['review', 'qa']) {
+    const path = `docs/pr/${Number(number)}/${kind}.md`
+    let r
+    try { r = await get(`repos/${repo}/contents/${path}?ref=${sha}`) } catch (err) {
+      if (err.httpStatus === 404) { out[kind] = null; continue }
+      throw err
+    }
+    if (r?.type !== 'file' || r.path !== path || r.encoding !== 'base64') {
+      health?.env_problems.push({ pr: Number(number), message: `handoff ${path} is not a regular file (type ${Array.isArray(r) ? 'dir' : r?.type ?? 'unknown'}${r?.path && r.path !== path ? `, resolves to ${r.path}` : ''}); ignored` })
+      out[kind] = null
+      continue
+    }
+    out[kind] = Buffer.from(r.content, 'base64').toString('utf8')
+  }
+  return out
+}
 export async function addFullText(repo, pr, files, { maxFiles = 50 } = {}) {
   const js = files.filter((f) => /\.[cm]?[jt]sx?$/i.test(f.filename))
   if (!js.length || js.length > maxFiles) return files

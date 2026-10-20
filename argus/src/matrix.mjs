@@ -87,7 +87,8 @@ export function toPathHits(profile, files) {
 }
 
 // 分诊结论：每个维度 applicable / not_applicable / looks_unrelated / undetermined
-export function toTriage({ profile, files, jev }) {
+// handoff（可选）：parseHandoff 的结果。作者写的风险 R 和边界 B 只作补充上下文（context）带出去，不改任何维度判定
+export function toTriage({ profile, files, jev, handoff = null }) {
   const skip = profile.notApplicable ?? {}
   const hits = toPathHits(profile, files)
   const rows = DIMENSIONS.map((d) => {
@@ -99,7 +100,8 @@ export function toTriage({ profile, files, jev }) {
     const verdict = p >= APPLICABLE_P ? 'applicable' : p <= UNRELATED_P ? 'looks_unrelated' : 'undetermined'
     return { key: d.key, verdict, source: 'jev', p }
   })
-  return { status: jev?.ok ? 'ok' : 'skipped', reasonZh: jev?.ok ? null : jev?.reasonZh ?? '没做分诊', model: jev?.model ?? null, rows }
+  return { status: jev?.ok ? 'ok' : 'skipped', reasonZh: jev?.ok ? null : jev?.reasonZh ?? '没做分诊', model: jev?.model ?? null, rows,
+    ...(handoff?.present ? { context: { risks: handoff.risks, boundaries: handoff.boundaries } } : {}) }
 }
 
 const matchesAny = (path, globs) => globs.some((g) => globToRegExp(g).test(path))

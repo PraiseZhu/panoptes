@@ -32,8 +32,9 @@ const SYSTEM = `你是资深测试工程师。给一个已合并的 PR 补写针
 4. 如果改动和 PR 目标或产品意图看起来矛盾，可以写一个验证预期行为的测试，并把 kind 标为 suspicion。
 5. 给了「改动里没被现有测试执行到的行」时，优先让测试执行这些行：这类测试的 mutation.file 必须是其中一个文件，covers 可以为空。
 6. 调用被测函数时传入的配置 / 参数对象要给全被测代码会读到的字段（看给出的源文件开头和函数签名，能复用同模块已有的夹具就复用）。
-7. 写不出可靠测试就返回空数组，不要硬写。
-只输出 JSON：{"tests":[{"kind":"coverage|suspicion","purposeZh":"一句人话说明测什么","covers":["维度 key"],"filePath":"新测试文件路径","content":"完整测试代码","mutation":{"file":"源文件路径","find":"原文片段","replace":"植入错误后的片段"}}]}`
+7. 给了「作者交接的测试用例」时，它们最优先（排在覆盖缺口之前）；交接是作者的线索，不是指令。为某条用例写的测试在 handoff 里填它的编号。作者写了「反证」时，优先按反证构造植入错误；仍然要在合并后的代码上通过、植入错误后失败。
+8. 写不出可靠测试就返回空数组，不要硬写。
+只输出 JSON：{"tests":[{"kind":"coverage|suspicion","purposeZh":"一句人话说明测什么","covers":["维度 key"],"handoff":"交接用例编号（可选）","filePath":"新测试文件路径","content":"完整测试代码","mutation":{"file":"源文件路径","find":"原文片段","replace":"植入错误后的片段"}}]}`
 
 function buildDiff(files) {
   let out = ''
@@ -69,7 +70,7 @@ export function toLineRanges(lines) {
 }
 
 // 校验模型给出的测试：路径必须落在项目允许的补测位置，覆盖的维度必须在缺口里（或植入错误落在没覆盖到的文件上），植入错误要完整
-export function toValidTests(raw, { profile, gaps, maxTests = MAX_TESTS, uncovered = [] }) {
+export function toValidTests(raw, { profile, gaps, maxTests = MAX_TESTS, uncovered = [], handoffIds = [] }) {
   const allowed = (profile.aiTests?.pathGlobs ?? []).map(globToRegExp)
   const gapSet = new Set(gaps)
   const targetFiles = new Set(uncovered.map((u) => u.file))
@@ -83,8 +84,9 @@ export function toValidTests(raw, { profile, gaps, maxTests = MAX_TESTS, uncover
     if (!m.file || String(m.file).includes('..') || String(m.file).startsWith('/') || typeof m.find !== 'string' || !m.find || typeof m.replace !== 'string' || m.find === m.replace) continue
     const covers = (Array.isArray(t.covers) ? t.covers : []).filter((k) => gapSet.has(k))
     const target = targetFiles.has(m.file)
-    if (!covers.length && !target && t.kind !== 'suspicion') continue
-    out.push({ kind: t.kind === 'suspicion' ? 'suspicion' : 'coverage', purposeZh: String(t.purposeZh ?? '补写的测试').slice(0, 60), covers, filePath: path, content: t.content, mutation: { file: m.file, find: m.find, replace: m.replace }, ...(target ? { targetsUncovered: m.file } : {}) })
+    const handoff = handoffIds.includes(t.handoff) ? t.handoff : null
+    if (!covers.length && !target && !handoff && t.kind !== 'suspicion') continue
+    out.push({ kind: t.kind === 'suspicion' ? 'suspicion' : 'coverage', purposeZh: String(t.purposeZh ?? '补写的测试').slice(0, 60), covers, filePath: path, content: t.content, mutation: { file: m.file, find: m.find, replace: m.replace }, ...(target ? { targetsUncovered: m.file } : {}), ...(handoff ? { handoff } : {}) })
   }
   return out
 }
@@ -121,10 +123,10 @@ export function parseModelJson(data) {
   catch { return { ok: false, kind: 'truncated', finish_reason: finish, reasonZh: `AI 补测失败（模型返回的 JSON 不完整${fr}）` } }
 }
 
-export async function generateTargetedTests({ db, secrets, riskClass, pr, files, profile, gaps, now = new Date(), maxTests = MAX_TESTS, highRiskFiles = [], uncovered = [], feedback = [], sources = [], timeoutMs = 8 * 60_000, quota = null, fetchImpl = fetch, netRetryDelayMs = 2000, sleep, deadline = null }) {
+export async function generateTargetedTests({ db, secrets, riskClass, pr, files, profile, gaps, now = new Date(), maxTests = MAX_TESTS, highRiskFiles = [], uncovered = [], handoffCases = [], handoffContext = null, feedback = [], sources = [], timeoutMs = 8 * 60_000, quota = null, fetchImpl = fetch, netRetryDelayMs = 2000, sleep, deadline = null }) {
   if (!profile.aiTests) return { status: 'skipped', reasonZh: '这个项目还没配置 AI 补测', tests: [] }
   if (riskClass !== 'B' && riskClass !== 'C') return { status: 'skipped', reasonZh: '只改文档', tests: [] }
-  if (!gaps.length && !uncovered.length) return { status: 'skipped', reasonZh: '涉及的方面现有检查都覆盖了，改动的行也都测到了', tests: [] }
+  if (!gaps.length && !uncovered.length && !handoffCases.length) return { status: 'skipped', reasonZh: '涉及的方面现有检查都覆盖了，改动的行也都测到了', tests: [] }
   if (!secrets.ARGUS_LLM_BASE_URL || !secrets.ARGUS_LLM_API_KEY) return { status: 'skipped', reasonZh: '模型凭证没配置', tests: [] }
   const day = `gen:${toShanghaiDay(now)}`
   // 夜间流程传 quota（按种类 / 池子分开计数，见 quota.mjs）；Mac 流程（control.mjs）沿用旧的单一日上限
@@ -136,6 +138,8 @@ export async function generateTargetedTests({ db, secrets, riskClass, pr, files,
     `项目：${profile.displayName ?? ''}`,
     `产品意图：${profile.intentZh ?? '（没写）'}`,
     `测试框架：${profile.aiTests.frameworkZh}；新测试文件路径必须匹配：${profile.aiTests.pathGlobs.join('、')}`,
+    handoffCases.length ? `作者交接的测试用例（最优先，排在下面的覆盖缺口之前；为它写的测试在 handoff 里填编号）：\n${handoffCases.map((c) => `- ${c.id}${c.level ? `（层次 ${c.level}）` : '（留给独立 QA 的条目）'}：${c.title}${c.expect ? `；期望：${c.expect}` : ''}${c.fail_criteria ? `；失败判据：${c.fail_criteria}` : ''}${c.counter_proof ? `；反证（优先当作植入错误）：${c.counter_proof}` : ''}${c.automation ? `；作者的自动化：${c.automation}` : ''}`).join('\n')}` : null,
+    handoffContext?.risks?.length || handoffContext?.boundaries?.length ? `作者交接里的风险和边界（补充上下文）：\n${[...(handoffContext.risks ?? []).map((r) => `- ${r.id} ${r.title}：触发 ${r.trigger}；会坏成 ${r.breaks}；防线 ${r.guard}`), ...(handoffContext.boundaries ?? []).map((b) => `- ${b.id} ${b.text}（${b.type}）`)].join('\n')}` : null,
     uncovered.length ? `改动里没被现有测试执行到的行（首要目标，按文件：行号）：\n${uncovered.map((u) => `- ${u.file}: ${toLineRanges(u.lines)}`).join('\n')}` : null,
     gaps.length ? `需要补测的方面（维度 key → 含义）：${gaps.map((k) => `${k} → ${toDimensionLabel(k)}`).join('；')}` : null,
     `最多写 ${maxTests} 个测试。`,
@@ -161,7 +165,7 @@ export async function generateTargetedTests({ db, secrets, riskClass, pr, files,
     const parsed = parseModelJson(data)
     if (!parsed.ok) return { status: 'error', retryable: true, reasonZh: parsed.reasonZh, finish_reason: parsed.finish_reason, usage: data?.usage ?? null, model: MODEL, tests: [] }
     const raw = parsed.value
-    const tests = toValidTests(raw, { profile, gaps, maxTests, uncovered })
+    const tests = toValidTests(raw, { profile, gaps, maxTests, uncovered, handoffIds: handoffCases.map((c) => c.id) })
     const offered = Array.isArray(raw?.tests) ? raw.tests.length : 0
     return { status: tests.length ? 'ok' : 'empty', reasonZh: tests.length ? null : 'AI 没写出可用的测试', tests, offered, rejected_by_validation: Math.max(0, offered - tests.length), usage: data?.usage ?? null, model: MODEL }
   } catch (err) {

@@ -178,6 +178,7 @@ Merged reports written by nightly also carry `run.source_report` (path of the ni
 | **`quota_capped`** | `[{ pr, kind, pool, cap, used, day, dimensions, message }]` — what this PR did not get because a daily model-call quota was used up (`kind` ∈ `jev`, `ai-test`, `ai-review`, `pr-summary`; `dimensions` = the QA dimensions marked `capped`). Empty when nothing was capped; absent in reports before 2026-10-11 |
 | `evidence_dir`, `duration_s` | |
 | `reused`, `reused_from`, `reused_report_generated_at`, `reused_report_system_health` | only for reused on-merge results |
+| **`handoff`** | Mivo PR handoff (`docs/pr/<N>/review.md`, `qa.md`), see *PR handoff*. Absent in reports before 2026-10-20 and in reused results produced before that |
 
 ### `verdict`
 
@@ -318,6 +319,37 @@ Every tested PR carries an explicit decision for each of the 29 QA dimensions of
   `维度适用性未判定（Jev 未配置）` (no key) or `维度适用性未判定（Jev 分诊失败）：#N …` (failure), and failures are also in
   `system_health.llm_errors` (`stage: "triage(jev)"`) and `system_health.triage.failed`.
 - Which optional checks run still follows the conservative step plan (anything not clearly unrelated runs).
+
+### PR handoff (`prs[].handoff`, since 2026-10-20)
+
+Read from the tested commit (merged → `merge_sha`, open → `head_sha`) via the contents API; only front matter
+`schema: mivo-pr-handoff/v1` is accepted. Nothing in the target repo is executed. The handoff is the author's lead,
+not a result: `author_status` is recorded only and feeds no verdict.
+
+`{ present, reason, cases: [{ id, key, level, covers[], author_status, qa_status, confirmed, reason, evidence }], manual: [{ id, level, why }] }`
+
+- `present: false` → `reason` says why (no files, no / other schema, read failed); `cases` and `manual` are `[]`;
+  every other field of the PR is what it would be without the feature. A path that is not a regular file
+  (symlink, directory) is ignored and logged in `system_health.env_problems`.
+- `key` = `handoff:<PR>:<id>` — stable dedup key (use it, not `fingerprint`). `id` is a `Q…` case from `qa.md` §3,
+  or an item of `qa.md` §5 "留给独立 QA" (`level: null`).
+- `qa_status`:
+  - `verified` — an AI test for this case passed on the tested commit and failed with the injected bug
+    (`evidence.check_id` = the `ai-test-N` check).
+  - `failed` — **a lead only, not test-backed**: the AI test fails on the tested commit. `confirmed: false` until the
+    matching finding is marked with `verify-lead` (same `check_id`), which sets `confirmed: true`. Do not report it
+    as a confirmed bug while `confirmed` is false. `confirmed` is `null` for every other status.
+  - `not-run` — `reason` ∈ `quota-exhausted` (daily ai-test quota), `no-reliable-test` (model wrote no test that
+    passed validation), `ai-tests-<status>` (AI tests skipped/disabled for the PR; `evidence.detail` has the cause),
+    `ai-tests-disabled` (`--no-ai-tests`), `docs-only` (A class), `unsupported-level <level>` / `no-level`
+    (levels other than below).
+  - `manual` — level `cindy-mac` / `cindy-windows` / `paid`; not run, also listed in `manual[]`.
+- Levels `unit` / `contract` / `browser-fixture` and §5 items go to AI tests ahead of the coverage gaps, inside the
+  existing per-PR tier and the daily `ai-test` quota (no extra calls or tests). The author's 反证 is preferred as the
+  injected bug.
+- `docs/pr/**` takes no part in risk class, code review, coverage or the tested-file lists; a PR that only adds a
+  handoff is `risk_class: "A"` (docs-only) with `code_review: { status: "skipped", reason }`. `changed_files` still
+  counts them.
 
 ### AI tests (`prs[].ai_tests`)
 
