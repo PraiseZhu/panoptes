@@ -387,6 +387,19 @@ test('AI 补测「测试无效」：断言前就因缺测试数据 / 文件、�
   assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: inProduct }, { content, filePath }).result, 'fails-on-current')
   // #1017 10-16：effects[kind].get is not a function 抛在被测代码里（测试传错了数据形状）→ 不在这条规则里，留给人确认
   assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: 'TypeError: effects[kind].get is not a function\n ❯ op src/canvas/actions/canvasSyncAssetEffects.ts:44:35' }, { content: "import { op } from './x'", filePath: 'src/canvas/actions/canvasSyncAssetEffects.argus.test.ts' }).result, 'fails-on-current')
+  // #978 10-19：测试直接调用了没导入、也没声明的 isMarkupTextCoveredByHigherSection → ReferenceError，报错在补测文件里 → 测试无效
+  const rContent = "import { describe, expect, it } from 'vitest'\nimport type { MivoCanvasNode } from '../types/mivoCanvas'\nimport { isImageCaptionCoveredByHigherSection } from './sectionStackOcclusion'\n"
+  const rPath = 'src/render/sectionStackOcclusion.argus.test.ts'
+  const rTail = ' \x1b[31m❯\x1b[39m src/render/sectionStackOcclusion.argus.test.ts (2 tests | 1 failed)\n FAIL  src/render/sectionStackOcclusion.argus.test.ts > section stack occlusion > 将被后出现分区覆盖的便签文字判定为遮挡\n\x1b[31m\x1b[1mReferenceError\x1b[22m: isMarkupTextCoveredByHigherSection is not defined\x1b[39m\n\x1b[36m \x1b[2m❯\x1b[22m src/render/sectionStackOcclusion.argus.test.ts:\x1b[2m62:5\x1b[22m\x1b[39m\n     62|     expect(isMarkupTextCoveredByHigherSection(note, [note, higherSecti…'
+  const rr = ai.toAiTestResult({ ok: false, exitCode: 1, tail: rTail }, { content: rContent, filePath: rPath })
+  assert.equal(rr.result, 'discarded'); assert.equal(rr.invalid_kind, 'missing-module'); assert.match(rr.reason, /isMarkupTextCoveredByHigherSection is not defined \(used by the test; never imported or declared in it\)/)
+  // 反例：没有测试代码对照、名字是测试导入 / 声明的、或报错在被测代码里 → 仍是 fails-on-current
+  assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: rTail }).result, 'fails-on-current')
+  assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: rTail }, { content: rContent.replace('{ isImageCaptionCoveredByHigherSection }', '{ isImageCaptionCoveredByHigherSection, isMarkupTextCoveredByHigherSection }'), filePath: rPath }).result, 'fails-on-current')
+  assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: rTail }, { content: rContent + 'const isMarkupTextCoveredByHigherSection = () => true\n', filePath: rPath }).result, 'fails-on-current')
+  assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: rTail }, { content: rContent + 'const { isMarkupTextCoveredByHigherSection } = mod\n', filePath: rPath }).result, 'fails-on-current')
+  const rInProduct = 'ReferenceError: isMarkupTextCoveredByHigherSection is not defined\n ❯ isOccluded src/render/sectionStackOcclusion.ts:40:3\n ❯ src/render/sectionStackOcclusion.argus.test.ts:62:5'
+  assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: rInProduct }, { content: rContent, filePath: rPath }).result, 'fails-on-current')
   // #1013 10-18：测试调 transport(c) 只给了 c.github，被测代码读 c.budgets.apiRequests → 测试无效（fixture-gap），哪怕包在断言失败里
   const tContent = "import { transport } from '../../scripts/loops/issue-agent/transport.mjs';\nconst client = transport({ github: { tokenEnv: 'T', writerMode: 'token' } }, { env: {} });\n"
   const tSource = "export function transport(c, {fetchImpl}={}) {\n  let requests=0;\n  function budget() { if(++requests>c.budgets.apiRequests) fail('READ_BUDGET_EXHAUSTED',4); }\n  const tok=c.github.tokenEnv;\n}\n"

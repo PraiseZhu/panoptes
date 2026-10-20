@@ -297,3 +297,26 @@ fails on base (`pre_existing: true`) be P3 like other old problems? Today it sta
 **For the 日报 bot.** #1013 P2 → clean P3 (AI-test failure is the test's own missing config). Batch re-run results to follow. No field changes.
 
 **For Praise.** (1) Renewing the model key should be followed by an env-guard probe; whether env-guard may alert on 401 is a trigger/notification rule change. (2) Bench flaky vs `pre_existing` P3 rule still open (since 10-16). (3) `qa/bench-after-unit-env-timeouts` (3 commits, 10-18 11:15) still waiting for 运维 acceptance.
+
+## 2026-10-20 (data day 2026-10-19, Asia/Shanghai)
+
+Review file: `/workspace/review-ops/daily/2026-10-19.md` (cross-bot-review format).
+
+**Reconciliation.** 7 PRs merged on 10-19 (#1100 #1101 #1099 #1098 #1104 #978 #1107); all 7 have a valid `reports/merged/PR-N.json`, schema 1.0. First run of every PR was the on-merge event (history v1 = event for #1098/#1099/#1100; current file event for #1101/#1104/#978/#1107). Current #1098/#1099/#1100 are manual re-runs from the LLM-retry re-run queue (10-19 17:20 CST), not missed events — the collector's "event missed, manual 98–262 min late" lead is wrong (it reads only the current file). Catch-up at 16:07 CST flagged #1101/#1099 "missing" while their event runs were in flight (cosmetic, reused, wrote only `reports/catch-up/`). No issue opened (no test-backed P0/P1); system_health #16 commented 4×. Correct.
+
+**Accuracy.**
+- #978 AI-test P2 (`ai-test-4`): the failing case is the second one in the file (note text), which calls `isMarkupTextCoveredByHigherSection` without importing it → `ReferenceError … is not defined` at `sectionStackOcclusion.argus.test.ts:62:5`; the case named in the finding title (image caption) passed. Test invalid → calibrated to P3 false_positive (`PR-978.json.bak-20261020-calibration`). PR stays P2 on new-code coverage 83.01%.
+- #1098 code-review P1 (`abandonUnreferencedGenerationExtras` only logs; `cindyGenerationPort.ts:255` at the merge commit) — the code matches the finding; not test-backed, level debatable, no issue (author lubinyu-lab).
+- #1107 code-review P2 / #1036 code-review P1: Praise PR fix PRs #1114 (open, CI green) and #1112 / #1121 (draft, CI green).
+
+**Test-assignment (7 reviewed, 4 fully correct).** Correct: #1100 #1104 (docs-only), #1098, #1107 (shell coverage not measurable — known blind spot; its .test.mjs ran in unit). Problems:
+- #978: AI-test classifier missed a test-own ReferenceError (fixed below).
+- #1101 (only edits `gh-app-router.test.mjs`): triage marked all 29 dimensions not-applicable (unit p=0.08) and all black-box steps were triage-skipped, so the PR became `partially-verified` P3 solely because black-box is "missing". The changed test did run in unit.
+- #1099 (3 new test files + 1-line export): the PR's own tests for the notify failure branch and the lock-reclaim race are not credited, so exception/async/concurrency show as gaps (coverage 0.25) and the AI call targeted gaps the PR already covers (it then failed on network).
+- All PRs: the unit run under v8 coverage has 5–20 failing tests (5 s timeouts in `cindyplugin/src/__tests__/library*`/`depositBindingLock`, ECONNREFUSED :3000) — informational only, none touched these PRs' changed files, but new-code coverage could be under-counted when they do.
+
+**Changes pushed.** `aitests.mjs` `toInvalidTest`: `ReferenceError: X is not defined` whose first frame is in the AI test file and where X is neither imported nor declared in the test → 测试无效 (missing-module). Regression + negatives in `qa-items.test.mjs` (real #978 log reproduces as discarded/invalid). Unit 340/341 pass (1 skipped). No report field change.
+
+**For the 日报 bot.** #978: the AI-test lead is withdrawn (test's own mistake); level unchanged P2 (coverage). No field changes.
+
+**For Praise / Praise PR.** Test-assignment candidates: #1101-type (test-only PR: unit/regression applicable; triage-skipped dimension should not make a PR partially-verified), #1099-type (credit the PR's own added tests before computing AI gaps), coverage-run timeouts. Relative `--out` on manual re-runs still lands in `/workspace/panoptes/argus/reports/` (#1098 20:36 run, hand-copied).

@@ -245,6 +245,25 @@ function fixtureGap(text, { content, source } = {}) {
   }
   return null
 }
+// missing-module 还包括：测试文件里直接调用了一个既没导入、也没在测试里声明的名字 → ReferenceError: x is not defined，
+// 且报错位置（第一帧）就在这个补测文件里（#978 10-19：用了 isMarkupTextCoveredByHigherSection 却只导入了另一个函数）。
+// 报错在被测代码里、或测试里有这个名字的导入 / 声明，都不算（可能是真问题）。
+const NOT_DEFINED = /ReferenceError: ([A-Za-z_$][\w$]*) is not defined/
+function declaredInTest(content, name) {
+  const n = name.replace(/\$/g, '\\$')
+  if (importedNames(content).has(name)) return true
+  if (new RegExp(`import\\s+(?:\\*\\s+as\\s+)?${n}\\b`).test(content)) return true
+  if (new RegExp(`\\b(?:const|let|var|function\\*?|class)\\s+${n}\\b`).test(content)) return true
+  return new RegExp(`\\b(?:const|let|var)\\s*[{\\[][^=;]*\\b${n}\\b[^=;]*[}\\]]\\s*=`).test(content)
+}
+function undeclaredInTest(text, { content, filePath } = {}) {
+  const m = text.match(NOT_DEFINED)
+  if (!m || !content || declaredInTest(content, m[1])) return null
+  const frame = text.slice(m.index).split('\n').slice(1).find((l) => /^\s*❯\s/.test(l))
+  const base = filePath ? String(filePath).split('/').pop() : null
+  if (!frame || !(base ? frame.includes(`${base}:`) : /\.test\.[cm]?[jt]sx?:\d+/.test(frame))) return null
+  return { kind: 'missing-module', line: `${m[0]} (used by the test; never imported or declared in it) ${frame.trim()}`.slice(0, 240) }
+}
 export function toInvalidTest(tail, test = {}) {
   const text = String(tail ?? '').replace(/\x1b\[[0-9;]*m/g, '')
   if (!text) return null
@@ -255,7 +274,7 @@ export function toInvalidTest(tail, test = {}) {
     const line = text.split('\n').find((l) => re.test(l))
     if (line) return { kind, line: line.trim().slice(0, 240) }
   }
-  return missingImportCall(text, test)
+  return missingImportCall(text, test) ?? undeclaredInTest(text, test)
 }
 
 // 补测执行结果 → 判定：kept（当前代码通过且植入错误后失败）/ discarded（植入错误对不上、植入后仍通过、没法跑、测试无效）/
