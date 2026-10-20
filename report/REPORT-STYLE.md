@@ -43,6 +43,7 @@
      只有覆盖率差、且属仓库基线的写「只是仓库整体覆盖率差一点（见下），本 PR 不用处理」；只有 flaky 的写「有个测试不稳定，重跑就过了，见下」（和合并前代码的对比按下面第 4 条写）；纯文档写「纯文档，按规则不跑测试，审查无问题，无需处理」。
    - 动作措辞不得出现"请尽快""立刻""马上"等施压词；P0 用"请优先修复"。
 3. **已私信通知**（紧跟 P1 节；没有 P0/P1 时紧跟开头）：每行 `#N 短标题 → 作者中文名，已飞书私信`，顺序与正文一致。
+   （2026-10-20 复盘补：要带交接仓 issue 链接的私信（aj0928、lubinyu-lab 的问题）按交接仓规则只能在群日报发出、开完 issue 之后再发。这类私信也照样列进本节，写成 `#N 短标题 → 作者中文名，日报发出后飞书私信`，不提交接仓、不提 issue；发送失败照常告诉 Praise。）
    - 数据只取 `/workspace/mivo-qa/feishu-sent.json` 中**本期日报里列出的 PR**（含补测的前一天合并 PR）的成功记录（key 形如
      `xindong/mivo-canvas-plugin#<N>:<fingerprint>`，有 `message_id` 才算成功）；同一 PR 多条记录只列一行；此前已私信过、本次因去重没再发的 PR 不进这一节，在它的级别条目末尾写「这一条之前已私信过」。
    - 绝不写 open_id、message_id、fingerprint、发送时间。
@@ -143,6 +144,15 @@
   - `coverage_gate.new_code.not_measurable_files`：量不出覆盖率的纯 JS 文件，不再按 0% 算。有时在「测试覆盖情况」写「有 N 个文件是纯 JS 脚本，量不出覆盖率，没算进新代码覆盖率」，不算问题。
   - `change_kind`：只用来判断是否按「纯文档或说明改动」写，字段值不进群。`ai_tests.uncovered_targets`（AI 补测瞄准的未覆盖行）只进私下补充。
   - `failed_checks[].not_a_pr_finding`：保留字段，当前版本不产出，缺省当 false。若出现 true：这条不算 PR 的问题、不进级别节、不 @ 不私信，只在「测试覆盖情况」一句话说「性能测试超时疑似环境原因，不算这个 PR 的问题」，并在私下补充提醒 Praise 规则已上线。
+
+- **PR 交接说明 `prs[].handoff`**（panoptes e42a13b，2026-10-20 起的报告才有；Praise 2026-10-20 定「全部执行」）：
+  - 没有这个字段，或 `present:false`：群里什么都不写。
+  - 有交接说明的 PR：条目里只加一行大白话带个数，如「作者写了 N 条要测的点：已验证 a 条，b 条自动测试没过、待确认，c 条额度用尽没测，d 条没能自动验证，e 条要人工测」，没有的项省略；不写 Q 编号、文件名、`key`。
+  - `qa_status:"failed"` 且 `confirmed:false` 只是线索：写「待确认」，不 @、不私信、不开交接仓 issue，也不因此升级别；等运维复现（`confirmed:true`）后再按正常问题写。
+  - `not-run` 分两类说：`reason:"quota-exhausted"` 写「额度用尽没测」；其它 reason（`no-reliable-test`、`ai-tests-*`、`no-level`、`unsupported-level …`）统一写「没能自动验证」，不贴原因。`docs-only` 不写。
+  - `manual`（cindy-mac / cindy-windows / paid）只写个数「要人工测 N 条」，不列内容。
+  - 去重按 PR 号加用例 id（`handoff:<PR>:<id>`），不用 fingerprint。
+- **只改了交接说明的 PR**（`code_review.status:"skipped"`，变动只在 `docs/pr/**`）：按纯文档写「只改了交接说明，按规则不跑测试和审查」，是正常情况，不能写成「还没审」或审查没跑成，也不算系统故障。
 
 ## 代码审查的复用（since 2026-10-11）
 
