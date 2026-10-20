@@ -5,8 +5,10 @@ import { globToRegExp, isTestPath } from './classify.mjs'
 // 维度 → 测试新增行（含文件名）里出现即算覆盖的关键词。只列 AI 补测会去补的、能从测试代码看出来的几项
 export const PR_TEST_DIMENSION_HINTS = Object.freeze({
   exception: /toThrow|\.rejects\b|\bthrow\b|mockRejectedValue|\bcatch\s*\(|pytest\.raises|assert\.(rejects|throws)|失败|错误|异常/,
-  'async-callback-retry': /\bretr(y|ies|ied)\b|backoff|callback|\.rejects\b|\.resolves\b|mockRejectedValue|mockResolvedValue|useFakeTimers|advanceTimers|setTimeout|RATE_LIMITED|重试|回调/i,
-  concurrency: /lock|mutex|\brace\b|concurren|parallel|Promise\.all|锁|竞争|并发/i,
+  // 要更具体的信号（按单词边界）：重试 / 拒绝 和断言同时出现；单有 callback、setTimeout、mockResolvedValue 不算
+  'async-callback-retry': { test: (t) => /\bretr(y|ies|ied|ying)\b|\brejects?\b|\brejected\b|mockRejectedValue(Once)?\b|\bRATE_LIMITED\b|重试/i.test(t) && /\bexpect\s*\(|\bassert\b|\.rejects\b|\btoThrow\b|pytest\.raises|断言/.test(t) },
+  // 并发信号（Promise.all / concurrent / race / 并发 / 竞争）和锁（lock / mutex / 锁，单词边界，block 之类不算）同时出现
+  concurrency: { test: (t) => /\bPromise\.(all|allSettled|race)\b|\bconcurren(t|cy|tly)\b|\bparallel\b|\brace\b|并发|竞争/i.test(t) && /\b(lock|locks|locked|locking|mutex)\b|锁/i.test(t) },
 })
 // 改到测试本身就意味着单测、回归被执行
 const ALWAYS = ['unit', 'regression']

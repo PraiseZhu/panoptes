@@ -1,5 +1,5 @@
 // AI 只做「人话解读 + 未覆盖风险提示 + 失败解释」，不参与通过/失败判定
-import { redact, truncate, tail, toShanghaiDay } from './util.mjs'
+import { redact, truncate, tail, toShanghaiDay, jsonObjectBody } from './util.mjs'
 import { toChatCompletionsUrl, fetchRetryingNetwork, isNetworkError, waitWithinBudget, budgetLeftMs, NET_OUTER_WAIT_MS, sleep as realSleep } from './util.mjs'
 import { aiUsageToday, addAiUsage } from './db.mjs'
 
@@ -64,12 +64,13 @@ export async function analyzePr({ db, secrets, riskClass, pr, files, profile, re
     `PR 描述：\n${truncate(pr.body ?? '', 6000)}`,
     `检查结果：\n${testSummary}`,
     `改动内容：${buildDiff(files)}`,
+    '按系统提示的格式只输出一个 json 对象。',
   ].join('\n\n'))
 
   const started = Date.now()
   const deadline = now() + maxMs
   try {
-    const body = JSON.stringify({
+    const body = jsonObjectBody({
       model: MODEL,
       reasoning_effort: EFFORT[riskClass],
       response_format: { type: 'json_object' },

@@ -146,3 +146,18 @@ test('(d) catch-up 子进程的 --out（reports/catch-up/PR-N.json）不受影�
   // 即使有人写成相对的 reports/catch-up/…，也落在 QA_HOME
   assert.equal(resolveOut('reports/catch-up/PR-1099.json', { cwd: join(HERE, '..'), qaHome: '/q' }), '/q/reports/catch-up/PR-1099.json')
 })
+
+// ── prTestDimensions 关键词收紧：反例 ─────────────────
+const fakeTest = (filename, lines) => ({ filename, status: 'added', patch: lines.map((l) => `+${l}`).join('\n') })
+test('prTestDimensions 反例：只用 setTimeout（以及 callback / mockResolvedValue）不算覆盖 async-callback-retry', () => {
+  const f = fakeTest('tests/timer.test.mjs', ["it('waits', async () => {", '  await new Promise((r) => setTimeout(r, 10))', '  const cb = vi.fn(); api.mockResolvedValue(1); run(callback)', '  expect(cb).toHaveBeenCalled()', '})'])
+  const dims = prTestDimensions({ files: [f], results: unitOk, profile: mivo })
+  assert.ok(dims.unit?.length, '测试本身应被执行')
+  assert.equal(dims['async-callback-retry'], undefined)
+})
+test('prTestDimensions 反例：只有 block 不算覆盖 concurrency', () => {
+  const f = fakeTest('tests/block.test.mjs', ["it('renders a code block', () => {", '  const block = render(blocks[0])', '  expect(block.blocked).toBe(false)', '})'])
+  const dims = prTestDimensions({ files: [f], results: unitOk, profile: mivo })
+  assert.ok(dims.unit?.length, '测试本身应被执行')
+  assert.equal(dims.concurrency, undefined)
+})
