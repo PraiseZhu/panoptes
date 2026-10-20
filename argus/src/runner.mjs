@@ -5,6 +5,7 @@ import { homedir, tmpdir } from 'node:os'
 import { run, isStopping, overBudget } from './exec.mjs'
 import { RUNS_DIR, MIRRORS_DIR, NPM_CACHE_DIR, UV_CACHE_DIR, UV_PYTHON_DIR, CACHE_DIR, CODE_DIR } from './paths.mjs'
 import { log, sleep, toPlainZh } from './util.mjs'
+import { machineLoad } from './memory.mjs'
 import { gitTokenFor } from './github.mjs'
 import { fileURLToPath } from 'node:url'
 import { validateTestReport } from './config.mjs'
@@ -360,7 +361,8 @@ function readProbeReport(specPath) {
   } catch { return null }
 }
 
-export async function runSteps(profile, src, runDir, { stepIds = null, execution = null } = {}) {
+// beforeStep(step)：每步开跑前等它返回的 promise（nightly 用来让 afterCoverage 的步骤等覆盖率轮次的单测分片跑完）
+export async function runSteps(profile, src, runDir, { stepIds = null, execution = null, beforeStep = null } = {}) {
   const env = stepEnv(runDir, profile)
   const needsBase = profile.steps.some((s) => /\$\{(?:BASE_SHA|DIFF_BASE_SHA)\}/.test(JSON.stringify(s)))
   const parent = needsBase ? await toParentSha(src) : ''
@@ -371,6 +373,7 @@ export async function runSteps(profile, src, runDir, { stepIds = null, execution
   for (const step of profile.steps) {
     if (isStopping() || overBudget()) break
     if (stepIds && step.kind !== 'setup' && !stepIds.includes(step.id)) continue
+    if (beforeStep) await beforeStep(step)
     const stepVarsForReport = prepareTestReport(step, runDir)
     const stepSubstitutions = { ...vars, ...stepVarsForReport }
     const identity = { ...(execution ?? {}), commandTemplate: [...step.cmd], covers: [...(step.covers ?? [])], aiGenerated: Boolean(step.aiGenerated) }
@@ -422,6 +425,7 @@ export async function runSteps(profile, src, runDir, { stepIds = null, execution
     const disturbed = await watch.stop()
     if (disturbed) log('error', 'step disturbed desktop', { step: step.id })
     const result = { ...identity, id: step.id, nameZh: step.nameZh, kind: step.kind, cmdText: step.cmd.join(' '), ok: res.ok, exitCode: res.exitCode, timedOut: res.timedOut, durationMs: res.durationMs, tail: res.tail, failures: res.ok ? [] : res.failures, failureDetails: res.ok ? [] : res.failureDetails, failureParseStatus: res.failureParseStatus, ...(res.shards ? { shards: res.shards } : {}) }
+    if (step.trialOnly) result.machine = machineLoad()
     toStepOutcome(step, result, runDir)
     Object.assign(result, readTestReport(step, result, src, runDir, stepVarsForReport, execution))
     if (disturbed) result.disturbedDesktop = true
@@ -590,7 +594,7 @@ export async function cleanupRun(mirror, runDir) {
 }
 
 // 一次完整执行：检出 → 跑步骤 → 清理；清理失败只记日志，由 janitor 兜底
-export async function executeOnSha({ repo, jobId, label, sha, profile, stepIds, extraRefspecs = [], keepTo = null, diffBase = null }) {
+export async function executeOnSha({ repo, jobId, label, sha, profile, stepIds, extraRefspecs = [], keepTo = null, diffBase = null, beforeStep = null }) {
   const mirror = await ensureMirror(repo, sha, { extraRefspecs })
   const runDir = newRunDir(jobId, label)
   try {
@@ -606,7 +610,7 @@ export async function executeOnSha({ repo, jobId, label, sha, profile, stepIds, 
   async function runCheckout() {
     const src = await checkout(mirror, sha, runDir, { repo, lfs: Boolean(profile.lfs), mode: profile.checkoutMode ?? 'worktree' })
     const checkedOutSha = await verifyCheckoutSha(src, sha)
-    return await runSteps(profile, src, runDir, { stepIds, execution: { jobId, runLabel: label, requestedSha: sha, checkedOutSha, diffBase } })
+    return await runSteps(profile, src, runDir, { stepIds, beforeStep, execution: { jobId, runLabel: label, requestedSha: sha, checkedOutSha, diffBase } })
   }
 }
 

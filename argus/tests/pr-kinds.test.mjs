@@ -187,3 +187,61 @@ test('pre_existing: unverified + base_run fail upgrades to pre-existing P3 (shad
   assert.equal(severityFor({ status, step: { kind: 'product' }, merged: true }), 'P3')
   assert.match(why, /base revision/)
 })
+
+test('覆盖率轮次跑完再查一次时间预算：超了就不再重跑 / 跑基线，直接返回（外层记 pr-timeout）', async () => {
+  const { setBudget } = await import('../src/exec.mjs')
+  const number = 2002
+  const repo = `fixture/pr${number}`
+  const src = join(root, `source-${number}`)
+  mkdirSync(src)
+  const git = (...args) => execFileSync('git', ['-C', src, '-c', 'user.name=F', '-c', 'user.email=f@example.invalid', ...args], { encoding: 'utf8' }).trim()
+  git('init', '-q', '-b', 'main')
+  writeFileSync(join(src, 'value.mjs'), 'export const v = 1\n'); git('add', '.'); git('commit', '-qm', 'base')
+  const baseSha = git('rev-parse', 'HEAD')
+  writeFileSync(join(src, 'value.mjs'), 'export const v = 2\n'); git('commit', '-qam', `code (#${number})`)
+  const mergeSha = git('rev-parse', 'HEAD')
+  execFileSync('git', ['clone', '-q', '--bare', src, join(MIRRORS_DIR, `fixture__pr${number}.git`)])
+  const pr = { number, title: 'code', html_url: 'https://example.invalid', user: { login: 'f' }, base: { ref: 'main', sha: baseSha }, head: { sha: 'f'.repeat(40) }, merged_at: new Date().toISOString(), merge_commit_sha: mergeSha, state: 'closed' }
+  writeFileSync(process.env.ARGUS_E2E_GH_STATE, JSON.stringify({ pr, baseSha, files: [{ filename: 'value.mjs', additions: 1, deletions: 1 }], calls: [] }))
+  // 首轮 unit 立刻失败；覆盖率轮次（带 NODE_V8_COVERAGE）睡 3 秒，期间预算用完
+  const profile = { sandbox: false, steps: [{ id: 'install', kind: 'setup', cmd: ['true'] }, { id: 'unit', kind: 'product', nameZh: '单元测试', covers: ['unit'], coverage: { labels: ['cov'] }, cmd: ['sh', '-c', '[ -n "$NODE_V8_COVERAGE" ] && sleep 3; exit 1'] }] }
+  process.env.ARGUS_PARALLEL_MIN_FREE_GB = '0'
+  setBudget(Date.now() + 1500)
+  try {
+    const ev = join(root, 'ev-budget')
+    const out = await N.processPr({ repo, project: { repo, profileData: profile }, number, discovery: 'merged', secrets: {}, db: null, health: health(), evidenceRoot: ev, opts: { noReview: true } })
+    assert.equal(out.run_mode?.coverage_parallel, true)
+    assert.ok(existsSync(join(ev, `pr-${number}`, 'h1')), '首轮跑过')
+    assert.ok(!existsSync(join(ev, `pr-${number}`, 'h2')) && !existsSync(join(ev, `pr-${number}`, 'b')), '预算用完：不重跑、不跑基线')
+    assert.equal(out.checks.length, 0)
+  } finally { setBudget(null); delete process.env.ARGUS_PARALLEL_MIN_FREE_GB }
+})
+
+test('bench 失败后等机器空闲：等完再查一次时间预算，超了就不重跑（不进 h2、不跑基线）', async () => {
+  const { setBudget } = await import('../src/exec.mjs')
+  const number = 2003
+  const repo = `fixture/pr${number}`
+  const src = join(root, `source-${number}`)
+  mkdirSync(src)
+  const git = (...args) => execFileSync('git', ['-C', src, '-c', 'user.name=F', '-c', 'user.email=f@example.invalid', ...args], { encoding: 'utf8' }).trim()
+  git('init', '-q', '-b', 'main')
+  writeFileSync(join(src, 'value.mjs'), 'export const v = 1\n'); git('add', '.'); git('commit', '-qm', 'base')
+  const baseSha = git('rev-parse', 'HEAD')
+  writeFileSync(join(src, 'value.mjs'), 'export const v = 2\n'); git('commit', '-qam', `code (#${number})`)
+  const mergeSha = git('rev-parse', 'HEAD')
+  execFileSync('git', ['clone', '-q', '--bare', src, join(MIRRORS_DIR, `fixture__pr${number}.git`)])
+  const pr = { number, title: 'code', html_url: 'https://example.invalid', user: { login: 'f' }, base: { ref: 'main', sha: baseSha }, head: { sha: 'f'.repeat(40) }, merged_at: new Date().toISOString(), merge_commit_sha: mergeSha, state: 'closed' }
+  writeFileSync(process.env.ARGUS_E2E_GH_STATE, JSON.stringify({ pr, baseSha, files: [{ filename: 'value.mjs', additions: 1, deletions: 1 }], calls: [] }))
+  const profile = { sandbox: false, steps: [{ id: 'install', kind: 'setup', cmd: ['true'] }, { id: 'bench', kind: 'product', nameZh: '性能基准', trialOnly: true, cmd: ['sh', '-c', 'exit 1'] }] }
+  const saved = { ...N.idleHooks }
+  // 机器一直忙；等第一轮时预算用完
+  N.idleHooks.sample = () => ({ loadavg: [99, 99, 99], cores: 1, mem_available_gb: 12 })
+  N.idleHooks.wait = async () => setBudget(Date.now() - 1)
+  try {
+    const ev = join(root, 'ev-idle-budget')
+    const out = await N.processPr({ repo, project: { repo, profileData: profile }, number, discovery: 'merged', secrets: {}, db: null, health: health(), evidenceRoot: ev, opts: { noReview: true } })
+    assert.equal(out.rerun_idle_wait?.idle, false)
+    assert.ok(existsSync(join(ev, `pr-${number}`, 'h1')), '首轮跑过')
+    assert.ok(!existsSync(join(ev, `pr-${number}`, 'h2')) && !existsSync(join(ev, `pr-${number}`, 'b')), '预算用完：不重跑、不跑基线')
+  } finally { Object.assign(N.idleHooks, saved); setBudget(null) }
+})

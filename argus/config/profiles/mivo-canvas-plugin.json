@@ -1470,45 +1470,6 @@
       ]
     },
     {
-      "id": "bench",
-      "nameZh": "性能基准",
-      "kind": "product",
-      "optional": true,
-      "trialOnly": true,
-      "covers": [
-        "performance"
-      ],
-      "cmd": [
-        "node",
-        "scripts/run-vitest.mjs",
-        "run",
-        "--config",
-        "vitest.bench.config.ts",
-        "--reporter=default",
-        "--reporter=json",
-        "--outputFile=${TEST_REPORT}"
-      ],
-      "timeoutMin": 15,
-      "testReport": {
-        "format": "vitest-json",
-        "path": "${RUN}/reports/bench.json"
-      },
-      "noteZh": "用仓里已有的性能测试和它们自带的阈值，不另编阈值；共享机器上耗时有波动，试运行期只记拿不准",
-      "cache": false,
-      "exercises": [
-        "src/kernel/**",
-        "src/render/**",
-        "src/canvas/**",
-        "src/agent/**",
-        "src/store/**",
-        "**/*.bench.test.ts"
-      ],
-      "runsFiles": [
-        "**/*.bench.test.ts",
-        "vitest.bench.config.ts"
-      ]
-    },
-    {
       "id": "typecheck",
       "nameZh": "类型检查",
       "kind": "product",
@@ -1634,6 +1595,46 @@
         "max": 2,
         "perShardGb": 1.2
       }
+    },
+    {
+      "id": "bench",
+      "nameZh": "性能基准",
+      "kind": "product",
+      "optional": true,
+      "trialOnly": true,
+      "covers": [
+        "performance"
+      ],
+      "cmd": [
+        "node",
+        "scripts/run-vitest.mjs",
+        "run",
+        "--config",
+        "vitest.bench.config.ts",
+        "--reporter=default",
+        "--reporter=json",
+        "--outputFile=${TEST_REPORT}"
+      ],
+      "timeoutMin": 15,
+      "testReport": {
+        "format": "vitest-json",
+        "path": "${RUN}/reports/bench.json"
+      },
+      "noteZh": "用仓里已有的性能测试和它们自带的阈值，不另编阈值；共享机器上耗时有波动，试运行期只记拿不准；排在单测之后，并等并行的覆盖率轮次跑完（负载敏感，审计 2026-10-18 S3）",
+      "cache": false,
+      "exercises": [
+        "src/kernel/**",
+        "src/render/**",
+        "src/canvas/**",
+        "src/agent/**",
+        "src/store/**",
+        "**/*.bench.test.ts"
+      ],
+      "runsFiles": [
+        "**/*.bench.test.ts",
+        "vitest.bench.config.ts"
+      ],
+      "afterCoverage": true
     },
     {
       "id": "node-test",
