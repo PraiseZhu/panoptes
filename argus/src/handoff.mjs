@@ -4,6 +4,9 @@
 export const HANDOFF_SCHEMA = 'mivo-pr-handoff/v1'
 export const AUTO_LEVELS = ['unit', 'contract', 'browser-fixture']
 export const MANUAL_LEVELS = ['cindy-mac', 'cindy-windows', 'paid']
+// 层次取法与 Mivo 校验器 pr-handoff-gate.cjs:241-243 相同：转小写，按整词匹配；先认自动补测的层次，再认其余层次
+const ALL_LEVELS = [...AUTO_LEVELS, ...MANUAL_LEVELS, 'static', 'github-live']
+const levelOf = (cell) => { const v = String(cell ?? '').toLowerCase(); return ALL_LEVELS.find((l) => new RegExp(`(^|[^a-z-])${l}($|[^a-z-])`).test(v)) ?? v }
 const R_FIELDS = { 触发: 'trigger', 会坏成什么样: 'breaks', 现在靠什么挡住: 'guard', 怎么证明我错了: 'falsify', 测试: 'tests' }
 const Q_FIELDS = { 层次: 'level', '期望(看得见)': 'expect_visible', '期望(看不见)': 'expect_hidden', 失败判据: 'fail_criteria', 反证: 'counter_proof', 自动化: 'automation' }
 
@@ -67,10 +70,10 @@ export function parseHandoff({ review = null, qa = null } = {}) {
     const cov = /[（(]\s*覆盖\s*([^）)]*)[）)]\s*$/.exec(b.title)
     const f = pick(b.fields, Q_FIELDS)
     return { id: b.id, title: clean(b.title.replace(cov?.[0] ?? '', '')), covers: cov ? cov[1].split(/[\s/、,，]+/).filter((x) => /^[RA]\d+$/.test(x)) : [],
-      level: f.level.toLowerCase(), expect: [f.expect_visible, f.expect_hidden].filter(Boolean).join('；'), fail_criteria: f.fail_criteria, counter_proof: f.counter_proof, automation: f.automation,
+      level: levelOf(f.level), expect: [f.expect_visible, f.expect_hidden].filter(Boolean).join('；'), fail_criteria: f.fail_criteria, counter_proof: f.counter_proof, automation: f.automation,
       author_status: authorStatus[b.id] ?? null }
   })
-  const left = rows(q['5']).filter((c) => c[0] && c[0] !== '无').map((c) => ({ ref: c[0] ?? '', why: c[1] ?? '', env: c[2] ?? '' }))
+  const left = rows(q['5']).filter((c) => c[0] && !/^无($|[（(\s])/.test(c[0])).map((c) => ({ ref: c[0] ?? '', why: c[1] ?? '', env: c[2] ?? '' }))
   return { present: true, reason: null, acceptance, risks, boundaries, cases, left }
 }
 
