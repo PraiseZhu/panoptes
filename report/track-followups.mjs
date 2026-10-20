@@ -7,6 +7,7 @@ import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { matchesItem, isCoverage, shortTitle } from './followup-match.mjs'
+import { handoffRepos, loadResolutions, resolvedBy } from './handoff-receipts.mjs'
 const feedbackBlock = (pr) => `怎么告诉我处理好了：
 · 改了：提修复 PR，标题或描述里写上原 PR 号（比如 #${pr}）
 · 不用改：在原 PR 下留言写一句原因，留言里点名是哪条，或写‘都不用改’
@@ -20,7 +21,7 @@ const OWNER_OPEN_ID = 'ou_b23d82331a27b89e6484f3464fce144e' // PraiseZhu: handle
 const STATE = process.env.MIVO_QA_FOLLOWUP_STATE || join(QA, 'followup/state.json')
 const SENT = join(QA, 'feishu-sent.json')
 const HOLDS = process.env.MIVO_QA_FOLLOWUP_HOLDS || join(QA, 'followup/holds.json')
-const SENDER = join(QA, 'scripts/send-feishu-dm.mjs')
+const SENDER = process.env.MIVO_QA_DM_SENDER || join(QA, 'scripts/send-feishu-dm.mjs')
 const MAX_REMINDERS = 7
 const DRY = process.argv.includes('--dry-run')
 const NO_REMIND = process.argv.includes('--no-remind') // 只查回复、发感谢，不发提醒
@@ -32,7 +33,7 @@ const OVERDUE_CC = { 'lubinyu-lab': ['aj0928'] }
 const readJson = (p, d) => (existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : d)
 const bjDate = (d = new Date()) => new Date(d.getTime() + 8 * 3600e3).toISOString().slice(0, 10)
 const today = bjDate()
-const summary = { dry_run: DRY, held: [], date: today, reminded: [], thanked: [], escalated: [], errors: [], drafts: [], items: [] }
+const summary = { dry_run: DRY, held: [], handoff_resolved: [], date: today, reminded: [], thanked: [], escalated: [], errors: [], drafts: [], items: [] }
 
 // GitHub 偶发 EOF：每次调用最多重试 3 次
 function ghx(args, opts) { for (let i = 0; ; i++) { try { return execFileSync('gh', args, opts) } catch (e) { if (i >= 3 || !/EOF|timeout|502|503|ECONNRESET/i.test(String(e.stderr || e.message))) throw e; execFileSync('sleep', [String(2 * (i + 1))]) } } }
@@ -159,15 +160,28 @@ function send(openId, text, key) {
   } finally { rmSync(d, { recursive: true, force: true }) }
 }
 
+// --- 交接仓回执：作者在 <login>-handoff 仓 issue 下回了结论（已修/不修/误报），或 issue 已关闭/标了误报 → 收起，不再提醒
+let resolutions = [], handoffFailed = null
+try { resolutions = loadResolutions(handoffRepos(QA), ghPaged) } catch (e) { handoffFailed = `handoff gh: ${oneLine(e.message).slice(0, 200)}`; summary.errors.push({ error: handoffFailed + '（交接仓回执没读成，本次不发提醒/逾期通报）' }) }
+summary.handoff = { resolutions: resolutions.length, failed: handoffFailed }
+const itemResolution = (it) => resolvedBy(resolutions, { pr: it.pr, fingerprints: (it.fingerprints || []).slice(0, 1), title: it.problems?.[0] })
+
 // --- main
 const byAuthor = new Map()
 // 每个 PR 还开着的非覆盖率问题数；只剩一条时作者任何回复都算回应它
 const openNonCov = {}
-for (const it of Object.values(state.items)) if (it.status === 'open' && !it.coverage) openNonCov[it.pr] = (openNonCov[it.pr] || 0) + 1
+for (const it of Object.values(state.items)) if (it.status === 'open' && !it.coverage && !itemResolution(it)) openNonCov[it.pr] = (openNonCov[it.pr] || 0) + 1
 for (const [key, it] of Object.entries(OVERDUE_ONLY ? {} : state.items)) {
   const rec = { key, pr: it.pr, login: it.login, status_before: it.status, reminders: it.reminders }
   summary.items.push(rec)
   if (it.status !== 'open' || !it.login) continue
+  const res = itemResolution(it)
+  if (res) {
+    const h = { kind: res.kind, by: res.by, at: res.at, issue: `${res.repo}#${res.issue}`, url: res.receipt_url || res.url }
+    rec.handoff = h; summary.handoff_resolved.push({ pr: it.pr, login: it.login, ...h })
+    if (!DRY) { it.status = 'closed'; it.closed_at = new Date().toISOString(); it.closed_via = 'handoff-receipt'; it.evidence = [{ type: 'handoff-receipt', ...h }] }
+    continue
+  }
   const person = byLogin.get(it.login)
   if (!person || person.feishu_open_id !== it.open_id) { rec.skip = 'author not in author-map (notify-enabled) or open_id mismatch'; summary.errors.push({ key, error: rec.skip }); continue }
   try { rec.evidence = evidenceFor(detect(it), { problems: it.problems.slice(0, 1), files: it.main_files || [], coverage: it.coverage, sole: openNonCov[it.pr] === 1 }) } catch (e) { summary.errors.push({ key, error: `gh: ${oneLine(e.message).slice(0, 200)}` }); continue }
@@ -190,7 +204,7 @@ for (const [login, g] of byAuthor) {
     else summary.errors.push({ login, error: r.error, key })
   }
   const due = g.remind.filter(it => !it.reminder_dates.includes(today))
-  if (g.remind.length && !NO_REMIND) {
+  if (g.remind.length && !NO_REMIND && !handoffFailed) {
     const key = `followup-remind:${login}:${today}`
     const r = send(g.openId, remindText(g.remind), key)
     if (r.ok) { summary.reminded.push({ login, items: byPr(g.remind), skipped: r.skipped || false }); if (!DRY && !r.skipped) for (const it of due) { it.reminders++; it.reminder_dates.push(today) } }
@@ -202,7 +216,9 @@ for (const x of summary.items) delete x._it
 // --- 逾期未回应通报 (--group-overdue): P0/P1/有具体建议的 P2 通知作者（私信或群日报 @）后 72h 无回应 → 群里合并通报一次
 if (GROUP_OVERDUE) {
   const GROUP_CHAT = 'oc_ecd450e0bed37d49bc033f3cd07cd9af'
-  const GROUP_SENDER = join(QA, 'report/send-feishu-report.mjs')
+  const GROUP_SENDER = process.env.MIVO_QA_GROUP_SENDER || join(QA, 'report/send-feishu-report.mjs')
+  const SLACK_SENDER = process.env.MIVO_QA_SLACK_SENDER || join(QA, 'report/slack/send-slack-report.mjs')
+  const SLACK_PREVIEW = join(dirname(STATE), 'overdue-preview.slack.txt')
   const PREVIEW = join(dirname(STATE), 'overdue-preview.post.json')
   const OVERDUE_MS = 72 * 3600e3
   const allByLogin = new Map((amap.mivo_authors || []).map(m => [m.github_login, m]))
@@ -233,8 +249,12 @@ if (GROUP_OVERDUE) {
     const { author, title, findings } = findingsFor(pr)
     const login = author || n.login
     const seen = new Set(), qual = []
-    for (const f of findings) if (!seen.has(f.fingerprint) && seen.add(f.fingerprint) && isQualifying(f)) qual.push(f)
-    if (!qual.length) continue
+    const resolvedFps = []
+    for (const f of findings) if (!seen.has(f.fingerprint) && seen.add(f.fingerprint) && isQualifying(f)) {
+      if (resolvedBy(resolutions, { pr, fingerprints: [f.fingerprint], title: f.title })) resolvedFps.push(f.fingerprint) // 交接仓已有结论
+      else qual.push(f)
+    }
+    if (!qual.length) { if (resolvedFps.length) ov.candidates.push({ pr, login: author || n.login, skip: 'handoff receipt', resolved: resolvedFps }); continue }
     const it = { pr, login, dm_sent_at: n.at, files: [...new Set(qual.map(f => f.file).filter(Boolean))], fingerprints: qual.map(f => f.fingerprint) }
     const rec = { pr, login, notified_at: n.at, via: [...n.via], issues: qual.map(f => ({ severity: f.severity, title: f.title })) }
     ov.candidates.push(rec)
@@ -253,6 +273,7 @@ if (GROUP_OVERDUE) {
     if (!person?.feishu_open_id) ov.gaps.push({ pr, login, gap: '作者没有 open_id，无法 @，改写名字' })
     ov.notices.push({ pr, login, title, person, days: Math.floor(age / 86400e3), notified_at: n.at, via: [...n.via], issues: open })
   }
+  if (handoffFailed) ghFailed++
   if (ghFailed) { ov.blocked = `${ghFailed} 个 PR 的 GitHub 回应没查成，本次不发通报，下次重跑`; summary.errors.push({ error: ov.blocked }) }
   if (ov.notices.length && !ghFailed) {
     const R = `https://github.com/${REPO}/pull/`
@@ -272,7 +293,10 @@ if (GROUP_OVERDUE) {
     lines.push([t('修了就开修复 PR 并在描述里写原 PR 号，不修就在 PR 下留言说明就行（觉得是误报也可以直接留言说明）。看到回应后这条就收起，不会重复通报。')])
     const post = { zh_cn: { title: `Mivo QA · 逾期未回应通报 · ${Number(today.slice(5, 7))}月${Number(today.slice(8))}日`, content: lines } }
     ov.text = [post.zh_cn.title, ...lines.map(l => l.map(e => e.tag === 'at' ? `@${e.user_name}` : e.text).join(''))].join('\n')
-    if (DRY) { writeFileSync(PREVIEW, JSON.stringify(post, null, 2)); ov.preview = PREVIEW }
+    // Slack #mivo-canvas-qa 同步一份（mrkdwn 纯文本，@中文名 由 send-slack-report.mjs 按 slack-ids.json 换成 <@U…>）
+    const slackLines = [`*${post.zh_cn.title}*`, ...lines.map(l => l.map(e => e.tag === 'at' ? `@${e.user_name}` : e.tag === 'a' ? `<${e.href}|${e.text}>` : e.text).join(''))]
+    ov.slack_text = slackLines.join('\n')
+    if (DRY) { writeFileSync(PREVIEW, JSON.stringify(post, null, 2)); ov.preview = PREVIEW; writeFileSync(SLACK_PREVIEW, ov.slack_text); ov.slack_preview = SLACK_PREVIEW }
     else {
       const d = mkdtempSync(join(tmpdir(), 'mivo-ov-')); const cf = join(d, 'post.json')
       try {
@@ -281,6 +305,16 @@ if (GROUP_OVERDUE) {
         let r; try { r = JSON.parse(String(outp).trim()) } catch { r = { ok: false, error: 'unparseable sender output' } }
         ov.sent = { ok: !!r.ok, skipped: !!r.skipped, error: r.ok ? null : (r.error || 'send failed') }
         if (r.ok) for (const x of ov.notices) for (const f of x.issues) state.overdue_notified[`${REPO}#${x.pr}:${f.fingerprint}`] = { at: new Date().toISOString(), date: today }
+        else summary.errors.push({ error: `overdue feishu: ${ov.sent.error}` })
+        // Slack：飞书发成功（或今天已发过）才跟发，同一 dedupe key 防重；失败只记 errors，不影响飞书记账
+        if (r.ok) {
+          const sf = join(d, 'slack.txt'); writeFileSync(sf, ov.slack_text)
+          let so = '', okS = false
+          try { so = execFileSync('node', [SLACK_SENDER, '--text-file', sf, '--dedupe-key', `mivo-overdue-notice:${today}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); okS = /^(ok|skip)\b/m.test(so) }
+          catch (e) { so = `${e.stdout || ''}${e.stderr || ''}` }
+          ov.slack = { ok: okS, skipped: /^skip\b/m.test(so), error: okS ? null : oneLine(so).slice(0, 200) || 'slack send failed' }
+          if (!okS) summary.errors.push({ error: `overdue slack: ${ov.slack.error}` })
+        }
       } finally { rmSync(d, { recursive: true, force: true }) }
     }
   }
