@@ -155,6 +155,7 @@ Merged reports written by nightly also carry `run.source_report` (path of the ni
 | **`tested`** | `true` when checks actually ran for this PR; `false` for `not-tested`, `qa-error`, `docs-only`, `skipped` |
 | **`dimensions_run`** | `{ "white-box": [check ids], "gray-box": [...], "black-box": [...] }` — checks that really executed (status pass or fail) |
 | **`dimensions_missing`** | dimensions with no executed check; non-empty ⇒ verdict can never be `clean` |
+| `dimensions_not_applicable` | (since 2026-10-20) dimensions with no check at all whose steps were **all** skipped by triage (`skipped_steps[].reason` starting `triage:`), e.g. `black-box` for a tests-only PR (#1101). They are **not** in `dimensions_missing` and do not make the PR `partially-verified`. A step that was planned but did not run (`not run: …`) or an `unavailable` check keeps the dimension in `dimensions_missing` |
 | `verdict` | see table below |
 | `outcome`, `outcome_reason` | engine outcome (`passed`, `defect`, `flaky`, `infra_failed`, `docs_only`, …) |
 | `not_tested_code`, `not_tested_reason` | only for `verdict: not-tested` |
@@ -170,6 +171,7 @@ Merged reports written by nightly also carry `run.source_report` (path of the ni
 | `test_backed_severity` | highest severity among test-backed findings, or `null` |
 | `finding_sources` | distinct `source` values of this PR's findings |
 | `coverage` | QA-dimension coverage of the matrix — *not* code coverage. See *Reading `coverage` and `dimension_status`* below. **`dimension_status`** `{ <key>: { applicability, status: covered \| covered-by-ai-test \| gap \| capped \| not-applicable \| undetermined, checks: [step ids], ai_tests: [ai-test ids], display_zh?, capped_by? } }` for all 29 dimensions, and every total derived from it: `applicable`, `covered`, `missed` (= `gaps`), `undetermined`, `undeterminedMissed`, `coverage`, **`applicable_total`**, **`covered_total`**, `covered_dimensions`, `ai_covered`, `not_applicable_total`, `undetermined_total`, **`capped`**, **`capped_total`**; `passRate` = share of checks that ran and passed; `basis` names the source |
+| `coverage.dimension_status.<key>.pr_tests` | (since 2026-10-20, only when non-empty) test files **the PR itself** added or modified that ran (pass / fail) and exercise this dimension (keywords in their added lines; `unit` / `regression` always). Such a dimension is `status: covered` and is not an AI-test gap (#1099) |
 | **`ai_tests`** | AI-generated tests for this PR, see *AI tests* |
 | **`coverage_gate`** | white-box code-coverage gate, see below; **docs-only: `{ status: "not-applicable", reason: "docs-only change" }`**; `null` when no unit run happened for another reason (not-tested, qa-error) |
 | **`skipped_steps`** | **every** profile step that did not run — **each step id at most once** (the first, most specific reason wins: not applicable / triage / `--skip-step` before `not run: …`; reports before 2026-10-11 could list e.g. `web-build` twice), each `{ id, nameZh, reason, reasonZh?, dimension }`; reasons: `triage: …` (optional step not relevant to the change), `skipped by --skip-step`, `not run: dependency install failed`, `not run: run stopped before this step …`, `docs-only change: no checks run`, `not applicable to this revision: …` (the profile step's `appliesIf` file is absent, e.g. `web-build` when the revision has no web entry `index.html`, or a dist scan whose script the revision does not have yet — neither a pass nor an unavailable check). **Sub-probes of a probe step that did not run** are listed too, as `{ id: "api-probe/<probe id>", nameZh, reason, parent_step: "api-probe", dimension }` — e.g. reason `no test account` for signed-in probes when neither local sign-in nor `MIVO_QA_TEST_*` is available |
@@ -265,6 +267,11 @@ Older reports without the field: treat `source == "check"` and `status != "flaky
   `unit_run_under_coverage` `{ exit_code, timed_out, failed_tests, note }` records how the unit suite did under
   instrumentation — informational only, never part of the verdict. Global metrics cover the files the unit tests
   load (vitest v8 default scope).
+  Since 2026-10-20 the coverage run passes `--testTimeout` / `--hookTimeout` (30000 ms, env `ARGUS_COVERAGE_TEST_TIMEOUT_MS`) to vitest,
+  so slow-under-instrumentation tests no longer hit the 5 s default; and `unit_run_under_coverage` also carries
+  **`new_code_maybe_low`** (bool) and **`failed_tests_importing_changes`** `[{ test_file, imports: [changed files] }]`: a test
+  file that failed in the coverage run imports (relative `import` / `import()` / `require`) a non-test file the PR changed, so
+  `new_code` for those files may read lower than it really is. Informational only, never part of the verdict.
 - The four metrics and thresholds are ming-qa's G2 *Unit Tests And Coverage* gate
   (`ming-qa/skills/quality-assurance-agent/references/quality-gates.md`, config `qualityGates.coverage`:
   `lines 80 · branches 70 · functions 80 · newCode 90`); `thresholds_source` names it.
@@ -312,6 +319,8 @@ Every tested PR carries an explicit decision for each of the 29 QA dimensions of
 - `applicability` ∈ `applicable` | `not-applicable` | `undetermined`; every entry has a `reason`.
 - `source`: `profile` (profile `notApplicable`), `path` (profile path hints matched a changed file → applicable),
   `jev` (Jev probability `p`), `none` (no decision possible).
+- `source: "tests-only"` (since 2026-10-20): every changed file is a test file (`*.test.*`, `*.spec.*`, `*.node-test.*`,
+  `__tests__/`, `test_*.py`, `*_test.py`) → `unit` and `regression` are `applicable` (high) whatever Jev says (#1101).
 - Jev bands: `p ≥ 0.7` applicable (high) · `0.5 ≤ p < 0.7` applicable (low, conservative) ·
   `0.3 < p < 0.5` not-applicable (low) · `p ≤ 0.3` not-applicable (high). With `status: "ok"` nothing is `undetermined`.
 - `status`: `ok` · `not-configured` (no key) · `failed` (Jev error; `reason` says why) · `not-run` (docs-only PR).

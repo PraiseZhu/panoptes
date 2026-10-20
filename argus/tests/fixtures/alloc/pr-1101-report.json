@@ -1,0 +1,146 @@
+{
+ "checks": [
+  {
+   "id": "install",
+   "kind": "setup",
+   "dimension": "white-box",
+   "status": "pass"
+  },
+  {
+   "id": "typecheck",
+   "kind": "product",
+   "dimension": "white-box",
+   "status": "pass"
+  },
+  {
+   "id": "plugin",
+   "kind": "product",
+   "dimension": "gray-box",
+   "status": "pass"
+  },
+  {
+   "id": "host-locale",
+   "kind": "quality",
+   "dimension": "gray-box",
+   "status": "pass"
+  },
+  {
+   "id": "vendor-split",
+   "kind": "quality",
+   "dimension": "gray-box",
+   "status": "pass"
+  },
+  {
+   "id": "unit",
+   "kind": "product",
+   "dimension": "white-box",
+   "status": "pass"
+  },
+  {
+   "id": "lint",
+   "kind": "quality",
+   "dimension": "white-box",
+   "status": "pass"
+  },
+  {
+   "id": "logging",
+   "kind": "quality",
+   "dimension": "white-box",
+   "status": "pass"
+  },
+  {
+   "id": "i18n",
+   "kind": "quality",
+   "dimension": "white-box",
+   "status": "pass"
+  },
+  {
+   "id": "cycles",
+   "kind": "quality",
+   "dimension": "white-box",
+   "status": "pass"
+  },
+  {
+   "id": "structure",
+   "kind": "quality",
+   "dimension": "white-box",
+   "status": "pass"
+  },
+  {
+   "id": "design",
+   "kind": "quality",
+   "dimension": "white-box",
+   "status": "pass"
+  },
+  {
+   "id": "internal-literals",
+   "kind": "quality",
+   "dimension": "white-box",
+   "status": "pass"
+  },
+  {
+   "id": "endpoint-literals",
+   "kind": "quality",
+   "dimension": "white-box",
+   "status": "pass"
+  },
+  {
+   "id": "secret-scan",
+   "kind": "product",
+   "dimension": "white-box",
+   "status": "pass"
+  }
+ ],
+ "skipped_steps": [
+  {
+   "id": "api-inproc",
+   "dimension": "gray-box",
+   "reason": "triage: change does not touch what this optional step covers"
+  },
+  {
+   "id": "api-probe",
+   "dimension": "gray-box",
+   "reason": "triage: change does not touch what this optional step covers"
+  },
+  {
+   "id": "e2e-browser",
+   "dimension": "black-box",
+   "reason": "triage: change does not touch what this optional step covers"
+  },
+  {
+   "id": "e2e-legacy-migration",
+   "dimension": "black-box",
+   "reason": "triage: change does not touch what this optional step covers"
+  },
+  {
+   "id": "bench",
+   "dimension": "gray-box",
+   "reason": "triage: change does not touch what this optional step covers"
+  },
+  {
+   "id": "node-test",
+   "dimension": "white-box",
+   "reason": "triage: change does not touch what this optional step covers"
+  },
+  {
+   "id": "pytest",
+   "dimension": "white-box",
+   "reason": "triage: change does not touch what this optional step covers"
+  },
+  {
+   "id": "playwright-smoke",
+   "dimension": "black-box",
+   "reason": "triage: change does not touch what this optional step covers"
+  },
+  {
+   "id": "web-build",
+   "dimension": "gray-box",
+   "reason": "not applicable to this revision: no web entry (index.html) in this revision: the web build was retired and the target CI no longer runs npm run build"
+  }
+ ],
+ "findings": [],
+ "outcome": "passed",
+ "code_review": {
+  "status": "passed"
+ }
+}

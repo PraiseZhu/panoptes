@@ -12,9 +12,13 @@ export const COVERAGE_THRESHOLDS = Object.freeze({ lines: 80, branches: 70, func
 export const COVERAGE_SOURCE = 'ming-qa G2 Unit Tests And Coverage (references/quality-gates.md; qualityGates.coverage lines/branches/functions/newCode)'
 
 // vitest 追加参数：只写 JSON 报告，不让 vitest 自己按阈值判失败（门禁由我们算，失败不能伪装成单测失败）
+// v8 插桩让用例变慢（cindyplugin library* / depositBindingLock 在默认 5 s 下超时）：覆盖率轮次调高单个用例 / 钩子超时。
+// 只用于覆盖率轮次（它的通过 / 失败不参与判定），判定用的首轮不受影响。ARGUS_COVERAGE_TEST_TIMEOUT_MS 可调（默认 30000）
+export const coverageTestTimeoutMs = (env = process.env) => { const n = Number(env.ARGUS_COVERAGE_TEST_TIMEOUT_MS); return Number.isInteger(n) && n > 0 ? n : 30_000 }
 export function vitestCoverageArgs(dir) {
+  const t = coverageTestTimeoutMs()
   return ['--coverage.enabled=true', '--coverage.provider=v8', '--coverage.reporter=json-summary', '--coverage.reporter=json',
-    `--coverage.reportsDirectory=${dir}`, '--coverage.reportOnFailure=true', '--coverage.clean=true']
+    `--coverage.reportsDirectory=${dir}`, '--coverage.reportOnFailure=true', '--coverage.clean=true', `--testTimeout=${t}`, `--hookTimeout=${t}`]
 }
 
 const pct = (x) => (typeof x?.pct === 'number' && Number.isFinite(x.pct) ? x.pct : null)

@@ -3,14 +3,14 @@
 // ARGUS_ALLOW_ISSUES=1 时才可能发生。
 import { memAvailableGb, machineLoad, isIdle } from './memory.mjs'
 import { mkdirSync, writeFileSync, renameSync, existsSync, readFileSync, statfsSync, readdirSync } from 'node:fs'
-import { join, resolve, dirname, basename } from 'node:path'
+import { join, resolve, dirname, basename, posix } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { hostname } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { loadRegistry, loadSecrets } from './config.mjs'
 import { openDb } from './db.mjs'
 import { listNightlyPrs, getPull, getCommit, getBranchHead, listPullFiles, addFullText, getHandoff, shanghaiDayWindow, findIssuesByMarkerLabel, createIssue, commentIssue, reopenIssue, findCommentByMarker } from './github.mjs'
-import { classifyChange, highRiskFiles, withoutHandoff } from './classify.mjs'
+import { classifyChange, highRiskFiles, withoutHandoff, isTestPath } from './classify.mjs'
 import { parseHandoff, splitHandoffCases, toHandoffReport, settleHandoff } from './handoff.mjs'
 import { executeOnSha, ensureMirror, mergeBase, sandboxMode, janitor, mirrorPath } from './runner.mjs'
 import { decideOutcome, failedIds, setupFailed, failureKeys, compareKey } from './decide.mjs'
@@ -23,6 +23,7 @@ import { log, redact, sleep, tail, toShanghaiDay, toShanghaiIso, waitWithinBudge
 import { setBudget, overBudget } from './exec.mjs'
 import { coverageGate, parseAddedLines, mergeCoverageFiles, COVERAGE_THRESHOLDS } from './coverage.mjs'
 import { recentGiveUps } from './catchup.mjs'
+import { prTestDimensions } from './pr-tests.mjs'
 import { generateTargetedTests, toAiTestSteps, toAiGaps, toUncoveredTargets, toAiTestResult, aiTestCaps, aiTestTier, degradeForQuota, toSourceHead } from './aitests.mjs'
 import { createQuota, memoryQuota, resolvePool, CAPPED_ZH } from './quota.mjs'
 
@@ -309,7 +310,8 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   const cov = await covRun
   // 覆盖率轮次可能很久：跑完再看一次时间预算，超了就不再重跑 / 跑基线（外层按 pr-timeout 记未测完）
   if (overBudget()) return out
-  out.coverage_gate = computeCoverageGate({ first: Array.isArray(cov) ? cov : [], prDiff, covError: cov?.error })
+  const readAtSha = (file) => { try { return execFileSync('git', ['-C', mirrorPath(repo), 'show', `${sha}:${file}`], { encoding: 'utf8', maxBuffer: 8 << 20 }) } catch { return null } }
+  out.coverage_gate = computeCoverageGate({ first: Array.isArray(cov) ? cov : [], prDiff, covError: cov?.error, changedFiles: files.map((f) => f.filename), readFile: readAtSha })
 
   let rerun = null, base = null, latest = null, latestIsSame = true
   const failed = failedIds(first)
@@ -464,7 +466,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   for (const c of out.failed_checks.filter((x) => x.not_a_pr_finding)) health.env_problems.push({ pr: number, message: `trial check '${c.check_id}' timed out${c.test ? ` (${c.test})` : ''} and passed on the idle-machine rerun: treated as environment load, not a PR finding` })
   out.findings = [...out.failed_checks.filter((c) => !c.not_a_pr_finding).map((c) => ({ source: 'check', test_backed: checkIsTestBacked(c), ...c })), ...out.findings]
   out.severity = out.findings.length ? maxSev(out.findings.map((f) => f.severity)) : 'P3'
-  Object.assign(out, dimensionsOf(out.checks))
+  Object.assign(out, dimensionsOf(out.checks, out.skipped_steps))
   out.tested = true
   out.verdict = verdictOf(out)
   out.duration_s = Math.round((Date.now() - startedAt) / 1000)
@@ -630,6 +632,7 @@ export function withDimensionStatus(cov, triage, ai, profile, results, files = [
   const paths = files.map((f) => f.filename)
   const byChecks = (k) => profile.steps.filter((s) => ran.has(s.id) && (s.covers ?? []).includes(k) && stepExercises(s, paths)).map((s) => s.id)
   const byAi = (k) => (ai?.tests ?? []).filter((t) => t.result === 'kept' && t.covers.includes(k)).map((t) => t.id)
+  const prTests = prTestDimensions({ files, results, profile })
   const dims = {}
   // capped（额度用尽未补测）：Jev 因额度没跑时没判定的维度；AI 补测因额度没做的缺口维度。和普通 gap 分开计
   const jevCapped = triage.status === 'capped'
@@ -637,8 +640,8 @@ export function withDimensionStatus(cov, triage, ai, profile, results, files = [
   for (const [k, d] of Object.entries(triage.dimensions)) {
     const checks = byChecks(k), aiIds = byAi(k)
     const status = d.applicability === 'not-applicable' ? 'not-applicable' : d.applicability === 'undetermined' ? (jevCapped ? 'capped' : 'undetermined')
-      : checks.length ? 'covered' : aiIds.length ? 'covered-by-ai-test' : aiCapped.has(k) ? 'capped' : 'gap'
-    dims[k] = { applicability: d.applicability, status, checks, ai_tests: aiIds, ...(status === 'capped' ? { display_zh: CAPPED_ZH, capped_by: jevCapped && d.applicability === 'undetermined' ? 'jev' : 'ai-test' } : {}) }
+      : checks.length || prTests[k]?.length ? 'covered' : aiIds.length ? 'covered-by-ai-test' : aiCapped.has(k) ? 'capped' : 'gap'
+    dims[k] = { applicability: d.applicability, status, checks, ai_tests: aiIds, ...(prTests[k]?.length ? { pr_tests: prTests[k] } : {}), ...(status === 'capped' ? { display_zh: CAPPED_ZH, capped_by: jevCapped && d.applicability === 'undetermined' ? 'jev' : 'ai-test' } : {}) }
   }
   return { ...cov, ...coverageTotalsFrom(dims), dimension_status: dims, basis: 'dimension_status (from prs[].triage, Jev)' }
 }
@@ -815,8 +818,34 @@ export function splitDiffFiles(text) {
   return files
 }
 
+// 覆盖率轮次里失败的测试文件（测试报告完整时取失败用例；否则取 failures 里「文件 > …」的文件部分）
+const failedTestFiles = (results) => [...new Set((results ?? []).flatMap((r) => [
+  ...(r.testOutcomes ?? []).filter((t) => t.status === 'failed').map((t) => t.caseId),
+  ...(r.failures ?? []),
+].map((x) => String(x).split(' > ')[0].trim()).filter(isTestPath)))]
+// 测试文件里相对导入（import … from / import() / require()）指向的仓内路径，去掉扩展名
+const IMPORT_RE = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*)['"](\.{1,2}\/[^'"]+)['"]/g
+const stripExt = (p) => p.replace(/\.[cm]?[jt]sx?$/, '')
+function relativeImports(testFile, text) {
+  const out = []
+  for (const m of String(text ?? '').matchAll(IMPORT_RE)) out.push(stripExt(posix.normalize(posix.join(posix.dirname(testFile), m[1]))))
+  return out
+}
+// 覆盖率轮次里失败的测试导入了 PR 改动的（非测试）文件：这些文件的新代码覆盖率可能偏低（失败的用例没走完）
+// readFile(path) → 被测版本里的文件内容或 null
+export function coverageMaybeLow({ results, changedFiles, readFile }) {
+  const changed = (changedFiles ?? []).filter((f) => !isTestPath(f))
+  const hits = []
+  for (const tf of failedTestFiles(results)) {
+    const imps = relativeImports(tf, readFile(tf))
+    const imports = changed.filter((c) => imps.some((i) => stripExt(c) === i || stripExt(c) === `${i}/index`))
+    if (imports.length) hits.push({ test_file: tf, imports })
+  }
+  return { new_code_maybe_low: hits.length > 0, failed_tests_importing_changes: hits }
+}
+
 // 覆盖率门禁：取首轮里带 coverage 的步骤（单测），与 base..tested 的 diff 新增行求交
-function computeCoverageGate({ first, prDiff, covError = null }) {
+function computeCoverageGate({ first, prDiff, covError = null, changedFiles = [], readFile = () => null }) {
   const main = first.find((x) => x.coverage && x.coverage.kind !== 'v8')
   // node --test 等 V8 步骤的逐文件数据并进主报告（主报告已有的文件不动）
   const v8 = first.filter((x) => x.coverage?.kind === 'v8').map((x) => x.coverage.files)
@@ -826,17 +855,25 @@ function computeCoverageGate({ first, prDiff, covError = null }) {
     return coverageGate({ coverage: { status: 'unavailable', reason: covError ? `coverage run failed: ${redact(String(covError.message)).slice(0, 200)}` : setup ? 'coverage run: dependency install failed' : 'unit step not planned or coverage disabled' } })
   }
   // 覆盖率轮次里单测本身的结果只作说明（插桩可能让个别用例失败），不影响判定
-  const underCoverage = { exit_code: r.exitCode, timed_out: Boolean(r.timedOut), failed_tests: (r.failures ?? []).length, note: 'unit run under v8 coverage; its pass/fail is informational only and never used for the verdict', ...(r.shards ? { shards: r.shards } : {}), ...(r.reused ? { reused: true, reused_from: r.reusedFrom } : {}) }
+  const underCoverage = { exit_code: r.exitCode, timed_out: Boolean(r.timedOut), failed_tests: (r.failures ?? []).length, note: 'unit run under v8 coverage; its pass/fail is informational only and never used for the verdict', ...(r.shards ? { shards: r.shards } : {}), ...(r.reused ? { reused: true, reused_from: r.reusedFrom } : {}), ...coverageMaybeLow({ results: first, changedFiles, readFile }) }
   if (r.coverage.status !== 'ok') return { ...coverageGate({ coverage: r.coverage, stepId: r.id }), unit_run_under_coverage: underCoverage }
   const diffError = prDiff.text == null ? `new-code coverage not evaluated: ${prDiff.error}` : null
   return { ...coverageGate({ coverage: r.coverage, added: diffError ? null : parseAddedLines(prDiff.text), stepId: r.id, diffError }), unit_run_under_coverage: underCoverage }
 }
 
 // 三个维度各自是否真的跑了检查（pass / fail 才算跑了；unavailable / timeout 不算）
-export function dimensionsOf(checks) {
+// skipped（skipped_steps，可选）：一个维度没有任何检查、它的步骤又全是因 triage 判不涉及才跳过的 → 记进
+// dimensions_not_applicable，不算缺（#1101：只改测试，黑盒步骤全被 triage 跳过）
+export function dimensionsOf(checks, skipped = []) {
   const run = Object.fromEntries(Object.keys(BOXES).map((b) => [b, []]))
   for (const c of checks ?? []) if (['pass', 'fail'].includes(c.status) && c.kind !== 'setup' && run[c.dimension]) run[c.dimension].push(c.id)
-  return { dimensions_run: run, dimensions_missing: Object.keys(run).filter((b) => !run[b].length) }
+  const triagedOut = (b) => {
+    if ((checks ?? []).some((c) => c.kind !== 'setup' && c.dimension === b)) return false
+    const sk = (skipped ?? []).filter((x) => x.dimension === b)
+    return sk.length > 0 && sk.every((x) => String(x.reason ?? '').startsWith('triage:'))
+  }
+  const empty = Object.keys(run).filter((b) => !run[b].length)
+  return { dimensions_run: run, dimensions_missing: empty.filter((b) => !triagedOut(b)), dimensions_not_applicable: empty.filter(triagedOut) }
 }
 
 // clean 只能在：没有发现、所有检查都跑成、三个维度都真的跑过时给出

@@ -28,7 +28,7 @@
 #                 caps per PR: ARGUS_AITEST_MAX_CALLS (2), ARGUS_AITEST_MAX_MIN (25), ARGUS_AITEST_MAX_TESTS per call (3))
 #   --skip-step ID  skip a profile step (repeatable)
 #   --out PATH    write the report here instead of $QA_HOME/reports/YYYY-MM-DD.json (refuses to target a
-#                 daily report file). On-merge trigger: --pr N --out $QA_HOME/reports/merged/PR-N.json
+#                 daily report file). Relative: reports/… is under $QA_HOME, anything else under the calling directory. On-merge trigger: --pr N --out $QA_HOME/reports/merged/PR-N.json
 #   --no-reuse    re-test merged PRs even if reports/merged/PR-N.json exists for the same merge commit
 #   --no-step-cache  run every step even if a passing result for identical inputs (tree hashes + lockfile) is cached
 #   --wait-lock [SECONDS]  queue behind a running instance (default 14400 = 4h) instead of exit 75
@@ -84,8 +84,19 @@ ctl "run-nightly launch" "\"args\":\"${LAUNCH_ARGS% }\""
 EXTRA_EXIT_CLEANUP=":"
 trap 'rc=$?; eval "$EXTRA_EXIT_CLEANUP"; ctl "run-nightly exit" "\"exitCode\":$rc"' EXIT
 
+# --out PATH is resolved here, before the cd into argus/ (10-19: a rerun's relative --out landed in argus/reports/merged/):
+# absolute stays as is; a relative path starting with reports/ is under $QA_HOME (reports/merged/PR-N.json,
+# reports/catch-up/PR-N.json); any other relative path is relative to the directory the script was called from.
+resolve_out() {
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    reports/*) printf '%s\n' "$QA_HOME/$1" ;;
+    *) local p="$PWD/$1"; printf '%s\n' "${p//\/.\///}" ;;
+  esac
+}
+
 # --wait-lock [SECONDS]: wait for the single-instance lock instead of exiting 75 (default 14400 = 4h).
-# Consumed here; everything else is passed to the Node CLI unchanged.
+# Consumed here; --out is made absolute (resolve_out); everything else is passed to the Node CLI unchanged.
 WAIT_LOCK=""
 CATCH_UP=""
 TRIGGER=""
@@ -105,6 +116,9 @@ while (( $# )); do
     --wait-lock=*)
       WAIT_LOCK="${1#--wait-lock=}"
       [[ "$WAIT_LOCK" =~ ^[0-9]+$ ]] || { echo "--wait-lock needs whole seconds" >&2; exit 1; } ;;
+    --out)
+      if [[ -n "${2:-}" && "$2" != --* ]]; then ARGS+=(--out "$(resolve_out "$2")"); shift; else ARGS+=("$1"); fi ;;
+    --out=*) ARGS+=(--out "$(resolve_out "${1#--out=}")") ;;
     *) ARGS+=("$1") ;;
   esac
   shift
