@@ -48,14 +48,14 @@ test('fetchRetryingNetwork：等待不越过 deadline / PR 时间预算，等不
 
 test('代码审查 chat：前 7 次断连（第 1 轮 5 次 + 第 2 轮 2 次）后成功；外层等约 20 s 再试', async () => {
   const f = flaky(7, '{"status":"passed","findings":[]}'); const sleep = recorder()
-  const res = await chat({ secrets, messages: [], fetchImpl: f, netRetryDelayMs: 0, sleep })
+  const res = await chat({ secrets, messages: [{ role: 'user', content: 'json' }], fetchImpl: f, netRetryDelayMs: 0, sleep })
   assert.equal(res.ok, true); assert.equal(f.calls, 8)
   assert.ok(sleep.waits.includes(20_000))
 })
 
 test('代码审查 chat：一直断连 → 3 轮 × 5 次后 ok=false、kind=network，外层等 20 s、40 s', async () => {
   const f = flaky(Infinity); const sleep = recorder()
-  const res = await chat({ secrets, messages: [], fetchImpl: f, netRetryDelayMs: 0, sleep })
+  const res = await chat({ secrets, messages: [{ role: 'user', content: 'json' }], fetchImpl: f, netRetryDelayMs: 0, sleep })
   assert.equal(res.ok, false); assert.equal(res.error.kind, 'network'); assert.match(res.error.message, /UND_ERR_SOCKET/)
   assert.equal(f.calls, 15)
   assert.deepEqual(sleep.waits.filter((ms) => ms >= 20_000), [20_000, 40_000])
@@ -64,7 +64,7 @@ test('代码审查 chat：一直断连 → 3 轮 × 5 次后 ok=false、kind=net
 test('代码审查 chat：连续超时 2 次就停，不走第 3 轮（第 3 轮只给网络错误），超时后也不等 20 s', async () => {
   let calls = 0; const sleep = recorder()
   const fetchImpl = async () => { calls++; throw Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }) }
-  const res = await chat({ secrets, messages: [], fetchImpl, netRetryDelayMs: 0, sleep })
+  const res = await chat({ secrets, messages: [{ role: 'user', content: 'json' }], fetchImpl, netRetryDelayMs: 0, sleep })
   assert.equal(res.ok, false); assert.equal(calls, 2)
   assert.deepEqual(sleep.waits, [])
 })
@@ -82,7 +82,7 @@ const fakeClock = (requestMs) => {
 test('代码审查 chat：只有默认上限 20 分钟——每次请求 5 分钟后断连，第 4 次结束时到 20 分钟就停', async () => {
   assert.equal(REVIEW_MAX_MS, 20 * 60_000)
   const c = fakeClock(5 * 60_000); const t0 = c.t
-  const res = await chat({ secrets, messages: [], fetchImpl: c.fetch, netRetryDelayMs: 0, sleep: c.sleep, now: c.now })
+  const res = await chat({ secrets, messages: [{ role: 'user', content: 'json' }], fetchImpl: c.fetch, netRetryDelayMs: 0, sleep: c.sleep, now: c.now })
   assert.equal(res.ok, false); assert.equal(res.error.kind, 'network')
   assert.equal(c.fetch.calls, 4) // 没有上限时是 15 次
   assert.ok(c.t - t0 <= REVIEW_MAX_MS)
@@ -92,7 +92,7 @@ test('代码审查 chat：外部 PR 预算（3 分钟）比默认上限紧——
   const c = fakeClock(60_000); const t0 = c.t
   setBudget(t0 + 3 * 60_000)
   try {
-    const res = await chat({ secrets, messages: [], fetchImpl: c.fetch, netRetryDelayMs: 0, sleep: c.sleep, now: c.now })
+    const res = await chat({ secrets, messages: [{ role: 'user', content: 'json' }], fetchImpl: c.fetch, netRetryDelayMs: 0, sleep: c.sleep, now: c.now })
     assert.equal(res.ok, false); assert.equal(res.error.kind, 'network')
     assert.equal(c.fetch.calls, 3); assert.ok(c.t - t0 <= 3 * 60_000)
   } finally { setBudget(null) }
@@ -102,7 +102,7 @@ test('代码审查 chat：外部 PR 预算（60 分钟）比默认上限松—�
   const c = fakeClock(5 * 60_000); const t0 = c.t
   setBudget(t0 + 60 * 60_000)
   try {
-    const res = await chat({ secrets, messages: [], fetchImpl: c.fetch, netRetryDelayMs: 0, sleep: c.sleep, now: c.now })
+    const res = await chat({ secrets, messages: [{ role: 'user', content: 'json' }], fetchImpl: c.fetch, netRetryDelayMs: 0, sleep: c.sleep, now: c.now })
     assert.equal(res.ok, false); assert.equal(c.fetch.calls, 4); assert.ok(c.t - t0 <= REVIEW_MAX_MS)
   } finally { setBudget(null) }
 })

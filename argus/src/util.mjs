@@ -135,3 +135,12 @@ export function toChatCompletionsUrl(baseUrl) {
   if (base.endsWith('/v1')) return `${base}/chat/completions`
   return `${base}/v1/chat/completions`
 }
+
+// response_format=json_object 的请求体：网关（转 Responses API，system → instructions）要求输入消息（非 system）里出现 "json"，
+// 否则 400（#1105 那晚 ai-tests / pr-summary 都挂在这）。发请求前在这里校验，缺了直接抛错，不白花一次调用
+export function jsonObjectBody(payload) {
+  if (payload?.response_format?.type === 'json_object' && !(payload.messages ?? []).some((m) => m?.role !== 'system' && /json/i.test(String(m?.content ?? '')))) {
+    throw new Error("json_object 请求的输入消息（非 system）里必须出现 'json' 这个词")
+  }
+  return JSON.stringify(payload)
+}

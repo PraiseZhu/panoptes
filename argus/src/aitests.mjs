@@ -5,7 +5,7 @@ import { aiUsageToday, addAiUsage } from './db.mjs'
 import { globToRegExp } from './classify.mjs'
 import { toDimensionLabel, stepExercises } from './matrix.mjs'
 import { prTestDimensions } from './pr-tests.mjs'
-import { redact, toShanghaiDay, truncate } from './util.mjs'
+import { redact, toShanghaiDay, truncate, jsonObjectBody } from './util.mjs'
 import { toChatCompletionsUrl, fetchRetryingNetwork, isNetworkError } from './util.mjs'
 
 const MODEL = 'openai/gpt-6-luna'
@@ -150,9 +150,10 @@ export async function generateTargetedTests({ db, secrets, riskClass, pr, files,
     `PR 描述：\n${truncate(pr.body ?? '', 4000)}`,
     `改动内容：${buildDiff(files)}`,
     sources.length ? `被测源文件开头（函数签名、要读的配置字段；测试传入的对象要给全这些字段）：${sources.map((x) => `\n--- ${x.file}\n${toSourceHead(x.head)}`).join('\n')}` : null,
+    '按系统提示的格式只输出一个 json 对象。',
   ].filter((x) => x != null).join('\n\n'))
   try {
-    const body = JSON.stringify({ model: MODEL, reasoning_effort: EFFORT[riskClass], response_format: { type: 'json_object' }, max_completion_tokens: 16_000, messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: user }] })
+    const body = jsonObjectBody({ model: MODEL, reasoning_effort: EFFORT[riskClass], response_format: { type: 'json_object' }, max_completion_tokens: 16_000, messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: user }] })
     const resp = await fetchRetryingNetwork(fetchImpl, toChatCompletionsUrl(secrets.ARGUS_LLM_BASE_URL), () => ({
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${secrets.ARGUS_LLM_API_KEY}` },

@@ -7,7 +7,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from '
 import { join } from 'node:path'
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { redact, truncate, tail, toChatCompletionsUrl, fetchRetryingNetwork, isNetworkError, waitWithinBudget, budgetLeftMs, NET_OUTER_WAIT_MS, sleep as realSleep } from './util.mjs'
+import { redact, truncate, jsonObjectBody, tail, toChatCompletionsUrl, fetchRetryingNetwork, isNetworkError, waitWithinBudget, budgetLeftMs, NET_OUTER_WAIT_MS, sleep as realSleep } from './util.mjs'
 import { CODE_DIR, CACHE_DIR } from './paths.mjs'
 import { withoutHandoff } from './classify.mjs'
 
@@ -88,6 +88,8 @@ let samplingSupported = true
 // 每次重试前按 now() 看还剩多少，不够就返回最后一次的失败；单次请求超时也缩到剩余时间
 export const REVIEW_MAX_MS = 20 * 60_000
 export async function chat({ secrets, messages, effort = 'high', timeoutMs = 8 * 60_000, attempts = 2, netAttempts = 3, fetchImpl = fetch, netRetryDelayMs = 2000, sleep = realSleep, now = Date.now, maxMs = REVIEW_MAX_MS }) {
+  // 输入里没有 json 网关必回 400：发之前就拦下，不进重试
+  try { jsonObjectBody({ response_format: { type: 'json_object' }, messages }) } catch (err) { return { ok: false, error: { kind: 'config', message: err.message } } }
   const deadline = now() + maxMs
   let lastErr = null, netFail = false
   for (let i = 1; i <= netAttempts; i++) {
@@ -99,7 +101,7 @@ export async function chat({ secrets, messages, effort = 'high', timeoutMs = 8 *
       const resp = await fetchRetryingNetwork(fetchImpl, toChatCompletionsUrl(secrets.ARGUS_LLM_BASE_URL), () => ({
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${secrets.ARGUS_LLM_API_KEY}` },
-        body: JSON.stringify({ model: LLM_MODEL, reasoning_effort: effort, response_format: { type: 'json_object' }, max_completion_tokens: 16_000, messages, ...(samplingSupported ? REVIEW_SAMPLING : {}) }),
+        body: jsonObjectBody({ model: LLM_MODEL, reasoning_effort: effort, response_format: { type: 'json_object' }, max_completion_tokens: 16_000, messages, ...(samplingSupported ? REVIEW_SAMPLING : {}) }),
         signal: AbortSignal.timeout(Math.max(1, Math.floor(Math.min(Number(timeoutMs) || 1, budgetLeftMs(deadline, now))))),
       }), { delayMs: netRetryDelayMs, sleep, deadline, now })
       const data = await resp.json().catch(() => ({}))
@@ -206,6 +208,7 @@ export async function codeReview({ secrets, pr, files, results, profile, outDir,
     `Executed checks on this PR's code:\n${testSummary || '(none)'}`,
     `Review guidance from ming-qa:\n${reviewFocus().slice(0, 6000)}`,
     `Diff:\n${buildDiff(files)}`,
+    'Respond with a single json object in the format given by the system prompt.',
   ].join('\n\n'))
   const res = await chat({ secrets, effort: REVIEW_EFFORT, messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: user }] })
   if (!res.ok) return { status: 'error', error: res.error }
