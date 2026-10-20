@@ -9,6 +9,7 @@ import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { redact, truncate, tail, toChatCompletionsUrl, fetchRetryingNetwork, isNetworkError, waitWithinBudget, budgetLeftMs, NET_OUTER_WAIT_MS, sleep as realSleep } from './util.mjs'
 import { CODE_DIR, CACHE_DIR } from './paths.mjs'
+import { withoutHandoff } from './classify.mjs'
 
 export const MINGQA_DIR = process.env.ARGUS_MINGQA_DIR ?? join(CODE_DIR, '..', 'ming-qa') // panoptes: submodule next to argus/
 const QA_AGENT = () => join(MINGQA_DIR, 'skills/quality-assurance-agent/scripts/qa_agent.py')
@@ -50,7 +51,9 @@ function reviewFocus() {
 const SKIP_DIFF = /(^|\/)(package-lock\.json|uv\.lock|pnpm-lock\.yaml|yarn\.lock)$|\.(png|jpg|jpeg|gif|webp|svg|ico|mp4|woff2?|psd)$/i
 const DIFF_CAP = 90_000
 
-function buildDiff(files) {
+// PR 交接文件 docs/pr/** 不进代码审查
+function buildDiff(allFiles) {
+  const files = withoutHandoff(allFiles)
   let out = ''
   for (const f of files) {
     if (SKIP_DIFF.test(f.filename)) { out += `\n--- ${f.filename} (lock/binary, omitted)\n`; continue }

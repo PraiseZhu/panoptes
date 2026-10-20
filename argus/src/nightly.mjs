@@ -9,8 +9,9 @@ import { hostname } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { loadRegistry, loadSecrets } from './config.mjs'
 import { openDb } from './db.mjs'
-import { listNightlyPrs, getPull, getCommit, getBranchHead, listPullFiles, addFullText, shanghaiDayWindow, findIssuesByMarkerLabel, createIssue, commentIssue, reopenIssue, findCommentByMarker } from './github.mjs'
-import { classifyChange, highRiskFiles } from './classify.mjs'
+import { listNightlyPrs, getPull, getCommit, getBranchHead, listPullFiles, addFullText, getHandoff, shanghaiDayWindow, findIssuesByMarkerLabel, createIssue, commentIssue, reopenIssue, findCommentByMarker } from './github.mjs'
+import { classifyChange, highRiskFiles, withoutHandoff } from './classify.mjs'
+import { parseHandoff, splitHandoffCases, toHandoffReport, settleHandoff } from './handoff.mjs'
 import { executeOnSha, ensureMirror, mergeBase, sandboxMode, janitor, mirrorPath } from './runner.mjs'
 import { decideOutcome, failedIds, setupFailed, failureKeys, compareKey } from './decide.mjs'
 import { analyzePr } from './ai.mjs'
@@ -167,14 +168,16 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   const startedAt = Date.now()
   const baseProfile = { ...project.profileData, displayName: project.displayName }
   const pr = await getPull(repo, number)
-  const files = await addFullText(repo, pr, await listPullFiles(repo, number))
+  // PR 交接文件 docs/pr/** 不参与分级、代码审查、覆盖率和被测文件列表（只算进 changed_files 总数）
+  const allFiles = await addFullText(repo, pr, await listPullFiles(repo, number))
+  const files = withoutHandoff(allFiles)
   const merged = Boolean(pr.merged_at)
   const out = {
     number, title: pr.title, author: pr.user?.login ?? null, url: pr.html_url,
     state: merged ? 'merged' : pr.state, draft: Boolean(pr.draft), discovery_reason: discovery,
     created_at: pr.created_at, updated_at: pr.updated_at, merged_at: pr.merged_at,
     base_ref: pr.base?.ref, head_sha: pr.head?.sha, merge_sha: pr.merge_commit_sha ?? null, tested_sha: null, base_sha: null,
-    changed_files: files.length, additions: pr.additions, deletions: pr.deletions,
+    changed_files: allFiles.length, additions: pr.additions, deletions: pr.deletions,
     risk_class: null, severity: 'P3', verdict: null, outcome: null, outcome_reason: null,
     checks: [], failed_checks: [], code_review: null, findings: [], ai_summary: null, coverage: null, coverage_gate: null,
     evidence_dir: null, duration_s: null,
@@ -196,18 +199,23 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   out.evidence_dir = evDir
   if (!merged && pr.state !== 'open') { out.tested = false; out.verdict = 'skipped'; out.outcome_reason = 'PR is closed without merge'; out.tested_at = toShanghaiIso(); return out }
 
-  const { riskClass, reasonZh: classReason, changeKind } = classifyChange(files, baseProfile)
+  const { riskClass, reasonZh: classReason, changeKind } = classifyChange(allFiles, baseProfile)
   out.risk_class = riskClass
   out.risk_reason = classReason
   if (changeKind) out.change_kind = changeKind
+  // 交接在分级之后读，不影响分级
+  const handoff = await loadHandoff({ repo, number, sha: merged ? pr.merge_commit_sha : pr.head.sha, health })
+  out.handoff = toHandoffReport(handoff, number)
   if (riskClass === 'A') {
     out.skipped_steps = baseProfile.steps.filter((x) => x.kind !== 'setup').map((x) => ({ id: x.id, nameZh: x.nameZh, reason: 'docs-only change: no checks run', dimension: toBox(x, baseProfile) }))
     out.triage = toApplicability({ status: 'skipped', jevStatus: 'not-run', reasonZh: 'docs-only change: no checks run, dimension triage not needed', rows: toTriage({ profile: baseProfile, files, jev: null }).rows })
-    { const t = aiTestTier({ files, riskClass }); out.ai_test_tier = t.tier; out.ai_test_caps = t.caps }
+    { const t = aiTestTier({ files: allFiles, riskClass }); out.ai_test_tier = t.tier; out.ai_test_caps = t.caps }
+    settleHandoff(out.handoff, null, 'docs-only')
     Object.assign(out, dimensionsOf([])); out.tested = false; out.verdict = 'docs-only'; out.outcome = 'docs_only'; out.outcome_reason = classReason
     // 文档改动也做代码审查（同一提交规则：merged → merge-base..merge commit；open → merge-base..head）；不跑测试，覆盖率门禁不适用
     out.coverage_gate = DOCS_ONLY_COVERAGE_GATE()
-    if (!opts.noReview) {
+    if (!opts.noReview && !files.length) out.code_review = { status: 'skipped', reason: 'only PR handoff files (docs/pr/**) changed' }
+    else if (!opts.noReview) {
       const sha = merged ? pr.merge_commit_sha : pr.head.sha
       const extraRefspecs = merged ? [] : [`+refs/pull/${number}/head:refs/pull/${number}/head`]
       const baseSha = await reviewBaseSha({ repo, pr, sha, merged, extraRefspecs })
@@ -240,7 +248,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
       quota.consume('jev', (jev.usage?.input_tokens ?? 0) + (jev.usage?.output_tokens ?? 0))
     }
   }
-  const triage = toTriage({ profile: baseProfile, files, jev })
+  const triage = toTriage({ profile: baseProfile, files, jev, handoff })
   triage.jevStatus = jev.ok ? 'ok' : jev.capped ? 'capped' : jevConfigured ? 'failed' : 'not-configured'
   out.triage = { ...toApplicability(triage), duration_ms: jevConfigured ? Date.now() - jevT0 : null, usage: jev.usage ?? null }
   recordTriage(health, number, out.triage)
@@ -395,7 +403,8 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
 
   // AI 补测：Jev 判为适用、但没有检查覆盖的维度 → 生成 vitest 用例，经「当前通过 + 植入错误失败」验证后才保留。
   // 独立的执行轮次（ai1、ai2…），结果不参与 outcome 判定；在当前代码上失败的只记 P2、test_backed=false。
-  if (!opts.noAiTests) await runAiTests({ out, repo, pr, files, profile, riskClass, sha, common, db, secrets, health, number, results: first, quota })
+  if (!opts.noAiTests) await runAiTests({ out, repo, pr, files, profile, riskClass, sha, common, db, secrets, health, number, results: first, quota, handoff })
+  settleHandoff(out.handoff, out.ai_tests ?? null, 'ai-tests-disabled')
   out.coverage = withDimensionStatus(out.coverage, out.triage, out.ai_tests, profile, first, files)
   // Jev 因额度没跑：没判定的维度记 capped；AI 补测因额度没做完：剩下的缺口维度记 capped（不是普通 gap）
   if (out.triage?.status === 'capped') out.quota_capped.push(quota.markCapped('jev', { pr: number, dimensions: out.coverage?.capped ?? out.triage.undetermined }))
@@ -456,7 +465,8 @@ export function runAiTestTier(prs) {
 
 // ── AI 补测（夜间）────────────────────────────────────────
 // llm：测试注入（fetchImpl / netRetryDelayMs / sleep），生产不传
-export async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, common, db, secrets, health, number, results, quota = memoryQuota(), llm = {} }) {
+// handoff：parseHandoff 的结果；层次 unit/contract/browser-fixture 的 Q 和 qa.md 第 5 节条目排在覆盖缺口之前（不加条数、不加调用次数）
+export async function runAiTests({ out, repo, pr, files, profile, riskClass, sha, common, db, secrets, health, number, results, quota = memoryQuota(), llm = {}, handoff = null }) {
   const tiered = degradeForQuota(aiTestTier({ files, riskClass }), quota.check('ai-test'))
   const caps = tiered.caps
   out.ai_test_tier = tiered.tier
@@ -473,7 +483,8 @@ export async function runAiTests({ out, repo, pr, files, profile, riskClass, sha
   ai.gaps = toAiGaps({ applicability: out.triage, profile, results, files })
   // 首要目标：覆盖率门禁算出的「改动里没被执行到的行」（门禁在补测之前算好）
   ai.uncovered_targets = toUncoveredTargets(out.coverage_gate?.new_code)
-  if (!ai.gaps.length && !ai.uncovered_targets.length) return finish('skipped', 'no applicable gap dimension and no uncovered changed lines')
+  const handoffCases = handoff?.present ? splitHandoffCases(handoff).auto : []
+  if (!ai.gaps.length && !ai.uncovered_targets.length && !handoffCases.length) return finish('skipped', 'no applicable gap dimension and no uncovered changed lines')
   if (caps.maxCalls < 1) return finish(tiered.tier.tier === 'none' ? 'skipped' : tiered.tier.degraded ? 'capped' : 'skipped', tiered.tier.tier === 'none' ? `ai-test tier none: ${tiered.tier.reason}` : tiered.tier.degraded ? `${CAPPED_ZH}: ${tiered.tier.reason}` : 'ARGUS_AITEST_MAX_CALLS=0')
   const cHits = highRiskFiles(files, profile)
   const setupIds = profile.steps.filter((s) => s.kind === 'setup').map((s) => s.id)
@@ -484,16 +495,17 @@ export async function runAiTests({ out, repo, pr, files, profile, riskClass, sha
   const withSource = (t) => t && { ...t, source: sourceAt(t.mutation.file) }
   let remaining = [...ai.gaps]
   let targets = [...ai.uncovered_targets]
+  let pendingHandoff = [...handoffCases]
   const feedback = []
   let offset = 0
   const stepDefs = new Map()
   const pendingLlmErrors = []
   // 网关断连（原地重试后仍失败）不计入 maxCalls：等约 30 s 后最多补 1 轮（S 档 maxCalls=1 断一次也还有一次机会）
   let netExtra = 0
-  for (let round = 1; round <= caps.maxCalls + netExtra && (remaining.length || targets.length); round++) {
+  for (let round = 1; round <= caps.maxCalls + netExtra && (remaining.length || targets.length || pendingHandoff.length); round++) {
     const left = deadline - Date.now()
     if (left < 3 * 60_000) { ai.rounds.push({ round, skipped: 'wall-time cap reached' }); break }
-    const gen = await generateTargetedTests({ db, secrets, riskClass, pr, files, profile, gaps: remaining, uncovered: targets, maxTests: caps.maxTestsPerCall, highRiskFiles: cHits, feedback, sources, timeoutMs: Math.max(1, Math.floor(Math.min(8 * 60_000, left / 2))), quota, deadline, ...llm })
+    const gen = await generateTargetedTests({ db, secrets, riskClass, pr, files, profile, gaps: remaining, uncovered: targets, handoffCases: pendingHandoff, handoffContext: handoff?.present ? { risks: handoff.risks, boundaries: handoff.boundaries } : null, maxTests: caps.maxTestsPerCall, highRiskFiles: cHits, feedback, sources, timeoutMs: Math.max(1, Math.floor(Math.min(8 * 60_000, left / 2))), quota, deadline, ...llm })
     if (gen.status === 'capped') {
       // 每日 ai-test 额度用尽：这一轮及之后都不调模型；剩下的缺口维度记 capped（显示「额度用尽未补测」）
       ai.capped = true; ai.capped_gaps = [...remaining]; ai.quota = gen.quota
@@ -524,7 +536,7 @@ export async function runAiTests({ out, repo, pr, files, profile, riskClass, sha
     for (const st of steps) {
       const r = run.find((x) => x.id === st.id)
       const verdict = toAiTestResult(setupFailed(run) ? null : r, withSource(st.aiTest))
-      const t = { id: st.id, round, kind: st.aiKind, purpose: st.aiTest.purposeZh, covers: st.covers, file: st.aiTest.filePath, mutation_file: st.aiTest.mutation.file, ...(st.aiTest.targetsUncovered ? { targets_uncovered: st.aiTest.targetsUncovered } : {}), ...verdict, exit_code: r?.exitCode ?? null, duration_ms: r?.durationMs ?? null, log_tail: r ? tail(redact(String(r.tail ?? '')), 1500) : null }
+      const t = { id: st.id, round, kind: st.aiKind, purpose: st.aiTest.purposeZh, covers: st.covers, file: st.aiTest.filePath, mutation_file: st.aiTest.mutation.file, ...(st.aiTest.targetsUncovered ? { targets_uncovered: st.aiTest.targetsUncovered } : {}), ...(st.aiTest.handoff ? { handoff: st.aiTest.handoff } : {}), ...verdict, exit_code: r?.exitCode ?? null, duration_ms: r?.durationMs ?? null, log_tail: r ? tail(redact(String(r.tail ?? '')), 1500) : null }
       ai.tests.push(t); rr.tests.push(st.id)
       if (verdict.result !== 'kept') feedback.push(`${st.aiTest.purposeZh}（${st.aiTest.filePath}）：${verdict.reason}`)
     }
@@ -532,6 +544,8 @@ export async function runAiTests({ out, repo, pr, files, profile, riskClass, sha
     remaining = ai.gaps.filter((k) => !keptCovers.has(k))
     const keptFiles = new Set(ai.tests.filter((t) => t.result === 'kept').map((t) => t.mutation_file))
     targets = targets.filter((u) => !keptFiles.has(u.file))
+    const keptHandoff = new Set(ai.tests.filter((t) => t.result === 'kept' && t.handoff).map((t) => t.handoff))
+    pendingHandoff = pendingHandoff.filter((c) => !keptHandoff.has(c.id))
   }
   health.llm_errors.push(...pendingLlmErrors)
   // 在当前代码上失败的补测：再单独跑一次确认是否复现（仍然只记 P2、test_backed=false；升级要人确认）
@@ -729,13 +743,22 @@ export function reviewVerdict(doc) {
 }
 
 // base..tested 的完整 diff：一份文本，解析出审查用的文件列表（GitHub files 形状）和覆盖率用的新增行
+// 交接文件 docs/pr/** 不进代码审查和新代码覆盖率：从 diff 文本和文件列表里去掉
+export const stripHandoffDiff = (text) => String(text).split(/(?=^diff --git )/m).filter((ch) => !/^diff --git a\/docs\/pr\//.test(ch)).join('')
+async function loadHandoff({ repo, number, sha, health }) {
+  try { return parseHandoff(await getHandoff(repo, number, sha, { health })) } catch (err) {
+    health.env_problems.push({ pr: number, message: `handoff read failed: ${String(err.message).slice(0, 200)}` })
+    return { present: false, reason: 'handoff read failed' }
+  }
+}
 async function diffForReview({ repo, sha, baseSha, extraRefspecs }) {
   if (!baseSha) return { text: null, files: null, error: 'base revision unknown' }
   try {
     const mirror = await ensureMirror(repo, sha, { extraRefspecs })
     // run() 只保留输出尾部，这里用同步调用拿全量
     const text = execFileSync('git', ['-C', mirror, 'diff', '--no-color', '--no-ext-diff', '--no-renames', '-U3', baseSha, sha], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: 120_000 })
-    return { text, files: splitDiffFiles(text), error: null }
+    const kept = stripHandoffDiff(text)
+    return { text: kept, files: splitDiffFiles(kept), error: null }
   } catch (err) { return { text: null, files: null, error: String(err.message).slice(0, 200) } }
 }
 
