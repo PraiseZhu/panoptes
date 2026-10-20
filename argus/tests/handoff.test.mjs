@@ -1,5 +1,5 @@
 // Mivo PR 交接文件（docs/pr/<N>/review.md、qa.md）：读取、解析、接入夜间流程。夹具取自 xindong/mivo-canvas-plugin
-// PR #1116（未合并，e4918d34）的 docs/pr/_template/ 和 scripts/ci/fixtures/pr-handoff/valid-full/。模型全部 mock。
+// PR #1116（已合并，d1e31327）的 docs/pr/_template/ 和 scripts/ci/fixtures/pr-handoff/valid-full/。模型全部 mock。
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
@@ -46,6 +46,16 @@ test('handoff parse: Mivo 填好的示例 → A / R（五个字段）/ B / Q / �
   assert.match(q.automation, /CrossScene\.test\.ts/)
   assert.equal(q.author_status, 'PASS')
   assert.deepEqual(h.left, [{ ref: 'B1', why: '没有两个插件实例的环境', env: 'Cindy 实机，两个实例' }])
+})
+
+test('handoff parse: Mivo 轻档示例（valid-light）→ 第 5 节「无」行不算留给 QA 的条目；层次大小写不敏感', () => {
+  const h = parseHandoff({ review: fx('light-review.md'), qa: fx('light-qa.md') })
+  assert.equal(h.present, true)
+  assert.deepEqual(h.risks, [])
+  assert.deepEqual(h.left, [])
+  assert.equal(h.cases[0].level, 'static')
+  assert.deepEqual(splitHandoffCases(h).auto, [])
+  assert.equal(parseHandoff({ ...FULL, qa: FULL.qa.replace('层次: contract', '层次: Contract') }).cases[0].level, 'contract')
 })
 
 test('handoff parse: 原样模板 → present:true，条目字段为空，不报错', () => {

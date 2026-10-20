@@ -1,6 +1,6 @@
 // Mivo PR 交接文件（docs/pr/<N>/review.md、qa.md，schema mivo-pr-handoff/v1）→ 结构化数据。
 // 只读文本，不执行 Mivo 仓里的任何脚本。交接是作者的线索，不是结论：author_status 只作记录。
-// 格式以 xindong/mivo-canvas-plugin docs/pr/_template/ 为准（2026-10-20 取自未合并的 PR #1116，模板定型后要对齐）。
+// 格式以 xindong/mivo-canvas-plugin docs/pr/_template/ 为准（已对齐合并后的 PR #1116，d1e31327；校验器 .github/scripts/pr-handoff-gate.cjs）。
 export const HANDOFF_SCHEMA = 'mivo-pr-handoff/v1'
 export const AUTO_LEVELS = ['unit', 'contract', 'browser-fixture']
 export const MANUAL_LEVELS = ['cindy-mac', 'cindy-windows', 'paid']
@@ -67,10 +67,10 @@ export function parseHandoff({ review = null, qa = null } = {}) {
     const cov = /[（(]\s*覆盖\s*([^）)]*)[）)]\s*$/.exec(b.title)
     const f = pick(b.fields, Q_FIELDS)
     return { id: b.id, title: clean(b.title.replace(cov?.[0] ?? '', '')), covers: cov ? cov[1].split(/[\s/、,，]+/).filter((x) => /^[RA]\d+$/.test(x)) : [],
-      level: f.level, expect: [f.expect_visible, f.expect_hidden].filter(Boolean).join('；'), fail_criteria: f.fail_criteria, counter_proof: f.counter_proof, automation: f.automation,
+      level: f.level.toLowerCase(), expect: [f.expect_visible, f.expect_hidden].filter(Boolean).join('；'), fail_criteria: f.fail_criteria, counter_proof: f.counter_proof, automation: f.automation,
       author_status: authorStatus[b.id] ?? null }
   })
-  const left = rows(q['5']).map((c) => ({ ref: c[0] ?? '', why: c[1] ?? '', env: c[2] ?? '' }))
+  const left = rows(q['5']).filter((c) => c[0] && c[0] !== '无').map((c) => ({ ref: c[0] ?? '', why: c[1] ?? '', env: c[2] ?? '' }))
   return { present: true, reason: null, acceptance, risks, boundaries, cases, left }
 }
 
