@@ -320,3 +320,15 @@ Review file: `/workspace/review-ops/daily/2026-10-19.md` (cross-bot-review forma
 **For the 日报 bot.** #978: the AI-test lead is withdrawn (test's own mistake); level unchanged P2 (coverage). No field changes.
 
 **For Praise / Praise PR.** Test-assignment candidates: #1101-type (test-only PR: unit/regression applicable; triage-skipped dimension should not make a PR partially-verified), #1099-type (credit the PR's own added tests before computing AI gaps), coverage-run timeouts. Relative `--out` on manual re-runs still lands in `/workspace/panoptes/argus/reports/` (#1098 20:36 run, hand-copied).
+
+## 2026-10-21 (data day 2026-10-20, Asia/Shanghai)
+
+Review file: `/workspace/review-ops/daily/2026-10-20.md` (cross-bot-review format).
+
+**Reconciliation.** 14 PRs merged on 10-20 (#1120 #1105 #1114 #1112 #1125 #1121 #934 #1117 #1077 #1131 #1116 #1133 #1103 #1106); all 14 have a valid `reports/merged/PR-N.json`, schema 1.0. First run of every PR was the on-merge event (#1105's history v1/v2 are both the 11:27 event run; current is the 11:51 manual re-run after the json_object LLM fix b693abb). No miss, no duplicate. No issue opened; system_health #16 commented once (#1105 gateway 400).
+
+**Accuracy.**
+- #1121 AI-test P2 (`ai-test-1`): `TypeError: client.now is not a function` at `collect.mjs:91` — the test built its own `client` without `now` and passed it to `collectGlobal(client, …)`. Test invalid → P3 (fixed below; re-run follows).
+- #1077/#1103/#1106/#1116/#1133 unit failure: `scripts/ops/org-market-company-no-dependencies.test.mjs` asserts no `node_modules` above its tmp dir; it fails first run + rerun in panoptes on 10-20, but passes in GitHub CI (Linux/Windows unit shards on #1077) and passes in panoptes on 10-21 (#1137). Environment-dependent; root cause not found (plain bwrap probe sees no node_modules on the tmp ancestors). #1077's test-backed P2 from this check is likely a false positive; level stays P2 from two code-review P2s. Routed to Praise PR.
+
+**Changes pushed.** `aitests.mjs` `fixtureMissingMethod`: `TypeError: X.M is not a function` where X is the first parameter of a function the test imports, M never appears in the test, and the source never assigns X.M → 测试无效 (fixture-gap). Regression + 5 negatives in `qa-items.test.mjs`; the real #1121 log reproduces as discarded/invalid. No report field change.

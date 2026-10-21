@@ -414,6 +414,18 @@ test('AI 补测「测试无效」：断言前就因缺测试数据 / 文件、�
   // 读的不是被测函数的参数（产品里的局部变量）→ 仍是 fails-on-current
   const local = "export function transport(opts) {\n  const c = resolve(opts);\n  return c.budgets.apiRequests\n}\n"
   assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: tTail }, { content: tContent, source: local }).result, 'fails-on-current')
+  // #1121 10-20：测试拼的 client 没给 now，被测 collectGlobal(client) 调 client.now() → 测试无效（fixture-gap 缺方法）
+  const mContent = "import { describe, expect, it } from 'vitest'\nimport { collectGlobal } from '../scripts/loops/automerge/lib/collect.mjs'\nconst client = { repo: 'r', identity: async () => ({}), get: async () => ({ data: {} }), paginate: async () => [] }\nit('x', async () => { expect((await collectGlobal(client, { base: 'main' })).strictRequiredStatusChecks).toBe(false) })\n"
+  const mSource = "export async function collectGlobal(client, policy, { hostId } = {}) {\n  const g = {}\n  g.now = client.now() ?? Date.now()\n  return g\n}\n"
+  const mTail = ' FAIL  src/automerge-collect-strict.argus.test.ts > collectGlobal strict required checks > 任一规则未启用 strict\nTypeError: client.now is not a function\n ❯ collectGlobal scripts/loops/automerge/lib/collect.mjs:91:18\n     91|   g.now = client.now() ?? Date.now()\n ❯ src/automerge-collect-strict.argus.test.ts:20:22\n'
+  const mm = ai.toAiTestResult({ ok: false, exitCode: 1, tail: mTail }, { content: mContent, source: mSource })
+  assert.equal(mm.result, 'discarded'); assert.equal(mm.invalid_kind, 'fixture-gap'); assert.match(mm.reason, /collectGlobal\(client\) calls client\.now\(\)/)
+  // 反例：没有源码对照、测试给了 now、被测代码自己给 client.now 赋值、调的不是被测函数的参数、或有断言失败 → 仍是 fails-on-current
+  assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: mTail }, { content: mContent }).result, 'fails-on-current')
+  assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: mTail }, { content: mContent.replace("repo: 'r',", "repo: 'r', now: () => 1,"), source: mSource }).result, 'fails-on-current')
+  assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: mTail }, { content: mContent, source: mSource.replace('const g = {}', 'const g = {}; client.now = pickClock(policy)') }).result, 'fails-on-current')
+  assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: mTail }, { content: mContent, source: mSource.replace('collectGlobal(client,', 'collectGlobal(opts,') }).result, 'fails-on-current')
+  assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: 'AssertionError: expected 1 to be 2\n' + mTail }, { content: mContent, source: mSource }).result, 'fails-on-current')
   // 断言失败（哪怕信息里带 ENOENT）仍是「在当前代码上失败」：可能是真问题，留给人确认
   const asserted = "AssertionError: expected [Function] to throw error including 'EVIDENCE_FILE_TOO_LARGE' but got 'ENOENT: no such file or directory'"
   assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: asserted }).result, 'fails-on-current')

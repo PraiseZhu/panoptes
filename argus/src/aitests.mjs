@@ -249,6 +249,21 @@ function fixtureGap(text, { content, source } = {}) {
   }
   return null
 }
+// fixture-gap（缺方法）：测试把自己拼的对象 X 传给它导入的函数 NAME(X, …)，被测代码调 X.M() 报 TypeError: X.M is not a function，
+// 而测试代码里根本没出现 M、被测代码也从不给 X.M 赋值 → 只能是测试传入的对象少了这个方法（#1121 10-20：collectGlobal(client) 调 client.now()，测试的 client 没给 now）。
+// 需要被测源码（test.source）对照；对不上任何一条都仍算 fails-on-current。
+const NOT_A_METHOD = /TypeError: ([A-Za-z_][\w]*)\.([A-Za-z_][\w]*) is not a function/
+function fixtureMissingMethod(text, { content, source } = {}) {
+  const m = text.match(NOT_A_METHOD)
+  if (!m || !content || !source) return null
+  const [, x, k] = m
+  if (new RegExp(`\\b${k}\\b`).test(content)) return null
+  if (new RegExp(`\\b${x}\\.${k}\\s*=[^=]`).test(source)) return null
+  const names = importedNames(content)
+  const fn = [...source.matchAll(new RegExp(`function\\s+(\\w+)\\s*\\(\\s*${x}\\b`, 'g'))].find((f) => names.has(f[1]))
+  if (!fn) return null
+  return { kind: 'fixture-gap', line: `${m[0]}: ${fn[1]}(${x}) calls ${x}.${k}(), the test's ${x} never defines ${k}`.slice(0, 240) }
+}
 // missing-module 还包括：测试文件里直接调用了一个既没导入、也没在测试里声明的名字 → ReferenceError: x is not defined，
 // 且报错位置（第一帧）就在这个补测文件里（#978 10-19：用了 isMarkupTextCoveredByHigherSection 却只导入了另一个函数）。
 // 报错在被测代码里、或测试里有这个名字的导入 / 声明，都不算（可能是真问题）。
@@ -278,7 +293,7 @@ export function toInvalidTest(tail, test = {}) {
     const line = text.split('\n').find((l) => re.test(l))
     if (line) return { kind, line: line.trim().slice(0, 240) }
   }
-  return missingImportCall(text, test) ?? undeclaredInTest(text, test)
+  return missingImportCall(text, test) ?? undeclaredInTest(text, test) ?? fixtureMissingMethod(text, test)
 }
 
 // 补测执行结果 → 判定：kept（当前代码通过且植入错误后失败）/ discarded（植入错误对不上、植入后仍通过、没法跑、测试无效）/
