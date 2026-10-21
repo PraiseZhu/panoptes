@@ -269,3 +269,27 @@ test('Jev：固定版本号；429 退避后成功；401 不重试；格式不对
   assert.equal(r.ok, false)
   assert.equal((await evaluateJev({ state: 's', questions: qs, secrets: {} })).ok, false)
 })
+
+test('改了脚本且自带测试（#1116）：unit / regression 适用，即使 Jev 判不涉及', () => {
+  const files = [{ filename: 'scripts/ci/pr-handoff-gate.cjs' }, { filename: 'scripts/ci/pr-handoff-gate.test.mjs' }]
+  const t = toTriage({ profile, files, jev: jevAll({ unit: 0.01, regression: 0.01 }) })
+  const by = Object.fromEntries(t.rows.map((r) => [r.key, r]))
+  assert.equal(by.unit.verdict, 'applicable')
+  assert.equal(by.unit.source, 'ships-tests')
+  assert.equal(by.regression.verdict, 'applicable')
+  assert.equal(by.regression.source, 'ships-tests')
+})
+
+test('只改测试仍是 tests-only，不被 ships-tests 抢走', () => {
+  const t = toTriage({ profile, files: [{ filename: 'src/a.test.ts' }], jev: jevAll({ unit: 0.01 }) })
+  assert.equal(t.rows.find((r) => r.key === 'unit').source, 'tests-only')
+})
+
+test('文档 + 测试、只改代码不带测试：都不套 ships-tests', () => {
+  const src = (files) => toTriage({ profile, files, jev: jevAll({ unit: 0.01 }) }).rows.find((r) => r.key === 'unit').source
+  for (const doc of ['docs/a.md', 'guide.mdx', 'notes.rst', 'pkg/LICENSE', 'CHANGELOG', 'sub/README.md', 'a.txt']) {
+    assert.notEqual(src([{ filename: doc }, { filename: 'x.test.mjs' }]), 'ships-tests', doc)
+  }
+  assert.notEqual(src([{ filename: 'scripts/a.mjs' }]), 'ships-tests')
+  assert.equal(src([{ filename: 'scripts/a.mjs' }, { filename: 'x.test.mjs' }]), 'ships-tests')
+})

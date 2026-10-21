@@ -35,9 +35,14 @@ test('(a) #1101 只改测试的 PR：unit 和 regression 判为适用（Jev 全 
   const app = toApplicability({ ...triage, status: 'ok' })
   assert.ok(app.applicable.includes('unit') && app.applicable.includes('regression'))
   assert.equal(app.dimensions.unit.source, 'tests-only')
-  // 混有非测试文件时不套用
+  // 混有非测试代码时不再算 tests-only，改走 ships-tests（改代码且自带测试）
   const mixed = toTriage({ profile: mivo, files: [...files, { filename: 'src/a.ts' }], jev: jevOf(1101) })
-  assert.equal(mixed.rows.find((r) => r.key === 'unit').verdict, 'looks_unrelated')
+  const mixedUnit = mixed.rows.find((r) => r.key === 'unit')
+  assert.equal(mixedUnit.verdict, 'applicable')
+  assert.equal(mixedUnit.source, 'ships-tests')
+  // 混的是文档时两条规则都不套用，听 Jev
+  const withDoc = toTriage({ profile: mivo, files: [...files, { filename: 'docs/a.md' }], jev: jevOf(1101) })
+  assert.equal(withDoc.rows.find((r) => r.key === 'unit').verdict, 'looks_unrelated')
 })
 
 test('(a) #1101 维度的步骤全因 triage 判不适用而跳过：不进 dimensions_missing，verdict 不降为 partially-verified', () => {
