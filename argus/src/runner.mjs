@@ -434,7 +434,7 @@ export async function runSteps(profile, src, runDir, { stepIds = null, execution
     if (sp && !res.shards) res.shards = { count: 1, reason: sp.reason }
     const disturbed = await watch.stop()
     if (disturbed) log('error', 'step disturbed desktop', { step: step.id })
-    const result = { ...identity, id: step.id, nameZh: step.nameZh, kind: step.kind, cmdText: step.cmd.join(' '), ok: res.ok, exitCode: res.exitCode, timedOut: res.timedOut, durationMs: res.durationMs, tail: res.tail, failures: res.ok ? [] : res.failures, failureDetails: res.ok ? [] : res.failureDetails, failureParseStatus: res.failureParseStatus, ...(res.shards ? { shards: res.shards } : {}) }
+    const result = { ...identity, id: step.id, nameZh: step.nameZh, kind: step.kind, cmdText: step.cmd.join(' '), ok: res.ok, exitCode: res.exitCode, signal: res.signal ?? null, endedAt: res.endedAt ?? null, timedOut: res.timedOut, durationMs: res.durationMs, tail: res.tail, failures: res.ok ? [] : res.failures, failureDetails: res.ok ? [] : res.failureDetails, failureParseStatus: res.failureParseStatus, ...(res.shards ? { shards: res.shards } : {}) }
     if (step.trialOnly) result.machine = machineLoad()
     toStepOutcome(step, result, runDir)
     Object.assign(result, readTestReport(step, result, src, runDir, stepVarsForReport, execution))
@@ -498,7 +498,7 @@ export async function runSharded({ step, plan, cmd, covDir, reportFile, runDir, 
     }
     // 合并日志（证据里的 logs/<step>.log 仍是一份完整日志）
     const header = `[argus] ${step.id}: ${n} shards in parallel (${plan.reason})\n`
-    writeFileSync(logFile, header + done.map((d) => { let t = ''; try { t = readFileSync(d.shardLog, 'utf8') } catch { /* 没有日志 */ } return `\n===== shard ${d.i}/${n} exit=${d.r.exitCode} ${Math.round(d.r.durationMs / 1000)}s =====\n${t}` }).join(''))
+    writeFileSync(logFile, header + done.map((d) => { let t = ''; try { t = readFileSync(d.shardLog, 'utf8') } catch { /* 没有日志 */ } return `\n===== shard ${d.i}/${n} exit=${d.r.exitCode}${d.r.signal ? ` ${d.r.signal}` : ''} ${Math.round(d.r.durationMs / 1000)}s =====\n${t}` }).join(''))
     const rs = done.map((d) => d.r)
     const failed = rs.filter((r) => !r.ok)
     const statuses = rs.map((r) => r.failureParseStatus)
@@ -507,13 +507,13 @@ export async function runSharded({ step, plan, cmd, covDir, reportFile, runDir, 
       : (statuses.some((x) => x === 'incomplete') ? 'incomplete' : statuses.every((x) => x === 'complete') ? 'complete' : statuses[0])
     const exitCode = failed.length ? (failed.find((r) => r.exitCode != null && r.exitCode !== 0)?.exitCode ?? null) : 0
     return {
-      ok: failed.length === 0, exitCode, timedOut: rs.some((r) => r.timedOut), durationMs: Date.now() - t0,
+      ok: failed.length === 0, exitCode, signal: failed.find((r) => r.signal)?.signal ?? null, endedAt: rs.map((r) => r.endedAt).filter(Boolean).sort().at(-1) ?? null, timedOut: rs.some((r) => r.timedOut), durationMs: Date.now() - t0,
       tail: (failed.length ? failed : rs.slice(-1)).map((r) => r.tail ?? '').join('\n').slice(-20000),
       failures: [...new Set(failed.flatMap((r) => r.failures ?? []))].sort(),
       failureDetails: failed.flatMap((r) => r.failureDetails ?? []),
       failureParseStatus: parse,
       shards: { count: n, reason: plan.reason, mem_available_gb: plan.mem_available_gb ?? null, budget_gb: plan.budget_gb ?? null, per_shard_gb: plan.per_shard_gb ?? null,
-        per_shard: done.map((d) => ({ shard: d.i, exit_code: d.r.exitCode, timed_out: Boolean(d.r.timedOut), duration_ms: d.r.durationMs })) },
+        per_shard: done.map((d) => ({ shard: d.i, exit_code: d.r.exitCode, signal: d.r.signal ?? null, ended_at: d.r.endedAt ?? null, timed_out: Boolean(d.r.timedOut), duration_ms: d.r.durationMs })) },
     }
   } finally { release() }
 }

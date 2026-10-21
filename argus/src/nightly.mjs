@@ -363,7 +363,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     out.checks.push({
       id: r.id, name: r.nameZh, kind: r.kind, dimension: toBox(step, profile), qa_dimensions: step.covers ?? [],
       status: r.unavailable ? 'unavailable' : r.timedOut ? 'timeout' : r.ok ? 'pass' : 'fail',
-      exit_code: r.exitCode, duration_ms: r.durationMs, failure_count: r.failures?.length ?? 0,
+      exit_code: r.exitCode, signal: r.signal ?? null, ended_at: r.endedAt ?? null, duration_ms: r.durationMs, failure_count: r.failures?.length ?? 0,
       ...(r.unavailable ? { unavailable_reason: r.unavailableReasonZh } : {}),
       ...(r.probeReport ? { sub_checks: probeSummary(r.probeReport) } : {}),
       ...(r.shards ? { shards: r.shards } : {}),
@@ -413,7 +413,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
       ...(envTimeout ? { not_a_pr_finding: true, env_suspected: 'trial-timeout' } : {}),
       fingerprint: fp, pr_fingerprint: prFingerprint(fp, number),
       evidence: {
-        tested_sha: sha, base_sha: baseSha, exit_code: r?.exitCode, timed_out: Boolean(r?.timedOut),
+        tested_sha: sha, base_sha: baseSha, exit_code: r?.exitCode, signal: r?.signal ?? null, ended_at: r?.endedAt ?? null, timed_out: Boolean(r?.timedOut),
         first_run: 'fail', rerun: compareOn(rerun), base_run: baseRun, ...(latest ? { latest_main_run: compareOn(latest) } : {}),
         command: (step.cmd ?? []).join(' '), log_tail: evidenceTail(r, named ? test : null), log_file: join(evDir, 'h1/logs', `${stepId}.log`),
         ...(step.trialOnly ? { machine_load: { first_run: r?.machine ?? null, rerun_wait: out.rerun_idle_wait ?? null, rerun: rerun?.find((y) => y.id === stepId)?.machine ?? null } } : {}),
@@ -855,7 +855,7 @@ function computeCoverageGate({ first, prDiff, covError = null, changedFiles = []
     return coverageGate({ coverage: { status: 'unavailable', reason: covError ? `coverage run failed: ${redact(String(covError.message)).slice(0, 200)}` : setup ? 'coverage run: dependency install failed' : 'unit step not planned or coverage disabled' } })
   }
   // 覆盖率轮次里单测本身的结果只作说明（插桩可能让个别用例失败），不影响判定
-  const underCoverage = { exit_code: r.exitCode, timed_out: Boolean(r.timedOut), failed_tests: (r.failures ?? []).length, note: 'unit run under v8 coverage; its pass/fail is informational only and never used for the verdict', ...(r.shards ? { shards: r.shards } : {}), ...(r.reused ? { reused: true, reused_from: r.reusedFrom } : {}), ...coverageMaybeLow({ results: first, changedFiles, readFile }) }
+  const underCoverage = { exit_code: r.exitCode, signal: r.signal ?? null, ended_at: r.endedAt ?? null, timed_out: Boolean(r.timedOut), failed_tests: (r.failures ?? []).length, note: 'unit run under v8 coverage; its pass/fail is informational only and never used for the verdict', ...(r.shards ? { shards: r.shards } : {}), ...(r.reused ? { reused: true, reused_from: r.reusedFrom } : {}), ...coverageMaybeLow({ results: first, changedFiles, readFile }) }
   if (r.coverage.status !== 'ok') return { ...coverageGate({ coverage: r.coverage, stepId: r.id }), unit_run_under_coverage: underCoverage }
   const diffError = prDiff.text == null ? `new-code coverage not evaluated: ${prDiff.error}` : null
   return { ...coverageGate({ coverage: r.coverage, added: diffError ? null : parseAddedLines(prDiff.text), stepId: r.id, diffError }), unit_run_under_coverage: underCoverage }

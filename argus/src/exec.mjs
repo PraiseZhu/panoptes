@@ -217,7 +217,7 @@ export function run(cmd, args, { cwd, env, timeoutMs = 10 * 60_000, logFile, inp
       setTimeout(() => killGroup(child, 'SIGKILL'), 10_000).unref()
     }, timeoutMs)
     let finished = false
-    const finish = (exitCode, extra = '') => {
+    const finish = (exitCode, extra = '', signal = null) => {
       if (finished) return
       finished = true
       clearTimeout(timer)
@@ -225,12 +225,13 @@ export function run(cmd, args, { cwd, env, timeoutMs = 10 * 60_000, logFile, inp
       // 进程组里可能还挂着孙进程（dev server、watcher），统一回收
       killGroup(child, 'SIGKILL')
       const durationMs = Date.now() - started
-      logStream?.end(`\n[exit ${exitCode}${timedOut ? ' timeout' : ''} ${durationMs}ms]\n`)
+      const endedAt = new Date().toISOString()
+      logStream?.end(`\n[exit ${exitCode}${signal ? ` ${signal}` : ''}${timedOut ? ' timeout' : ''} ${durationMs}ms]\n`)
       const tailText = (out.length > TAIL_BYTES ? out.slice(out.length - TAIL_BYTES) : out) + extra
-      resolve({ ok: exitCode === 0 && !timedOut, exitCode, timedOut, ...(timedOut && budgetCut ? { budgetExceeded: true } : {}), durationMs, tail: tailText, ...parser.finish() })
+      resolve({ ok: exitCode === 0 && !timedOut, exitCode, signal, endedAt, timedOut, ...(timedOut && budgetCut ? { budgetExceeded: true } : {}), durationMs, tail: tailText, ...parser.finish() })
     }
     child.on('error', (err) => finish(null, `\n进程错误：${err.message}`))
-    child.on('close', (code) => finish(code))
+    child.on('close', (code, signal) => finish(code, '', signal ?? null))
   })
 }
 
