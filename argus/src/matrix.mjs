@@ -1,6 +1,6 @@
 // 适用性矩阵：ming-qa 的 29 个维度（4 执行层 / 10 用例类型 / 10 风险 / 5 判定依据）。
 // 三件事分开：Jev 判断「涉及 / 拿不准」；「不适用」只来自 profile 明文；「测到没有」由代码按步骤的 covers 和真实结果计算。
-import { classifyChange, globToRegExp, highRiskFiles, isTestsOnly } from './classify.mjs'
+import { classifyChange, globToRegExp, highRiskFiles, isTestPath, isTestsOnly } from './classify.mjs'
 import { toReadableTitle } from './util.mjs'
 
 const q = (what) => `Could this code change plausibly affect ${what}? Answer yes only if the changed files, title or description clearly touch it.`
@@ -86,6 +86,7 @@ export function toPathHits(profile, files) {
   return hits
 }
 
+const DOC_PATH_RE = /(\.md|\.txt)$|(^|\/)docs\/|^LICENSE$/
 export const TESTS_ONLY_APPLICABLE = Object.freeze(['unit', 'regression'])
 
 // 分诊结论：每个维度 applicable / not_applicable / looks_unrelated / undetermined
@@ -95,10 +96,14 @@ export function toTriage({ profile, files, jev, handoff = null }) {
   const hits = toPathHits(profile, files)
   // 只改测试的 PR（#1101 只删了测试里 2 行，Jev 把 29 个维度全判不涉及）：至少单测和回归是适用的
   const testsOnly = isTestsOnly(files)
+  // 改了非测试代码/脚本且自带测试（#1116：pr-handoff-gate.cjs + 4 个测试被判 N/A）：单测和回归同样适用
+  const codeWithTests = !testsOnly && files.some((f) => isTestPath(f.filename))
+    && files.some((f) => !isTestPath(f.filename) && !DOC_PATH_RE.test(f.filename))
   const rows = DIMENSIONS.map((d) => {
     if (skip[d.key]) return { key: d.key, verdict: 'not_applicable', source: 'profile', reasonZh: skip[d.key] }
     if (hits.has(d.key)) return { key: d.key, verdict: 'applicable', source: 'path', reasonZh: `改到了 ${hits.get(d.key)}` }
     if (testsOnly && TESTS_ONLY_APPLICABLE.includes(d.key)) return { key: d.key, verdict: 'applicable', source: 'tests-only', reasonZh: '只改了测试文件' }
+    if (codeWithTests && TESTS_ONLY_APPLICABLE.includes(d.key)) return { key: d.key, verdict: 'applicable', source: 'ships-tests', reasonZh: '改了代码并自带测试' }
     if (!jev?.ok) return { key: d.key, verdict: 'undetermined', source: 'none' }
     const p = jev.answers[d.key]?.noul
     if (typeof p !== 'number') return { key: d.key, verdict: 'undetermined', source: 'none' }
