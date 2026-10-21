@@ -206,7 +206,9 @@ const run = async (number, handoff) => {
   return { out, h, calls, mergeSha }
 }
 // 和交接无关、每次都不同的字段
-const stable = (o) => { const { handoff, number, merged_at, evidence_dir, test_started_at, tested_at, duration_s, merge_sha, tested_sha, base_sha, changed_files, triage, checks, ...rest } = o; return { ...rest, checks: checks.map(({ duration_ms, ended_at, ...c }) => c), triage: { ...triage, duration_ms: null } } }
+const dropEndedAt = (v) => Array.isArray(v) ? v.map(dropEndedAt) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).filter(([k]) => k !== 'ended_at').map(([k, x]) => [k, dropEndedAt(x)])) : v
+const stable = (o) => dropEndedAt(_stable(o))
+const _stable = (o) => { const { handoff, number, merged_at, evidence_dir, test_started_at, tested_at, duration_s, merge_sha, tested_sha, base_sha, changed_files, triage, checks, ...rest } = o; return { ...rest, checks: checks.map(({ duration_ms, ...c }) => c), triage: { ...triage, duration_ms: null } } }
 
 test('handoff e2e processPr: SC-1 带交接的已合并代码 PR → present:true、每条 case 有 qa_status；SC-2 没交接 → present:false、其余字段一致；SC-3 分级不变', async () => {
   const withH = await run(3101, FULL)
