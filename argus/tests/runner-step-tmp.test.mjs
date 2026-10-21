@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { stepTmpDir } from '../src/runner.mjs'
+import { shardTmpDir, stepTmpDir } from '../src/runner.mjs'
 
 const hasAncestorNodeModules = (dir, stop) => {
   for (let a = dir; a !== dirname(stop); a = dirname(a)) if (existsSync(join(a, 'node_modules'))) return true
@@ -29,4 +29,12 @@ test('同一步重跑时清空旧内容；step id 里的特殊字符被转义', 
   assert.equal(again, a)
   assert.equal(existsSync(join(again, 'node_modules')), false)
   assert.equal(dirname(a), base)
+})
+
+test('分片 TMPDIR 建在步骤 TMPDIR 下，不跟 step.env 里覆盖的 TMPDIR 走', () => {
+  const base = mkdtempSync(join(tmpdir(), 'argus-steptmp-'))
+  const step = stepTmpDir(base, 'unit')
+  const shard = shardTmpDir(step, 2)
+  assert.equal(shard, join(step, 'shard-2'))
+  assert.ok(existsSync(shard))
 })
