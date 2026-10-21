@@ -3,6 +3,7 @@
 // issue 正文里的标记 <!-- mivo-qa-handoff: key=mq1-<fingerprint>-pr<N> pr=<N> --> 把 issue 对回原 PR 的那条问题。
 import { readFileSync, existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { routedRepos } from './handoff-routes.mjs'
 
 export const RECEIPT_RE = /^\s*(?:\*\*)?结论(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*(已修|不修|误报)/m
 const MARKER_RE = /<!--\s*mivo-qa-handoff:\s*key=(\S+)\s+pr=(\d+)/
@@ -20,11 +21,11 @@ export function parseMarker(body) {
   return { key: m[1], pr: Number(m[2]), fingerprint: m[1].replace(/-pr\d+$/, '') }
 }
 
-// 交接仓列表：$MIVO_QA_HANDOFF_REPOS（逗号分隔 owner/repo）或 QA/handoff/*/issues.json 里的 issue url
+// 交接仓列表：$MIVO_QA_HANDOFF_REPOS（逗号分隔 owner/repo）；否则 handoff-routes.json 里的仓 + QA/handoff/*/issues.json 里的 issue url
 export function handoffRepos(QA) {
   if (process.env.MIVO_QA_HANDOFF_REPOS !== undefined) return process.env.MIVO_QA_HANDOFF_REPOS.split(',').map(s => s.trim()).filter(Boolean)
-  const repos = new Set(), dir = join(QA, 'handoff')
-  if (!existsSync(dir)) return []
+  const repos = new Set(routedRepos()), dir = join(QA, 'handoff')
+  if (!existsSync(dir)) return [...repos]
   for (const d of readdirSync(dir)) {
     const f = join(dir, d, 'issues.json'); if (!existsSync(f)) continue
     try { for (const i of JSON.parse(readFileSync(f, 'utf8')).issues || []) { const m = String(i.url || '').match(/github\.com\/([^/]+\/[^/]+)\/issues\//); if (m) repos.add(m[1]) } } catch {}

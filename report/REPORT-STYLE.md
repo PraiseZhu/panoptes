@@ -43,7 +43,7 @@
      只有覆盖率差、且属仓库基线的写「只是仓库整体覆盖率差一点（见下），本 PR 不用处理」；只有 flaky 的写「有个测试不稳定，重跑就过了，见下」（和合并前代码的对比按下面第 4 条写）；纯文档写「纯文档，按规则不跑测试，审查无问题，无需处理」。
    - 动作措辞不得出现"请尽快""立刻""马上"等施压词；P0 用"请优先修复"。
 3. **已私信通知**（紧跟 P2 节；没有 P0/P1/P2 时紧跟开头）：每行 `#N 短标题 → 作者中文名，已飞书私信`，顺序与正文一致。
-   （2026-10-20 复盘补：要带交接仓 issue 链接的私信（aj0928、lubinyu-lab 的问题）按交接仓规则只能在群日报发出、开完 issue 之后再发。这类私信也照样列进本节，写成 `#N 短标题 → 作者中文名，日报发出后飞书私信`，不提交接仓、不提 issue；发送失败照常告诉 Praise。）
+   （2026-10-20 复盘补：要带交接仓 issue 链接的私信（作者在 `report/handoff-routes.json` 里的问题：aj0928、lubinyu-lab → aj0928/aj0928-handoff；zhongxingtian-ai → zhongxingtian-ai/handover-mivo）按交接仓规则只能在群日报发出、开完 issue 之后再发。这类私信也照样列进本节，写成 `#N 短标题 → 作者中文名，日报发出后飞书私信`，不提交接仓、不提 issue；发送失败照常告诉 Praise。）
    - 数据只取 `/workspace/mivo-qa/feishu-sent.json` 中**本期日报里列出的 PR**（含补测的前一天合并 PR）的成功记录（key 形如
      `xindong/mivo-canvas-plugin#<N>:<fingerprint>`，有 `message_id` 才算成功）；同一 PR 多条记录只列一行；此前已私信过、本次因去重没再发的 PR 不进这一节，在它的级别条目末尾写「这一条之前已私信过」。
    - 绝不写 open_id、message_id、fingerprint、发送时间。

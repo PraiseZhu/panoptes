@@ -1,0 +1,8 @@
+{
+  "_doc": "PR 作者 -> QA 交接仓。日报开交接 issue、扫回执、逾期通报都按这张表走；加人只改这里。cc = 逾期通报时一起 @ 的负责人。",
+  "target_repo": "xindong/mivo-canvas-plugin",
+  "routes": [
+    { "repo": "aj0928/aj0928-handoff", "owner": "aj0928", "authors": ["aj0928", "lubinyu-lab"], "cc": { "lubinyu-lab": ["aj0928"] } },
+    { "repo": "zhongxingtian-ai/handover-mivo", "owner": "zhongxingtian-ai", "authors": ["zhongxingtian-ai"], "cc": {} }
+  ]
+}

@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { matchesItem, isCoverage, shortTitle } from './followup-match.mjs'
 import { handoffRepos, loadResolutions, resolvedBy } from './handoff-receipts.mjs'
+import { overdueCc } from './handoff-routes.mjs'
 const feedbackBlock = (pr) => `怎么告诉我处理好了：
 · 改了：提修复 PR，标题或描述里写上原 PR 号（比如 #${pr}）
 · 不用改：在原 PR 下留言写一句原因，留言里点名是哪条，或写‘都不用改’
@@ -27,8 +28,8 @@ const DRY = process.argv.includes('--dry-run')
 const NO_REMIND = process.argv.includes('--no-remind') // 只查回复、发感谢，不发提醒
 const GROUP_OVERDUE = process.argv.includes('--group-overdue') // 逾期未回应群通报，默认关
 const OVERDUE_ONLY = process.argv.includes('--overdue-only') // 只跑逾期通报，跳过私信提醒/感谢
-// PR 作者之外一起 @ 的负责人（Praise 2026-10-19：路滨宇的 PR 由 aj 负责）
-const OVERDUE_CC = { 'lubinyu-lab': ['aj0928'] }
+// PR 作者之外一起 @ 的负责人（Praise 2026-10-19：路滨宇的 PR 由 aj 负责），见 handoff-routes.json
+const OVERDUE_CC = overdueCc()
 
 const readJson = (p, d) => (existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : d)
 const bjDate = (d = new Date()) => new Date(d.getTime() + 8 * 3600e3).toISOString().slice(0, 10)
