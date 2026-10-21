@@ -86,7 +86,8 @@ export function toPathHits(profile, files) {
   return hits
 }
 
-const DOC_PATH_RE = /(\.md|\.txt)$|(^|\/)docs\/|^LICENSE$/
+// 文档：.md/.mdx/.rst/.txt、docs/ 下、任意层级的 LICENSE / CHANGELOG / README（可带扩展名）
+const DOC_PATH_RE = /\.(md|mdx|rst|txt)$|(^|\/)docs\/|(^|\/)(LICENSE|LICENCE|COPYING|CHANGELOG|README)(\.[^/]*)?$/i
 export const TESTS_ONLY_APPLICABLE = Object.freeze(['unit', 'regression'])
 
 // 分诊结论：每个维度 applicable / not_applicable / looks_unrelated / undetermined

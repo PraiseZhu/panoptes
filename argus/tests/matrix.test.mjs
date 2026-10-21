@@ -274,16 +274,22 @@ test('改了脚本且自带测试（#1116）：unit / regression 适用，即使
   const files = [{ filename: 'scripts/ci/pr-handoff-gate.cjs' }, { filename: 'scripts/ci/pr-handoff-gate.test.mjs' }]
   const t = toTriage({ profile, files, jev: jevAll({ unit: 0.01, regression: 0.01 }) })
   const by = Object.fromEntries(t.rows.map((r) => [r.key, r]))
-  if (by.unit) { assert.equal(by.unit.verdict, 'applicable'); assert.equal(by.unit.source, 'ships-tests') }
-  if (by.regression) assert.equal(by.regression.verdict, 'applicable')
-  assert.ok(by.unit || by.regression)
+  assert.equal(by.unit.verdict, 'applicable')
+  assert.equal(by.unit.source, 'ships-tests')
+  assert.equal(by.regression.verdict, 'applicable')
+  assert.equal(by.regression.source, 'ships-tests')
 })
 
-test('只改文档 + 测试 不算改代码；只改代码不带测试 不强制', () => {
-  const docs = toTriage({ profile, files: [{ filename: 'docs/a.md' }, { filename: 'x.test.mjs' }, { filename: 'b.mjs' }].slice(0, 1), jev: jevAll({ unit: 0.01 }) })
-  assert.notEqual(docs.rows.find((r) => r.key === 'unit')?.source, 'ships-tests')
-  const noTests = toTriage({ profile, files: [{ filename: 'scripts/a.mjs' }], jev: jevAll({ unit: 0.01 }) })
-  assert.notEqual(noTests.rows.find((r) => r.key === 'unit')?.source, 'ships-tests')
-  const docAndTest = toTriage({ profile, files: [{ filename: 'docs/a.md' }, { filename: 'x.test.mjs' }], jev: jevAll({ unit: 0.01 }) })
-  assert.notEqual(docAndTest.rows.find((r) => r.key === 'unit')?.source, 'ships-tests')
+test('只改测试仍是 tests-only，不被 ships-tests 抢走', () => {
+  const t = toTriage({ profile, files: [{ filename: 'src/a.test.ts' }], jev: jevAll({ unit: 0.01 }) })
+  assert.equal(t.rows.find((r) => r.key === 'unit').source, 'tests-only')
+})
+
+test('文档 + 测试、只改代码不带测试：都不套 ships-tests', () => {
+  const src = (files) => toTriage({ profile, files, jev: jevAll({ unit: 0.01 }) }).rows.find((r) => r.key === 'unit').source
+  for (const doc of ['docs/a.md', 'guide.mdx', 'notes.rst', 'pkg/LICENSE', 'CHANGELOG', 'sub/README.md', 'a.txt']) {
+    assert.notEqual(src([{ filename: doc }, { filename: 'x.test.mjs' }]), 'ships-tests', doc)
+  }
+  assert.notEqual(src([{ filename: 'scripts/a.mjs' }]), 'ships-tests')
+  assert.equal(src([{ filename: 'scripts/a.mjs' }, { filename: 'x.test.mjs' }]), 'ships-tests')
 })
