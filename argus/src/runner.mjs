@@ -424,11 +424,12 @@ export async function runSteps(profile, src, runDir, { stepIds = null, execution
     const stepVars = { ...passEnvFor(step), ...Object.fromEntries(Object.entries(step.env ?? {}).map(([k, v]) => [k, subst(v, runDir, vars)])), ...(v8Dir ? { NODE_V8_COVERAGE: v8Dir } : {}) }
     // step.envUnset：这一步不要继承的公共变量（例如单测要求 MIVO_ASSET_STORE_DIR 未设置）
     const stepEnvBase = { ...env, TMPDIR: stepTmpDir(env.TMPDIR ?? tmpdir(), step.id) }
+    const stepTmp = stepEnvBase.TMPDIR
     for (const k of step.envUnset ?? []) delete stepEnvBase[k]
     const watch = watchDesktop(step.silentCheck)
     const sp = step.shard ? shardPlan(step) : null
     const res = sp && sp.shards > 1
-      ? await runSharded({ step, plan: sp, cmd, covDir, reportFile: stepVarsForReport.TEST_REPORT ?? null, runDir, src, profile, ro: bin.ro, env: { ...stepEnvBase, ...stepVars }, logFile })
+      ? await runSharded({ step, plan: sp, cmd, covDir, reportFile: stepVarsForReport.TEST_REPORT ?? null, runDir, src, profile, ro: bin.ro, env: { ...stepEnvBase, ...stepVars }, logFile, tmpBase: stepTmp })
       : await run(argv[0], argv.slice(1), { cwd: src, env: { ...stepEnvBase, ...stepVars }, timeoutMs: (step.timeoutMin ?? 20) * 60_000, logFile })
     if (sp && !res.shards) res.shards = { count: 1, reason: sp.reason }
     const disturbed = await watch.stop()
@@ -451,7 +452,14 @@ export async function runSteps(profile, src, runDir, { stepIds = null, execution
 // 分片执行（step.shard）：N 个 `--shard=i/N` 进程并行，各写自己的 JSON 报告 / 覆盖率目录 / 日志，跑完合并成
 // 和不分片时同名的文件（reports/<step>.json、coverage/<step>/coverage-{final,summary}.json、logs/<step>.log），
 // 结果对象与 run() 同形，外加 shards { count, reason, per_shard[] }。
-export async function runSharded({ step, plan, cmd, covDir, reportFile, runDir, src, profile, ro = [], env, logFile }) {
+// 分片 TMPDIR 建在这一步自己的 TMPDIR（stepEnvBase.TMPDIR）下：step.env / passEnv 里的 TMPDIR 不能把分片带出步骤隔离目录
+export function shardTmpDir(tmpBase, i) {
+  const dir = join(tmpBase ?? tmpdir(), `shard-${i}`)
+  mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+export async function runSharded({ step, plan, cmd, covDir, reportFile, runDir, src, profile, ro = [], env, logFile, tmpBase = null }) {
   const n = plan.shards
   const release = reserveShards(n * (plan.per_shard_gb ?? 1.5))
   const t0 = Date.now()
@@ -465,8 +473,7 @@ export async function runSharded({ step, plan, cmd, covDir, reportFile, runDir, 
       c = shardArgs(c, i, n)
       if (shardCov) mkdirSync(shardCov, { recursive: true })
       // 每片自己的 TMPDIR，避免测试用固定临时文件名时互相踩
-      const tmp = join(env.TMPDIR ?? tmpdir(), `shard-${i}`)
-      mkdirSync(tmp, { recursive: true })
+      const tmp = shardTmpDir(tmpBase ?? env.TMPDIR, i)
       const argv = sandboxed(c, runDir, profile, ro)
       const shardLog = logFile.replace(/\.log$/, '') + `.shard-${i}.log`
       jobs.push(run(argv[0], argv.slice(1), { cwd: src, env: { ...env, TMPDIR: tmp }, timeoutMs: (step.timeoutMin ?? 20) * 60_000, logFile: shardLog })
