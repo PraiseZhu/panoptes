@@ -79,6 +79,15 @@ export async function ensureMirror(repo, neededSha = null, { extraRefspecs = [] 
 // 临时目录改放短路径 /private/tmp/argus-<id>，随 run 一起清理
 const SHORT_TMP_ROOT = process.platform === 'darwin' ? '/private/tmp' : tmpdir()
 const shortTmpOf = (runDir) => join(SHORT_TMP_ROOT, `argus-${runDir.split('/').pop()}`)
+// 每步独立的 TMPDIR（在 run 的短临时目录下，沙箱已绑定）：前一步在 $TMPDIR 留下的 node_modules 等文件
+// 会变成后一步测试临时目录的「祖先」，例如 org-market-company-no-dependencies 断言祖先无 node_modules，
+// 只在本机前序步骤真跑（没被 step cache 复用）时失败，GitHub CI 每个 job 全新 /tmp 不会。
+export function stepTmpDir(baseTmp, stepId) {
+  const dir = join(baseTmp, `step-${String(stepId).replace(/[^A-Za-z0-9_.-]/g, '_')}`)
+  rmSync(dir, { recursive: true, force: true })
+  mkdirSync(dir, { recursive: true })
+  return dir
+}
 
 // 两个提交的 merge-base（开放 PR 用它当「改动前」的对照版本）
 export async function mergeBase(mirror, a, b) {
@@ -414,7 +423,7 @@ export async function runSteps(profile, src, runDir, { stepIds = null, execution
     const argv = sandboxed(cmd, runDir, profile, bin.ro)
     const stepVars = { ...passEnvFor(step), ...Object.fromEntries(Object.entries(step.env ?? {}).map(([k, v]) => [k, subst(v, runDir, vars)])), ...(v8Dir ? { NODE_V8_COVERAGE: v8Dir } : {}) }
     // step.envUnset：这一步不要继承的公共变量（例如单测要求 MIVO_ASSET_STORE_DIR 未设置）
-    const stepEnvBase = { ...env }
+    const stepEnvBase = { ...env, TMPDIR: stepTmpDir(env.TMPDIR ?? tmpdir(), step.id) }
     for (const k of step.envUnset ?? []) delete stepEnvBase[k]
     const watch = watchDesktop(step.silentCheck)
     const sp = step.shard ? shardPlan(step) : null
