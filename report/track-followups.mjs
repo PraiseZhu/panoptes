@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 // Follow-up tracker for Mivo QA Feishu DMs to PR authors of xindong/mivo-canvas-plugin.
 // Usage: node track-followups.mjs [--dry-run] [--no-remind] [--group-overdue]
+// State item fields set by hand / the 日报 bot when reopening a wrongly-closed entry:
+//   reopened: true, ignore_prs: [1103, 1098]  → those PRs never auto-close it again (see followup-match.mjs).
 // Runtime state lives outside the repo: $MIVO_QA_FOLLOWUP_STATE (default /workspace/mivo-qa/followup/state.json).
 import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
-import { matchesItem, isCoverage, shortTitle } from './followup-match.mjs'
+import { matchesItem, isCoverage, shortTitle, prCountsAsFollowup } from './followup-match.mjs'
 import { handoffRepos, loadResolutions, resolvedBy } from './handoff-receipts.mjs'
 import { overdueCc } from './handoff-routes.mjs'
 const feedbackBlock = (pr) => `怎么告诉我处理好了：
@@ -111,12 +113,9 @@ function detect(it) {
   for (const c of ghPaged(`repos/${REPO}/issues/${it.pr}/comments?per_page=100`)) if (after(c)) ev.push({ type: 'pr-comment', at: c.created_at, url: c.html_url, text: c.body })
   for (const c of ghPaged(`repos/${REPO}/pulls/${it.pr}/reviews?per_page=100`)) if (after(c)) ev.push({ type: 'pr-review', at: c.submitted_at, url: c.html_url, text: c.body })
   for (const c of ghPaged(`repos/${REPO}/pulls/${it.pr}/comments?per_page=100`)) if (after(c)) ev.push({ type: 'pr-review-comment', at: c.created_at, url: c.html_url, text: c.body, path: c.path })
-  const ref = new RegExp(`#${it.pr}(?!\\d)`)
   for (const p of authorPrsSince(who, since)) {
-    if (p.number === it.pr) continue
-    // 只改到同一文件不算跟进；必须引用原 PR 号，改到的文件仅作附注
-    const touched = p.files.filter(f => it.files.includes(f))
-    if (ref.test(`${p.title}\n${p.body || ''}`)) ev.push({ type: 'pr-references', pr: p.number, at: p.createdAt, url: p.url, files: touched })
+    // 必须引用原 PR 号，且（有相关文件时）改到相关文件；reopened / ignore_prs 里的 PR 不算，见 followup-match.mjs
+    if (prCountsAsFollowup(p, it)) ev.push({ type: 'pr-references', pr: p.number, at: p.createdAt, url: p.url, files: p.files.filter(f => (it.files || []).includes(f)) })
   }
   return ev
 }
