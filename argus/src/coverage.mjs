@@ -1,5 +1,6 @@
 // 白盒覆盖率门禁：单测步骤用 vitest --coverage（v8）跑，读 coverage-summary.json（总体）与 coverage-final.json
 // （逐行），再与 PR diff 的新增行求交，得到「新代码覆盖率」。低于门槛 → P2（只是建议复查，永远不会单独变成 issue）。
+import { TEST_HELPER_RE } from './classify.mjs'
 import { readFileSync, existsSync, statSync, rmSync, readdirSync } from 'node:fs'
 import { join, relative, isAbsolute, resolve, sep, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -87,7 +88,7 @@ export function parseAddedLines(diff) {
 
 const SOURCE_RE = /\.(?:[cm]?[jt]sx?)$/
 const NOT_SOURCE_RE = /(?:^|\/)(?:node_modules|dist|coverage|_tmp|__mocks__|__fixtures__|fixtures|test|tests|__tests__)\/|\.(?:test|spec|bench|d)\.[cm]?[jt]sx?$|(?:^|\/)(?:vite|vitest|eslint|playwright)\.[^/]*config\.[cm]?[jt]s$|\.config\.[cm]?[jt]s$/
-export const isCoverageSource = (file) => SOURCE_RE.test(file) && !NOT_SOURCE_RE.test(file)
+export const isCoverageSource = (file) => SOURCE_RE.test(file) && !NOT_SOURCE_RE.test(file) && !TEST_HELPER_RE.test(file)
 // 未被测试加载的文件没有可执行行信息：按「像代码的新增行」保守计为未覆盖
 const looksLikeCode = (t) => { const s = t.trim(); return Boolean(s) && !/^(?:\/\/|\/\*|\*|\*\/)/.test(s) && !/^(?:import\b|export\s+(?:type|interface)\b|type\s|interface\s|[{}()[\];,]+$)/.test(s) }
 

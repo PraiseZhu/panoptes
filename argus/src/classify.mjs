@@ -25,8 +25,11 @@ export function globToRegExp(glob) {
 const matchAny = (path, globs) => globs.some((g) => globToRegExp(g).test(path))
 
 // 测试文件（*.test.* / *.spec.* / *.node-test.* / __tests__/ / test_*.py / *_test.py）
+// 以及测试辅助文件：文件名以 -fixture / _fixture / .fixture / Fixture 或 -harness / Harness 结尾（company-cli-test-fixture.mjs、
+// design-ratchet-fixture.mjs、canvasHarness.ts）；fixtureLoader.ts 这类只是开头像的产品文件不算
+export const TEST_HELPER_RE = /(?:[-_.]fixtures?|Fixtures?|[-_.]harness|Harness)\.[cm]?[jt]sx?$/
 const TEST_PATH_RE = /\.(test|spec|node-test)\.[cm]?[jt]sx?$|(^|\/)__tests__\/|(^|\/)test_[^/]+\.py$|_test\.py$/
-export const isTestPath = (path) => TEST_PATH_RE.test(String(path ?? ''))
+export const isTestPath = (path) => TEST_PATH_RE.test(String(path ?? '')) || TEST_HELPER_RE.test(String(path ?? ''))
 // 只改了测试文件（至少一个，且全是测试文件；删掉的测试文件也算测试改动）
 export const isTestsOnly = (files) => (files ?? []).length > 0 && files.every((f) => isTestPath(f.filename))
 
