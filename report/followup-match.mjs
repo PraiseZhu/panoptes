@@ -42,6 +42,9 @@ export function prCountsAsFollowup(p, item) {
   return true
 }
 
+// reports/acceptance 下属于该 PR 的报告：PR-943.json / review-PR-943.json / PR-943-nocache.json（不含 PR-9431）
+export const isAcceptanceReportFor = (name, pr) => new RegExp(`^(review-)?PR-${pr}(-[\\w-]+)?\\.json$`).test(name)
+
 export function matchesItem(ev, item) {
   if (ev.type === 'pr-references') return true
   if (!String(ev.text || '').trim()) return false // 空正文（如行内回复自动生成的空 review）不算回应

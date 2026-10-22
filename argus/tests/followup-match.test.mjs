@@ -83,3 +83,9 @@ test('reopened / ignore_prs skip those PRs', () => {
   assert.equal(prCountsAsFollowup(pr(1098, []), re), false)
   assert.equal(prCountsAsFollowup(pr(1200, []), re), true)
 })
+
+import { isAcceptanceReportFor } from '../../report/followup-match.mjs'
+test('acceptance report files for a PR (#943 P1 lives in review-PR-943.json)', () => {
+  for (const n of ['PR-943.json', 'review-PR-943.json', 'PR-943-nocache.json']) assert.equal(isAcceptanceReportFor(n, 943), true, n)
+  for (const n of ['PR-9431.json', 'review-PR-94.json', 'PR-943.md', 'xPR-943.json']) assert.equal(isAcceptanceReportFor(n, 943), false, n)
+})

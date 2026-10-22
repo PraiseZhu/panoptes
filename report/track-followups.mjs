@@ -8,7 +8,7 @@ import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, mkdtem
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
-import { matchesItem, isCoverage, shortTitle, prCountsAsFollowup } from './followup-match.mjs'
+import { matchesItem, isCoverage, shortTitle, prCountsAsFollowup, isAcceptanceReportFor } from './followup-match.mjs'
 import { handoffRepos, loadResolutions, resolvedBy } from './handoff-receipts.mjs'
 import { overdueCc } from './handoff-routes.mjs'
 const feedbackBlock = (pr) => `怎么告诉我处理好了：
@@ -57,6 +57,9 @@ function findingsFor(pr) {
   const files = [join(dir, `PR-${pr}.json`)]
   const hdir = join(dir, 'history')
   if (existsSync(hdir)) for (const f of readdirSync(hdir)) if (new RegExp(`^PR-${pr}\\.v\\d+\\.json$`).test(f)) files.push(join(hdir, f))
+  // 验收复审（code-review P0/P1 等）只在 reports/acceptance，不读会让 DM 主问题找不到、标签退成同 PR 的覆盖率
+  const adir = join(QA, 'reports/acceptance')
+  if (existsSync(adir)) for (const f of readdirSync(adir).sort()) if (isAcceptanceReportFor(f, pr)) files.push(join(adir, f))
   let author = null, title = null
   const findings = []
   for (const f of files) {
