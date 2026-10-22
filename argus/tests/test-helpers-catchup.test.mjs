@@ -34,6 +34,10 @@ test('prsInArgv: run-nightly.sh / cli.mjs nightly --pr N, nothing else', () => {
   assert.deepEqual(prsInArgv(['node', '--disable-warning=ExperimentalWarning', 'src/cli.mjs', 'nightly', '--pr', '1128', '--pr', '1129']), [1128, 1129])
   assert.deepEqual(prsInArgv(['node', 'src/cli.mjs', 'catch-up', '--wait-lock', '14400']), [])
   assert.deepEqual(prsInArgv(['gh', 'pr', 'view', '--pr', '7']), [])
+  assert.deepEqual(prsInArgv(['bash', '/p/run-nightly.sh', '--pr=1161', '--wait-lock', '14400']), [1161])
+  assert.deepEqual(prsInArgv(['node', 'src/cli.mjs', 'nightly', '--pr=1128', '--pr', '1129']), [1128, 1129])
+  assert.deepEqual(prsInArgv(['bash', 'run-nightly.sh', '--pr=', '--pr=abc', '--pr=12x']), [])
+  assert.deepEqual(prsInArgv(['gh', 'pr', 'view', '--pr=7']), [])
 })
 
 test('activeRunPrs scans a proc dir (running + queued-on-lock processes)', () => {

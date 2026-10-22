@@ -79,7 +79,11 @@ export function gapOf(pr, mergedDir) {
 export function prsInArgv(argv) {
   const isRun = argv.some((a) => /(^|\/)run-nightly\.sh$/.test(a)) || (argv.some((a) => /(^|\/)cli\.mjs$/.test(a)) && argv.includes('nightly'))
   if (!isRun) return []
-  return argv.flatMap((a, i) => (a === '--pr' && /^\d+$/.test(argv[i + 1] ?? '') ? [Number(argv[i + 1])] : []))
+  return argv.flatMap((a, i) => {
+    if (a === '--pr') return /^\d+$/.test(argv[i + 1] ?? '') ? [Number(argv[i + 1])] : []
+    const m = /^--pr=(\d+)$/.exec(a)
+    return m ? [Number(m[1])] : []
+  })
 }
 export function activeRunPrs({ procDir = '/proc', selfPid = process.pid } = {}) {
   const prs = new Set()
