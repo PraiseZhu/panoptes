@@ -8,7 +8,7 @@
 //      把放弃记录写进本次结果文件的 system_health，下一次夜间日报的 system_health 也会带上（stage 'catch-up'）。
 //   没有缺口时立即安静退出（不输出、不写文件）。
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, renameSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { REPORTS_DIR } from './paths.mjs'
 import { toShanghaiDay, toShanghaiIso } from './util.mjs'
@@ -74,6 +74,25 @@ export function gapOf(pr, mergedDir) {
   return null
 }
 
+// 正在跑或排队等 nightly.lock 的 run-nightly（on-merge 事件、手动）：它们的报告还没写出来，不算缺口（10-21 #1128 / #1161 被误补）。
+// 排队中的 run-nightly.sh 已经是活进程（卡在 flock -w），所以扫 /proc 里 run-nightly.sh / cli.mjs nightly 的 --pr N 即可同时覆盖两种状态。
+export function prsInArgv(argv) {
+  const isRun = argv.some((a) => /(^|\/)run-nightly\.sh$/.test(a)) || (argv.some((a) => /(^|\/)cli\.mjs$/.test(a)) && argv.includes('nightly'))
+  if (!isRun) return []
+  return argv.flatMap((a, i) => (a === '--pr' && /^\d+$/.test(argv[i + 1] ?? '') ? [Number(argv[i + 1])] : []))
+}
+export function activeRunPrs({ procDir = '/proc', selfPid = process.pid } = {}) {
+  const prs = new Set()
+  let pids = []
+  try { pids = readdirSync(procDir).filter((d) => /^\d+$/.test(d) && Number(d) !== selfPid) } catch { return prs }
+  for (const pid of pids) {
+    let argv
+    try { argv = readFileSync(join(procDir, pid, 'cmdline'), 'utf8').split('\0').filter(Boolean) } catch { continue }
+    for (const n of prsInArgv(argv)) prs.add(n)
+  }
+  return prs
+}
+
 export function loadState(file) {
   try { return JSON.parse(readFileSync(file, 'utf8')) } catch { return { prs: {} } }
 }
@@ -84,13 +103,15 @@ function saveState(file, state) {
 }
 
 // 主流程。runOne(pr) 返回子进程退出码；gh / 时钟 / 目录都可注入，便于测试。
-export function catchUp({ repo, now = new Date(), reportsDir = REPORTS_DIR, mergedDir = join(reportsDir, 'merged'), list = (r, d) => listMergedPrs(r, d), runOne, maxAttempts = MAX_ATTEMPTS }) {
+export function catchUp({ repo, now = new Date(), reportsDir = REPORTS_DIR, mergedDir = join(reportsDir, 'merged'), list = (r, d) => listMergedPrs(r, d), runOne, maxAttempts = MAX_ATTEMPTS, active = () => activeRunPrs() }) {
   const days = catchUpDays(now)
   const merged = list(repo, days)
   const sFile = statePath(reportsDir)
   const state = loadState(sFile)
   state.prs ??= {}
   const gaps = []
+  const running = active()
+  const inProgress = []
   for (const pr of merged) {
     const gap = gapOf(pr, mergedDir)
     const key = String(pr.number)
@@ -99,11 +120,13 @@ export function catchUp({ repo, now = new Date(), reportsDir = REPORTS_DIR, merg
     // 新的 merge commit（例如 revert 后重新合并）重新计数
     if (prev && prev.merge_sha !== pr.merge_sha) delete state.prs[key]
     if (state.prs[key]?.gave_up_at) continue
+    // 有 on-merge（或手动）运行正在跑 / 排队：交给它，不算缺口、不计尝试次数
+    if (running.has(pr.number)) { inProgress.push(pr.number); continue }
     gaps.push({ ...pr, gap })
   }
-  if (!gaps.length) { if (existsSync(sFile)) saveState(sFile, state); return { status: 'nothing-to-do', days, gaps: [] } }
+  if (!gaps.length) { if (existsSync(sFile)) saveState(sFile, state); return { status: 'nothing-to-do', days, gaps: [], in_progress: inProgress } }
 
-  const result = { schema: 'mivo-qa-catch-up/v1', repo, days, started_at: toShanghaiIso(now), gaps: gaps.map((g) => ({ number: g.number, day: g.day, merge_sha: g.merge_sha, reason: g.gap.reason })), runs: [],
+  const result = { schema: 'mivo-qa-catch-up/v1', repo, days, started_at: toShanghaiIso(now), gaps: gaps.map((g) => ({ number: g.number, day: g.day, merge_sha: g.merge_sha, reason: g.gap.reason })), in_progress: inProgress, runs: [],
     system_health: { status: 'ok', gave_up: [], qa_tool_failures: [] } }
   for (const g of gaps) {
     const key = String(g.number)

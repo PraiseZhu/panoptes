@@ -2,7 +2,7 @@
 // 每个补测都要带一个「植入错误」：测试在当前代码上通过、植入错误后失败，才算有效；否则丢弃。
 // 补测发现的问题在试运行期只记「拿不准，要你看」，不自动提 issue。
 import { aiUsageToday, addAiUsage } from './db.mjs'
-import { globToRegExp } from './classify.mjs'
+import { globToRegExp, TEST_HELPER_RE } from './classify.mjs'
 import { toDimensionLabel, stepExercises } from './matrix.mjs'
 import { prTestDimensions } from './pr-tests.mjs'
 import { redact, toShanghaiDay, truncate, jsonObjectBody } from './util.mjs'
@@ -333,6 +333,7 @@ const TIER_RE = {
 export function fileKind(path) {
   if (TIER_RE.lock.test(path)) return 'lock'
   if (TIER_RE.generated.test(path)) return 'generated'
+  if (TEST_HELPER_RE.test(path)) return 'tests'
   if (TIER_RE.ci.test(path)) return 'ci'
   if (TIER_RE.tests.test(path)) return 'tests'
   if (TIER_RE.depManifest.test(path)) return 'deps'
