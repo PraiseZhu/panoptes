@@ -23,6 +23,25 @@ function mentionsFile(f, text) {
   return new RegExp(`(^|[^\\w.-])${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w-])`).test(text)
 }
 
+// 引用原 PR 号的修复 PR 是否算跟进（防"只提了一嘴"误收起）：
+//  - item.ignore_prs: [号码] → 这些 PR 永不算跟进（日报 bot 重开条目时写入当初误判的 PR）
+//  - item.reopened: true → 同上，另外 reopen_prior_evidence 里记录的 PR 也一并忽略
+//  - item.files 非空时，PR 必须改到其中至少一个文件；只引用 PR 号、不碰相关文件不算
+//    （item.files 为空——如覆盖率问题没有具体文件——无法判断，维持只看引用）
+export function ignoredPrs(item) {
+  const s = new Set((item.ignore_prs || []).map(Number))
+  if (item.reopened || item.reopen_prior_evidence) for (const e of item.reopen_prior_evidence || []) if (e.pr) s.add(Number(e.pr))
+  return s
+}
+export function prCountsAsFollowup(p, item) {
+  if (p.number === item.pr) return false
+  if (!new RegExp(`#${item.pr}(?!\\d)`).test(`${p.title}\n${p.body || ''}`)) return false
+  if (ignoredPrs(item).has(Number(p.number))) return false
+  const files = item.files || []
+  if (files.length && !(p.files || []).some(f => files.includes(f))) return false
+  return true
+}
+
 export function matchesItem(ev, item) {
   if (ev.type === 'pr-references') return true
   if (!String(ev.text || '').trim()) return false // 空正文（如行内回复自动生成的空 review）不算回应

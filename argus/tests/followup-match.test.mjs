@@ -65,3 +65,21 @@ test('shortTitle: leading punctuation and min 8 chars before cut', () => {
   assert.equal(shortTitle('CI 失败：lint 报错，构建产物缺失'), 'CI 失败：lint 报错')
   assert.equal(shortTitle('超时：部分请求在重试后仍然失败且没有任何日志可以排查问题的根因所在之处呢'), '超时：部分请求在重试后仍然失败且没有任何日志可以排查问题的根…')
 })
+
+import { prCountsAsFollowup } from '../../report/followup-match.mjs'
+const fx = { pr: 943, files: ['src/canvas/foo.ts'] }
+const pr = (number, files, body = 'refs #943') => ({ number, title: 't', body, files })
+test('mention-only PR not touching finding files is not a follow-up', () => {
+  assert.equal(prCountsAsFollowup(pr(1103, ['src/other.ts']), fx), false)
+  assert.equal(prCountsAsFollowup(pr(1104, ['src/canvas/foo.ts']), fx), true)
+  assert.equal(prCountsAsFollowup(pr(1105, ['src/canvas/foo.ts'], 'refs #9431'), fx), false)
+})
+test('no finding files (coverage): reference alone still counts', () => {
+  assert.equal(prCountsAsFollowup(pr(1103, []), { pr: 943, files: [] }), true)
+})
+test('reopened / ignore_prs skip those PRs', () => {
+  assert.equal(prCountsAsFollowup(pr(1103, ['src/canvas/foo.ts']), { ...fx, ignore_prs: [1103] }), false)
+  const re = { pr: 943, files: [], reopened: true, reopen_prior_evidence: [{ type: 'pr-references', pr: 1098 }] }
+  assert.equal(prCountsAsFollowup(pr(1098, []), re), false)
+  assert.equal(prCountsAsFollowup(pr(1200, []), re), true)
+})
