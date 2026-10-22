@@ -31,7 +31,8 @@ const REDACTIONS = [
   [/(authorization|x-api-key|cookie|set-cookie)\s*[:=]\s*\S+/gi, '$1: <redacted>'],
   [/Bearer\s+[A-Za-z0-9._-]{12,}/g, 'Bearer <redacted>'],
   [/(app_secret|api_key|apikey|password|secret)(["']?\s*[:=]\s*["']?)[^\s"',}]+/gi, '$1$2<redacted>'],
-  [/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '<email>'],
+  // scp-style git remote (git@github.com:owner/repo.git) is not an email: keep it (mivo #1124 false P1)
+  [/(?<![A-Za-z0-9._%+-])(?!git@[A-Za-z0-9.-]+\.[A-Za-z]{2,}:[A-Za-z0-9_~./-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '<email>'],
   [/(file:\/\/)?\/Users\/[^/\s]+\/Library\/[^\s)'"]*/g, '<本机临时路径>'],
   [/(file:\/\/)?~\/Library\/[^\s)'"]*/g, '<本机临时路径>'],
   [/\/Users\/[^/\s]+/g, '~'],

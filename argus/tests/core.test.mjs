@@ -365,3 +365,14 @@ test('issue：首行 @ 作者，指纹不含 PR 号和 SHA', () => {
   assert.equal(body.split('\n')[0], '@PraiseZhu')
   assert.ok(body.includes('argus-publication: p1'))
 })
+
+test('redact: scp-style git remotes stay, real emails (incl. bare git@) still redacted', () => {
+  for (const keep of ['git clone git@github.com:owner/repo.git', 'remote = git@gitlab.example.com:group/sub/repo.git', '+  git@github.com:xindong/mivo-canvas-plugin.git deploy']) {
+    assert.equal(redact(keep), keep)
+  }
+  assert.equal(redact('mail git@github.com now'), 'mail <email> now')
+  assert.equal(redact('to: git@github.com.'), 'to: <email>.')
+  assert.equal(redact('contact git@example.com: please'), 'contact <email>: please')
+  assert.equal(redact('alice.bob+qa@xd.com and x@y.io'), '<email> and <email>')
+  assert.equal(redact('mygit@github.com:owner/repo'), '<email>:owner/repo')
+})
