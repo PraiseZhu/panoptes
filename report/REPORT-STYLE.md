@@ -22,7 +22,8 @@
 - 等级只认审查机统一分级（PraiseZhu/Review-PR `mivo/config/severity.md`，报告里 `severity_standard` 指向钉住的版本）。本文件不再定义 P0–P3，只写怎么把报告写成日报。
 - 报告 `prs[].findings` 里的每一条都是按统一分级成立的问题：P0、P1、P2 都要修，都 @ 作者、私信、计入 3 天逾期。
 - 报告 `prs[].pending_verification[]` 是**待核实（QA 自查）**：AI 审查怀疑但排除不了（PLAUSIBLE）、AI 单独报的 P1 整仓复核没证实、检查结果 unverified / setup-failed / timeout / flaky、AI 补测线索、PR 改过的测试没被跑到、测试系统自己出错、和合并前裁定对得上的。它们**不定级、不进级别节、不 @、不私信、不开交接 issue、不计逾期**，由 QA 自己先查清；日报里只在「待核实」一节带一句。
-- 旧报告（没有 `severity_standard`）按 `report/finding-policy.mjs` 的 `notifiable()` 判哪些算作者的问题：只差覆盖率的 P2、AI 补测线索、flaky / unverified、PLAUSIBLE 审查结论、qa-error、own-tests 都不算。
+- 旧报告（没有 `severity_standard`）按 `report/finding-policy.mjs` 的 `notifiable(f, { newNotice: true })` 判哪些算作者的问题：只差覆盖率的 P2、AI 补测线索、flaky / unverified、PLAUSIBLE 审查结论、qa-error、own-tests、没经整仓复核证实的 AI 单独 P0/P1 都不算。
+- 新口径只管**北京时间 10-24 起新发出**的私信 / @ / 交接 issue。在那之前已经发给作者的问题照老流程跟进：照常提醒、照老规矩计逾期（P0/P1、有具体建议的非覆盖率 P2），不因新口径收起 —— 作者自己的 bot 会回去复核，没问题、不修会在 PR 下回复（Praise 2026-10-23）。
 - 回执只有一种格式（见文末「私信/提醒固定结尾」）。
 
 ## 骨架（顺序固定；级别节无条目可省略，「已私信通知」始终保留）

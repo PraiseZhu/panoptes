@@ -761,3 +761,13 @@ target written as a target (≥ / 不低于 / 至少 / 以上 / 目标 / at leas
 does not count): `coverage_gate.stated_target { pct, metric: new_code|lines|branches|functions, source, quote, value,
 status: met|missed|not-evaluated }`, and when `missed` one P2 `source: "stated-acceptance"`, `check_id: "coverage-target"`.
 
+
+**Who is told (author problems).** `report/finding-policy.mjs` `notifiable(f, { newNotice })` decides which findings
+are the author's problem (@ / DM / handoff issue / overdue); the same rule lives in `pi-fallback bin/finding_policy.py`
+and `mivo-qa/ledger/build-ledger.mjs`. Reports before 2026-10-23 have no `pending_verification`, so it also drops what the
+unified severity would have put there (coverage-only P2, AI-test leads, own-tests, qa-error, unverified / setup-failed /
+timeout / flaky checks, PLAUSIBLE review findings, and — for a new notice — an AI-only code-review P0/P1 without
+`verification.status: "confirmed"`). This applies to notices sent from 2026-10-24 00:00 Asia/Shanghai
+(`UNIFIED_SINCE`). Problems already sent to an author before that keep the old follow-up flow in
+`report/track-followups.mjs`: reminders as before, overdue by the old rule (`legacyOverdueQualifying`: P0/P1, a
+non-coverage P2 with a concrete recommendation); the author's own bot re-checks them and replies on the PR.

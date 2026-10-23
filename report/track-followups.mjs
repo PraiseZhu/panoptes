@@ -11,7 +11,7 @@ import { execFileSync } from 'node:child_process'
 import { matchesItem, isCoverage, shortTitle, prCountsAsFollowup, isAcceptanceReportFor, namesItem } from './followup-match.mjs'
 import { handoffRepos, loadResolutions, resolvedBy, parseReceiptDetail, qaRefRe } from './handoff-receipts.mjs'
 import { overdueCc } from './handoff-routes.mjs'
-import { notifiable } from './finding-policy.mjs'
+import { notifiable, sentUnderUnified, legacyOverdueQualifying } from './finding-policy.mjs'
 // 回执统一成一种（Praise 2026-10-23）：私信、日报、交接仓约定都是这一种说法（REPORT-STYLE.md「私信/提醒固定结尾」同文）
 const feedbackBlock = (pr) => `怎么告诉我处理好了（选一种）：
 · 修了：开修复 PR，标题或描述里写「QA #${pr}」，合并后自动算已修
@@ -93,8 +93,9 @@ for (const [key, v] of Object.entries(sent)) {
   it.problems = hit.map(f => f.title || f.test || f.check_name).filter(Boolean)
   it.coverage = hit.length > 0 && isCoverage(hit[0]) // DM 主问题是否覆盖率
   it.main_files = hit[0]?.file ? [hit[0].file] : [] // 回应只按主问题自己的文件判断
-  // 统一分级：这条私信对应的问题里没有一条算作者的问题（覆盖率 P2、AI 补测线索、flaky / unverified、PLAUSIBLE 审查结论…）→ 不再提醒、不计逾期
-  it.author_facing = hit.length ? hit.some(notifiable) : null
+  // 统一分级只管北京时间 10-24 起发出的私信：那之后的私信，对应问题里没有一条算作者的问题（覆盖率 P2、AI 补测线索、flaky / unverified、
+  // PLAUSIBLE 或没复核的 AI P1…）→ 不再提醒、不计逾期。之前已经发出去的照老流程（作者自己的 bot 会复核、在 PR 下回复），author_facing = null
+  it.author_facing = hit.length && sentUnderUnified(it.dm_sent_at) ? hit.some((f) => notifiable(f, { newNotice: true })) : null
   if (!it.login) summary.errors.push({ key, error: 'author not found in report' })
 }
 
@@ -191,7 +192,7 @@ for (const [key, it] of Object.entries(OVERDUE_ONLY ? {} : state.items)) {
   if (it.status !== 'open' || !it.login) continue
   if (it.author_facing === false) {
     rec.not_author_facing = true; summary.not_author_facing ||= []; summary.not_author_facing.push({ pr: it.pr, login: it.login, problems: (it.problems || []).slice(0, 2) })
-    if (!DRY) { it.status = 'closed'; it.closed_at = new Date().toISOString(); it.closed_via = 'not-author-facing'; it.closed_note = '统一分级（2026-10-23）：这条私信对应的问题都不算作者的问题（待核实 / 只差覆盖率 / AI 补测线索等），不再提醒' }
+    if (!DRY) { it.status = 'closed'; it.closed_at = new Date().toISOString(); it.closed_via = 'not-author-facing'; it.closed_note = '统一分级（10-24 起发出的私信）：这条私信对应的问题都不算作者的问题（待核实 / 只差覆盖率 / AI 补测线索等），不再提醒' }
     continue
   }
   const res = itemResolution(it)
@@ -232,7 +233,7 @@ for (const [login, g] of byAuthor) {
 }
 for (const x of summary.items) delete x._it
 
-// --- 逾期未回应通报 (--group-overdue): P0/P1/有具体建议的 P2 通知作者（私信或群日报 @）后 72h 无回应 → 群里合并通报一次
+// --- 逾期未回应通报 (--group-overdue): 作者的问题（10-24 前通知的：P0/P1/有具体建议的 P2；之后的：统一分级口径）通知作者（私信或群日报 @）后 72h 无回应 → 群里合并通报一次
 if (GROUP_OVERDUE) {
   const GROUP_CHAT = 'oc_ecd450e0bed37d49bc033f3cd07cd9af'
   const GROUP_SENDER = process.env.MIVO_QA_GROUP_SENDER || join(QA, 'report/send-feishu-report.mjs')
@@ -256,8 +257,9 @@ if (GROUP_OVERDUE) {
     if (ms.length && !groupSentAt[d]) { ov.gaps.push({ date: d, gap: '有 mentions.json 但找不到当天群日报发送记录，通知时间未知，跳过' }); continue }
     for (const x of ms) note(Number(x.pr), x.login, groupSentAt[d], '群日报@')
   }
-  // 统一分级：按 finding-policy.mjs 的作者口径（P0/P1/P2 里算作者问题的那些），不再单独挑「有具体建议的 P2」
-  const isQualifying = (f) => notifiable(f)
+  // 北京时间 10-24 起才通知的 PR：按统一分级的作者口径（finding-policy.mjs notifiable，新发提醒口径）；
+  // 之前就通知过的 PR 照老流程（P0/P1、有具体建议的非覆盖率 P2）
+  const isQualifying = (f, at) => sentUnderUnified(at) ? notifiable(f, { newNotice: true }) : legacyOverdueQualifying(f)
   const now = Date.now()
   let ghFailed = 0
   for (const [pr, n] of [...notices].sort((a, b) => a[0] - b[0])) {
@@ -265,7 +267,7 @@ if (GROUP_OVERDUE) {
     const login = author || n.login
     const seen = new Set(), qual = []
     const resolvedFps = []
-    for (const f of findings) if (!seen.has(f.fingerprint) && seen.add(f.fingerprint) && isQualifying(f)) {
+    for (const f of findings) if (!seen.has(f.fingerprint) && seen.add(f.fingerprint) && isQualifying(f, n.at)) {
       if (resolvedBy(resolutions, { pr, fingerprints: [f.fingerprint], title: f.title })) resolvedFps.push(f.fingerprint) // 交接仓已有结论
       else qual.push(f)
     }

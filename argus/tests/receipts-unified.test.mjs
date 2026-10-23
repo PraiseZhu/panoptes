@@ -1,6 +1,7 @@
 // 作者回执统一成一种（Praise 2026-10-23）：首行「结论：已修 #N / 不修，原因… / 误报，原因…」，原 PR 评论和交接 issue 评论都认；
 // 写了「QA #原PR号」的修复 PR 合并后自动当「已修」，私信追踪和交接 issue 一起收起；
-// 作者口径（finding-policy.mjs）：旧报告里的覆盖率 P2、AI 补测线索、flaky / unverified、PLAUSIBLE 审查结论不再提醒、不计逾期。
+// 作者口径（finding-policy.mjs）：10-24 起新发的提醒里，旧报告的覆盖率 P2、AI 补测线索、flaky / unverified、PLAUSIBLE、没复核的 AI P1 不发；
+// 在那之前已经发给作者的问题照老流程提醒、计逾期（Praise 2026-10-23）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, existsSync } from 'node:fs'
@@ -9,7 +10,7 @@ import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { parseReceipt, parseReceiptDetail, fixPrResolutions, qaRefRe, resolutionFor } from '../../report/handoff-receipts.mjs'
-import { notifiable, authorFindings } from '../../report/finding-policy.mjs'
+import { notifiable, authorFindings, legacyOverdueQualifying } from '../../report/finding-policy.mjs'
 import { matchesItem, namesItem } from '../../report/followup-match.mjs'
 
 const TRACK = join(dirname(fileURLToPath(import.meta.url)), '../../report/track-followups.mjs')
@@ -55,6 +56,9 @@ test('作者口径：新报告 findings 都算；旧报告里的覆盖率 P2、�
   assert.equal(notifiable({ severity: 'P2', source: 'own-tests' }), false)
   assert.equal(notifiable({ severity: 'P3', source: 'check', status: 'introduced' }), false)
   assert.equal(notifiable({ severity: 'P1', source: 'code-review', verdict: 'CONFIRMED', pending_kind: 'review-plausible' }), false)
+  assert.equal(notifiable({ severity: 'P1', source: 'code-review', verdict: 'CONFIRMED' }, { newNotice: true }), false, '新发提醒：没复核过的 AI P1 是待核实')
+  assert.equal(notifiable({ severity: 'P2', source: 'code-review', verdict: 'CONFIRMED' }, { newNotice: true }), true)
+  assert.equal(notifiable({ severity: 'P1', source: 'code-review', verdict: 'CONFIRMED', verification: { status: 'confirmed' } }, { newNotice: true }), true)
   assert.deepEqual(authorFindings({ findings: [{ severity: 'P2', source: 'coverage-gate' }, { severity: 'P2', source: 'code-review', verdict: 'CONFIRMED', title: 'b' }, { severity: 'P1', source: 'check', status: 'introduced', title: 'a' }] }).map((f) => f.title), ['a', 'b'])
 })
 
@@ -68,7 +72,7 @@ test('PR 评论回执匹配：点名了某条就只收那条；没点名任何�
 
 // --- track-followups.mjs 端到端：假 gh + 假发送器，不碰真实飞书 / Slack / GitHub
 const HOURS = 3600e3
-function fixture({ prComment = null, fixPr = null, legacyFinding = null } = {}) {
+function fixture({ prComment = null, fixPr = null, legacyFinding = null, sentUnderUnified = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'argus-rc-')), QA = join(root, 'qa'), bin = join(root, 'bin'), log = join(root, 'calls.log')
   for (const d of ['reports/merged', 'followup', 'handoff/aj0928', 'report/sent']) mkdirSync(join(QA, d), { recursive: true })
   mkdirSync(bin)
@@ -92,6 +96,8 @@ process.exit(0)`
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, QA_HOME: QA, MIVO_SLACK_BOT_TOKEN: '',
     MIVO_QA_DM_SENDER: sender('dm.cjs', JSON.stringify({ ok: true })), MIVO_QA_GROUP_SENDER: sender('feishu.cjs', JSON.stringify({ ok: true })), MIVO_QA_SLACK_SENDER: sender('slack.cjs', 'ok ts=1 channel=C replies=0') }
   delete env.MIVO_QA_HANDOFF_REPOS; delete env.MIVO_QA_FOLLOWUP_STATE; delete env.MIVO_QA_FOLLOWUP_HOLDS
+  // 私信在统一分级生效之前（默认）还是之后发出：测试不随真实日期变
+  env.MIVO_QA_UNIFIED_SINCE = new Date(Date.now() - (sentUnderUnified ? 200 : 50) * HOURS).toISOString()
   env.MIVO_QA_HANDOFF_REPOS = ''
   return { QA, log, env }
 }
@@ -131,12 +137,32 @@ test('track-followups：写了「QA #2000」的修复 PR 合并后 → 私信追
   assert.ok(o.overdue.candidates.some((c) => c.pr === 2000 && c.skip === 'responded'))
 })
 
-test('track-followups：旧报告里只差覆盖率 / PLAUSIBLE 的私信条目 → 统一分级下不算作者的问题，不提醒、不感谢，记 not-author-facing', () => {
-  const fx = fixture({ legacyFinding: { fingerprint: 'mq1-bbb', pr_fingerprint: 'mq1-bbb-pr2000', severity: 'P1', title: '沿用原槽任务 ID 的隐藏裁剪节点会被误删', file: 'src/a.ts', source: 'code-review', verdict: 'PLAUSIBLE', evidence: { recommendation: '改' } } })
-  const s = run(fx, [])
-  assert.equal(s.reminded.length, 0)
-  assert.equal(s.thanked.length, 0)
-  assert.deepEqual(s.not_author_facing.map((x) => x.pr), [2000])
-  assert.equal(stateOf(fx).closed_via, 'not-author-facing')
-  assert.doesNotMatch(calls(fx), /dm\.cjs/)
+test('老流程：10-24 之前已经发给作者的问题（哪怕新口径下是 PLAUSIBLE / 只差覆盖率）照旧提醒、计逾期', () => {
+  const plausible = { fingerprint: 'mq1-bbb', pr_fingerprint: 'mq1-bbb-pr2000', severity: 'P1', title: '沿用原槽任务 ID 的隐藏裁剪节点会被误删', file: 'src/a.ts', source: 'code-review', verdict: 'PLAUSIBLE', evidence: { recommendation: '改' } }
+  const fx = fixture({ legacyFinding: plausible })
+  const s = run(fx, ['--dry-run'])
+  assert.equal(s.not_author_facing, undefined)
+  assert.ok(s.drafts.some((x) => x.open_id === 'ou_bob' && x.dedupe_key.startsWith('followup-remind:')))
+  const o = run(fixture({ legacyFinding: plausible }), ['--overdue-only', '--group-overdue', '--dry-run'])
+  assert.deepEqual(o.overdue.notices.map((x) => x.pr), [2000], '老流程的逾期口径：P1 照算')
+  const cov = { fingerprint: 'mq1-bbb', pr_fingerprint: 'mq1-bbb-pr2000', severity: 'P2', source: 'coverage-gate', title: 'new-code coverage 81% < 90%', file: 'src/a.ts' }
+  const c = run(fixture({ legacyFinding: cov }), ['--dry-run'])
+  assert.ok(c.drafts.some((x) => x.dedupe_key.startsWith('followup-remind:')), '覆盖率私信也照旧提醒')
+  assert.equal(legacyOverdueQualifying(cov), false, '覆盖率本来就不进逾期通报（老规矩）')
+  assert.equal(legacyOverdueQualifying({ severity: 'P2', source: 'code-review', evidence: { recommendation: '改一下' } }), true)
+  assert.equal(legacyOverdueQualifying({ severity: 'P2', source: 'code-review', evidence: {} }), false)
+})
+
+test('track-followups：10-24 起发出的私信，对应问题统一分级下都不算作者的问题（PLAUSIBLE / 没复核的 AI P1）→ 不提醒、不感谢，记 not-author-facing', () => {
+  for (const verdict of ['PLAUSIBLE', 'CONFIRMED']) {
+    const fx = fixture({ sentUnderUnified: true, legacyFinding: { fingerprint: 'mq1-bbb', pr_fingerprint: 'mq1-bbb-pr2000', severity: 'P1', title: '沿用原槽任务 ID 的隐藏裁剪节点会被误删', file: 'src/a.ts', source: 'code-review', verdict, evidence: { recommendation: '改' } } })
+    const s = run(fx, [])
+    assert.equal(s.reminded.length, 0, verdict)
+    assert.equal(s.thanked.length, 0, verdict)
+    assert.deepEqual(s.not_author_facing.map((x) => x.pr), [2000], verdict)
+    assert.equal(stateOf(fx).closed_via, 'not-author-facing', verdict)
+    assert.doesNotMatch(calls(fx), /dm\.cjs/, verdict)
+  }
+  const o = run(fixture({ sentUnderUnified: true, legacyFinding: { fingerprint: 'mq1-bbb', pr_fingerprint: 'mq1-bbb-pr2000', severity: 'P1', title: 'x', file: 'src/a.ts', source: 'code-review', verdict: 'CONFIRMED', evidence: { recommendation: '改' } } }), ['--overdue-only', '--group-overdue', '--dry-run'])
+  assert.deepEqual(o.overdue.notices, [], '没复核过的 AI P1 不进逾期通报')
 })
