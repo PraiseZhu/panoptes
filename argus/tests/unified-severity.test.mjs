@@ -153,9 +153,11 @@ test('#1174 回归：AI 单独的 P1 先整仓复核；复核判「写明的有�
 
 test('AI 单独的 P1：复核判可达、调用链里的文件都在会话里读过 → 证实，留在 findings（带 verification）', async () => {
   const pr = { number: 2001, title: 't', body: '', user: { login: 'x' }, merged_at: '2026-10-22T00:00:00Z' }
+  // 搜索命中不算读过（2026-10-24）：调用链里的两个文件都要 read
   const verifier = scripted([
     { action: 'grep', pattern: 'placeCroppedImageNode' },
     { action: 'read', path: 'src/store/nodeCreationSlice.ts' },
+    { action: 'read', path: F1191.file, start: 140, end: 160 },
     { action: 'final', verdict: 'reachable', reasoning: '裁剪入口把原槽 generation 整个复制过来', supported_scenario: '用户裁剪生成中的图片', call_path: [{ file: 'src/store/nodeCreationSlice.ts', line: 1, note: 'copies generation' }, { file: F1191.file, line: 150, note: 'deletes' }] },
   ])
   const reader = fakeReader({ 'src/store/nodeCreationSlice.ts': 'placeCroppedImageNode generation: { ...slot.generation }', [F1191.file]: 'belongsToPreviousTask placeCroppedImageNode' })
@@ -232,36 +234,63 @@ test('合并前裁定：盯梢核实「不需要改代码」、维护者「维�
   assert.ok(!rulings.some((r) => r.path === 'src/d.ts'), '后来又判成立并修了 → 以最新为准，不算裁定')
 })
 
-test('裁定只对裁定时的代码有效：回帖时刻的 head（按 PR 提交时间）到被测提交之间文件没改才用；同文件、行号差 ≤ 3 才算同一问题', () => {
+const ADJ_KEY = 'cccccccccccc'
+const adjudication = (extra = {}) => ({ kind: 'adjudication', verdict: 'invalid', path: 'a.ts', line: 150, at: '2026-10-22T06:15:13Z', ruled_head: null, key: ADJ_KEY,
+  finding: 'generating 裁剪格会被误删', finding_text: 'generating 裁剪格会被误删\nbelongsToPreviousTask 在裁剪格上判成上一个任务\n裁剪出来的新格被当成旧任务的格子删掉', ...extra })
+const sameIssue = { severity: 'P1', file: 'a.ts', line: 152, title: '裁剪格会被误删', evidence: { trigger: 'belongsToPreviousTask 把裁剪格判成上一个任务', behavior: '新格被当成旧任务删掉' } }
+test('裁定只对裁定时的代码有效：回帖时刻的 head（按 PR 提交时间）到被测提交之间文件没改才用；只有盯梢正式裁决、同文件行号差 ≤ 3、内容相近才算同一问题', () => {
   const headAt = R.headAtFrom([{ sha: 'h1', commit: { committer: { date: '2026-10-22T01:00:00Z' } } }, { sha: 'h2', commit: { committer: { date: '2026-10-22T05:00:00Z' } } }])
   assert.equal(headAt('2026-10-22T06:15:13Z'), 'h2')
   assert.equal(headAt('2026-10-22T02:00:00Z'), 'h1')
-  const base = [{ kind: 'watcher', verdict: 'invalid-or-p3', path: 'a.ts', line: 150, at: '2026-10-22T06:15:13Z', ruled_head: null }]
-  const [u] = R.withCodeState(base, { headAt, codeState: (h, p) => (h === 'h2' && p === 'a.ts' ? 'unchanged' : 'changed') })
+  const [u] = R.withCodeState([adjudication()], { headAt, codeState: (h, p) => (h === 'h2' && p === 'a.ts' ? 'unchanged' : 'changed') })
   assert.equal(u.ruled_head, 'h2'); assert.equal(u.code_state, 'unchanged')
-  assert.ok(R.matchPriorRuling([u], { severity: 'P1', file: 'a.ts', line: 152 }))
-  assert.equal(R.matchPriorRuling([u], { severity: 'P1', file: 'a.ts', line: 160 }), null)
-  assert.equal(R.matchPriorRuling([u], { severity: 'P1', llm_severity: 'P0', file: 'a.ts', line: 150 }), null, 'P0 不按裁定放过')
-  const [c] = R.withCodeState(base, { headAt, codeState: () => 'changed' })
-  assert.equal(R.matchPriorRuling([c], { severity: 'P1', file: 'a.ts', line: 150 }), null, '文件改过 → 只作参考')
+  assert.ok(R.matchPriorRuling([u], sameIssue))
+  assert.equal(R.matchPriorRuling([u], { ...sameIssue, line: 160 }), null)
+  assert.equal(R.matchPriorRuling([u], { ...sameIssue, llm_severity: 'P0' }), null, 'P0 不按裁定放过')
+  const [c] = R.withCodeState([adjudication()], { headAt, codeState: () => 'changed' })
+  assert.equal(R.matchPriorRuling([c], sameIssue), null, '文件改过 → 只作参考')
   assert.match(R.rulingPromptSection([c]), /只作参考/)
+  // 盯梢核实回帖 / 维护者裁定：只进提示词，代码不据此压掉问题
+  for (const kind of ['watcher', 'maintainer']) {
+    const [w] = R.withCodeState([adjudication({ kind, key: null })], { headAt, codeState: () => 'unchanged' })
+    assert.equal(R.matchPriorRuling([w], sameIssue), null, kind)
+  }
+  // 同位置的另一个问题（命名小问题旁边的凭证外泄）：内容不相近 → 不算同一问题
+  const [n] = R.withCodeState([adjudication({ finding: '变量命名不清晰', finding_text: '变量命名不清晰\nfoo 这个名字看不出用途' })], { headAt, codeState: () => 'unchanged' })
+  assert.equal(R.matchPriorRuling([n], { severity: 'P2', file: 'a.ts', line: 152, title: '把访问令牌明文写进 Debug Log', evidence: { trigger: '开启调试日志', behavior: 'accessToken 原文写进日志文件' } }), null)
 })
 
-test('合并前已裁定的同一问题、代码没变 → 审查即使再报也进待核实（review-ruled），不发作者；裁定写进审查提示词', async () => {
+test('合并前裁定：盯梢核实回帖只进提示词、不压问题（照常复核）；盯梢正式裁决（审查账号回帖 + mivo-finding 标记 + key 对上 + 当前分级版本）同一问题、代码没变 → 待核实（review-ruled）', async () => {
   const pr = { number: 1191, title: 't', body: '', user: { login: 'aj0928' }, merged_at: '2026-10-22T06:30:57Z' }
-  const deps = {
-    listPullReviewComments: async () => [cm(1, 'greptile-apps[bot]', 'generating 裁剪格会被误删'), cm(2, 'PraiseZhu', '结论是本轮不需要改代码（不成立、或属于 P3 建议）\n核实依据：\n- 裁剪格 taskId 独立\n<!-- mivo-watcher-receipt task=x -->', { in_reply_to_id: 1 })],
+  const base = {
     listPullCommits: async () => [{ sha: 'h2', commit: { committer: { date: '2026-10-22T00:00:00Z' } } }],
     listTeamMembers: async () => ['PraiseZhu'],
     codeState: () => 'unchanged',
   }
-  reviewCalls = []; reviewAnswer = { findings: [{ ...F1191, verdict: 'CONFIRMED' }] }
-  const out = { quota_capped: [], findings: [], pending_verification: [], checks: [] }
-  await N.runCodeReview({ out, repo: REPO, pr, files: fileOf(F1191.file), prDiff: { files: fileOf(F1191.file) }, sha: 's'.repeat(40), baseSha: 'b'.repeat(40), results: [], profile: { reviewRulings: { enabled: true, reviewer: 'PraiseZhu', maintainersTeam: 'xindong/art-support' } }, evDir: mkdtempSync(join(root, 'ev-')), secrets, health: health(), number: 1191, quota: memoryQuota({ pool: 'test' }), opts: { freshReview: true }, deps })
-  assert.match(String(reviewCalls[0].messages[1].content), /盯梢核实：不成立或属于 P3；依据：「- 裁剪格 taskId 独立/)
-  assert.deepEqual(out.findings, [])
-  assert.equal(out.pending_verification[0].pending_kind, 'review-ruled')
-  assert.equal(out.prior_rulings.used, 1)
+  const profile = { reviewRulings: { enabled: true, reviewer: 'PraiseZhu', maintainersTeam: 'xindong/art-support' } }
+  const run = async (comments, verifier) => {
+    reviewCalls = []; reviewAnswer = { findings: [{ ...F1191, verdict: 'CONFIRMED' }] }
+    const out = { quota_capped: [], findings: [], pending_verification: [], checks: [] }
+    await N.runCodeReview({ out, repo: REPO, pr, files: fileOf(F1191.file), prDiff: { files: fileOf(F1191.file) }, sha: 's'.repeat(40), baseSha: 'b'.repeat(40), results: [], profile, evDir: mkdtempSync(join(root, 'ev-')), secrets, health: health(), number: 1191, quota: memoryQuota({ pool: 'test' }), opts: { freshReview: true },
+      deps: { ...base, listPullReviewComments: async () => comments, chat: verifier, reader: fakeReader({ [F1191.file]: 'x' }) } })
+    return out
+  }
+  // 作者账号的盯梢核实回帖：写进提示词，但问题照常走复核（这里复核判不可达 → 待核实 review-p1-unconfirmed，不是 review-ruled）
+  const watcher = [cm(1, 'greptile-apps[bot]', 'generating 裁剪格会被误删'), cm(2, 'aj0928', '结论是本轮不需要改代码（不成立、或属于 P3 建议）\n核实依据：\n- 裁剪格 taskId 独立\n<!-- mivo-watcher-receipt task=x -->', { in_reply_to_id: 1 })]
+  const o1 = await run(watcher, scripted([{ action: 'read', path: F1191.file }, { action: 'final', verdict: 'not-reachable', reasoning: '裁剪格没有 taskId' }]))
+  assert.match(String(reviewCalls[0].messages[1].content), /盯梢核实回帖（作者一方的申辩，没经过裁决）：不成立或属于 P3；依据：「- 裁剪格 taskId 独立/)
+  assert.deepEqual([o1.findings.length, o1.pending_verification.map((x) => x.pending_kind)], [0, ['review-p1-unconfirmed']])
+  // 别人（不是审查账号、也不是 PR 作者）带回执标记的回帖：不收
+  const o2 = await run([watcher[0], { ...watcher[1], user: { login: 'stranger' } }], scripted([{ action: 'final', verdict: 'cannot-determine' }]))
+  assert.equal(o2.prior_rulings.used, 0); assert.equal(o2.prior_rulings.rejected, 1)
+  // 盯梢正式裁决：同一问题、代码没变 → review-ruled，不复核
+  const std = S.loadSeverityStandard().version
+  const adj = [cm(1, 'PraiseZhu', `[P1] generating 裁剪格会被误删\n\n**触发条件**：belongsToPreviousTask 把裁剪格判成上一个任务\n**错误行为**：新格被当成旧任务删掉\n\n<!-- mivo-finding key=${ADJ_KEY} round=1 head=bbbbbbb class=state -->`),
+    cm(2, 'PraiseZhu', `判不成立\n<!-- mivo-watcher-receipt task=t -->\n<!-- mivo-ruling v=1 key=${ADJ_KEY} head=${'e'.repeat(40)} verdict=invalid std=${std} by=w task=t -->`, { in_reply_to_id: 1 })]
+  const verifier = scripted([{ action: 'final', verdict: 'reachable' }])
+  const o3 = await run(adj, verifier)
+  assert.deepEqual([o3.findings.length, o3.pending_verification[0]?.pending_kind, o3.prior_rulings.used, verifier.seen.length], [0, 'review-ruled', 1, 0])
+  assert.equal(o3.pending_verification[0].ruling.key, ADJ_KEY)
 })
 
 // ── 检查失败的定级 ────────────────────────────────────────

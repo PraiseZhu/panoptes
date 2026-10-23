@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // 用法: node scripts/verify-ai-lead.mjs --pr 918 (--fingerprint <fp|pr_fingerprint> | --check-id ai-test-2) [--by daily-review] [--note "..."] [--unset] [--file path] [--dry-run]
-// 默认文件: $MIVO_QA_REPORTS (默认 /workspace/mivo-qa/reports)/merged/PR-<N>.json。只改 verified* 字段，原子写回。
+// 默认文件: $MIVO_QA_REPORTS (默认 /workspace/mivo-qa/reports)/merged/PR-<N>.json，原子写回。
+// 待核实里的 AI 补测线索（--check-id / --fingerprint）、以及 AI 单独 P1 复核没证实 / 没跑成等代码审查待核实条目（只按 --fingerprint），
+// 人核实后移进 findings（作者口径放行）；--unset 移回。旧报告 findings 里的线索只改 verified* 字段
 import { readFileSync, writeFileSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseArgs } from 'node:util'
@@ -13,6 +15,6 @@ const report = JSON.parse(readFileSync(file, 'utf8'))
 let changed
 try { changed = verifyLeads(report, { pr: v.pr, fingerprint: v.fingerprint, checkId: v['check-id'], by: v.by ?? null, note: v.note ?? null, unset: v.unset, ...(v.at ? { at: v.at } : {}) }) }
 catch (e) { console.error(e.message); process.exit(2) }
-if (!changed.length) { console.error(`no ai-test lead matched in ${file}`); process.exit(1) }
+if (!changed.length) { console.error(`no ai-test lead / code-review pending item matched in ${file}`); process.exit(1) }
 if (!v['dry-run']) { const tmp = `${file}.tmp-${process.pid}`; writeFileSync(tmp, JSON.stringify(report, null, 2) + '\n'); renameSync(tmp, file) }
 console.log(JSON.stringify({ file, changed, dry_run: Boolean(v['dry-run']) }))

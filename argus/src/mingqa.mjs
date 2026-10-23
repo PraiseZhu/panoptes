@@ -99,7 +99,9 @@ let samplingSupported = true
 // 整体（含请求、等待、重试）最多 maxMs（默认 20 分钟），设了 PR 时间预算（--pr-timeout / --deadline）取较紧的；
 // 每次重试前按 now() 看还剩多少，不够就返回最后一次的失败；单次请求超时也缩到剩余时间
 export const REVIEW_MAX_MS = 20 * 60_000
-export async function chat({ secrets, messages, effort = 'high', model = LLM_MODEL, timeoutMs = 8 * 60_000, attempts = 2, netAttempts = 3, fetchImpl = fetch, netRetryDelayMs = 2000, sleep = realSleep, now = Date.now, maxMs = REVIEW_MAX_MS }) {
+// select(parsed)：调用方从 parseModelJson 的结果里挑要用的对象，返回 { json, loose, all } 或 null（null = 按「不是 JSON」处理，照常重试）。
+// 不传就用 parseModelJson 的结果（复核会话：多个对象都要，见 review-verify.mjs）
+export async function chat({ secrets, messages, effort = 'high', model = LLM_MODEL, timeoutMs = 8 * 60_000, attempts = 2, netAttempts = 3, fetchImpl = fetch, netRetryDelayMs = 2000, sleep = realSleep, now = Date.now, maxMs = REVIEW_MAX_MS, select = null }) {
   // 输入里没有 json 网关必回 400：发之前就拦下，不进重试
   try { jsonObjectBody({ response_format: { type: 'json_object' }, messages }) } catch (err) { return { ok: false, error: { kind: 'config', message: err.message } } }
   const deadline = now() + maxMs
@@ -124,8 +126,13 @@ export async function chat({ secrets, messages, effort = 'high', model = LLM_MOD
         return { ok: false, error: lastErr }
       }
       const content = data.choices?.[0]?.message?.content ?? ''
-      try { const { json, loose, all } = parseModelJson(content); return { ok: true, json, ...(loose ? { json_loose: true } : {}), ...(all.length > 1 ? { json_all: all } : {}), tokens: data?.usage?.total_tokens ?? null, ms: now() - started, model: data.model ?? model, sampling: samplingSupported ? REVIEW_SAMPLING : 'unsupported' } }
-      catch { lastErr = { kind: 'bad_json', message: `model returned non-JSON (${content.length} chars)` } }
+      let picked = null
+      try { const parsed = parseModelJson(content); picked = select ? select(parsed) : parsed } catch { picked = null }
+      if (picked) {
+        const { json, loose, all } = picked
+        return { ok: true, json, ...(loose ? { json_loose: true } : {}), ...(all?.length > 1 ? { json_all: all } : {}), tokens: data?.usage?.total_tokens ?? null, ms: now() - started, model: data.model ?? model, sampling: samplingSupported ? REVIEW_SAMPLING : 'unsupported' }
+      }
+      lastErr = { kind: 'bad_json', message: `model returned non-JSON${select ? ' or no usable object' : ''} (${content.length} chars)` }
     } catch (err) {
       // 记下底层原因（undici cause.code / message）和这一轮耗时，否则只剩一句 "fetch failed"，查不出是断连、DNS 还是超时
       const cause = [err?.cause?.code, err?.cause?.message].filter(Boolean).join(' ')
@@ -156,6 +163,15 @@ export function parseModelJson(content) {
   }
   if (all.length) return { json: all[0], loose: true, all }
   throw new Error('no JSON object in model output')
+}
+
+// 代码审查用哪一个对象：严格的单个 JSON 照旧（和 2a3800d 之前一样）；宽松解析（围栏 / 多个对象连写 / 前后带话）时取最后一个
+// 带 findings 数组的对象（模型先回草稿再回结论时，后面那个才是结论）；一个都没有 → null，chat 按「不是 JSON」处理并重试
+export function pickReviewJson(parsed) {
+  if (!parsed) return null
+  if (!parsed.loose) return parsed
+  const withFindings = (parsed.all ?? []).filter((o) => o && typeof o === 'object' && !Array.isArray(o) && Array.isArray(o.findings))
+  return withFindings.length ? { json: withFindings.at(-1), loose: true, all: parsed.all } : null
 }
 
 function runQaAgent(args, { timeoutMs = 120_000 } = {}) {
@@ -270,7 +286,7 @@ export function referenceText(reference) {
 
 export async function codeReview({ secrets, pr, files, results, profile, outDir, cacheKey = null, cached = null, prior = null, verdictOf = null, source = {}, reference = null }) {
   mkdirSync(outDir, { recursive: true })
-  if (cached) return finishReview({ outDir, doc: cached.doc, model: cached.model, tokens: 0, ms: 0, sampling: cached.sampling ?? null, reused: true, reusedFrom: { key: cached.key.slice(0, 16), stored_at: cached.stored_at, ...(cached.source ?? {}), original_tokens: cached.tokens ?? null } })
+  if (cached) return withLoose(await finishReview({ outDir, doc: cached.doc, model: cached.model, tokens: 0, ms: 0, sampling: cached.sampling ?? null, reused: true, reusedFrom: { key: cached.key.slice(0, 16), stored_at: cached.stored_at, ...(cached.source ?? {}), original_tokens: cached.tokens ?? null } }), cached.json_loose)
   if (!secrets.ARGUS_LLM_BASE_URL || !secrets.ARGUS_LLM_API_KEY) return { status: 'unavailable', error: { kind: 'config', message: 'QA_LLM_BASE_URL / QA_LLM_API_KEY not configured' } }
   // 统一分级读不到（副本被改、锁文件坏了）就不审：不凭摘要自己定级
   let std
@@ -288,7 +304,8 @@ export async function codeReview({ secrets, pr, files, results, profile, outDir,
     `Diff:\n${buildDiff(files)}`,
     'Respond with a single json object in the format given by the system prompt.',
   ].join('\n\n'))
-  const res = await chat({ secrets, effort: REVIEW_EFFORT, messages: [{ role: 'system', content: reviewSystemPrompt(std) }, { role: 'user', content: user }] })
+  // 模型回复是宽松 JSON（多个对象连写 / 围栏）时取最后一个带 findings 数组的对象；没有就按解析失败处理（pickReviewJson）
+  const res = await chat({ secrets, effort: REVIEW_EFFORT, messages: [{ role: 'system', content: reviewSystemPrompt(std) }, { role: 'user', content: user }], select: pickReviewJson })
   if (!res.ok) return { status: 'error', error: res.error }
   const doc = toCodeReviewDoc(res.json, files, { standardVersion: std.version })
   if (prior && verdictOf) {
@@ -297,16 +314,18 @@ export async function codeReview({ secrets, pr, files, results, profile, outDir,
     const same = JSON.stringify(cachedVerdict) === JSON.stringify(freshVerdict)
     const freshPath = join(outDir, 'code-review.fresh.json')
     writeFileSync(freshPath, JSON.stringify(doc, null, 2))
-    const out = await finishReview({ outDir, doc: same ? doc : prior.doc, model: same ? res.model : prior.model, tokens: res.tokens, ms: res.ms, sampling: res.sampling, reused: !same,
-      reusedFrom: same ? null : { key: prior.key.slice(0, 16), stored_at: prior.stored_at, ...(prior.source ?? {}), original_tokens: prior.tokens ?? null } })
+    const out = withLoose(await finishReview({ outDir, doc: same ? doc : prior.doc, model: same ? res.model : prior.model, tokens: res.tokens, ms: res.ms, sampling: res.sampling, reused: !same,
+      reusedFrom: same ? null : { key: prior.key.slice(0, 16), stored_at: prior.stored_at, ...(prior.source ?? {}), original_tokens: prior.tokens ?? null } }), same ? res.json_loose : prior.json_loose)
     out.fresh_comparison = { cached_key: prior.key.slice(0, 16), cached_stored_at: prior.stored_at ?? null, cached_sampling: prior.sampling ?? null, fresh_sampling: res.sampling ?? null,
       cached_verdict: cachedVerdict, fresh_verdict: freshVerdict, same, authoritative: 'cached', fresh_file: freshPath, fresh_model: res.model, fresh_tokens: res.tokens, cache_overwritten: false }
     return out
   }
-  const out = await finishReview({ outDir, doc, model: res.model, tokens: res.tokens, ms: res.ms, sampling: res.sampling, reused: false })
-  if (cacheKey) { try { storeReviewVerdict(cacheKey, { doc, model: res.model, tokens: res.tokens, sampling: res.sampling, source: { ...source, review_file: out.reviewPath } }) } catch { /* 缓存写不进去不影响本次结果 */ } }
+  const out = withLoose(await finishReview({ outDir, doc, model: res.model, tokens: res.tokens, ms: res.ms, sampling: res.sampling, reused: false }), res.json_loose)
+  if (cacheKey) { try { storeReviewVerdict(cacheKey, { doc, model: res.model, tokens: res.tokens, sampling: res.sampling, ...(res.json_loose ? { json_loose: true } : {}), source: { ...source, review_file: out.reviewPath } }) } catch { /* 缓存写不进去不影响本次结果 */ } }
   return out
 }
+// 结论来自宽松解析的回复：记 json_loose（缓存条目里也记，复用时带出来）
+const withLoose = (out, loose) => (loose ? { ...out, json_loose: true } : out)
 
 async function finishReview({ outDir, doc, model, tokens, ms, sampling, reused, reusedFrom = null }) {
   const reviewPath = join(outDir, 'code-review.json')

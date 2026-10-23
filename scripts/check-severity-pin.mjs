@@ -25,9 +25,10 @@ const now = new Date()
 const readJson = (p) => { try { return JSON.parse(readFileSync(p, 'utf8')) } catch { return null } }
 
 const prev = readJson(STATE)
-if (v['once-per-day'] && prev?.day === shanghaiDay(now) && ['same', 'drift'].includes(prev.status)) process.exit(prev.status === 'drift' ? 4 : 0)
-
 const lock = readSeverityLock()
+// 同一天只真查一次；但钉住值当天被人更新过（锁文件的 sha256 变了）就重查，不再沿用旧的 drift 结论。error 不缓存，下次运行重试
+if (v['once-per-day'] && prev?.day === shanghaiDay(now) && ['same', 'drift'].includes(prev.status) && prev.pinned_sha256 === lock.sha256) process.exit(prev.status === 'drift' ? 4 : 0)
+
 let entry
 try { loadSeverityStandard({ fresh: true }) } catch (err) {
   entry = { status: 'local-mismatch', message: err.message }

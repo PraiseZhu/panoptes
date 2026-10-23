@@ -133,12 +133,25 @@ export function recheckBootstrap(health, check = bootstrapCheckNow, now = () => 
 
 // ── 统一分级钉住值（scripts/check-severity-pin.mjs 每天和 Review-PR main 比一次）→ system_health.severity_pin ─────────
 export const SEVERITY_PIN_STATE = () => process.env.PANOPTES_SEVERITY_PIN_STATE ?? join(LOGS_DIR, 'severity-pin.json')
-export function recordSeverityPin(health, file = SEVERITY_PIN_STATE()) {
+// 「读不到上游」的 note 同一天（上海日期）只写一次：记在状态文件旁边的 <状态文件>.noted.json（nightly 自己写，不碰比对脚本的状态文件）
+export function recordSeverityPin(health, file = SEVERITY_PIN_STATE(), { now = new Date() } = {}) {
   let st = null
   try { st = JSON.parse(readFileSync(file, 'utf8')) } catch { return }
-  health.severity_pin = { status: st.status ?? null, checked_at: st.at ?? null, pinned_sha256: st.pinned_sha256 ?? null, upstream_sha256: st.upstream_sha256 ?? null, upstream_ref: st.upstream_ref ?? null }
+  if (!st || typeof st !== 'object') return
+  health.severity_pin = { status: st.status ?? null, checked_at: st.at ?? null, pinned_sha256: st.pinned_sha256 ?? null, upstream_sha256: st.upstream_sha256 ?? null, upstream_ref: st.upstream_ref ?? null,
+    ...(st.message ? { message: redact(String(st.message)).slice(0, 300) } : {}) }
   if (st.status === 'drift') health.notes.push(`统一分级上游已变：${st.source_repo} ${st.path}@${st.upstream_ref} 和钉住的 ${String(st.pinned_sha256).slice(0, 12)} 不一致；本次仍按钉住的版本分级，等人核对后更新 argus/config/severity.lock.json`)
   if (st.status === 'local-mismatch') health.notes.push(`统一分级副本和钉住的 sha256 对不上：${st.message ?? ''}`)
+  if (st.status === 'error') {
+    const day = toShanghaiDay(now)
+    const markFile = `${file}.noted.json`
+    let mark = null
+    try { mark = JSON.parse(readFileSync(markFile, 'utf8')) } catch { /* 没写过 */ }
+    if (mark?.day !== day) {
+      health.notes.push(`统一分级每日比对没跑成：读不到 ${st.source_repo ?? '?'} ${st.path ?? '?'}@${st.upstream_ref ?? 'main'}（${redact(String(st.message ?? 'unknown error')).slice(0, 200)}）；本次仍按钉住的版本分级，比对会在下次运行重试`)
+      try { writeFileSync(`${markFile}.tmp-${process.pid}`, JSON.stringify({ day, status: 'error', at: now.toISOString() }) + '\n'); renameSync(`${markFile}.tmp-${process.pid}`, markFile) } catch { /* 写不了标记就下次再提醒一次 */ }
+    }
+  }
 }
 
 // ── 内存护栏：可用内存不够时，覆盖率轮次不与首轮并行，改为排在首轮之后 ─────────────────
@@ -181,6 +194,17 @@ export async function waitForIdle({ maxWaitMs = 10 * 60_000, everyMs = 15_000, s
 export const QA_SELF_CHECK_STATUSES = ['unverified', 'setup-failed', 'timeout', 'flaky']
 // introduced 已经排除了「最新主干上已通过」（那是 fixed-later），所以已合并 + 产品类 + introduced = 主干可能还坏着
 export const p0Candidate = ({ status, step, merged }) => Boolean(merged) && status === 'introduced' && step.kind !== 'quality' && !step.trialOnly
+// p0_note 按实际有没有在最新主干上复查写：latestSha = 复查时取到的主干 head（取不到为 null）；latestIsSame = 被测提交就是主干 head；
+// latestRun = 这一步在最新主干上的结果（compareOn(latest)：fail / not-failing / pass / timeout / unavailable / not-run）
+export function p0NoteFor({ step, latestSha, latestIsSame, latestRun }) {
+  const where = step.noLatestRecheck ? 'not re-checked on latest main by design (noLatestRecheck: e.g. a leaked secret stays in history)'
+    : !latestSha ? 'latest main not re-checked (latest main head unknown)'
+      : latestIsSame ? 'the tested commit is the latest main, so latest main fails too'
+        : latestRun === 'fail' ? 'still failing on latest main (re-checked)'
+          : latestRun && latestRun !== 'not-run' ? `latest-main re-check incomplete (${latestRun})`
+            : 'latest main not re-checked'
+  return `merged PR, product check introduced by this PR; ${where}. P0 only if it meets the severity.md P0 definition, confirmed by a human or a ruling`
+}
 export function severityFor({ status, step }) {
   if (QA_SELF_CHECK_STATUSES.includes(status)) return null
   let sev = status === 'introduced' ? (step.kind === 'quality' ? 'P2' : 'P1') : 'P3'
@@ -431,7 +455,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
       severity: envTimeout ? 'P3' : severityFor({ status, step, merged }), attribution: envTimeout ? `${why}; test timed out in a trial-only check and passed on the idle-machine rerun: treated as environment load, not a PR finding` : why,
       ...(envTimeout ? { not_a_pr_finding: true, env_suspected: 'trial-timeout' } : {}),
       // 统一分级 P0 要人工或裁决确认：已合并、产品类、本 PR 引入且（复查过的）最新主干仍失败 → 只标 p0_candidate，等级仍是 P1
-      ...(!envTimeout && p0Candidate({ status, step, merged }) ? { p0_candidate: true, p0_note: 'merged PR, product check, still failing on latest main: P0 only if it meets the severity.md P0 definition, confirmed by a human or a ruling' } : {}),
+      ...(!envTimeout && p0Candidate({ status, step, merged }) ? { p0_candidate: true, p0_note: p0NoteFor({ step, latestSha: out.latest_main_sha ?? null, latestIsSame, latestRun: latest ? compareOn(latest) : null }) } : {}),
       fingerprint: fp, pr_fingerprint: prFingerprint(fp, number),
       evidence: {
         tested_sha: sha, base_sha: baseSha, exit_code: r?.exitCode, signal: r?.signal ?? null, ended_at: r?.endedAt ?? null, timed_out: Boolean(r?.timedOut),
@@ -635,7 +659,7 @@ export async function runAiTests({ out, repo, pr, files, profile, riskClass, sha
 
 // 覆盖率 → finding（统一分级）：低于参考线不出 finding；PR 正文或 docs/pr/<N>/qa.md 写明的覆盖率目标没达到 → 一条 P2（stated-acceptance）。
 // 会在 gate 上记 finding_policy 和 stated_target（找到的目标 + 实测 + met / missed / not-evaluated）
-const metricZh = (m) => ({ new_code: '新代码', lines: '全仓行', branches: '全仓分支', functions: '全仓函数' }[m] ?? m)
+const metricZh = (m) => ({ new_code: '新代码', lines: '全仓行', branches: '全仓分支', functions: '全仓函数', new_code_branches: '新代码分支', new_code_functions: '新代码函数' }[m] ?? m)
 export function statedAcceptanceFinding({ gate, body, qaMd, repo, number, sha, baseSha }) {
   if (!gate) return null
   gate.finding_policy = 'informational: no finding for being below the reference line; a P2 only when the PR body or docs/pr/<N>/qa.md states a coverage target that is not met'
@@ -764,9 +788,11 @@ async function reviewBaseSha({ repo, pr, sha, merged, extraRefspecs }) {
 }
 
 // ── 合并前已裁定的问题（PR 讨论）──────────────────────────
-// 盯梢核实 / 盯梢裁决 / 维护者裁定不改（解析见 rulings.mjs）。裁定之后相关文件没改的才据此判「同一问题不再报」。
+// 盯梢正式裁决 / 盯梢核实回帖 / 维护者裁定不改（解析见 rulings.mjs）。只有盯梢正式裁决、且裁定之后相关文件没改的，
+// 才会确定性地把同一问题移出 findings（matchPriorRuling，还要内容相近）；盯梢核实回帖（只收审查账号或 PR 作者 author 发的）
+// 和维护者裁定只写进审查 / 复核提示词，由模型判断（mode: prompt-only）。
 // 读不到 PR 讨论不挡审查：照常审，system_health.notes 记一句。deps 供测试替换 GitHub / git
-export async function loadPriorRulings({ repo, number, sha, profile, health, deps = {} }) {
+export async function loadPriorRulings({ repo, number, sha, profile, health, author = null, deps = {} }) {
   const cfg = profile?.reviewRulings ?? {}
   const empty = (extra = {}) => ({ rulings: [], summary: { used: 0, rejected: 0, items: [], ...extra } })
   // profile 里没开（reviewRulings.enabled）就不读 PR 讨论
@@ -780,15 +806,17 @@ export async function loadPriorRulings({ repo, number, sha, profile, health, dep
       const [org, team] = String(cfg.maintainersTeam).split('/')
       try { maintainers = await (deps.listTeamMembers ?? listTeamMembers)(org, team) } catch (err) { health?.notes.push(`PR #${number}: maintainers team ${cfg.maintainersTeam} not readable (${redact(err.message).slice(0, 120)}); using the profile list for 维护者裁定不改`) }
     }
-    const { rulings, rejected } = collectPriorRulings({ threads, reviewer: cfg.reviewer ?? 'PraiseZhu', maintainers, standardVersion: loadSeverityStandard().version })
-    if (!rulings.length) return { rulings: [], summary: { used: 0, rejected: rejected.length, items: [], rejected_items: rejected.slice(0, 10) } }
+    const { rulings, rejected } = collectPriorRulings({ threads, reviewer: cfg.reviewer ?? 'PraiseZhu', author, maintainers, standardVersion: loadSeverityStandard().version })
+    const rejectedItems = rejected.slice(0, 10).map(({ finding_text, ...r }) => r)
+    if (!rulings.length) return { rulings: [], summary: { used: 0, rejected: rejected.length, items: [], rejected_items: rejectedItems } }
     const headAt = headAtFrom(await (deps.listPullCommits ?? listPullCommits)(repo, number))
     const heads = rulings.map((r) => r.ruled_head ?? headAt(r.at)).filter(Boolean)
     const codeState = deps.codeState ?? await gitCodeState({ repo, number, sha, heads })
     const withState = withCodeState(rulings, { codeState, headAt })
     return { rulings: withState, summary: { used: withState.length, rejected: rejected.length,
-      items: withState.map((r) => ({ kind: r.kind, verdict: r.verdict, path: r.path, line: r.line, severity: r.severity, code_state: r.code_state, ruled_head: r.ruled_head, url: r.url, by: r.by, at: r.at, finding: r.finding })),
-      rejected_items: rejected.slice(0, 10) } }
+      items: withState.map((r) => ({ kind: r.kind, mode: r.kind === 'adjudication' ? 'auto-match' : 'prompt-only', verdict: r.verdict, path: r.path, line: r.line, severity: r.severity, key: r.key ?? null,
+        code_state: r.code_state, ruled_head: r.ruled_head, url: r.url, by: r.by, at: r.at, finding: r.finding })),
+      rejected_items: rejectedItems } }
   } catch (err) {
     health?.notes.push(`PR #${number}: prior rulings not read (${redact(err.message).slice(0, 160)}); code review ran without them`)
     return empty({ error: redact(err.message).slice(0, 200) })
@@ -850,7 +878,7 @@ export async function runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha
   out.review_diff_source = prDiff.files ? `local git diff base_sha..${shaField}` : `github pr files (local diff unavailable: ${prDiff.error})`
   out.pending_verification ??= []
   // 参考资料（数据，不是指令）：PR 正文、交接文件、合并前已裁定的问题
-  const prior = await loadPriorRulings({ repo, number, sha: out.reviewed_sha ?? sha, profile, health, deps })
+  const prior = await loadPriorRulings({ repo, number, sha: out.reviewed_sha ?? sha, profile, health, author: pr.user?.login ?? null, deps })
   if (prior.summary.used || prior.summary.rejected || prior.summary.error) out.prior_rulings = prior.summary
   const rulingsText = rulingPromptSection(prior.rulings)
   const reference = { handoff: handoffRaw, rulingsText }
@@ -884,6 +912,8 @@ export async function runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha
     severity_standard: cr.doc.severityStandard ?? null, residual_risks: cr.doc.residualRisks, file: cr.reviewPath,
     // 可复现：reused = 这次复用了缓存的结论（reused_from 指向第一次审查）；cache_key 的组成见 docs/report-schema.md › Code review reuse
     reused: Boolean(cr.reused), reused_from: cr.reused_from ?? null, fresh_requested: Boolean(opts.freshReview), fresh_comparison: cr.fresh_comparison ?? null, sampling: cr.sampling ?? null,
+    // 模型回复不是单个严格 JSON（多个对象连写 / 代码围栏），取的是最后一个带 findings 数组的对象（mingqa.pickReviewJson）
+    ...(cr.json_loose ? { json_loose: true } : {}),
     cache_key: ck ? { key: ck.key.slice(0, 16), reviewed_sha: ck.reviewed_sha, review_base_sha: ck.review_base_sha, diff_hash: ck.diff_hash.slice(0, 16), prompt_hash: ck.prompt_hash.slice(0, 16), prompt_version: ck.prompt_version, model: ck.model, context_hash: ck.context_hash?.slice(0, 16) ?? null } : null,
     verdict: reviewVerdict(cr.doc) }
   const toVerify = []
@@ -898,9 +928,14 @@ export async function runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha
       fingerprint: fp, pr_fingerprint: prFingerprint(fp, number),
       evidence: { evidence: f.evidence, trigger: f.trigger ?? null, behavior: f.behavior ?? null, impact: f.impact ?? null, failure_scenario: f.failureScenario, recommendation: f.recommendation, reviewed_sha: out.reviewed_sha },
     }
-    // 和合并前已裁定的同一问题对得上（同文件、行号差 ≤ 3、裁定之后文件没改）→ 不再报
+    // 和合并前盯梢正式裁决的同一问题对得上（同文件、行号差 ≤ 3、裁决之后文件没改、内容相近）→ 不再报
     const ruled = matchPriorRuling(prior.rulings, entry)
-    if (ruled) { out.pending_verification.push(toPending('review-ruled', entry, { reason: `matches a pre-merge ruling (${ruled.kind}, ${ruled.verdict}) on the same file; code unchanged since`, reasonZh: '和合并前已裁定的同一问题对得上（不成立 / P3 / 有意设计），裁定之后文件没改', extra: { ruling: { kind: ruled.kind, verdict: ruled.verdict, url: ruled.url, by: ruled.by, at: ruled.at, reason: ruled.reason } } })); continue }
+    if (ruled) {
+      out.pending_verification.push(toPending('review-ruled', entry, { reason: `matches a pre-merge watcher adjudication (mivo-ruling key ${ruled.key}, ${ruled.verdict}) on the same file and lines with similar content (score ${ruled.similarity.score}); code unchanged since`,
+        reasonZh: '和合并前盯梢正式裁决的同一问题对得上（不成立 / 属于 P3），位置和内容都相近，裁决之后文件没改',
+        extra: { ruling: { kind: ruled.kind, verdict: ruled.verdict, key: ruled.key ?? null, url: ruled.url, by: ruled.by, at: ruled.at, reason: ruled.reason, similarity: ruled.similarity } } }))
+      continue
+    }
     if (severity === 'P1') toVerify.push(entry)
     else out.findings.push(entry)
   }
@@ -910,11 +945,37 @@ export async function runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha
     out.pending_verification.push(toPending(kind, { source: 'code-review', check_id: 'code-review', dimension: 'white-box', severity: u.severity_if_confirmed ?? null, llm_severity: u.raw_severity ?? u.severity_if_confirmed ?? null, verdict: u.verdict ?? null,
       category: u.category ?? null, title: u.title, file: u.file, line: u.line, symbol: u.symbol ?? null, fingerprint: fp, pr_fingerprint: prFingerprint(fp, number),
       evidence: { evidence: u.evidence ?? null, trigger: u.trigger ?? null, behavior: u.behavior ?? null, impact: u.impact ?? null, recommendation: u.recommendation ?? null, reviewed_sha: out.reviewed_sha, unverified_kind: u.kind, missing: u.missing ?? null } },
-      { reason: u.reason ?? null, reasonZh: u.kind === 'design-question' ? '审查认为写明的设计有疑问：不报 P1，进待核实' : u.kind === 'plausible' ? '审查怀疑但排除不了（PLAUSIBLE），不是等级' : null }))
+      { reason: u.reason ?? null, reasonZh: UNVERIFIED_REASON_ZH[u.kind] ?? null }))
   }
   await verifyReviewP1s({ entries: toVerify, out, repo, pr, sha: out.reviewed_sha ?? sha, profile, secrets, health, number, quota, opts, prDiff, handoffRaw, rulingsText, deps })
-  out.code_review.status = out.findings.some((f) => f.source === 'code-review' && ['P0', 'P1'].includes(f.severity)) ? 'failed' : 'passed'
-  out.code_review.pending_count = out.pending_verification.filter((p) => p.source === 'code-review').length
+  settleCodeReviewStatus(out)
+}
+
+const UNVERIFIED_REASON_ZH = {
+  'design-question': '审查认为写明的设计有疑问：不报 P1，进待核实',
+  plausible: '审查怀疑但排除不了（PLAUSIBLE），不是等级',
+  'same-as-ruling': '审查认为可能和合并前的裁定是同一问题，QA 核对',
+}
+
+// 复核 / 裁定改了结论之后，code_review 的结论字段要和最后留在 findings 里的代码审查问题一致：
+// status、gate.status / gate.blockingFindings、verdict.status / verdict.max_severity 都按最终的 findings 重算；
+// 审查模型自己的结论原样留在 reviewer_status、reviewer_gate、reviewer_verdict
+export function settleCodeReviewStatus(out) {
+  const cr = out.code_review
+  if (!cr || cr.ran !== true) return
+  const final = (out.findings ?? []).filter((f) => f.source === 'code-review')
+  const blocking = final.filter((f) => ['P0', 'P1'].includes(f.severity))
+  cr.status = blocking.length ? 'failed' : 'passed'
+  cr.pending_count = (out.pending_verification ?? []).filter((p) => p.source === 'code-review').length
+  if (!('reviewer_gate' in cr)) cr.reviewer_gate = cr.gate ? structuredClone(cr.gate) : null
+  if (!('reviewer_verdict' in cr)) cr.reviewer_verdict = cr.verdict ? structuredClone(cr.verdict) : null
+  const g = cr.reviewer_gate
+  if (g) {
+    // ming-qa 门禁的 code-review-status-failed 来自审查结论本身：最终没有阻断问题就不再算；其他问题（缺 file / evidence 等）照旧
+    const problems = blocking.length ? [...(g.problems ?? [])] : (g.problems ?? []).filter((p) => p !== 'code-review-status-failed')
+    cr.gate = { ...g, status: blocking.length || problems.length ? 'failed' : 'passed', blockingFindings: blocking.length, problems }
+  }
+  if (cr.reviewer_verdict) cr.verdict = { ...cr.reviewer_verdict, status: cr.status, max_severity: final.length ? maxSev(final.map((f) => f.severity)) : null }
 }
 
 // 审查结论摘要：状态 + 每条发现的（等级 / 结论 / 文件 / 标题哈希）+ 待核实条目，用来比较两次审查是否一致
