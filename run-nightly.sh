@@ -256,6 +256,13 @@ export TZ=Asia/Shanghai
 [[ -n "${PANOPTES_TEST_TZ:-}" ]] && export PANOPTES_TEST_TZ
 mkdir -p "$ARGUS_ROOT/logs" "$ARGUS_REPORTS_DIR"
 
+# Unified severity pin (argus/config/severity.md = pinned copy of PraiseZhu/Review-PR mivo/config/severity.md): compare
+# with Review-PR main once per Shanghai day. Drift only raises an ALERT line in $ARGUS_ROOT/logs/severity-pin.log
+# (and system_health.notes of the next report); it never blocks a run. PANOPTES_SEVERITY_PIN_CHECK=0 disables.
+if [[ "${PANOPTES_SEVERITY_PIN_CHECK:-1}" != "0" && -f "$PANOPTES_DIR/scripts/check-severity-pin.mjs" ]]; then
+  timeout 90 node "$PANOPTES_DIR/scripts/check-severity-pin.mjs" --once-per-day --quiet || true
+fi
+
 if [[ -n "$CATCH_UP" ]]; then
   CU_ARGS=()
   for a in "$@"; do

@@ -1,5 +1,7 @@
-// 白盒覆盖率门禁：单测步骤用 vitest --coverage（v8）跑，读 coverage-summary.json（总体）与 coverage-final.json
-// （逐行），再与 PR diff 的新增行求交，得到「新代码覆盖率」。低于门槛 → P2（只是建议复查，永远不会单独变成 issue）。
+// 白盒覆盖率：单测步骤用 vitest --coverage（v8）跑，读 coverage-summary.json（总体）与 coverage-final.json
+// （逐行），再与 PR diff 的新增行求交，得到「新代码覆盖率」。数字照常写进报告当信息（和参考线 90 比出 pass / fail）。
+// 统一分级（Praise 2026-10-23）：覆盖率低于参考线本身不是问题，不出 finding；只有 PR 正文或 docs/pr/<N>/qa.md 自己写明了
+// 覆盖率目标却没达到，才按「自己定的验收没达成」记一条 P2（statedCoverageTarget + evaluateStatedTarget）。
 import { TEST_HELPER_RE } from './classify.mjs'
 import { readFileSync, existsSync, statSync, rmSync, readdirSync } from 'node:fs'
 import { join, relative, isAbsolute, resolve, sep, basename } from 'node:path'
@@ -232,8 +234,8 @@ export const NEW_CODE_METHOD = 'ming-qa newCode = line coverage of new code. Cha
   + 'files with no data at all count their code-like added lines as uncovered, except plain .js/.mjs/.cjs files (node entry scripts / host entry), which are listed as not_measurable and left out of pct. '
   + 'pct = covered / executable changed lines; null (not evaluated) when the diff has no executable source lines.'
 
-// 门禁结论：任何一项低于门槛 → fail（P2）；拿不到覆盖率 → unavailable（不判 fail，单独说明）
-// 门禁只看新代码覆盖率（< new_code 阈值 → 不达标 → 一条 P2）。全仓 lines / branches / functions 只作基线趋势数据：
+// 结论：新代码覆盖率低于参考线 → status fail（只是信息，不出 finding）；拿不到覆盖率 → unavailable（不判 fail，单独说明）
+// 只拿新代码覆盖率和参考线比。全仓 lines / branches / functions 只作基线趋势数据：
 // 记在 baseline 里（附参考线 BASELINE_REFERENCE），results 里标 'baseline'，永远不让门禁失败、不产生 finding。
 export const GATED_METRICS = Object.freeze(['new_code'])
 export const BASELINE_METRICS = Object.freeze(['lines', 'branches', 'functions'])
@@ -257,4 +259,44 @@ export function coverageGate({ coverage, added, thresholds = COVERAGE_THRESHOLDS
   gate.failed = failed
   if (notEvaluated) gate.reason = `new-code coverage not evaluated: ${gate.new_code?.reason ?? (gate.new_code?.executable_lines === 0 ? 'the diff adds no executable lines in non-test JS/TS sources' : 'unknown')}`
   return gate
+}
+
+// ── PR 自己写明的覆盖率目标（统一分级「P2 必修的三类」第 2 类：自己定的验收没达成）──────────────
+// 只认写成「目标 / 门槛」的说法（≥ / 不低于 / 至少 / 以上 / 目标 / 要求 / at least / target …），不认对现状的描述（「当前覆盖率 81%」）。
+// 指标：提到新代码 / 增量 / 本 PR → new_code；全仓 / 整体 / overall → lines；分支 → branches；函数 → functions；没说 → new_code。
+const COV_WORD = /覆盖率|coverage/i
+const TARGET_WORD = /[≥>]=?|不低于|不少于|至少|以上|达到|目标|门槛|要求|at\s+least|minimum|target|threshold|no\s+less\s+than|\+\s*$/i
+const PCT = /(\d{1,3}(?:\.\d+)?)\s*%/g
+function metricOf(line) {
+  if (/新代码|新增代码|增量|改动|本\s*PR|new[-\s]code|changed|diff|patch/i.test(line)) return 'new_code'
+  if (/分支|branch/i.test(line)) return 'branches'
+  if (/函数|function/i.test(line)) return 'functions'
+  if (/全仓|整体|整个仓库|总体|overall|total|repo|project|lines?\b|行覆盖/i.test(line)) return 'lines'
+  return 'new_code'
+}
+export function statedCoverageTarget(sources) {
+  for (const { source, text } of sources ?? []) {
+    let fence = false
+    for (const raw of String(text ?? '').replace(/<!--[\s\S]*?-->/g, '').split(/\r?\n/)) {
+      if (/^\s*(```|~~~)/.test(raw)) { fence = !fence; continue }
+      if (fence || !COV_WORD.test(raw)) continue
+      const line = raw.trim()
+      // 百分号前后 12 个字符内要有目标说法（「≥ 90%」「90% 以上」「目标 90%」）
+      for (const m of line.matchAll(PCT)) {
+        const pct = Number(m[1])
+        if (!(pct > 0 && pct <= 100)) continue
+        const around = line.slice(Math.max(0, m.index - 12), m.index + m[0].length + 6)
+        if (!TARGET_WORD.test(around)) continue
+        return { pct, metric: metricOf(line), source, quote: line.slice(0, 300) }
+      }
+    }
+  }
+  return null
+}
+// 目标对实测：实测拿不到 → not-evaluated（不出 finding）；低于目标 → missed
+export function evaluateStatedTarget(target, gate) {
+  if (!target) return null
+  const value = target.metric === 'new_code' ? gate?.values?.new_code ?? null : gate?.values?.[target.metric] ?? null
+  if (value == null) return { ...target, value: null, status: 'not-evaluated', reason: gate?.reason ?? 'coverage not measured' }
+  return { ...target, value, status: value < target.pct ? 'missed' : 'met' }
 }

@@ -29,7 +29,7 @@ test('发现了但没测的 PR 仍进 prs[]：severity 固定 untested（绝不�
   assert.equal(c.notTested.length, 0)
 })
 
-test('qa-error 记 P2（不再是 null）并登记到 qa_tool_failures；心跳记录每个 PR 的起止与耗时', async () => {
+test('qa-error 不定级（untested）、进待核实（QA 自查），并登记到 qa_tool_failures；心跳记录每个 PR 的起止与耗时', async () => {
   const h = health()
   const startedAt = new Date()
   const { prs, heartbeat } = await processTargets(disc.slice(0, 2), {
@@ -37,7 +37,9 @@ test('qa-error 记 P2（不再是 null）并登记到 qa_tool_failures；心跳�
     processOne: async (t) => { if (t.number === 2) throw new Error('boom ghp_abcdefghijklmnopqrstuvwxyz0123456789'); return { number: t.number, verdict: 'clean', severity: 'P3', findings: [], checks: [] } },
   })
   assert.equal(prs[1].verdict, 'qa-error')
-  assert.equal(prs[1].severity, 'P2')
+  assert.equal(prs[1].severity, 'untested')
+  assert.deepEqual(prs[1].findings, [], 'QA 自己出错不是作者的问题，不进 findings')
+  assert.deepEqual(prs[1].pending_verification.map((p) => [p.pending_kind, p.owner]), [['qa-error', 'qa']])
   assert.ok(!prs[1].error.includes('ghp_abcdefghijklmnopqrstuvwxyz0123456789'), 'error is redacted')
   assert.deepEqual(h.qa_tool_failures.map((f) => [f.pr, f.stage]), [[2, 'pipeline']])
   assert.equal(h.heartbeat, heartbeat)
@@ -257,7 +259,7 @@ test('夜间全量把每个测完的已合并 PR 写成 merged/PR-N.json（同�
 
 test('test_backed：只有失败检查佐证才是 true；每个发现都有 source；PR 级汇总；issue 规则按 test_backed', async () => {
   const { annotateTestBacked, isTestBacked, FINDING_SOURCES } = await import('../src/nightly.mjs')
-  assert.deepEqual(FINDING_SOURCES, ['check', 'code-review', 'coverage-gate', 'qa-error', 'ai-test'])
+  assert.deepEqual(FINDING_SOURCES, ['check', 'code-review', 'stated-acceptance', 'coverage-gate', 'qa-error', 'ai-test', 'own-tests'])
   const prs = annotateTestBacked([
     { number: 1, findings: [{ source: 'check', severity: 'P2' }, { source: 'code-review', severity: 'P1' }, { source: 'coverage-gate', severity: 'P2' }] },
     { number: 2, findings: [{ source: 'code-review', severity: 'P1' }] },
@@ -270,10 +272,11 @@ test('test_backed：只有失败检查佐证才是 true；每个发现都有 sou
   assert.equal(prs[2].findings[0].source, 'check'); assert.equal(prs[2].test_backed, true)
   assert.equal(prs[3].test_backed, false)
   assert.equal(isTestBacked({ source: 'check', test_backed: false }), false, 'explicit flag wins')
-  // qa-error 自带 source: qa-error、test_backed: false 的发现
+  // qa-error：不进 findings，待核实条目 source: qa-error、test_backed: false、不定级
   const h = health()
   const { prs: out } = await processTargets([{ number: 7, reason: 'merged' }], { health: h, repo: 'o/r', processOne: async () => { throw new Error('crash') } })
-  assert.deepEqual(out[0].findings.map((f) => [f.source, f.test_backed, f.severity]), [['qa-error', false, 'P2']])
+  assert.deepEqual(out[0].findings, [])
+  assert.deepEqual(out[0].pending_verification.map((f) => [f.source, f.test_backed, f.severity_if_confirmed]), [['qa-error', false, null]])
   // issue：P1 但不是 test_backed → 不提
   const report = { date: 'd', repo: 'r', prs: [{ number: 9, author: 'PraiseZhu', findings: [{ source: 'check', test_backed: false, severity: 'P1', fingerprint: 'x' }, { source: 'check', test_backed: true, severity: 'P1', fingerprint: 'y' }] }], system_health: { status: 'ok', qa_tool_failures: [], env_problems: [], llm_errors: [] } }
   const { candidates, skipped } = selectIssueCandidates(report)

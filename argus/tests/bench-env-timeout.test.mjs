@@ -49,7 +49,9 @@ test('isTrialTimeout：只有试运行检查的 test_timeout 用例、且空闲�
   assert.equal(isTrialTimeout(bench, { timedOut: true }, '*', { status: 'timeout', rerun: 'pass', idle: true }), false)
   assert.equal(isTrialTimeout(bench, { failureDetails: [{ name, type: 'assertion' }] }, name, { status: 'flaky', rerun: 'pass', idle: true }), false, '非超时失败照旧')
   assert.equal(isTrialTimeout({ id: 'unit', kind: 'product' }, r, name, { status: 'flaky', rerun: 'pass', idle: true }), false, '非试运行检查照旧')
-  assert.equal(severityFor({ status: 'flaky', step: bench, merged: true }), 'P2', '非降级的试运行失败仍最高 P2')
+  // 统一分级（2026-10-23）：flaky 不是作者的问题，不定级（null），进待核实（QA 自查）；试运行检查引入的失败仍最高 P2
+  assert.equal(severityFor({ status: 'flaky', step: bench, merged: true }), null, 'flaky → 待核实，不定级')
+  assert.equal(severityFor({ status: 'introduced', step: bench, merged: true }), 'P2', '试运行检查引入的失败最高 P2')
 })
 
 test('waitForIdle：负载高就等，空闲后返回负载快照（loadavg、内存、等了多久）；等满上限仍忙 → idle=false', async () => {

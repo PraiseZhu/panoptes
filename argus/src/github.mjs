@@ -163,6 +163,21 @@ export async function listPullFiles(repo, n, { maxPages = 30 } = {}) {
   return files
 }
 
+// PR 讨论：review comments（行内评论 + 回复，带 in_reply_to_id）与提交列表（找回帖时刻的 head）。只读
+async function pagedGet(path, { maxPages = 10 } = {}) {
+  const out = []
+  for (let page = 1; page <= maxPages; page++) {
+    const rows = await apiGet(`${path}${path.includes('?') ? '&' : '?'}per_page=100&page=${page}`)
+    if (!Array.isArray(rows) || rows.length === 0) break
+    out.push(...rows)
+    if (rows.length < 100) break
+  }
+  return out
+}
+export const listPullReviewComments = (repo, n) => pagedGet(`repos/${repo}/pulls/${n}/comments`)
+export const listPullCommits = (repo, n) => pagedGet(`repos/${repo}/pulls/${n}/commits`, { maxPages: 3 })
+export const listTeamMembers = async (org, team) => (await pagedGet(`orgs/${org}/teams/${team}/members`, { maxPages: 3 })).map((m) => m.login)
+
 // 给 JS/TS 改动文件补上改动前后的完整内容（f.before / f.after），供「只改注释」判断用。
 // 前 = merge base，后 = PR head（和 files 接口的 patch 同一对版本）。任何一步失败就不补，判断时按真实改动算
 const fileAt = async (repo, path, ref) => {
