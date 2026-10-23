@@ -217,3 +217,13 @@ test('逾期通报：自己的 PR（PraiseZhu）不进群里的通报（由修 P
   assert.deepEqual(o.overdue.notices, [])
   assert.ok(o.overdue.candidates.some((c) => c.pr === 2000 && /own PR/.test(c.skip)))
 })
+
+test('track-followups.mjs 被 import 时拒绝执行，不发私信、不写 state（2026-10-24 03:08 一次 import 冒烟检查真发了 4 条作者私信）', () => {
+  const fx = fixture({ prComment: '结论：不修，原因：x' })
+  let err = ''
+  try { execFileSync('node', ['--input-type=module', '-e', `await import(${JSON.stringify(TRACK)})`], { env: fx.env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }) }
+  catch (e) { err = String(e.stderr) }
+  assert.match(err, /is a CLI/)
+  assert.equal(existsSync(join(fx.QA, 'followup/state.json')), false)
+  assert.doesNotMatch(calls(fx), /dm\.cjs|gh /)
+})
