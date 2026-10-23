@@ -745,11 +745,14 @@ export async function runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha
   if (cr.status !== 'unavailable' && (!cr.reused || cr.fresh_comparison)) quota.consume('ai-review', cr.tokens ?? 0)
   if (cr.status !== 'ok') {
     health.llm_errors.push({ pr: number, stage: 'code-review', model: LLM_MODEL, ...cr.error })
-    out.code_review = { status: cr.status, error: cr.error }
+    // ran: false = the review itself did not complete (model/gateway error); status carries the failure kind
+    out.code_review = { status: cr.status, ran: false, error: cr.error }
     return
   }
   if (cr.gateError) health.qa_tool_failures.push({ pr: number, stage: 'ming-qa assert-code-review', message: cr.gateError.message })
-  out.code_review = { status: cr.doc.status, summary: cr.doc.summary, gate: cr.gate, model: cr.model, tokens: cr.tokens, findings_count: cr.doc.findings.length, residual_risks: cr.doc.residualRisks, file: cr.reviewPath,
+  // status 'failed' here is the review VERDICT (a P0/P1 finding not REJECTED → gate blocks), not a run failure;
+  // ran: true lets consumers tell "reviewed, found P1" from "review did not run" (QA daily-review misread it on 10-22)
+  out.code_review = { status: cr.doc.status, ran: true, summary: cr.doc.summary, gate: cr.gate, model: cr.model, tokens: cr.tokens, findings_count: cr.doc.findings.length, residual_risks: cr.doc.residualRisks, file: cr.reviewPath,
     // 可复现：reused = 这次复用了缓存的结论（reused_from 指向第一次审查）；cache_key 的组成见 docs/report-schema.md › Code review reuse
     reused: Boolean(cr.reused), reused_from: cr.reused_from ?? null, fresh_requested: Boolean(opts.freshReview), fresh_comparison: cr.fresh_comparison ?? null, sampling: cr.sampling ?? null,
     cache_key: ck ? { key: ck.key.slice(0, 16), reviewed_sha: ck.reviewed_sha, review_base_sha: ck.review_base_sha, diff_hash: ck.diff_hash.slice(0, 16), prompt_hash: ck.prompt_hash.slice(0, 16), prompt_version: ck.prompt_version, model: ck.model } : null,
