@@ -108,9 +108,12 @@ test('日报：两个进程同时发，只有一个真正发出', async () => {
 
 test('日报：结果不明超过去重窗口就不再重发，下一份提示并合并内容', async () => {
   const db = freshDb()
-  setMeta(db, 'heartbeat_at', new Date().toISOString())
+  // Pin "day 1" to 12:00 Asia/Shanghai of the current date: with the real clock the +60 min retry crosses midnight after
+  // 23:00 Shanghai, the dedupe day key changes and the test failed every night (CI red on main 23:00–24:00 Shanghai).
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date())
+  const day1 = new Date(`${today}T12:00:00+08:00`)
+  setMeta(db, 'heartbeat_at', day1.toISOString())
   stubFeishu({ fail: true })
-  const day1 = new Date()
   const dayKey = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(day1)
   await assert.rejects(sendDailyReport({ db, reg, secrets, now: day1 }))
   const calls2 = stubFeishu()
