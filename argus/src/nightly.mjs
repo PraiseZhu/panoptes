@@ -872,12 +872,15 @@ export async function runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha
   if (cr.status !== 'ok') {
     if (cr.error?.kind === 'severity-standard') health.qa_tool_failures.push({ pr: number, stage: 'code-review', message: cr.error.message })
     else health.llm_errors.push({ pr: number, stage: 'code-review', model: LLM_MODEL, ...cr.error })
-    out.code_review = { status: cr.status, error: cr.error }
+    // ran: false = the review itself did not complete (model/gateway error, or the severity pin failed); status carries the failure kind
+    out.code_review = { status: cr.status, ran: false, error: cr.error }
     return
   }
   if (cr.gateError) health.qa_tool_failures.push({ pr: number, stage: 'ming-qa assert-code-review', message: cr.gateError.message })
   const unverified = cr.doc.unverified ?? []
-  out.code_review = { status: cr.doc.status, reviewer_status: cr.doc.status, summary: cr.doc.summary, gate: cr.gate, model: cr.model, tokens: cr.tokens, findings_count: cr.doc.findings.length, unverified_count: unverified.length, dropped: cr.doc.dropped ?? null,
+  // status 'failed' here is the review VERDICT (a P0/P1 that stays in findings after verification / rulings, set below), not a
+  // run failure; ran: true lets consumers tell "reviewed, found P1" from "review did not run" (QA daily-review misread it on 10-22)
+  out.code_review = { status: cr.doc.status, ran: true, reviewer_status: cr.doc.status, summary: cr.doc.summary, gate: cr.gate, model: cr.model, tokens: cr.tokens, findings_count: cr.doc.findings.length, unverified_count: unverified.length, dropped: cr.doc.dropped ?? null,
     severity_standard: cr.doc.severityStandard ?? null, residual_risks: cr.doc.residualRisks, file: cr.reviewPath,
     // 可复现：reused = 这次复用了缓存的结论（reused_from 指向第一次审查）；cache_key 的组成见 docs/report-schema.md › Code review reuse
     reused: Boolean(cr.reused), reused_from: cr.reused_from ?? null, fresh_requested: Boolean(opts.freshReview), fresh_comparison: cr.fresh_comparison ?? null, sampling: cr.sampling ?? null,
