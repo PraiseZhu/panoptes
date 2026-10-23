@@ -116,6 +116,8 @@ test('日报：结果不明超过去重窗口就不再重发，下一份提示�
   stubFeishu({ fail: true })
   const dayKey = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(day1)
   await assert.rejects(sendDailyReport({ db, reg, secrets, now: day1 }))
+  // the outbox row's created_at comes from the real clock; align it with the pinned day 1
+  db.prepare('UPDATE outbox SET created_at = ? WHERE dedupe_key = ?').run(day1.toISOString(), `daily:${dayKey}`)
   const calls2 = stubFeishu()
   const res = await sendDailyReport({ db, reg, secrets, now: new Date(day1.getTime() + 60 * 60_000) })
   assert.equal(res.status, 'gave_up')
