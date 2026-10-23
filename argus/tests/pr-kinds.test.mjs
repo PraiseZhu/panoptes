@@ -64,20 +64,21 @@ const benchRun = (ok) => [{ id: 'install', kind: 'setup', ok: true, exitCode: 0 
   testOutcomeStatus: 'complete', testOutcomes: [{ caseId: NAME, failureName: NAME, status: ok ? 'passed' : 'failed' }],
 }]
 
-test('flaky：首跑超时、同提交重跑通过 → status flaky、P2（不稳定）、与 PR 无关、test_backed=false', () => {
+test('flaky：首跑超时、同提交重跑通过 → status flaky、不定级（待核实）、与 PR 无关、test_backed=false', () => {
   const first = benchRun(false), rerun = benchRun(true)
   assert.equal(compareKey(`bench::${NAME}`, rerun, first), 'absent')
   assert.equal(decideOutcome({ first, rerun, base: null, latest: null }).outcome, 'flaky')
   const step = { id: 'bench', kind: 'product', trialOnly: true }
-  assert.equal(N.severityFor({ status: 'flaky', step, merged: true }), 'P2')
-  assert.equal(N.severityFor({ status: 'flaky', step: { kind: 'product' }, merged: false }), 'P2')
+  assert.equal(N.severityFor({ status: 'flaky', step, merged: true }), null)
+  assert.equal(N.severityFor({ status: 'flaky', step: { kind: 'product' }, merged: false }), null)
   assert.equal(N.severityFor({ status: 'pre-existing', step: { kind: 'product' }, merged: true }), 'P3')
   // 没有逐用例报告时重跑无法核实 → unverified（这就是 bench 现在带 JSON reporter 的原因）
   const noReport = (r) => r.map((x) => ({ ...x, testOutcomeStatus: 'unavailable', testOutcomes: undefined }))
   assert.equal(compareKey(`bench::${NAME}`, noReport(rerun), noReport(first)), 'unknown')
   // test_backed：flaky 的失败检查不是测试佐证
   assert.equal(N.checkIsTestBacked({ status: 'flaky' }), false)
-  assert.equal(N.checkIsTestBacked({ status: 'unverified' }), true)
+  assert.equal(N.checkIsTestBacked({ status: 'unverified' }), false, 'unverified 没核实，不算测试佐证')
+  assert.equal(N.checkIsTestBacked({ status: 'introduced' }), true)
   const [pr] = N.annotateTestBacked([{ number: 892, findings: [
     { source: 'check', status: 'flaky', flaky: true, severity: 'P2' }, // 旧格式没有 test_backed 字段
     { source: 'code-review', severity: 'P2', test_backed: false },

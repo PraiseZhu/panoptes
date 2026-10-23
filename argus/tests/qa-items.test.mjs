@@ -109,7 +109,10 @@ test('profile：补齐目标仓 CI 的 7 项检查，命令与目标 workflow / 
   for (const [id, k] of Object.entries(kinds)) assert.equal(by[id].kind, k, id)
   assert.equal(p.boxes.design, 'white-box'); assert.equal(p.boxes['secret-scan'], 'white-box'); assert.equal(p.boxes['web-build'], 'gray-box')
   assert.equal(nightly.severityFor({ status: 'introduced', step: by.design, merged: true }), 'P2')
-  assert.equal(nightly.severityFor({ status: 'introduced', step: by['secret-scan'], merged: true }), 'P0')
+  // 统一分级：已合并不再自动 P0；产品类引入的失败是 P1，P0 要人工 / 裁决按 severity.md 确认（p0_candidate 标出来）
+  assert.equal(nightly.severityFor({ status: 'introduced', step: by['secret-scan'], merged: true }), 'P1')
+  assert.equal(nightly.p0Candidate({ status: 'introduced', step: by['secret-scan'], merged: true }), true)
+  assert.equal(nightly.p0Candidate({ status: 'introduced', step: by.design, merged: true }), false, '质量守卫不是 P0 候选')
   assert.equal(nightly.severityFor({ status: 'introduced', step: by['web-build'], merged: false }), 'P1')
   // 旧数据迁移旅程 + 接口探测的登录态
   assert.equal(by['e2e-legacy-migration'].optional, true)
@@ -466,7 +469,7 @@ test('appliesIf：被测版本没有检查对象（如 index.html）→ 不适�
 })
 
 // ── 不稳定失败与合并前版本对比 ────────────────────────────
-test('flaky 的 base 对比：没对比时写「未与合并前版本对比」；对比了记基线结果，严重度仍是 P2', () => {
+test('flaky 的 base 对比：没对比时写「未与合并前版本对比」；对比了记基线结果，仍不定级（待核实）', () => {
   const none = nightly.flakyBaseComparison({ baseSha: 'b'.repeat(40), baseRun: 'not-run' })
   assert.equal(none.compared, false); assert.ok(none.note.includes('未与合并前版本对比')); assert.ok(none.note_zh.startsWith('未与合并前版本对比'))
   assert.ok(nightly.flakyBaseComparison({ baseSha: null, baseRun: 'not-run' }).note.includes('base revision unknown'))
@@ -475,7 +478,7 @@ test('flaky 的 base 对比：没对比时写「未与合并前版本对比」�
   assert.equal(fails.result, 'also-fails-on-base'); assert.ok(!fails.note.includes('未与合并前版本对比'))
   assert.equal(nightly.flakyBaseComparison({ baseSha: 'b', baseRun: 'pass' }).result, 'passes-on-base')
   assert.equal(nightly.flakyBaseComparison({ baseSha: 'b', baseRun: 'not-failing' }).result, 'passes-on-base')
-  assert.equal(nightly.severityFor({ status: 'flaky', step: { kind: 'product' }, merged: true }), 'P2')
+  assert.equal(nightly.severityFor({ status: 'flaky', step: { kind: 'product' }, merged: true }), null)
 })
 
 // ── 自检 / 自举 → system_health；内存护栏 ────────────────────

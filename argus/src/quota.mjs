@@ -1,5 +1,6 @@
 // 模型调用额度（每天，上海日期）：按调用种类分开计数，生产与测试两个池子互不占用。
 //   种类：ai-test（AI 补测生成）· jev（Jev 维度分诊）· ai-review（ming-qa 代码审查）· pr-summary（人话摘要）
+//         · ai-verify（AI 审查单独发现的 P1 的整仓复核，每条一次）
 //   池子：production（event 合并即测、catch-up 补测）· test（--trigger manual 手动跑 / 演练 / 验收重跑，或 --quota-pool test）
 // 上限可配：环境变量 ARGUS_QUOTA_<KIND>（生产）/ ARGUS_QUOTA_TEST_<KIND>（测试池），或 JSON 文件
 // ARGUS_QUOTA_FILE（默认 $ARGUS_ROOT/quota.json：{ "production": { "ai-test": 50, … }, "test": { … } }）；环境变量优先。
@@ -9,9 +10,9 @@ import { join } from 'node:path'
 import { aiUsageToday, addAiUsage } from './db.mjs'
 import { toShanghaiDay } from './util.mjs'
 
-export const QUOTA_KINDS = ['ai-test', 'jev', 'ai-review', 'pr-summary']
+export const QUOTA_KINDS = ['ai-test', 'jev', 'ai-review', 'pr-summary', 'ai-verify']
 export const QUOTA_POOLS = ['production', 'test']
-export const DEFAULT_CAPS = { 'ai-test': 50, jev: 150, 'ai-review': 70, 'pr-summary': 40 }
+export const DEFAULT_CAPS = { 'ai-test': 50, jev: 150, 'ai-review': 70, 'pr-summary': 40, 'ai-verify': 40 }
 // 旧的单一上限变量仍然认（只作用于生产池的对应种类）
 const LEGACY_ENV = { 'ai-test': 'ARGUS_AITEST_DAILY_CAP', 'pr-summary': 'ARGUS_AI_DAILY_CAP' }
 export const CAPPED_ZH = '额度用尽未补测'

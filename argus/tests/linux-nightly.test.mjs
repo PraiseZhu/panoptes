@@ -55,15 +55,18 @@ test('三维度归类：profile.boxes 优先，其次按 kind/covers', () => {
   assert.equal(toBox({ id: 'plugin', kind: 'product', covers: ['regression'] }, { boxes: { plugin: 'gray-box' } }), 'gray-box')
 })
 
-test('审查文档规范化成 ming-qa code-review.json 形状', () => {
-  const doc = toCodeReviewDoc({ findings: [{ severity: 'p1', file: 'a.ts', line: '12', title: 't', evidence: 'e', verdict: 'confirmed' }, { severity: 'weird' }] }, [{ filename: 'a.ts' }])
+test('审查文档规范化成 ming-qa code-review.json 形状；不认识的等级不再默认 P2，进待核实', () => {
+  const full = { file: 'a.ts', line: '12', title: 't', trigger: 'tr', behavior: 'be', impact: 'im', evidence: 'e' }
+  const doc = toCodeReviewDoc({ findings: [{ severity: 'p1', ...full, verdict: 'confirmed' }, { severity: 'weird' }] }, [{ filename: 'a.ts' }])
   assert.equal(doc.status, 'failed')
   assert.deepEqual(doc.scope.files, ['a.ts'])
+  assert.equal(doc.findings.length, 1)
   assert.equal(doc.findings[0].severity, 'P1')
   assert.equal(doc.findings[0].line, 12)
   assert.equal(doc.findings[0].verdict, 'CONFIRMED')
-  assert.equal(doc.findings[1].severity, 'P2')
-  assert.equal(doc.findings[1].verdict, 'PLAUSIBLE')
+  assert.equal(doc.unverified.length, 1)
+  assert.equal(doc.unverified[0].kind, 'unknown-level')
+  assert.equal(doc.unverified[0].severity_if_confirmed, null)
 })
 
 test('bwrap 隔离：/home 与 /workspace 不可见，根只读，run 目录可写', { skip: process.platform !== 'linux' || sandboxMode() !== 'bwrap' }, async () => {

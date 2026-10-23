@@ -1,6 +1,7 @@
 // 把多份报告（批量运行 / 单 PR 文件 merged/ open/）合成一份日报形状的 full-YYYY-MM-DD.json。
 // 同一 PR 出现多次时以后面的来源为准；prs[] 条目原样保留，summary 重算，system_health 聚合（最差状态、问题清单合并）。
-import { writeReport } from './nightly.mjs'
+import { writeReport, isTestBacked } from './nightly.mjs'
+import { pendingSummary } from './pending.mjs'
 import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -9,7 +10,7 @@ import { toShanghaiIso } from './util.mjs'
 const SEVS = ['P0', 'P1', 'P2', 'P3']
 const RANK = { P0: 0, P1: 1, P2: 2, P3: 3 }
 const STATUS_RANK = { ok: 0, degraded: 1, failed: 2 }
-const backed = (f) => (typeof f?.test_backed === 'boolean' ? f.test_backed : f?.source === 'check' && f?.status !== 'flaky')
+const backed = (f) => isTestBacked({ source: 'check', ...f })
 
 export function summarize(prs) {
   const all = prs.flatMap((p) => p.findings ?? [])
@@ -24,6 +25,7 @@ export function summarize(prs) {
     qa_errors: prs.filter((p) => p.verdict === 'qa-error').map((p) => p.number),
     test_backed_findings_by_severity: Object.fromEntries(SEVS.map((s) => [s, all.filter((f) => backed(f) && f.severity === s).length])),
     prs_test_backed: prs.filter((p) => (p.findings ?? []).some(backed)).map((p) => p.number),
+    pending_verification: pendingSummary(prs.flatMap((p) => p.pending_verification ?? [])),
   }
 }
 

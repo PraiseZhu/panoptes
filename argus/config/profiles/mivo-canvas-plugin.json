@@ -1,6 +1,15 @@
 {
   "version": 2,
   "intentZh": "Mivo 是桌面式 AI 艺术画布，本仓以 Cindy 插件形态为主（网页入口已下线，网页与插件共用 src/ 共享层）：无限画布、FigJam 风格标注、AI 生图工作流。关键不变量：用户导入或生成的图片归用户资产，删除原始文件不影响编辑，关闭重开后画布和资产都能恢复；失败或取消不能留下半成品；所有会改状态、加载数据、执行工作流、跳过或失败的操作都要写 Debug Log，需要即时反馈的要弹提示；插件形态依赖 Cindy 宿主的存储与生命周期。非目标：本系统目前不验证 Cindy 宿主内的真实使用、Windows 原生和真实 GPU。",
+  "reviewRulings": {
+    "_doc": "合并后 AI 代码审查读 PR 讨论里合并前已裁定的问题（盯梢核实 / 盯梢裁决 / 维护者裁定不改），同一问题、代码没变就不再报。reviewer = 审查机与盯梢回帖用的账号；维护者 = CODEOWNERS 根规则的团队（与审查机 context.mjs 同一来源），读不到时用 maintainers",
+    "enabled": true,
+    "reviewer": "PraiseZhu",
+    "maintainersTeam": "xindong/art-support",
+    "maintainers": [
+      "PraiseZhu"
+    ]
+  },
   "sourceOfSteps": "对齐 origin/main 的 .github/workflows/ci.yml（build-and-test、structure-guard、cindyplugin-build、linux-unit-shards）；接口测试与浏览器端到端来自仓内已有测试和脚本，不在 CI 里，浏览器用 Ego Lite 无头实例；2026-10-11 补齐 ci.yml 里 panoptes 原先没跑的：verify:design、check-internal-literals、check-endpoint-literals、cindyplugin/check-host-locale.mjs、check-vendor-split.mjs、gitleaks（secret-scan），以及 package.json 的 npm run build（网页构建）",
   "aPaths": [
     "**/*.md",

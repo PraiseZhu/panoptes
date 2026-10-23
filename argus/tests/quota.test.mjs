@@ -23,7 +23,7 @@ test('pool: manual → test, event / catch-up → production, --quota-pool overr
 })
 
 test('caps: defaults ai-test 50 / ai-review 70 / jev 150, env per kind and pool, legacy env, quota.json', () => {
-  assert.deepEqual(Q.quotaCaps('production', {}).caps, { 'ai-test': 50, jev: 150, 'ai-review': 70, 'pr-summary': 40 })
+  assert.deepEqual(Q.quotaCaps('production', {}).caps, { 'ai-test': 50, jev: 150, 'ai-review': 70, 'pr-summary': 40, 'ai-verify': 40 })
   const env = { ARGUS_QUOTA_AI_TEST: '5', ARGUS_QUOTA_TEST_AI_REVIEW: '3', ARGUS_AI_DAILY_CAP: '9' }
   assert.equal(Q.quotaCaps('production', env).caps['ai-test'], 5)
   assert.equal(Q.quotaCaps('production', env).caps['ai-review'], 70)
@@ -58,7 +58,7 @@ test('separate counters per kind; the test pool never consumes production quota'
   const e = prod.markCapped('ai-test', { pr: 893, dimensions: ['boundary'] })
   assert.match(e.message, /额度用尽未补测/)
   assert.deepEqual(prod.summary().capped.map((x) => [x.pr, x.kind, x.pool]), [[893, 'ai-test', 'production']])
-  assert.deepEqual(prod.summary().used_by_run, { 'ai-test': 2, jev: 1, 'ai-review': 1, 'pr-summary': 0 })
+  assert.deepEqual(prod.summary().used_by_run, { 'ai-test': 2, jev: 1, 'ai-review': 1, 'pr-summary': 0, 'ai-verify': 0 })
   db.close()
 })
 

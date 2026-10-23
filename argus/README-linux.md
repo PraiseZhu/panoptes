@@ -86,13 +86,21 @@ Each check additionally lists the ming-qa 29-dimension keys it covers (`qa_dimen
 
 ### Severity
 
-* **P0** – introduced, reproducible product-check failure on a *merged* PR that still fails on latest main.
-* **P1** – introduced, reproducible product-check failure on an open PR; LLM code-review P0/P1
-  (LLM-only findings are capped at P1; the original level is kept in `llm_severity`).
-* **P2** – introduced quality-guard failure, unverified failure, timeout, setup failure, flaky (unstable; `test_backed: false`), review P2,
-  trial checks (bench) at most P2.
-* **P3** – pre-existing / fixed-later failures, review P3, or nothing found.
-* PR severity = most severe finding (P3 when there are none; `verdict` says `clean`).
+Since 2026-10-23 every level follows the reviewer's unified severity (PraiseZhu/Review-PR `mivo/config/severity.md`,
+pinned copy `config/severity.md`, see `../docs/report-schema.md` › *Unified severity*). How check results map onto it:
+
+* **P1** – introduced, reproducible product-check failure, on a merged *or* an open PR. It is **not** automatically P0
+  any more: a merged one that still fails on latest main is marked `p0_candidate: true`; P0 only when a human or a
+  ruling confirms the severity.md P0 definition.
+* **P2** – introduced quality-guard failure; trial checks (bench) at most P2; a coverage target the PR states itself
+  and misses (`stated-acceptance`).
+* **P3** – pre-existing / fixed-later failures (reminder only).
+* **No level, pending verification (QA 自查)** – `unverified`, `setup-failed`, `timeout`, `flaky` failures, AI-test
+  leads, own tests not run, QA errors (`prs[].pending_verification[]`; not the author's problem, never notified).
+* Code review: CONFIRMED findings with trigger / behavior / impact / evidence; LLM-only P0 capped at P1 (original in
+  `llm_severity`); an LLM-only P1 stays only after the repo-wide verification confirmed it; PLAUSIBLE and the rest are
+  pending verification.
+* PR severity = most severe finding (P3 when there are none; `verdict` says `clean` only when nothing is pending either).
 
 ### Fingerprints
 

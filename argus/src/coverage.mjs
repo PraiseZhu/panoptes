@@ -1,5 +1,7 @@
-// 白盒覆盖率门禁：单测步骤用 vitest --coverage（v8）跑，读 coverage-summary.json（总体）与 coverage-final.json
-// （逐行），再与 PR diff 的新增行求交，得到「新代码覆盖率」。低于门槛 → P2（只是建议复查，永远不会单独变成 issue）。
+// 白盒覆盖率：单测步骤用 vitest --coverage（v8）跑，读 coverage-summary.json（总体）与 coverage-final.json
+// （逐行），再与 PR diff 的新增行求交，得到「新代码覆盖率」。数字照常写进报告当信息（和参考线 90 比出 pass / fail）。
+// 统一分级（Praise 2026-10-23）：覆盖率低于参考线本身不是问题，不出 finding；只有 PR 正文或 docs/pr/<N>/qa.md 自己写明了
+// 覆盖率目标却没达到，才按「自己定的验收没达成」记一条 P2（statedCoverageTarget + evaluateStatedTarget）。
 import { TEST_HELPER_RE } from './classify.mjs'
 import { readFileSync, existsSync, statSync, rmSync, readdirSync } from 'node:fs'
 import { join, relative, isAbsolute, resolve, sep, basename } from 'node:path'
@@ -232,8 +234,8 @@ export const NEW_CODE_METHOD = 'ming-qa newCode = line coverage of new code. Cha
   + 'files with no data at all count their code-like added lines as uncovered, except plain .js/.mjs/.cjs files (node entry scripts / host entry), which are listed as not_measurable and left out of pct. '
   + 'pct = covered / executable changed lines; null (not evaluated) when the diff has no executable source lines.'
 
-// 门禁结论：任何一项低于门槛 → fail（P2）；拿不到覆盖率 → unavailable（不判 fail，单独说明）
-// 门禁只看新代码覆盖率（< new_code 阈值 → 不达标 → 一条 P2）。全仓 lines / branches / functions 只作基线趋势数据：
+// 结论：新代码覆盖率低于参考线 → status fail（只是信息，不出 finding）；拿不到覆盖率 → unavailable（不判 fail，单独说明）
+// 只拿新代码覆盖率和参考线比。全仓 lines / branches / functions 只作基线趋势数据：
 // 记在 baseline 里（附参考线 BASELINE_REFERENCE），results 里标 'baseline'，永远不让门禁失败、不产生 finding。
 export const GATED_METRICS = Object.freeze(['new_code'])
 export const BASELINE_METRICS = Object.freeze(['lines', 'branches', 'functions'])
@@ -257,4 +259,75 @@ export function coverageGate({ coverage, added, thresholds = COVERAGE_THRESHOLDS
   gate.failed = failed
   if (notEvaluated) gate.reason = `new-code coverage not evaluated: ${gate.new_code?.reason ?? (gate.new_code?.executable_lines === 0 ? 'the diff adds no executable lines in non-test JS/TS sources' : 'unknown')}`
   return gate
+}
+
+// ── PR 自己写明的覆盖率目标（统一分级「P2 必修的三类」第 2 类：自己定的验收没达成）──────────────
+// 只认紧挨在百分数前面的目标说法：比较符（≥ / >= / >）或「目标 / 门槛 / 不低于 / 不少于 / 至少」、at least / target / threshold /
+// minimum / no less than，中间只能有空白、冒号、「为 / 是」。对现状的描述（「当前覆盖率 81%」「覆盖率达到 95%」「96%，达到要求」）不算。
+// 指标按每个百分数就近判断（同一小句里的说法，没有就取句中离它最近的说法）：新代码 / 增量 / 本 PR / new code / new lines → new_code；
+// 写了「全仓 / 整体 / overall / total …」才按全仓行覆盖率（lines）比 —— 只写 line coverage、行覆盖率不按全仓比；
+// 分支 → branches、函数 → functions（全仓数据）；新代码的分支 / 函数覆盖率 QA 不测 → new_code_branches / new_code_functions（not-evaluated）；
+// 没说 → new_code。
+const COV_WORD = /覆盖率|coverage/i
+const PCT = /(\d{1,3}(?:\.\d+)?)\s*[%％]/g
+const TARGET_BEFORE = /(?:[≥⩾]|>=|＞=|[>＞]|不低于|不少于|至少|目标(?:值)?|门槛|at\s+least|no\s+less\s+than|minimum(?:\s+of)?|targets?(?:\s+of)?|threshold(?:\s+of)?)\s*(?:[:：=]|为|是|is)?\s*$/i
+const METRIC_WORDS = [
+  ['new', /新代码|新增代码|增量|本\s*PR|改动(?:的)?(?:代码|行)|新增行|new[-\s]?code|new\s+lines?|changed\s+(?:code|lines?|files?)|\bdiff\b|\bpatch\b/gi],
+  ['repo', /全仓|整体|整个仓库|总体|全量|overall|\btotal\b|whole[-\s]?repo|repo[-\s]?wide|project[-\s]?wide|entire\s+(?:repo|project|codebase)/gi],
+  ['branch', /分支|branch(?:es)?/gi],
+  ['func', /函数|functions?\b/gi],
+]
+const CLAUSE_SEP = /[，,；;。|｜（）()【】[\]]/
+function metricWords(text) {
+  const hits = []
+  for (const [kind, re] of METRIC_WORDS) for (const m of String(text).matchAll(re)) hits.push({ kind, index: m.index })
+  return hits
+}
+function metricFor(line, index, length) {
+  // 所在小句：前后最近的分隔符之间
+  let s = index, e = index + length
+  while (s > 0 && !CLAUSE_SEP.test(line[s - 1])) s--
+  while (e < line.length && !CLAUSE_SEP.test(line[e])) e++
+  let kinds = new Set(metricWords(line.slice(s, e)).map((h) => h.kind))
+  if (!kinds.size) {
+    // 小句里没说：取整句里离这个百分数最近的说法（先看前面）
+    const hits = metricWords(line)
+    const before = hits.filter((h) => h.index < index).sort((a, b) => b.index - a.index)[0]
+    const after = hits.filter((h) => h.index > index).sort((a, b) => a.index - b.index)[0]
+    const near = before ?? after
+    kinds = new Set(near ? [near.kind] : [])
+  }
+  const isNew = kinds.has('new')
+  if (kinds.has('branch')) return isNew ? 'new_code_branches' : 'branches'
+  if (kinds.has('func')) return isNew ? 'new_code_functions' : 'functions'
+  if (kinds.has('repo') && !isNew) return 'lines'
+  return 'new_code'
+}
+export function statedCoverageTarget(sources) {
+  for (const { source, text } of sources ?? []) {
+    let fence = false
+    for (const raw of String(text ?? '').replace(/<!--[\s\S]*?-->/g, '').split(/\r?\n/)) {
+      if (/^\s*(```|~~~)/.test(raw)) { fence = !fence; continue }
+      if (fence || !COV_WORD.test(raw)) continue
+      // 引用块的「>」不是比较符
+      const line = raw.replace(/^\s*(?:>\s*)+/, '').trim()
+      for (const m of line.matchAll(PCT)) {
+        const pct = Number(m[1])
+        if (!(pct > 0 && pct <= 100)) continue
+        if (!TARGET_BEFORE.test(line.slice(Math.max(0, m.index - 24), m.index))) continue
+        return { pct, metric: metricFor(line, m.index, m[0].length), source, quote: line.slice(0, 300) }
+      }
+    }
+  }
+  return null
+}
+// 目标对实测：实测拿不到（或是 QA 不测的指标）→ not-evaluated（不出 finding）；低于目标 → missed
+export function evaluateStatedTarget(target, gate) {
+  if (!target) return null
+  if (target.metric === 'new_code_branches' || target.metric === 'new_code_functions') {
+    return { ...target, value: null, status: 'not-evaluated', reason: 'the PR states a new-code branch / function coverage target; QA measures new-code line coverage only' }
+  }
+  const value = gate?.values?.[target.metric] ?? null
+  if (value == null) return { ...target, value: null, status: 'not-evaluated', reason: gate?.reason ?? 'coverage not measured' }
+  return { ...target, value, status: value < target.pct ? 'missed' : 'met' }
 }

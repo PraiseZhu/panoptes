@@ -102,7 +102,8 @@ Reports written before 2026-10-11 (commit `78184f9`) do not have `tested_at`; fa
 | `written_by` | string | only in per-PR files: `"nightly"` (written by a multi-PR run) or `"backfill (panoptes processPr)"` (one PR re-run through the same pipeline function) |
 | `run` | object | see below |
 | `dimensions` | object | `white-box` / `gray-box` / `black-box` → description |
-| `severity_scale` | object | `P0`…`P3` → description |
+| **`severity_standard`** | object | since 2026-10-23: the grading standard every P level in this report follows — the reviewer's unified severity, **PraiseZhu/Review-PR `mivo/config/severity.md`**, pinned by sha256 (`{ status: "pinned", source_repo, path, ref, sha256, version }`; `version` = first 12 hex of sha256, the same as the reviewer's `SEVERITY_VERSION` and the watcher's `mivo-ruling std=`). panoptes no longer writes its own P0–P3 definitions; see *Unified severity* |
+| `severity_scale` | object | level names only (`P0 紧急严重事故`, `P1 严重缺陷`, `P2 一般缺陷`, `P3 改进建议（不报）`, `pending: 待核实（QA 自查）`); definitions are in `severity_standard`. Reports before 2026-10-23 carry panoptes' old hand-written descriptions here |
 | `summary` | object | see below |
 | `prs` | array | one entry per discovered PR; for `--pr` runs **only the requested PRs** (since 2026-10-11; older `--pr` reports also listed the day's other PRs as `not-tested` / `excluded-by-pr-filter`, e.g. the 10-11 PR-905/906/907 originals kept as `.v1.json`) |
 | `issues` | object | issue creation result (off by default) |
@@ -115,7 +116,7 @@ Reports written before 2026-10-11 (commit `78184f9`) do not have `tested_at`; fa
 **`trigger`** (`event` = on-merge trigger, `catch-up` = the 2-hourly catch-up timer or `--catch-up`, `manual` = run by
 hand; default `manual`; reports before 2026-10-11 have no `trigger`), `id` (uuid), `started_at`, `finished_at`, `started_at_shanghai`, `finished_at_shanghai`, `duration_s`,
 `args` (`date` (the `--date` argument or `null`), `date_source` (how `date` was chosen: `--date`, `pr merged_at (Asia/Shanghai)`, `pr updated_at (Asia/Shanghai)`, `yesterday (Asia/Shanghai)`), `prs`, `out`, `reuse_merged`, `create_issues`, `limit`, `pr_timeout_min`, `deadline`, `burst_cutoff`, `step_cache`, `write_merged`, `write_open`),
-`ai_tests`, `ai_test_caps` (effective caps; since 2026-10-12 the tiered caps of the PR, or of the highest-tier PR in a multi-PR run), **`ai_test_tier`** (see *AI-test tiers*; `null` when no PR was tested), **`quota_pool`** (`production` | `test`, see *Model-call quotas*), **`quota_caps`** (`{ ai-test, jev, ai-review, pr-summary }` daily caps of that pool), `fresh_review` (see *Code review reuse*). **`status: "failed"` with `ran: true` means the review completed and found a blocking P0/P1 (verdict), not that it failed to run**; reports before this field: a `summary`/`verdict` present ⇒ it ran),
+`ai_tests`, `ai_test_caps` (effective caps; since 2026-10-12 the tiered caps of the PR, or of the highest-tier PR in a multi-PR run), **`ai_test_tier`** (see *AI-test tiers*; `null` when no PR was tested), **`quota_pool`** (`production` | `test`, see *Model-call quotas*), **`quota_caps`** (`{ ai-test, jev, ai-review, pr-summary, ai-verify }` daily caps of that pool), `fresh_review` (see *Code review reuse*). **`status: "failed"` with `ran: true` means the review completed and found a blocking P0/P1 (verdict; since 2026-10-23 only a P0/P1 that stays in `findings` after verification and rulings, the model's own verdict is `reviewer_status`), not that it failed to run**; reports before this field: a `summary`/`verdict` present ⇒ it ran),
 `argus_commit` (panoptes commit), `ming_qa_commit`, `llm_model`, `evidence_root`.
 Merged reports written by nightly also carry `run.source_report` (path of the nightly report).
 
@@ -160,12 +161,15 @@ Merged reports written by nightly also carry `run.source_report` (path of the ni
 | `outcome`, `outcome_reason` | engine outcome (`passed`, `defect`, `flaky`, `infra_failed`, `docs_only`, …) |
 | `not_tested_code`, `not_tested_reason` | only for `verdict: not-tested` |
 | `partial_result` | only for `not-tested` because of a time budget: `{ verdict, checks, evidence_dir }` of the interrupted run; not used for the verdict |
-| `error` | only for `qa-error` (redacted message); the entry also has one finding `{ source: "qa-error", test_backed: false, severity: "P2" }` |
+| `error` | only for `qa-error` (redacted message); since 2026-10-23 the entry has `severity: "untested"`, no findings and one `pending_verification` item `{ pending_kind: "qa-error" }` (reports before: one finding `{ source: "qa-error", test_backed: false, severity: "P2" }`) |
 | `run_mode` | `{ coverage_parallel, reason }`: whether the coverage round ran in parallel with the first run (memory guard: `MemAvailable` ≥ `ARGUS_PARALLEL_MIN_FREE_GB`, default 8, and `ARGUS_MAX_PARALLEL` ≠ 1) |
 | `checks[]` | `{ id, name, kind, dimension, qa_dimensions, status: pass/fail/timeout/unavailable, exit_code, signal, ended_at, duration_ms, failure_count, unavailable_reason?, sub_checks?, shards?, reused?, reused_from? }` (`shards` / `reused` / `reused_from`: see *Burst capacity*); `sub_checks` only for probe steps (`api-probe`): `{ total, passed, failed, skipped, auth: { account, account_via, host_exchange } }` — `status: pass` means every probe that **ran** passed; skipped probes are listed in `skipped_steps`, never counted as passed |
 | `failed_checks[]` | `{ check_id, check_name, dimension, qa_dimensions, test, failure_type, status, severity, attribution, fingerprint, pr_fingerprint, evidence{ tested_sha, base_sha, exit_code, signal, ended_at, timed_out, first_run, rerun, base_run, latest_main_run?, command, log_tail, log_file } }`; `status` ∈ `introduced, pre-existing, flaky, fixed-later, unverified, timeout, setup-failed`; boolean **`pre_existing`** (`true` when `status` is `pre-existing` **or** `evidence.base_run` is `"fail"` — 日报 bot reads this to label 老问题 / 合并前就有, e.g. recurring `shadowRoundTrip` bench timeout); also boolean **`flaky`** (`true` iff `status: "flaky"`), `related_to_pr: false` and **`base_comparison`** (see *Flaky*) for flaky entries, `evidence.base_log_file?` when base ran, `not_a_pr_finding: true` + `env_suspected: "trial-timeout"` (severity P3, **not copied into `findings[]`**, noted in `system_health.env_problems`) when a `test_timeout` case of a trial-only check (bench) got rerun result exactly `pass` after the machine went idle (1-min loadavg ≤ 0.5 × cores and MemAvailable ≥ 3 GB, waited at most 10 min; `rerun_idle_wait` on the PR); a whole-step timeout, `status: introduced`, a rerun that is not exactly `pass` (incl. `not-failing`), or a wait that hit 10 min with the machine still busy (`rerun_idle_wait.idle: false`) keeps its severity; if the time budget runs out during the wait, no rerun happens; trial checks carry `evidence.machine_load { first_run, rerun_wait, rerun }` (`loadavg`, `cores`, `mem_available_gb`), and, in reports written before 2026-10-11 only, `reclassified { at, from, reason }` (legacy in-place re-classification; no longer done — see *Report preservation*) |
-| `code_review` | `{ status, ran, summary, gate, model, tokens, findings_count, residual_risks, file, reused, reused_from, fresh_requested, fresh_comparison, sampling, cache_key, verdict }` (see *Code review reuse*) or `{ status, ran: false, error }`, or **`{ status: "capped", reason, display_zh: "额度用尽未补测" }`** when the day's ai-review quota was used up (no review happened; see *Model-call quotas*). **Also present for docs-only PRs** (reviewed on the same commit: merged → `base_sha` (first parent = merge-base) `..merge_sha`); `null` only with `--no-review` |
-| `findings[]` | everything that can raise severity. Every finding has **`source`** ∈ `check` (a failed check, same fields as `failed_checks`), `code-review` (LLM; capped at P1, original in `llm_severity`), `coverage-gate` (P2), `qa-error` (P2, the pipeline crashed), `own-tests` (P2, `check_id: "own-tests-not-run"`, `test_backed: false`: a test file the PR changed appears in no check's test report, `evidence.files`; not raised when a report that could contain it is incomplete), `ai-test` (P2, an AI-generated test that fails on the tested commit; `test_backed: false`, `status: "unconfirmed"`, `reproduced`) and boolean **`test_backed`** (see *test_backed*) |
+| `code_review` | `{ status, ran, reviewer_status, summary, gate, reviewer_gate, model, tokens, findings_count, unverified_count, pending_count, dropped, severity_standard, residual_risks, file, reused, reused_from, fresh_requested, fresh_comparison, sampling, json_loose?, cache_key, verdict, reviewer_verdict }` (`gate` / `verdict` follow the final findings, see *Unified severity*) (see *Code review reuse*) or `{ status, ran: false, error }`, or **`{ status: "capped", reason, display_zh: "额度用尽未补测" }`** when the day's ai-review quota was used up (no review happened; see *Model-call quotas*). **Also present for docs-only PRs** (reviewed on the same commit: merged → `base_sha` (first parent = merge-base) `..merge_sha`); `null` only with `--no-review` |
+| `findings[]` | the PR's problems **as graded by the unified severity** — everything here is a P0–P3 that stands; since 2026-10-23 nothing unproven is in here (see `pending_verification`). Every finding has **`source`** ∈ `check` (a failed check with `status` `introduced` / `pre-existing` / `fixed-later`, same fields as `failed_checks`), `code-review` (LLM, CONFIRMED only; capped at P1, original in `llm_severity`; an AI-only P1 is here only after the repo-wide verification confirmed it, `verification`), `stated-acceptance` (P2: the PR body or `docs/pr/<N>/qa.md` states a coverage target that was not met, `evidence.stated_target`) and boolean **`test_backed`** (see *test_backed*). Reports before 2026-10-23 also have `coverage-gate` (P2, new-code coverage < 90), `qa-error` (P2), `own-tests` (P2), `ai-test` (P2, `status: "unconfirmed"`), and `check` entries with `unverified` / `flaky` / `timeout` / `setup-failed` (P2) |
+| **`pending_verification[]`** | since 2026-10-23: **待核实（QA 自查）** — items that the unified severity does not let us grade yet, or that are not the author's problem. They get **no P level** (`severity_if_confirmed` is only what they would be), never raise `severity`, never make the PR `needs-attention`, and are never @'d, DM'd, opened as handoff issues or counted as overdue; QA verifies them first. Each item keeps the finding's fields plus `pending_kind`, `kind_zh`, `owner: "qa"`, `label_zh: "待核实（QA 自查）"`, `pending_reason`, `pending_reason_zh`, `test_backed: false`. `pending_kind` ∈ `review-plausible` (LLM PLAUSIBLE), `review-unverified` (the reviewer listed it as unverified / a question about a written design), `review-incomplete` (no trigger / behavior / impact / evidence / line), `review-unknown-level`, `review-p1-unconfirmed` (AI-only P1 the repo-wide verification did not confirm, `verification`), `review-ruled` (same issue as a pre-merge ruling, code unchanged, `ruling`), `check-qa` (a failed check with status `unverified` / `setup-failed` / `timeout` / `flaky`), `ai-test` (AI-generated test fails on the tested commit; a person confirms it with `scripts/verify-ai-lead.mjs`, which moves it into `findings` as P2), `own-tests` (changed test files no check ran), `qa-error` |
+| `pending_summary` | `{ total, by_kind }` over `pending_verification` (only when non-empty) |
+| `prior_rulings` | since 2026-10-23, only when the PR discussion had any: pre-merge rulings the code review took into account — `{ used, rejected, items: [{ kind: watcher \| adjudication \| maintainer, mode: auto-match \| prompt-only, verdict, path, line, severity, key, code_state: unchanged \| changed \| unknown, ruled_head, url, by, at, finding }], rejected_items }`; only `adjudication` can move a finding by code, see *Unified severity* |
 | `not_a_pr_finding` | Emitted since 2026-10-20 (branch `qa/bench-after-unit-env-timeouts` merged) as `failed_checks[].not_a_pr_finding: true` + `env_suspected: "trial-timeout"` for trial-only (bench) test timeouts that passed an idle-machine rerun; such entries are left out of `findings[]` (see `failed_checks[]`). Readers should treat a missing field as `false`. |
 | **`test_backed`** | PR-level: `true` if at least one finding is test-backed |
 | `test_backed_severity` | highest severity among test-backed findings, or `null` |
@@ -177,7 +181,7 @@ Merged reports written by nightly also carry `run.source_report` (path of the ni
 | **`skipped_steps`** | **every** profile step that did not run — **each step id at most once** (the first, most specific reason wins: not applicable / triage / `--skip-step` before `not run: …`; reports before 2026-10-11 could list e.g. `web-build` twice), each `{ id, nameZh, reason, reasonZh?, dimension }`; reasons: `triage: …` (optional step not relevant to the change), `skipped by --skip-step`, `not run: dependency install failed`, `not run: run stopped before this step …`, `docs-only change: no checks run`, `not applicable to this revision: …` (the profile step's `appliesIf` file is absent, e.g. `web-build` when the revision has no web entry `index.html`, or a dist scan whose script the revision does not have yet — neither a pass nor an unavailable check). **Sub-probes of a probe step that did not run** are listed too, as `{ id: "api-probe/<probe id>", nameZh, reason, parent_step: "api-probe", dimension }` — e.g. reason `no test account` for signed-in probes when neither local sign-in nor `MIVO_QA_TEST_*` is available |
 | **`triage`** | dimension applicability for this PR, see *Triage* |
 | `ai_summary` | `{ summary, risks, suspect, failure_explanation }`, or `{ status: "capped", reason }` (pr-summary quota used up) |
-| **`quota_capped`** | `[{ pr, kind, pool, cap, used, day, dimensions, message }]` — what this PR did not get because a daily model-call quota was used up (`kind` ∈ `jev`, `ai-test`, `ai-review`, `pr-summary`; `dimensions` = the QA dimensions marked `capped`). Empty when nothing was capped; absent in reports before 2026-10-11 |
+| **`quota_capped`** | `[{ pr, kind, pool, cap, used, day, dimensions, message }]` — what this PR did not get because a daily model-call quota was used up (`kind` ∈ `jev`, `ai-test`, `ai-review`, `pr-summary`, `ai-verify`; `dimensions` = the QA dimensions marked `capped`). Empty when nothing was capped; absent in reports before 2026-10-11 |
 | `evidence_dir`, `duration_s` | |
 | `reused`, `reused_from`, `reused_report_generated_at`, `reused_report_system_health` | only for reused on-merge results |
 | **`handoff`** | Mivo PR handoff (`docs/pr/<N>/review.md`, `qa.md`), see *PR handoff*. Absent in reports before 2026-10-20 and in reused results produced before that |
@@ -187,18 +191,23 @@ Merged reports written by nightly also carry `run.source_report` (path of the ni
 | Verdict | Severity | Meaning |
 |---|---|---|
 | `clean` | P3 | nothing found, every planned check ran and passed, **and all three dimensions (white / gray / black) actually ran** |
-| `review-suggested` | P2 | P2 findings (quality guard, unverified failure, review P2, coverage below gate) |
+| `review-suggested` | P2 | P2 findings (quality guard, review P2, a stated acceptance target not met; before 2026-10-23 also unverified failures and coverage below gate) |
 | `needs-attention` | P0/P1 | at least one P0/P1 finding |
-| `partially-verified` | P3 | nothing found, but some checks were unavailable / timed out **or a dimension did not run** (`dimensions_missing`), **or the code review was skipped because the ai-review quota was used up** (`code_review.status: "capped"`) |
+| `partially-verified` | P3 | nothing found, but **something is pending verification** (`pending_verification`, since 2026-10-23), some checks were unavailable / timed out **or a dimension did not run** (`dimensions_missing`), **or the code review was skipped because the ai-review quota was used up** (`code_review.status: "capped"`) |
 | `qa-env-problem` | per findings | the environment failed (e.g. install failed twice) |
 | `docs-only` | P3 (or the highest code-review finding) | only docs changed; no checks run, `tested: false`, `tested_sha: null`; the ming-qa code review still runs on the merge commit / head (`code_review`, `reviewed_sha`), `coverage_gate.status: "not-applicable"`. Review findings are `test_backed: false`. |
 | `skipped` | P3 | closed without merge |
 | `not-tested` | **`untested`** | discovered but not tested in this run (`tested: false`, `tested_at: null`); `not_tested_code` ∈ `excluded-by-pr-filter` (deliberate `--pr`; only in reports written before 2026-10-11 — current `--pr` reports leave other PRs out of `prs[]` and list them in `system_health.discovery.excluded_by_pr_filter`), `over-limit`, `pr-timeout`, `deadline`, `burst-cutoff` (see *Burst capacity*). Time-budget cases are also in `system_health.qa_tool_failures`. Look for this PR's own `merged/PR-N.json` before concluding it was never tested. |
-| `qa-error` | **P2** | the QA pipeline itself crashed for this PR; also listed in `system_health.qa_tool_failures` (`stage: "pipeline"`) |
+| `qa-error` | **`untested`** (P2 before 2026-10-23) | the QA pipeline itself crashed for this PR; also listed in `system_health.qa_tool_failures` (`stage: "pipeline"`); one `pending_verification` item `qa-error` |
 
-Severity rules: P0 introduced failure on a merged PR that still fails on latest main · P1 introduced reproducible
-product-check failure, or LLM review P0/P1 · P2 quality guard, unverified, timeout, setup failure, **flaky (unstable)**,
-review P2, new-code coverage below gate, QA error · P3 pre-existing / fixed-later / nothing · `untested` not tested at all.
+Severity rules (since 2026-10-23, unified severity — see *Unified severity*): an introduced product-check failure is
+**P1** (merged or open; a merged one still failing on latest main carries `p0_candidate: true` — P0 only when a human or
+a ruling confirms it meets the severity.md P0 definition) · an introduced quality-guard failure P2 · trial checks at most
+P2 · `unverified` / `setup-failed` / `timeout` / `flaky` → no level, pending verification · pre-existing / fixed-later P3 ·
+code review: CONFIRMED P2 as is, AI-only P0 capped at P1, AI-only P1 only after verification, the rest pending ·
+`untested` not tested at all. Before 2026-10-23: P0 introduced failure on a merged PR that still fails on latest main ·
+P1 introduced reproducible product-check failure, or LLM review P0/P1 · P2 quality guard, unverified, timeout, setup
+failure, flaky, review P2, new-code coverage below gate, QA error · P3 pre-existing / fixed-later / nothing.
 
 ### Flaky (unstable) failures
 
@@ -230,15 +239,18 @@ pre-feature entries have `base_comparison.reason: "report predates feature"` and
 
 ### `test_backed` — what notification / issue rules key off
 
-`findings[].test_backed` is `true` **only** when the finding is backed by a failing check that actually ran
-(`source: "check"`) **and was not `flaky`**. Flaky checks (failed, then passed on the rerun), review-only
-(`code-review`), `coverage-gate`, `qa-error` and `ai-test` findings are always `false`.
+`findings[].test_backed` is `true` **only** when the finding is backed by a failing check that actually ran and
+reproduced (`source: "check"` with `status` `introduced`, `pre-existing` or `fixed-later`). Since 2026-10-23
+`unverified` (no comparable rerun / base result) is **not** test-backed either (it used to be); `flaky`, `timeout`,
+`setup-failed`, review-only (`code-review`), `stated-acceptance`, `coverage-gate`, `qa-error` and `ai-test` are always `false`.
 
-**Downstream notification and issue rules must key off `test_backed`, not severity alone.** A P1 with
-`test_backed: false` is an LLM opinion and must not be presented or escalated as a verified defect. Suggested rule:
-notify authors / open issues for P0/P1 only when `test_backed: true`; list `test_backed: false` items as
-"review suggestions". panoptes' own issue creation (only with `--create-issues` + `ARGUS_ALLOW_ISSUES=1`) follows
-this: P0/P1 findings with `test_backed: true` on PRs by PraiseZhu, plus `system_health` failures; nothing else.
+panoptes' own issue creation (only with `--create-issues` + `ARGUS_ALLOW_ISSUES=1`) keys off it: P0/P1 findings with
+`test_backed: true` on PRs by PraiseZhu, plus `system_health` failures; nothing else. **Who gets @'d / DM'd / a handoff
+issue / an overdue reminder** follows the unified severity instead: every finding in `findings[]` of a report with
+`severity_standard` is an author problem; nothing in `pending_verification[]` is. For older reports the shared rule is
+`report/finding-policy.mjs` `notifiable()` (Python twin: pi-fallback `bin/finding_policy.py`; ledger: `build-ledger.mjs`),
+which drops coverage-only P2, unverified AI-test leads, `own-tests`, `qa-error`, unverified / flaky / timeout /
+setup-failed checks, pre-existing and PLAUSIBLE review findings.
 Older reports without the field: treat `source == "check"` and `status != "flaky"` as test-backed.
 
 ### `coverage_gate`
@@ -300,8 +312,10 @@ Older reports without the field: treat `source == "check"` and `status != "flaky
   `baseline { role, lines, branches, functions, reference: { lines: 80, branches: 70, functions: 80 } }`
   (ming-qa's G2 numbers kept as reference lines), `results.<metric> = "baseline"`, never a failure, never a finding.
   (Since 2026-10-11; earlier reports gated all four.)
-- `new_code` < 90 → `status: fail`, `failed: ["new_code"]` and one finding
-  `{ source: "coverage-gate", severity: "P2", title: "new-code coverage X% < 90%" }`.
+- `new_code` < 90 → `status: fail`, `failed: ["new_code"]` — **information only since 2026-10-23, no finding**
+  (before: one finding `{ source: "coverage-gate", severity: "P2", title: "new-code coverage X% < 90%" }`). A P2 exists
+  only when the PR states its own coverage target and misses it (`stated_target`, `source: "stated-acceptance"`; see
+  *Unified severity*).
 - `status: not-evaluated` (`pass: null`) when new-code coverage could not be computed (diff unavailable, no per-line
   data); `reason` says why. Not a failure, no finding.
 
@@ -379,8 +393,9 @@ first. The **primary target** is the PR's uncovered changed lines from `coverage
 exist, and a case with no gap dimension is accepted when its injected bug is in one of those files (`tests[].targets_uncovered`). Each case comes with an injected bug (a one-occurrence text replacement in a source file) and runs in its own
 sandboxed run (`ai1`, `ai2`, …, never part of the verdict runs). **Mutation discipline:** a case is **kept** only if it
 passes on the tested commit **and** fails with the injected bug; otherwise it is **discarded**. A case that fails on
-the tested commit is re-run once (`reproduced`) and becomes a `source: "ai-test"` finding: always P2,
-`test_backed: false`; it is only upgraded by a person after the failure is reproduced and confirmed. Generated files
+the tested commit is re-run once (`reproduced`) and becomes a `pending_verification` item `pending_kind: "ai-test"`
+(since 2026-10-23; before: a P2 `source: "ai-test"` finding), `test_backed: false`; a person who reproduces and confirms it
+runs `scripts/verify-ai-lead.mjs`, which moves it into `findings` as P2 (`verified: true`, `promoted_from_pending: true`). Generated files
 are deleted after the run; nothing is written to the target repo.
 
 **Invalid tests — 测试无效 (since 2026-10-13).** A case that fails on the tested commit **before any assertion** because
@@ -696,3 +711,106 @@ from `reports/merged/PR-N.json` / `reports/open/PR-N.json` unchanged; `summary` 
 `complete` = every source complete, `all_discovered_tested` = no `not-tested` entry. Extra fields:
 `assembled_from: [{ pr, file, generated_at, run_id, system_health }]` and `run.kind: "assembled"`.
 
+## Unified severity (since 2026-10-23)
+
+Praise 2026-10-23: the author's session (local), the reviewer (pre-merge) and this QA (post-merge) grade with **one**
+standard, the reviewer's unified severity — PraiseZhu/Review-PR `mivo/config/severity.md`. panoptes keeps a read-only
+copy at `argus/config/severity.md`, pinned by sha256 in `argus/config/severity.lock.json` (ref = the Mivo repo variable
+`MIVO_REVIEW_SKILL_SHA`). A copy that does not match the pin is refused (code review `unavailable`,
+`error.kind: "severity-standard"`). `scripts/check-severity-pin.mjs` compares the pin with Review-PR main once per
+Shanghai day (run-nightly.sh calls it with `--once-per-day`); a difference is an ALERT line in
+`$ARGUS_ROOT/logs/severity-pin.log`, `system_health.severity_pin.status: "drift"` and a `system_health.notes` line — the
+run still grades with the pinned version until a person updates the pin. When the upstream cannot be read
+(permissions, network) the state is `status: "error"` with the reason in `system_health.severity_pin.message` and one
+`system_health.notes` line per Shanghai day; errors are not cached, the next run retries. A cached same / drift result
+of the day is reused only while the lock's sha256 is unchanged (an updated pin is re-checked at once). The GitHub token
+needs read access to PraiseZhu/Review-PR (`secrets.env.example`).
+
+**Code review.** The review prompt embeds the standard verbatim (no panoptes-written definitions). Every P0/P1/P2 needs
+file, line, `trigger`, `behavior`, `impact` and `evidence` (in `findings[].evidence`); P3 is not output
+(`code_review.dropped.p3`). PR body, `docs/pr/<N>/review.md` and `qa.md` are given to the reviewer as reference data:
+written intent / deliberate design is not a defect; a doubt about the design goes to `pending_verification`
+(`review-unverified`), not P1. The model's raw output goes through `toCodeReviewDoc`: CONFIRMED + complete → `findings`
+(the only part the ming-qa gate sees); PLAUSIBLE, an unknown level (no longer defaulted to P2), incomplete items and the
+model's own `unverified` list → `code-review.json` `unverified` → `pending_verification`. `code_review.status` is
+`failed` only when a P0/P1 code-review finding is still in `findings` after verification; `code_review.reviewer_status`
+is the model's own status; `gate` (`status`, `blockingFindings`, `problems`) and `verdict` (`status`, `max_severity`) are
+recomputed from the final `findings` after verification and rulings (since 2026-10-24), the reviewer's originals stay in
+`reviewer_gate` / `reviewer_verdict`; `unverified_count`, `pending_count`, `severity_standard` (version) are recorded.
+**`json_loose: true`** when the model's reply was not one strict JSON object (several objects, a fence): the review uses
+the last object that has a `findings` array; a reply with none is a parse failure (retried, then `status: "error"`).
+`REVIEW_PROMPT_VERSION` is `panoptes-code-review/3`; the cache key adds `context_hash` (PR body + handoff + rulings).
+
+**AI-only P1 verification.** Before an AI-only P1 (incl. a capped P0) can reach an author it goes through a repo-wide
+verification session (`argus/src/review-verify.mjs`): the model reads files and greps the repository at the tested
+commit (read-only `git cat-file` / `git grep` / `git ls-tree` on the local mirror) and answers `reachable` /
+`not-reachable` / `intended-design` / `cannot-determine`. Only `reachable` with a call path whose every file **and
+line** the session actually read with `read` counts as confirmed (`findings[].verification.status: "confirmed"`; since
+2026-10-24, `panoptes-review-verify/2`: grep hits, directory listings, reads past the end of a file or of a directory do
+not count as read); everything else — including a
+failed call, a used-up `ai-verify` quota (default 40 per day per pool) or more than `ARGUS_VERIFY_MAX_PER_PR` (3) P1s in
+one PR — becomes `pending_verification` `review-p1-unconfirmed` with the `verification` result. Results are cached per
+commit + finding (`$ARGUS_ROOT/cache/review-verifications/`; `not-run` is never cached, so a capped or failed
+verification runs again next time). `ARGUS_VERIFY_MODEL` overrides the model. A person who verified one by hand (e.g. a
+failing reproduction test) moves it into `findings` with `scripts/verify-ai-lead.mjs --pr <N> --fingerprint <fp>`:
+`verification: { status: "confirmed", by: "manual", at, note }`, the pending marks are removed (kept in
+`promoted_from_pending`, `--unset` restores them).
+
+**Pre-merge rulings.** With `reviewRulings.enabled` in the profile (Mivo: reviewer `PraiseZhu`, maintainers = team
+`xindong/art-support`, the CODEOWNERS root team), the PR's review threads are read (REST `pulls/{n}/comments`). Since
+2026-10-24 the handling matches the reviewer (Review-PR `mivo/lib/rulings.mjs`):
+- a **watcher adjudication** — a reply by the reviewer account with the watcher receipt and the record
+  `<!-- mivo-ruling v=1 key=… head=… verdict=invalid|p3 std=<version> -->`, on a thread the reviewer opened with a
+  `<!-- mivo-finding key=… -->` marker, record key = marker key, std = the current version — is the only ruling that can
+  move a finding out of `findings` by code: same file, within 3 lines, file unchanged since the ruling's head, and similar
+  content (title + trigger + behavior; `rulings.mjs` `contentSimilarity`, ≥ 0.2 overlap and ≥ 4 shared tokens) →
+  `pending_verification` `review-ruled` with `ruling` (incl. `key`, `similarity`);
+- a **watcher reply** concluding 不需要改代码（不成立 / P3） (only from the reviewer or the PR author account) and a
+  **maintainer** reply starting with 维护者裁定不改 are given to the reviewer and the verifier as reference only; the model
+  decides (`unverified` `same-as-ruling` → `review-ruled`, "审查认为可能和合并前的裁定是同一问题，QA 核对").
+`prior_rulings.items[].mode` is `auto-match` (adjudication) or `prompt-only`. A ruling counts only while the file is
+unchanged between the head at ruling time (the record's head, else the PR's latest commit by committer date at the reply
+time — a commit made before the reply but pushed after it is a known blind spot, hence prompt-only) and the tested
+commit (`code_state`). P0 is never waived by a ruling.
+
+**Checks.** See *Severity rules* above; `failed_checks[].severity` is `null` for `unverified` / `setup-failed` /
+`timeout` / `flaky` (they are listed in `pending_verification` as `check-qa`), `p0_candidate: true` + `p0_note` on
+merged introduced product failures (`p0_note` says whether latest main was re-checked: still failing there, not
+re-checked by design for `noLatestRecheck` steps such as secret-scan, latest main unknown, or the re-check incomplete).
+
+**Coverage.** `coverage_gate` still measures new-code coverage against the reference line 90 (`status` pass / fail) as
+information only (`coverage_gate.finding_policy`). A finding exists only when the PR body or `docs/pr/<N>/qa.md` states a
+target written as a target right before the percentage (≥ / > / 不低于 / 不少于 / 至少 / 目标 / 门槛 / at least / target /
+threshold / minimum; a description of the current value such as 「覆盖率达到 95%」「96%，达到要求」 does not count). The metric
+is taken from the words nearest to that percentage; repo-wide line coverage only when 全仓 / 整体 / overall / total is
+written (a bare "line coverage" is new code): `coverage_gate.stated_target { pct, metric:
+new_code|lines|branches|functions|new_code_branches|new_code_functions (the last two are not measured → not-evaluated), source, quote, value,
+status: met|missed|not-evaluated }`, and when `missed` one P2 `source: "stated-acceptance"`, `check_id: "coverage-target"`.
+
+
+**Who is told (author problems).** `report/finding-policy.mjs` `notifiable(f, { newNotice })` decides which findings
+are the author's problem (@ / DM / handoff issue / overdue); the same rule lives in `pi-fallback bin/finding_policy.py`
+and `mivo-qa/ledger/build-ledger.mjs`. Reports before 2026-10-23 have no `pending_verification`, so it also drops what the
+unified severity would have put there (coverage-only P2, AI-test leads, own-tests, qa-error, unverified / setup-failed /
+timeout / flaky checks, PLAUSIBLE review findings, and — for a new notice — an AI-only code-review P0/P1 without
+`verification.status: "confirmed"`). This applies to notices sent from 2026-10-24 00:00 Asia/Shanghai
+(`UNIFIED_SINCE`). Problems already sent to an author before that keep the old follow-up flow in
+`report/track-followups.mjs`: reminders as before, overdue by the old rule (`legacyOverdueQualifying`: P0/P1, a
+non-coverage P2 with a concrete recommendation); the author's own bot re-checks them and replies on the PR.
+
+**Receipts and responses (`report/handoff-receipts.mjs`, `followup-match.mjs`, `track-followups.mjs`; same receipt rule
+in `pi-fallback bin/handoff.py`, shared cases `argus/tests/fixtures/receipt-cases.json`).** A receipt is the first
+meaningful line of a comment (HTML comments / BOM dropped; blank, code-block, quote and @-only lines skipped):
+「结论：已修 #N / 不修，原因… / 误报，原因…」 with synonyms folded (已修复 / 已改, 不成立, 不用改 / 不需要改 / 无需修改 / 不改) and a word
+boundary after the conclusion (「结论：不修改…」 is not one); 「已修 #<original PR>」 is not a fix PR. A watcher-bot post
+(`mivo-watcher-receipt`) without such a line counts by its fixed wording; bot status posts (`task=blocked-notice` /
+`auto-close`, `vigil-handoff`) never count. Replies count from the PR author and the handoff route's owner / cc
+(`handoff-routes.json`: aj0928 for lubinyu-lab), after the later of the notice and the PR's merge. A merged PR whose
+title / body says 「QA #N」 and that touches one of the finding's files (its file list must be readable; not in the
+item's `ignore_prs`) is 已修 whoever opened it — one rule for DM follow-ups, overdue notices and handoff issues
+(`fixPrResolutions`). A receipt that names none of the PR's problems answers all of them, except that one which only talks
+about coverage answers only coverage problems. Handoff receipts land in `followup/state.json` evidence with `fix_pr` and
+`reason`. Overdue notices: DM notices include the Pi line's alias records (`alias_of`, no `message_id`); group-report
+@-mentions take the send time of the same data day (`feishu-sent.json` or `report/slack/sent.json`
+`mivo-daily-report:<day>`) and accept `login` or `github`; the owner's own PRs (`MIVO_QA_OWNER_LOGINS`, default PraiseZhu)
+are never in a group notice.

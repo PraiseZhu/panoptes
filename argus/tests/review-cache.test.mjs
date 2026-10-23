@@ -16,9 +16,10 @@ const { memoryQuota } = await import('../src/quota.mjs')
 const files = [{ filename: 'src/a.ts', status: 'modified', additions: 1, deletions: 0, patch: '@@ -1 +1 @@\n+export const a = 2' }]
 let calls = []
 let answer = 0
+// 统一分级：P3 不输出（只计数）；CONFIRMED + 四项齐全的 P2 才进 findings
 const answers = [
   { status: 'passed', summary: 'r1', findings: [{ severity: 'P3', category: 'test-coverage', file: 'src/a.ts', line: 1, title: 'add a test', verdict: 'PLAUSIBLE' }] },
-  { status: 'passed', summary: 'r2', findings: [{ severity: 'P2', category: 'correctness', file: 'src/a.ts', line: 1, title: 'something else', verdict: 'PLAUSIBLE' }] },
+  { status: 'passed', summary: 'r2', findings: [{ severity: 'P2', category: 'correctness', file: 'src/a.ts', line: 1, title: 'something else', trigger: 't', behavior: 'b', impact: 'i', evidence: 'src/a.ts:1', verdict: 'CONFIRMED' }] },
 ]
 globalThis.fetch = async (url, init) => {
   calls.push(JSON.parse(init.body))
@@ -64,19 +65,19 @@ test('--fresh-review on a cached commit compares only: cache not overwritten, di
   assert.equal(fc.authoritative, 'cached')
   assert.equal(fc.cache_overwritten, false)
   assert.equal(fc.fresh_verdict.max_severity, 'P2')
-  assert.equal(fc.cached_verdict.max_severity, 'P3')
-  assert.equal(c.code_review.verdict.max_severity, 'P3', 'report keeps the cached verdict')
+  assert.equal(fc.cached_verdict.max_severity, null, 'P3 is not output')
+  assert.equal(c.code_review.verdict.max_severity, null, 'report keeps the cached verdict')
   assert.equal(c.code_review.reused, true)
   assert.equal(q.summary().used_by_run['ai-review'], 1, 'the fresh call consumes quota')
   const d = await review()
   assert.equal(calls.length, 1)
   assert.equal(d.code_review.reused, true)
-  assert.equal(d.code_review.verdict.max_severity, 'P3', 'cache entry unchanged after a fresh review')
+  assert.equal(d.code_review.verdict.max_severity, null, 'cache entry unchanged after a fresh review')
   answer = 0
   const e = await review({ fresh: true })
   assert.equal(calls.length, 2)
   assert.equal(e.code_review.fresh_comparison.same, true)
-  assert.equal(e.code_review.verdict.max_severity, 'P3')
+  assert.equal(e.code_review.verdict.max_severity, null)
   answer = 1
   await review({ sha: 'deadbee2' })
   assert.equal(calls.length, 3, 'different commit → new review')
@@ -95,9 +96,10 @@ test('--fresh-review without a cached entry reviews and stores normally', async 
   assert.equal(d.code_review.reused, true)
 })
 
-test('cache key components: commit, base, diff hash, prompt hash/version, model', () => {
+test('cache key components: commit, base, diff hash, prompt hash/version, model, reference context', () => {
   const k = M.reviewCacheKey({ sha: 's', baseSha: 'b', files })
-  assert.deepEqual(Object.keys(k).sort(), ['diff_hash', 'key', 'model', 'prompt_hash', 'prompt_version', 'review_base_sha', 'reviewed_sha'])
+  assert.deepEqual(Object.keys(k).sort(), ['context_hash', 'diff_hash', 'key', 'model', 'prompt_hash', 'prompt_version', 'review_base_sha', 'reviewed_sha'])
+  assert.notEqual(M.reviewCacheKey({ sha: 's', baseSha: 'b', files, reference: { rulingsText: 'new ruling' } }).key, k.key, 'a new pre-merge ruling → not reused')
   assert.notEqual(M.reviewCacheKey({ sha: 's', baseSha: 'b', files, model: 'other' }).key, k.key)
   assert.notEqual(M.reviewCacheKey({ sha: 's', baseSha: 'b', files, promptHash: 'p2' }).key, k.key)
   assert.equal(M.reviewCacheKey({ sha: 's', baseSha: 'b', files }).key, k.key)
