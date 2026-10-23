@@ -9,7 +9,7 @@ import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { parseReceipt, parseReceiptDetail, fixPrResolutions, qaRefRe, resolutionFor } from '../../report/handoff-receipts.mjs'
+import { parseReceipt, parseReceiptDetail, fixPrResolutions, qaRefRe, qaRefs, resolutionFor } from '../../report/handoff-receipts.mjs'
 import { notifiable, authorFindings, legacyOverdueQualifying } from '../../report/finding-policy.mjs'
 import { matchesItem, namesItem } from '../../report/followup-match.mjs'
 
@@ -35,6 +35,14 @@ test('交接 issue 回执带上修复 PR 号与原因（台账据此认「已修
 test('「QA #原PR号」：QA #N / QA: #N / QA：#N / QA: owner/repo#N 都认；只写 #N 的不算统一格式（兜底规则另算）', () => {
   for (const t of ['QA #2000', 'QA: #2000', 'QA：#2000', 'qa:#2000', 'QA: xindong/mivo-canvas-plugin#2000']) assert.ok(qaRefRe(2000).test(t), t)
   for (const t of ['fix #2000', 'QA #20001', 'QA #200']) assert.ok(!qaRefRe(2000).test(t), t)
+  // 一个修复 PR 对应多份 QA 报告（2026-10-24 #918：「QA 回访 #904/#910/#898/#884」原来只认第一个号）
+  const multi = 'fix: 修复 QA 回访 #904/#910/#898/#884 的四处问题'
+  for (const pr of [904, 910, 898, 884]) assert.ok(qaRefRe(pr).test(multi), String(pr))
+  for (const pr of [91, 9040]) assert.ok(!qaRefRe(pr).test(multi), String(pr))
+  for (const t of ['QA #1, #2000', 'QA #1 和 #2000', 'QA 回访 #1、#2000', 'QA: #1 / xindong/mivo-canvas-plugin#2000']) assert.ok(qaRefRe(2000).test(t), t)
+  for (const t of ['SQA #2000', 'QA passed; see issue #2000']) assert.ok(!qaRefRe(2000).test(t), t)
+  assert.deepEqual(qaRefs(multi), [904, 910, 898, 884])
+  assert.deepEqual(fixPrResolutions([{ number: 918, title: multi, body: '', mergedAt: '2026-10-21T00:00:00Z', files: ['scripts/loops/lifeline/handoff.mjs'] }], { pr: 904, files: ['scripts/loops/lifeline/handoff.mjs'] }).map((r) => r.fix_pr), [918])
   const prs = [{ number: 2100, title: 'fix: 串号 (QA #2000)', body: '', mergedAt: '2026-10-23T01:00:00Z', files: ['src/cache.ts'] },
     { number: 2101, title: 'QA #2000 进行中', body: '', mergedAt: null, files: ['src/cache.ts'] },
     { number: 2102, title: 'QA #2000 只改文档', body: '', mergedAt: '2026-10-23T01:00:00Z', files: ['README.md'] }]
