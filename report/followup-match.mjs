@@ -45,8 +45,16 @@ export function prCountsAsFollowup(p, item) {
 // reports/acceptance 下属于该 PR 的报告：PR-943.json / review-PR-943.json / PR-943-nocache.json（不含 PR-9431）
 export const isAcceptanceReportFor = (name, pr) => new RegExp(`^(review-)?PR-${pr}(-[\\w-]+)?\\.json$`).test(name)
 
+// 回应里点名了这条问题（文件或标题）—— 用来判断一条「结论：…」回执是针对某几条，还是针对整个私信
+export function namesItem(text, item) {
+  const t = String(text || '')
+  return (item.files || []).some(f => f && mentionsFile(f, t)) || (item.problems || []).some(p => quotesTitle(p, t))
+}
+
 export function matchesItem(ev, item) {
-  if (ev.type === 'pr-references') return true
+  if (ev.type === 'pr-references' || ev.type === 'fix-pr-merged') return true
+  // 首行「结论：已修 #N / 不修，原因 / 误报，原因」的回执（统一格式）：点名了哪条就收哪条；没点名任何一条 → 回的是整条私信
+  if (ev.receipt && ev.receipt_generic) return true
   if (!String(ev.text || '').trim()) return false // 空正文（如行内回复自动生成的空 review）不算回应
   const text = `${ev.text || ''}\n${ev.path || ''}`
   if (item.sole && !item.coverage && !COVERAGE.test(text)) return true // 明说覆盖率的回复只算覆盖率那条

@@ -8,14 +8,16 @@ import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, mkdtem
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
-import { matchesItem, isCoverage, shortTitle, prCountsAsFollowup, isAcceptanceReportFor } from './followup-match.mjs'
-import { handoffRepos, loadResolutions, resolvedBy } from './handoff-receipts.mjs'
+import { matchesItem, isCoverage, shortTitle, prCountsAsFollowup, isAcceptanceReportFor, namesItem } from './followup-match.mjs'
+import { handoffRepos, loadResolutions, resolvedBy, parseReceiptDetail, qaRefRe } from './handoff-receipts.mjs'
 import { overdueCc } from './handoff-routes.mjs'
-const feedbackBlock = (pr) => `怎么告诉我处理好了：
-· 改了：提修复 PR，标题或描述里写上原 PR 号（比如 #${pr}）
-· 不用改：在原 PR 下留言写一句原因，留言里点名是哪条，或写‘都不用改’
+import { notifiable } from './finding-policy.mjs'
+// 回执统一成一种（Praise 2026-10-23）：私信、日报、交接仓约定都是这一种说法（REPORT-STYLE.md「私信/提醒固定结尾」同文）
+const feedbackBlock = (pr) => `怎么告诉我处理好了（选一种）：
+· 修了：开修复 PR，标题或描述里写「QA #${pr}」，合并后自动算已修
+· 不修 / 误报：在原 PR 下留言，第一行写「结论：不修，原因…」或「结论：误报，原因…」（多条时写明是哪条）
 · 飞书私信回复我收不到，别回这里
-这两种我每天都会自动查，看到了就不再提醒 🙃`;
+这几种我每天都会自动查，看到了就不再提醒 🙃`;
 
 
 const QA = process.env.QA_HOME || '/workspace/mivo-qa'
@@ -91,6 +93,8 @@ for (const [key, v] of Object.entries(sent)) {
   it.problems = hit.map(f => f.title || f.test || f.check_name).filter(Boolean)
   it.coverage = hit.length > 0 && isCoverage(hit[0]) // DM 主问题是否覆盖率
   it.main_files = hit[0]?.file ? [hit[0].file] : [] // 回应只按主问题自己的文件判断
+  // 统一分级：这条私信对应的问题里没有一条算作者的问题（覆盖率 P2、AI 补测线索、flaky / unverified、PLAUSIBLE 审查结论…）→ 不再提醒、不计逾期
+  it.author_facing = hit.length ? hit.some(notifiable) : null
   if (!it.login) summary.errors.push({ key, error: 'author not found in report' })
 }
 
@@ -104,7 +108,7 @@ function authorPrsSince(login, since) {
   const k = `${login}|${since.slice(0, 10)}`
   if (!prCache.has(k)) {
     const list = gh(['pr', 'list', '-R', REPO, '--author', login, '--state', 'all', '--limit', '100',
-      '--search', `created:>=${since.slice(0, 10)}`, '--json', 'number,title,body,createdAt,url'])
+      '--search', `created:>=${since.slice(0, 10)}`, '--json', 'number,title,body,createdAt,url,mergedAt'])
     prCache.set(k, list.filter(p => p.createdAt > since).map(p => ({ ...p, files: ghPaged(`repos/${REPO}/pulls/${p.number}/files?per_page=100`).map(f => f.filename) })))
   }
   return prCache.get(k)
@@ -113,17 +117,24 @@ function detect(it) {
   const ev = []
   const since = it.dm_sent_at, who = it.login
   const after = (x) => (x.created_at || x.submitted_at || '') > since && x.user?.login === who
-  for (const c of ghPaged(`repos/${REPO}/issues/${it.pr}/comments?per_page=100`)) if (after(c)) ev.push({ type: 'pr-comment', at: c.created_at, url: c.html_url, text: c.body })
-  for (const c of ghPaged(`repos/${REPO}/pulls/${it.pr}/reviews?per_page=100`)) if (after(c)) ev.push({ type: 'pr-review', at: c.submitted_at, url: c.html_url, text: c.body })
-  for (const c of ghPaged(`repos/${REPO}/pulls/${it.pr}/comments?per_page=100`)) if (after(c)) ev.push({ type: 'pr-review-comment', at: c.created_at, url: c.html_url, text: c.body, path: c.path })
+  // 同 PR 还开着的其他私信条目：回执没点名任何一条时，算回的是整条私信（receipt_generic）
+  const peers = Object.values(state.items).filter(x => x.pr === it.pr && x.status === 'open').map(x => ({ files: x.main_files || [], problems: (x.problems || []).slice(0, 1) }))
+  const withReceipt = (e) => { const r = parseReceiptDetail(e.text); return r ? { ...e, receipt: r, receipt_generic: !peers.some(x => namesItem(`${e.text || ''}\n${e.path || ''}`, x)) } : e }
+  for (const c of ghPaged(`repos/${REPO}/issues/${it.pr}/comments?per_page=100`)) if (after(c)) ev.push(withReceipt({ type: 'pr-comment', at: c.created_at, url: c.html_url, text: c.body }))
+  for (const c of ghPaged(`repos/${REPO}/pulls/${it.pr}/reviews?per_page=100`)) if (after(c)) ev.push(withReceipt({ type: 'pr-review', at: c.submitted_at, url: c.html_url, text: c.body }))
+  for (const c of ghPaged(`repos/${REPO}/pulls/${it.pr}/comments?per_page=100`)) if (after(c)) ev.push(withReceipt({ type: 'pr-review-comment', at: c.created_at, url: c.html_url, text: c.body, path: c.path }))
   for (const p of authorPrsSince(who, since)) {
     // 必须引用原 PR 号，且（有相关文件时）改到相关文件；reopened / ignore_prs 里的 PR 不算，见 followup-match.mjs
-    if (prCountsAsFollowup(p, it)) ev.push({ type: 'pr-references', pr: p.number, at: p.createdAt, url: p.url, files: p.files.filter(f => (it.files || []).includes(f)) })
+    if (!prCountsAsFollowup(p, it)) continue
+    const files = p.files.filter(f => (it.files || []).includes(f))
+    // 统一格式：标题或正文写了「QA #原PR号」且已合并 → 已修
+    if (p.mergedAt && qaRefRe(it.pr).test(`${p.title}\n${p.body || ''}`)) ev.push({ type: 'fix-pr-merged', pr: p.number, at: p.mergedAt, url: p.url, files, receipt: { kind: '已修', fix_pr: p.number } })
+    else ev.push({ type: 'pr-references', pr: p.number, at: p.createdAt, url: p.url, files })
   }
   return ev
 }
-// 只保留针对这条问题的回应（不落 text 进 state）
-const evidenceFor = (ev, item) => ev.filter(e => matchesItem(e, item)).map(({ text, path, ...e }) => e)
+// 只保留针对这条问题的回应（不落 text 进 state；回执只留结论 / 修复 PR 号 / 原因）
+const evidenceFor = (ev, item) => ev.filter(e => matchesItem(e, item)).map(({ text, path, receipt_generic, ...e }) => e)
 
 // --- messages (template B voice: cool, restrained, no pressure)
 const oneLine = (s) => String(s).replace(/\s+/g, ' ').trim()
@@ -178,6 +189,11 @@ for (const [key, it] of Object.entries(OVERDUE_ONLY ? {} : state.items)) {
   const rec = { key, pr: it.pr, login: it.login, status_before: it.status, reminders: it.reminders }
   summary.items.push(rec)
   if (it.status !== 'open' || !it.login) continue
+  if (it.author_facing === false) {
+    rec.not_author_facing = true; summary.not_author_facing ||= []; summary.not_author_facing.push({ pr: it.pr, login: it.login, problems: (it.problems || []).slice(0, 2) })
+    if (!DRY) { it.status = 'closed'; it.closed_at = new Date().toISOString(); it.closed_via = 'not-author-facing'; it.closed_note = '统一分级（2026-10-23）：这条私信对应的问题都不算作者的问题（待核实 / 只差覆盖率 / AI 补测线索等），不再提醒' }
+    continue
+  }
   const res = itemResolution(it)
   if (res) {
     const h = { kind: res.kind, by: res.by, at: res.at, issue: `${res.repo}#${res.issue}`, url: res.receipt_url || res.url }
@@ -240,12 +256,8 @@ if (GROUP_OVERDUE) {
     if (ms.length && !groupSentAt[d]) { ov.gaps.push({ date: d, gap: '有 mentions.json 但找不到当天群日报发送记录，通知时间未知，跳过' }); continue }
     for (const x of ms) note(Number(x.pr), x.login, groupSentAt[d], '群日报@')
   }
-  const isQualifying = (f) => {
-    if (f.severity === 'P0' || f.severity === 'P1') return f.source !== 'ai-test' || f.verified === true
-    if (f.severity !== 'P2') return false
-    if (f.source === 'coverage-gate' || f.source === 'ai-test' || /coverage/i.test(f.title || '')) return false
-    return !!oneLine(f.evidence?.recommendation || '')
-  }
+  // 统一分级：按 finding-policy.mjs 的作者口径（P0/P1/P2 里算作者问题的那些），不再单独挑「有具体建议的 P2」
+  const isQualifying = (f) => notifiable(f)
   const now = Date.now()
   let ghFailed = 0
   for (const [pr, n] of [...notices].sort((a, b) => a[0] - b[0])) {
@@ -283,7 +295,7 @@ if (GROUP_OVERDUE) {
     const t = s => ({ tag: 'text', text: s })
     const short = (s) => oneLine(s || '').replace(/^\w+(\([^)]*\))?!?:\s*/, '').slice(0, 40)
     const lvl = { P0: 'P0 阻断', P1: 'P1 严重', P2: 'P2 一般' }
-    const lines = [[t(`以下 ${ov.notices.length} 个 PR 的问题已通知作者超过 3 天，还没看到回应（PR 下留言/评审，或引用原 PR 号的修复 PR）。QA 结论和发版打包挂钩，这几条没有结论会卡在待确认状态。`)], [t(' ')]]
+    const lines = [[t(`以下 ${ov.notices.length} 个 PR 的问题已通知作者超过 3 天，还没看到回应（原 PR 下首行「结论：…」的留言，或写了「QA #原PR号」的修复 PR）。QA 结论和发版打包挂钩，这几条没有结论会卡在待确认状态。`)], [t(' ')]]
     for (const x of ov.notices) {
       const head = [{ tag: 'a', text: `#${x.pr}`, href: R + x.pr }, t(` ${short(x.title)} — `)]
       head.push(x.person?.feishu_open_id ? { tag: 'at', user_id: x.person.feishu_open_id, user_name: x.person.name } : t(x.person?.name || x.login))
@@ -293,7 +305,7 @@ if (GROUP_OVERDUE) {
       lines.push([t(`· 已通知 ${x.days} 天（${x.via.join('、')}，${bjDate(new Date(x.notified_at)).slice(5).replace('-', '月')}日），至今未见回应。`)])
       lines.push([t(' ')])
     }
-    lines.push([t('修了就开修复 PR 并在描述里写原 PR 号，不修就在 PR 下留言说明就行（觉得是误报也可以直接留言说明）。看到回应后这条就收起，不会重复通报。')])
+    lines.push([t('修了就开修复 PR 并在标题或描述里写「QA #原PR号」；不修或误报就在原 PR 下留言，第一行写「结论：不修，原因…」或「结论：误报，原因…」。看到回应后这条就收起，不会重复通报。')])
     const post = { zh_cn: { title: `Mivo QA · 逾期未回应通报 · ${Number(today.slice(5, 7))}月${Number(today.slice(8))}日`, content: lines } }
     ov.text = [post.zh_cn.title, ...lines.map(l => l.map(e => e.tag === 'at' ? `@${e.user_name}` : e.text).join(''))].join('\n')
     // Slack #mivo-canvas-qa 同步一份（mrkdwn 纯文本，@中文名 由 send-slack-report.mjs 按 slack-ids.json 换成 <@U…>）

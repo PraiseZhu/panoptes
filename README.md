@@ -134,7 +134,7 @@ run-nightly.sh [--trigger event|catch-up|manual] [--date YYYY-MM-DD] [--pr N ...
 | `--deadline HH:MM` | Shanghai wall-clock deadline or ISO time (env `ARGUS_DEADLINE`). PRs not started by then → `not-tested` (P2, `deadline`); a running PR is stopped. |
 | `--write-merged` / `--no-write-merged` | Also write each actually-tested merged PR to `reports/merged/PR-N.json` (on-merge format). Default on without `--pr`, off with `--pr`. |
 | `--write-open` | Also write each **open** PR of the run to `reports/open/PR-N.json` (same per-PR format; untested ones too, with `not_tested_code` / reason). Default off. |
-| `--quota-pool P` | Daily model-call quota pool, `production` or `test`. Default: `--trigger manual` → `test` (manual runs, drills, acceptance reruns never consume production quota), `event` / `catch-up` → `production`. Separate daily caps per kind: ai-test 50, ai-review 70, jev 150, pr-summary 40 (`ARGUS_QUOTA_<KIND>`, `ARGUS_QUOTA_TEST_<KIND>`, or `$ARGUS_ROOT/quota.json`). A hit cap → `status: "capped"` (额度用尽未补测), see `docs/report-schema.md` › *Model-call quotas*. |
+| `--quota-pool P` | Daily model-call quota pool, `production` or `test`. Default: `--trigger manual` → `test` (manual runs, drills, acceptance reruns never consume production quota), `event` / `catch-up` → `production`. Separate daily caps per kind: ai-test 50, ai-review 70, jev 150, pr-summary 40, ai-verify 40 (`ARGUS_QUOTA_<KIND>`, `ARGUS_QUOTA_TEST_<KIND>`, or `$ARGUS_ROOT/quota.json`). A hit cap → `status: "capped"` (额度用尽未补测), see `docs/report-schema.md` › *Model-call quotas*. |
 | `--fresh-review` | Do not reuse a cached code-review verdict. By default a review of the same commit + diff + reviewer prompt/version + model is reused (`code_review.reused`, `reused_from`), so re-runs give the same review. If a cached verdict exists, `--fresh-review` only compares (`code_review.fresh_comparison`); the cache is not overwritten and the cached verdict stays authoritative. See `docs/report-schema.md` › *Code review reuse*. |
 | `--no-issues` | Default. Accepted for explicitness. |
 | `--create-issues` | Open issues — **only if `ARGUS_ALLOW_ISSUES=1` is also exported by the caller.** The secrets file cannot switch this on. |
@@ -207,13 +207,13 @@ Target-CI parity (commands taken verbatim from `xindong/mivo-canvas-plugin` `.gi
 
 | Step | Command | Kind → introduced failure |
 |---|---|---|
-| `web-build` | `npm run build` (`tsc -b && vite build`); only applies when the revision has `index.html` — the web entry was retired and the target CI no longer runs it, so current revisions list it in `skipped_steps` as not applicable | product → P1 open / P0 merged |
+| `web-build` | `npm run build` (`tsc -b && vite build`); only applies when the revision has `index.html` — the web entry was retired and the target CI no longer runs it, so current revisions list it in `skipped_steps` as not applicable | product → P1 (merged or open; `p0_candidate` when merged) |
 | `design` | `npm run verify:design` with `MIVO_GUARD_BASE_SHA=<base_sha>`, `MIVO_LITERAL_RATCHET_ENFORCE=1` | quality → P2 |
 | `internal-literals` | `node scripts/ci/check-internal-literals.mjs` | quality → P2 |
 | `endpoint-literals` | `node scripts/ci/check-endpoint-literals.mjs` | quality → P2 |
 | `host-locale` | `node cindyplugin/check-host-locale.mjs cindyplugin/dist` (builds dist if missing; not applicable to revisions without the script) | quality → P2 |
 | `vendor-split` | `node cindyplugin/check-vendor-split.mjs cindyplugin/dist` (builds dist if missing; not applicable to revisions without the script) | quality → P2 |
-| `secret-scan` | `gitleaks detect --source . [--config .gitleaks.toml] --log-opts "<base_sha>..HEAD" --no-banner --redact=100` (binary: `ARGUS_GITLEAKS_BIN`, `/usr/local/bin/gitleaks`, `/workspace/_tools/gitleaks` or PATH; missing → unavailable) | product → P1 open / P0 merged; no latest-main recheck (a leaked secret stays in history) |
+| `secret-scan` | `gitleaks detect --source . [--config .gitleaks.toml] --log-opts "<base_sha>..HEAD" --no-banner --redact=100` (binary: `ARGUS_GITLEAKS_BIN`, `/usr/local/bin/gitleaks`, `/workspace/_tools/gitleaks` or PATH; missing → unavailable) | product → P1 (merged or open; `p0_candidate` when merged); no latest-main recheck (a leaked secret stays in history) |
 
 Diff-scoped checks (`design`, `secret-scan`) get the PR's `base_sha` as `${DIFF_BASE_SHA}` in every run (first,
 rerun, base, latest).
@@ -229,11 +229,18 @@ revisions without the seam: `MIVO_QA_TEST_TOKEN`, or `MIVO_QA_TEST_USER` + `MIVO
 `MIVO_QA_TEST_TOKEN_URL` from `secrets.env`; with neither, signed-in probes are listed in `skipped_steps` with reason
 `no test account` — never counted as passed.
 
-Severity: **P0** introduced failure on a merged PR that still fails on latest main · **P1** introduced reproducible
-product-check failure on an open PR, or LLM review P0/P1 (LLM-only capped at P1) · **P2** quality-guard failure,
-unverified, timeout, setup failure, flaky (unstable), review P2 · **P3** pre-existing / fixed-later, or nothing found.
-Flaky = failed, then the same test passed on a clean rerun of the same commit: P2 "unstable", not attributed to the PR,
-`test_backed: false` — it never triggers notifications or issues.
+Severity (since 2026-10-23): **one standard for local, pre-merge and post-merge** — the reviewer's unified severity,
+PraiseZhu/Review-PR `mivo/config/severity.md`, pinned by sha256 in `argus/config/severity.lock.json` (read-only copy
+`argus/config/severity.md`; `scripts/check-severity-pin.mjs` compares with Review-PR main once a day and only alerts).
+panoptes writes no P0–P3 definitions of its own; the code-review prompt embeds the standard verbatim. In short: an
+introduced product-check failure is **P1** (merged or not; P0 only when a human / ruling confirms the severity.md P0
+definition, `p0_candidate` marks merged ones still failing on main) · introduced quality-guard failure **P2** ·
+pre-existing / fixed-later **P3** (reminder only) · code review: CONFIRMED findings with trigger / behavior / impact /
+evidence, AI-only P0 capped at P1, **AI-only P1 only after a repo-wide verification session confirms it** · new-code
+coverage below 90 is information, a P2 only when the PR itself states a coverage target and misses it. Anything not
+proven — PLAUSIBLE review findings, unconfirmed AI P1s, `unverified` / `setup-failed` / `timeout` / `flaky` checks, AI-test
+leads, own-tests not run, QA errors — goes to **`prs[].pending_verification[]` (待核实, QA 自查)**: no P level, never
+@'d, DM'd, opened as a handoff issue or counted as overdue. Details: `docs/report-schema.md` › *Unified severity*.
 
 ## Sandbox / 沙盒: bubblewrap
 
@@ -300,8 +307,9 @@ a few Mivo tests fail — and the coverage run's own pass/fail never affects the
 gated (90)**; repo-wide lines / branches / functions are recorded as baseline trend data (`coverage_gate.baseline`,
 reference lines 80 / 70 / 80) and never produce a finding. New code = added/modified lines of
 `git diff base_sha..tested_sha` in non-test JS/TS sources, intersected with v8 statement lines (a changed line inside a multi-line statement or branch range counts as the innermost one); files no test loads
-count as uncovered. New code < 90% → one **P2** finding (`source: "coverage-gate"`), which by the issue rules never
-becomes an issue. Result in
+count as uncovered. New code < 90% is recorded as information (`status: fail` against the reference line) and is **not a
+finding** since 2026-10-23; only a coverage target the PR states itself (PR body or `docs/pr/<N>/qa.md`) that is missed is
+one P2 (`source: "stated-acceptance"`, `coverage_gate.stated_target`). Result in
 `prs[].coverage_gate`. `ARGUS_COVERAGE=0` turns it off.
 
 ## Report / 报告格式
