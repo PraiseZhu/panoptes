@@ -1036,6 +1036,47 @@
             "requires": "account"
           },
           {
+            "id": "assets-ref-node-create",
+            "name": "登录：新建引用资产的节点（引用以节点 payload 为准，mivo #434）",
+            "method": "POST",
+            "path": "/api/canvas/argus-qa-c1/nodes/argus-qa-n2",
+            "expect": {
+              "status": 200,
+              "json": {
+                "id": "argus-qa-n2",
+                "revision": 1
+              }
+            },
+            "body": {
+              "payload": {
+                "type": "image",
+                "asset": {
+                  "url": "mivo-sasset:${accAsset}"
+                }
+              }
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "assets-attach-ref-node",
+            "name": "登录：挂资产到已引用它的节点",
+            "method": "POST",
+            "path": "/api/assets/${accAsset}/attach",
+            "expect": {
+              "status": 200,
+              "json": {
+                "kind": "already-attached"
+              }
+            },
+            "body": {
+              "nodeId": "argus-qa-n2",
+              "canvasId": "argus-qa-c1"
+            },
+            "auth": "account",
+            "requires": "account"
+          },
+          {
             "id": "assets-list-attached",
             "name": "登录：按画布列出已挂资产",
             "method": "GET",
@@ -1082,6 +1123,28 @@
               "canvasId": "argus-qa-c1"
             },
             "repeat": 2,
+            "auth": "account",
+            "requires": "account"
+          },
+          {
+            "id": "assets-ref-node-clear",
+            "name": "登录：节点去掉资产引用",
+            "method": "POST",
+            "path": "/api/canvas/argus-qa-c1/nodes/argus-qa-n2",
+            "expect": {
+              "status": 200,
+              "json": {
+                "revision": 2
+              }
+            },
+            "body": {
+              "payload": {
+                "type": "image"
+              }
+            },
+            "headers": {
+              "if-match": "1"
+            },
             "auth": "account",
             "requires": "account"
           },

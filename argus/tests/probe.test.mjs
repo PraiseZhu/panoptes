@@ -110,3 +110,19 @@ test('api-probe：登录态 GET /api/user-state（account 看得到自己的键�
   // 顺序：先写入、再列出（两个用户）、再删除
   assert.ok(ids.indexOf('user-state-put') < ids.indexOf('user-state-list') && ids.indexOf('user-state-list-cross-user') < ids.indexOf('user-state-delete'))
 })
+
+test('api-probe：按画布列出已挂资产先写引用该资产的节点（mivo #434 起引用以节点 payload 为准）', async () => {
+  const { loadProfile } = await import('../src/config.mjs')
+  const all = loadProfile('mivo-canvas-plugin').steps.find((s) => s.id === 'api-probe').probe.requests
+  const at = (id) => { const i = all.findIndex((r) => r.id === id); assert.ok(i >= 0, id); return i }
+  const create = all[at('assets-ref-node-create')], clear = all[at('assets-ref-node-clear')]
+  assert.equal(create.method, 'POST'); assert.equal(create.path, '/api/canvas/argus-qa-c1/nodes/argus-qa-n2')
+  assert.equal(create.body.payload.asset.url, 'mivo-sasset:${accAsset}')
+  assert.deepEqual(all[at('assets-attach-ref-node')].expect.json, { kind: 'already-attached' })
+  assert.deepEqual(all[at('assets-list-attached')].expect.json, { assetIds: ['${accAsset}'] })
+  assert.equal(clear.path, create.path); assert.equal(clear.headers['if-match'], '1'); assert.equal(clear.body.payload.asset, undefined)
+  assert.deepEqual(all[at('assets-list-detached')].expect.json, { assetIds: [] })
+  // 顺序：上传 → 写引用节点 → 列出含该资产 → 去掉引用 → 列出为空
+  const order = ['assets-upload-account', 'assets-ref-node-create', 'assets-attach-ref-node', 'assets-list-attached', 'assets-detach', 'assets-ref-node-clear', 'assets-list-detached'].map(at)
+  assert.deepEqual([...order].sort((a, b) => a - b), order)
+})
