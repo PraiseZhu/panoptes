@@ -352,3 +352,21 @@ test('verify-ai-lead：待核实里的 AI 补测线索被人确认 → 移进 fi
   verifyLeads(report, { pr: 918, checkId: 'ai-test-1', unset: true })
   assert.deepEqual([p.findings.length, p.pending_verification.length, p.pending_verification[0].severity_if_confirmed, p.severity, p.verdict], [0, 1, 'P2', 'P3', 'partially-verified'])
 })
+
+test('模型回复不是单个 JSON：连写的几个对象 / 代码围栏 / 前后带话都能解析；复核会话一次执行连写的读 / 搜动作，同一回复里提前写的结论不算', async () => {
+  assert.deepEqual(M.parseModelJson('{"a":1}{"b":2}').all, [{ a: 1 }, { b: 2 }])
+  assert.deepEqual(M.parseModelJson('好的：```json\n{"c":3}\n```').json, { c: 3 })
+  assert.throws(() => M.parseModelJson('没有对象'))
+  const reader = fakeReader({ 'src/a.ts': 'placeCroppedImageNode', 'src/b.ts': 'deletes slot' })
+  let call = 0
+  const chatFake = async ({ messages }) => {
+    call++
+    if (call === 1) return { ok: true, json: { action: 'read', path: 'src/a.ts' }, json_all: [{ action: 'read', path: 'src/a.ts' }, { action: 'read', path: 'src/b.ts' }, { action: 'final', verdict: 'reachable', call_path: [{ file: 'src/a.ts', line: 1 }] }], tokens: 1 }
+    assert.match(String(messages.at(-1).content), /src\/a\.ts[\s\S]*src\/b\.ts/, '两个读动作的结果一起回给模型')
+    return { ok: true, json: { action: 'final', verdict: 'reachable', call_path: [{ file: 'src/a.ts', line: 1 }, { file: 'src/b.ts', line: 1 }] }, tokens: 1 }
+  }
+  const r = await V.verifyReviewFinding({ secrets, finding: { ...F1191, evidence: {} }, reader, context: { pr: { number: 1 } }, std: S.loadSeverityStandard(), chat: chatFake, model: 'm' })
+  assert.equal(call, 2, '第一次回复里的结论没被采用（还没看到结果）')
+  assert.equal(r.status, 'confirmed')
+  assert.deepEqual(r.steps.map((s) => s.path), ['src/a.ts', 'src/b.ts'])
+})

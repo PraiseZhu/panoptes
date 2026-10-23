@@ -124,7 +124,7 @@ export async function chat({ secrets, messages, effort = 'high', model = LLM_MOD
         return { ok: false, error: lastErr }
       }
       const content = data.choices?.[0]?.message?.content ?? ''
-      try { return { ok: true, json: JSON.parse(content), tokens: data?.usage?.total_tokens ?? null, ms: now() - started, model: data.model ?? model, sampling: samplingSupported ? REVIEW_SAMPLING : 'unsupported' } }
+      try { const { json, loose, all } = parseModelJson(content); return { ok: true, json, ...(loose ? { json_loose: true } : {}), ...(all.length > 1 ? { json_all: all } : {}), tokens: data?.usage?.total_tokens ?? null, ms: now() - started, model: data.model ?? model, sampling: samplingSupported ? REVIEW_SAMPLING : 'unsupported' } }
       catch { lastErr = { kind: 'bad_json', message: `model returned non-JSON (${content.length} chars)` } }
     } catch (err) {
       // 记下底层原因（undici cause.code / message）和这一轮耗时，否则只剩一句 "fetch failed"，查不出是断连、DNS 还是超时
@@ -135,6 +135,27 @@ export async function chat({ secrets, messages, effort = 'high', model = LLM_MOD
     }
   }
   return { ok: false, error: lastErr }
+}
+
+// 模型回的 JSON：先严格解析；不行再取 ```json 围栏里的、或第一个完整的 {...}（复核会话里模型偶尔一次回两个动作
+// `{"action":"read",…}{"action":"grep",…}`，或在对象前后带一句话）。loose = 不是严格的单个 JSON
+export function parseModelJson(content) {
+  const t = String(content ?? '').trim()
+  try { const j = JSON.parse(t); return { json: j, loose: false, all: [j] } } catch { /* fall through */ }
+  const fenced = t.match(/```(?:json)?\s*([\s\S]*?)```/i)
+  if (fenced) { try { const j = JSON.parse(fenced[1]); return { json: j, loose: true, all: [j] } } catch { /* fall through */ } }
+  // 依次取出所有完整的顶层 {...}
+  const all = []
+  let depth = 0, inStr = false, esc = false, start = -1
+  for (let i = 0; i < t.length && all.length < 20; i++) {
+    const ch = t[i]
+    if (inStr) { if (esc) esc = false; else if (ch === '\\') esc = true; else if (ch === '"') inStr = false; continue }
+    if (ch === '"' && depth > 0) inStr = true
+    else if (ch === '{') { if (depth++ === 0) start = i }
+    else if (ch === '}' && depth > 0 && --depth === 0) { try { all.push(JSON.parse(t.slice(start, i + 1))) } catch { /* skip */ } }
+  }
+  if (all.length) return { json: all[0], loose: true, all }
+  throw new Error('no JSON object in model output')
 }
 
 function runQaAgent(args, { timeoutMs = 120_000 } = {}) {
