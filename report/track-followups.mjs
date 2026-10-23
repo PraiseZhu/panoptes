@@ -12,6 +12,14 @@ import { matchesItem, isCoverage, shortTitle, prCountsAsFollowup, isAcceptanceRe
 import { handoffRepos, loadResolutions, resolvedBy, parseReceiptDetail, fixPrResolutions } from './handoff-receipts.mjs'
 import { overdueCc, routeFor, loadRoutes } from './handoff-routes.mjs'
 import { notifiable, sentUnderUnified, legacyOverdueQualifying } from './finding-policy.mjs'
+import { realpathSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+// 只能当命令行程序跑：下面的逻辑都在模块顶层，会真发飞书私信、改 followup/state.json。被 import（比如拿 node -e "import(...)" 查语法）
+// 时直接拒绝，什么都不做 —— 2026-10-24 03:08 一次这样的「冒烟检查」真发出了 4 条作者私信。查语法用 node --check。
+const invokedPath = (() => { try { return realpathSync(process.argv[1] ?? '') } catch { return null } })()
+if (invokedPath !== realpathSync(fileURLToPath(import.meta.url))) {
+  throw new Error('report/track-followups.mjs is a CLI (it sends Feishu DMs and writes followup state at top level): run it with `node report/track-followups.mjs [--dry-run]`; do not import it. Use `node --check` for a syntax check.')
+}
 // 回执统一成一种（Praise 2026-10-23）：私信、日报、交接仓约定都是这一种说法（REPORT-STYLE.md「私信/提醒固定结尾」同文）
 // 合成一条的提醒里有几个原 PR 时，逐个写清楚各写哪个号（只有一个 PR 时和 Pi 线 outbound.py feedback_block 逐字相同）
 const qaRefs = (prs) => (prs.length === 1 ? `「QA #${prs[0]}」` : `「QA #原PR号」（${prs.map((n) => `#${n} 写「QA #${n}」`).join('，')}）`)
