@@ -26,8 +26,21 @@ const LINE_SPLIT = /\r\n|\r|\n|\u2028|\u2029/
 export const BOT_STATUS_RE = /<!--\s*(?:vigil-handoff\b|mivo-watcher-receipt\b[^>]*\btask=(?:blocked-notice|auto-close)\b)/
 const WATCHER_RECEIPT_RE = /<!--\s*mivo-watcher-receipt\b/
 // 修复 PR 引用原 PR：QA #N / QA: #N / QA：#N / QA: xindong/mivo-canvas-plugin#N
-export const qaRefRe = (n) => new RegExp(`QA\\s*[:：]?\\s*(?:[\\w.-]+\\/[\\w.-]+)?#${Number(n)}(?!\\d)`, 'i')
-export const QA_REF_ALL = /QA\s*[:：]?\s*(?:[\w.-]+\/[\w.-]+)?#(\d+)(?!\d)/gi
+// 「QA」后面可以夹最多 8 个非 # 的字（「QA 回访 」「QA: 」），然后是一串原 PR 号（/ , ， 、 和 & 隔开，可带 owner/repo），
+// 一个修复 PR 对应多份 QA 报告时写成「QA 回访 #904/#910/#898/#884」（2026-10-24：#918 这样写，原来只认第一个号）。
+// 「QA」前不能是字母（SQA、FAQA 不算）。同一口径的 Python 副本：pi-fallback bin/handoff.py qa_ref
+const QA_REF_HEAD = '(?<![A-Za-z])QA[^#\\n]{0,8}?'
+const QA_REF_ONE = '(?:[\\w.-]+\\/[\\w.-]+)?#'
+const QA_REF_SEP = '\\s*[\\/,，、&和]\\s*'
+export const qaRefRe = (n) => new RegExp(`${QA_REF_HEAD}(?:${QA_REF_ONE}\\d+(?!\\d)${QA_REF_SEP})*${QA_REF_ONE}${Number(n)}(?!\\d)`, 'i')
+// 一段文字里「QA …」引用到的全部原 PR 号
+export function qaRefs(text) {
+  const out = new Set()
+  for (const m of String(text ?? '').matchAll(new RegExp(`${QA_REF_HEAD}((?:${QA_REF_ONE}\\d+(?!\\d)(?:${QA_REF_SEP})?)+)`, 'gi')))
+    for (const x of m[1].matchAll(/#(\d+)(?!\d)/g)) out.add(Number(x[1]))
+  return [...out]
+}
+export const QA_REF_ALL = /(?<![A-Za-z])QA[^#\n]{0,8}?(?:[\w.-]+\/[\w.-]+)?#(\d+)(?!\d)/gi
 const MARKER_RE = /<!--\s*mivo-qa-handoff:\s*key=(\S+)\s+pr=(\d+)/
 const RESOLVED_LABELS = new Set(['status:false-positive', 'status:closed', 'status:fixed', 'status:wontfix', 'status:resolved'])
 // QA 自己（PraiseZhu）的评论不算作者回执
