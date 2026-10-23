@@ -16,7 +16,8 @@ test('parseReceipt: 三种结论格式，其他不算', () => {
   assert.equal(parseReceipt('结论：误报，无 Key 时配方请求到不了 mivoTryImage'), '误报')
   assert.equal(parseReceipt('结论: 已修 #1130'), '已修')
   assert.equal(parseReceipt('**结论**：不修，原因：设计如此'), '不修')
-  assert.equal(parseReceipt('我看下\n结论：已修 #1'), '已修')
+  assert.equal(parseReceipt('我看下\n结论：已修 #1'), null, '回执要写在第一行有意义的话里（2026-10-24 起不再在后面的行里兜底找）')
+  assert.equal(parseReceipt('@aj0928\n结论：已修 #1'), '已修', '只有 @ 的行跳过')
   assert.equal(parseReceipt('复核结论：误报成立'), null)
   assert.equal(parseReceipt('还在看'), null)
 })
@@ -50,7 +51,7 @@ test('loadResolutions 只对有评论的 issue 拉评论，跳过 PR 和无标�
 
 // --- track-followups.mjs 端到端：假 gh + 假发送器，不碰真实飞书/Slack
 const HOURS = 3600e3
-function fixture({ receipt = true, handoffFail = false } = {}) {
+function fixture({ receipt = true, handoffFail = false, receiptText = '结论：误报，无 Key 时到不了 mivoTryImage' } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'argus-fu-')), QA = join(root, 'qa'), bin = join(root, 'bin'), log = join(root, 'calls.log')
   for (const d of ['reports/merged', 'followup', 'handoff/aj0928', 'report/sent']) mkdirSync(join(QA, d), { recursive: true })
   mkdirSync(bin)
@@ -71,7 +72,7 @@ const fs=require('fs');const a=process.argv.slice(2);fs.appendFileSync(${JSON.st
 if(a[0]==='pr'){console.log('[]');process.exit(0)}
 const p=a[a.length-1]
 if(p.startsWith('repos/aj0928/aj0928-handoff/')){ if(${handoffFail}){console.error('HTTP 404');process.exit(1)}
-  if(p.includes('/comments'))console.log(JSON.stringify({user:{login:'aj0928'},body:${JSON.stringify(receipt ? '结论：误报，无 Key 时到不了 mivoTryImage' : '在看')},created_at:'2026-10-20T02:19:00Z',html_url:'c'}))
+  if(p.includes('/comments'))console.log(JSON.stringify({user:{login:'aj0928'},body:${JSON.stringify(receipt ? receiptText : '在看')},created_at:'2026-10-20T02:19:00Z',html_url:'c'}))
   else console.log(JSON.stringify(${JSON.stringify(handoffIssue)})); process.exit(0)}
 process.exit(0)`
   writeFileSync(join(bin, 'gh'), fakeGh); chmodSync(join(bin, 'gh'), 0o755)
@@ -97,7 +98,14 @@ test('track-followups: 交接仓回执“误报”的 #1023 不再出现在提�
   const st = JSON.parse(readFileSync(join(fx.QA, 'followup/state.json'), 'utf8'))
   assert.equal(st.items['xindong/mivo-canvas-plugin#1023:mq1-aaa'].status, 'closed')
   assert.equal(st.items['xindong/mivo-canvas-plugin#1023:mq1-aaa'].closed_via, 'handoff-receipt')
+  assert.deepEqual([st.items['xindong/mivo-canvas-plugin#1023:mq1-aaa'].evidence[0].reason, st.items['xindong/mivo-canvas-plugin#1023:mq1-aaa'].evidence[0].fix_pr], ['无 Key 时到不了 mivoTryImage', null], '回执原因落进 state（台账读它）')
   assert.doesNotMatch(calls(fx), /--open-id ou_aj/)
+})
+test('track-followups: 交接仓回执「结论：已修 #1130」→ state 的证据带 fix_pr，台账能认出已修', () => {
+  const fx = fixture({ receiptText: '结论：已修 #1130\n根因：…' })
+  run(fx, [])
+  const ev = JSON.parse(readFileSync(join(fx.QA, 'followup/state.json'), 'utf8')).items['xindong/mivo-canvas-plugin#1023:mq1-aaa'].evidence[0]
+  assert.deepEqual([ev.type, ev.kind, ev.fix_pr], ['handoff-receipt', '已修', 1130])
 })
 test('track-followups: 没有回执照常提醒', () => {
   const fx = fixture({ receipt: false })

@@ -16,13 +16,13 @@ import { matchesItem, namesItem } from '../../report/followup-match.mjs'
 const TRACK = join(dirname(fileURLToPath(import.meta.url)), '../../report/track-followups.mjs')
 
 test('回执解析：首行「结论：…」，可加粗，半角 / 全角冒号；已修带修复 PR 号，不修 / 误报带原因', () => {
-  assert.deepEqual(parseReceiptDetail('结论：不修，原因：设计如此\n\n详细：见 PR 正文「产品意图」'), { kind: '不修', fix_pr: null, reason: '设计如此', first_line: true })
-  assert.deepEqual(parseReceiptDetail('**结论**: 已修 #1240'), { kind: '已修', fix_pr: 1240, reason: null, first_line: true })
+  assert.deepEqual(parseReceiptDetail('结论：不修，原因：设计如此\n\n详细：见 PR 正文「产品意图」'), { kind: '不修', fix_pr: null, reason: '设计如此', via: 'line' })
+  assert.deepEqual(parseReceiptDetail('**结论**: 已修 #1240'), { kind: '已修', fix_pr: 1240, reason: null, via: 'line' })
   assert.equal(parseReceiptDetail('**结论：误报**，裁剪格 generation 里没有 taskId').reason, '裁剪格 generation 里没有 taskId')
   assert.equal(parseReceiptDetail('结论：已修 xindong/mivo-canvas-plugin#1222').fix_pr, 1222)
   assert.equal(parseReceiptDetail('复核结论：误报成立'), null)
   assert.equal(parseReceiptDetail('还在看'), null)
-  assert.equal(parseReceiptDetail('先看了一下\n结论：误报，x').first_line, false, '旧回执（结论不在首行）兜底照认')
+  assert.equal(parseReceiptDetail('先看了一下\n结论：误报，x'), null, '结论不在第一行有意义的话里不算（和 Pi 线 handoff.py 同一口径）')
   assert.equal(parseReceipt('结论：不修，原因…'), '不修', '旧接口不变')
 })
 
@@ -72,24 +72,25 @@ test('PR 评论回执匹配：点名了某条就只收那条；没点名任何�
 
 // --- track-followups.mjs 端到端：假 gh + 假发送器，不碰真实飞书 / Slack / GitHub
 const HOURS = 3600e3
-function fixture({ prComment = null, fixPr = null, legacyFinding = null, sentUnderUnified = false } = {}) {
+function fixture({ prComment = null, fixPr = null, legacyFinding = null, sentUnderUnified = false, author = 'bob', commenter = null, sentRecord = null, mentions = null } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'argus-rc-')), QA = join(root, 'qa'), bin = join(root, 'bin'), log = join(root, 'calls.log')
   for (const d of ['reports/merged', 'followup', 'handoff/aj0928', 'report/sent']) mkdirSync(join(QA, d), { recursive: true })
   mkdirSync(bin)
   const sentAt = new Date(Date.now() - 100 * HOURS).toISOString()
-  writeFileSync(join(QA, 'author-map.json'), JSON.stringify({ mivo_authors: [{ github_login: 'bob', name: '鲍勃', feishu_open_id: 'ou_bob' }] }))
+  writeFileSync(join(QA, 'author-map.json'), JSON.stringify({ mivo_authors: [{ github_login: author, name: '鲍勃', feishu_open_id: 'ou_bob' }, { github_login: 'aj0928', name: '严健', feishu_open_id: 'ou_aj' }] }))
   const finding = legacyFinding ?? { fingerprint: 'mq1-bbb', pr_fingerprint: 'mq1-bbb-pr2000', severity: 'P1', title: '缓存键没有区分用户导致串号', file: 'src/cache.ts', source: 'code-review', verdict: 'CONFIRMED', evidence: { recommendation: '改' } }
-  writeFileSync(join(QA, 'reports/merged/PR-2000.json'), JSON.stringify({ prs: [{ number: 2000, author: 'bob', title: 'fix: 别的', findings: [finding] }] }))
-  writeFileSync(join(QA, 'feishu-sent.json'), JSON.stringify({ [`xindong/mivo-canvas-plugin#2000:${finding.fingerprint}`]: { open_id: 'ou_bob', sent_at: sentAt, message_id: 'm2' } }))
+  writeFileSync(join(QA, 'reports/merged/PR-2000.json'), JSON.stringify({ prs: [{ number: 2000, author, title: 'fix: 别的', merged_at: new Date(Date.now() - 120 * HOURS).toISOString(), findings: [finding] }] }))
+  writeFileSync(join(QA, 'feishu-sent.json'), JSON.stringify({ [`xindong/mivo-canvas-plugin#2000:${finding.fingerprint}`]: sentRecord ?? { open_id: 'ou_bob', sent_at: sentAt, message_id: 'm2' } }))
+  if (mentions) { mkdirSync(join(QA, 'report/sent', mentions.day), { recursive: true }); writeFileSync(join(QA, 'report/sent', mentions.day, 'mentions.json'), JSON.stringify(mentions.list)); mkdirSync(join(QA, 'report/slack'), { recursive: true }); writeFileSync(join(QA, 'report/slack/sent.json'), JSON.stringify({ [`mivo-daily-report:${mentions.day}`]: { channel: 'C', ts: '1.2', sent_at: mentions.sentAt } })) }
   writeFileSync(join(QA, 'handoff/aj0928/issues.json'), JSON.stringify({ issues: [] }))
-  const comment = prComment ? { user: { login: 'bob' }, body: prComment, created_at: new Date().toISOString(), html_url: 'https://github.com/x/pull/2000#c1' } : null
-  const prs = fixPr ? [{ number: 2100, title: fixPr.title, body: fixPr.body ?? '', createdAt: new Date(Date.now() - HOURS).toISOString(), url: 'https://github.com/x/pull/2100', mergedAt: fixPr.mergedAt ?? null }] : []
+  const comment = prComment ? { user: { login: commenter ?? author }, body: prComment, created_at: new Date().toISOString(), html_url: 'https://github.com/x/pull/2000#c1' } : null
+  const prs = fixPr ? [{ number: 2100, title: fixPr.title, body: fixPr.body ?? '', createdAt: new Date(Date.now() - HOURS).toISOString(), url: 'https://github.com/x/pull/2100', mergedAt: fixPr.mergedAt ?? null, files: [{ path: fixPr.file ?? 'src/cache.ts' }] }] : []
   const fakeGh = `#!/usr/bin/env node
 const fs=require('fs');const a=process.argv.slice(2);fs.appendFileSync(${JSON.stringify(log)},'gh '+a.join(' ')+'\\n')
 if(a[0]==='pr'){console.log(${JSON.stringify(JSON.stringify(prs))});process.exit(0)}
 const p=a[a.length-1]
 if(p==='repos/xindong/mivo-canvas-plugin/issues/2000/comments?per_page=100'){ ${comment ? `console.log(${JSON.stringify(JSON.stringify(comment))})` : ''}; process.exit(0)}
-if(p==='repos/xindong/mivo-canvas-plugin/pulls/2100/files?per_page=100'){console.log(JSON.stringify({filename:'src/cache.ts'}));process.exit(0)}
+if(p==='repos/xindong/mivo-canvas-plugin/pulls/2100/files?per_page=100'){console.log(JSON.stringify({filename:${JSON.stringify(fixPr?.file ?? 'src/cache.ts')}}));process.exit(0)}
 process.exit(0)`
   writeFileSync(join(bin, 'gh'), fakeGh); chmodSync(join(bin, 'gh'), 0o755)
   const sender = (name, out) => { const p = join(root, name); writeFileSync(p, `const fs=require('fs');const a=process.argv.slice(2);const i=a.indexOf('--text-file')>=0?a.indexOf('--text-file'):a.indexOf('--content-file');fs.appendFileSync(${JSON.stringify(log)},'${name} '+a.join(' ')+'\\n'+(i>=0?fs.readFileSync(a[i+1],'utf8')+'\\n':''));console.log(${JSON.stringify(out)})`); return p }
@@ -165,4 +166,54 @@ test('track-followups：10-24 起发出的私信，对应问题统一分级下�
   }
   const o = run(fixture({ sentUnderUnified: true, legacyFinding: { fingerprint: 'mq1-bbb', pr_fingerprint: 'mq1-bbb-pr2000', severity: 'P1', title: 'x', file: 'src/a.ts', source: 'code-review', verdict: 'CONFIRMED', evidence: { recommendation: '改' } } }), ['--overdue-only', '--group-overdue', '--dry-run'])
   assert.deepEqual(o.overdue.notices, [], '没复核过的 AI P1 不进逾期通报')
+})
+
+test('回执解析：共用用例（argus/tests/fixtures/receipt-cases.json，Pi 线 test/receipt-cases.json 是同一份）逐条一致', () => {
+  const cases = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'fixtures/receipt-cases.json'), 'utf8'))
+  assert.ok(cases.length >= 100)
+  for (const c of cases) {
+    const r = parseReceiptDetail(c.in, { pr: c.pr ?? null })
+    assert.deepEqual(r && { kind: r.kind, fix_pr: r.fix_pr, reason: r.reason }, c.out && { kind: c.out.kind, fix_pr: c.out.fix_pr ?? null, reason: c.out.reason ?? null }, JSON.stringify(c.in))
+  }
+})
+
+test('回应匹配：只说覆盖率的「结论：不修」回执不收非覆盖率问题；bot 状态贴不算回应；讲覆盖率的回复点名标题要连续 6 个字', () => {
+  const a = { files: ['src/a.ts'], problems: ['同名附件无法可靠保持节点 ID 与附件顺序的对应关系'], coverage: false, sole: true }
+  const cov = { files: [], problems: ['new-code coverage 81% < 90%'], coverage: true }
+  const r = { type: 'pr-comment', text: '结论：不修，原因：覆盖率不另补', receipt: { kind: '不修' }, receipt_generic: true }
+  assert.equal(matchesItem(r, a), false)
+  assert.equal(matchesItem(r, cov), true)
+  assert.equal(matchesItem({ type: 'pr-comment', text: '盯梢停下了，没有改代码\n<!-- mivo-watcher-receipt task=blocked-notice kind=external -->' }, a), false)
+  assert.equal(matchesItem({ type: 'pr-review-comment', text: '这是一条 P2 级（建议类）反馈…讨论到此关闭\n<!-- mivo-watcher-receipt task=auto-close -->' }, a), false)
+  assert.equal(matchesItem({ type: 'pr-comment', text: '不用改。（覆盖率不另补，附件顺序别处保证）' }, { ...a, sole: false }), false)
+  assert.equal(matchesItem({ type: 'pr-comment', text: '不用改。（覆盖率不另补；附件顺序的对应关系已有测试）' }, { ...a, sole: false }), true)
+})
+
+test('track-followups：路滨宇的 PR，严健（路由负责人）在原 PR 下回「结论：…」也算回应', () => {
+  const fx = fixture({ author: 'lubinyu-lab', commenter: 'aj0928', prComment: '结论：误报，原因：生产路径里到不了' })
+  const s = run(fx, [])
+  assert.equal(s.reminded.length, 0)
+  assert.equal(stateOf(fx).status, 'closed')
+  const fx2 = fixture({ author: 'lubinyu-lab', commenter: 'someone-else', prComment: '结论：误报，原因：x' })
+  assert.equal(run(fx2, ['--dry-run']).drafts.some((d) => d.dedupe_key.startsWith('followup-remind:')), true, '别人回的不算')
+})
+
+test('track-followups：写了「QA #2000」的修复 PR 没改到问题所在的文件 → 不算已修', () => {
+  const s = run(fixture({ fixPr: { title: 'fix: 别处 (QA #2000)', mergedAt: new Date().toISOString(), file: 'src/other.ts' } }), ['--dry-run'])
+  assert.ok(s.drafts.some((d) => d.dedupe_key.startsWith('followup-remind:')))
+})
+
+test('逾期通报的通知时间：Pi 线补的别名私信记录（没有 message_id）算通知过；群日报 @ 认 github 字段、按数据日取 Slack 发送时间', () => {
+  const at = new Date(Date.now() - 100 * HOURS).toISOString()
+  const o = run(fixture({ sentRecord: { open_id: 'ou_bob', sent_at: at, alias_of: 'dm:2026-10-22:2000', by: 'pi-line dm-compat' } }), ['--overdue-only', '--group-overdue', '--dry-run'])
+  assert.deepEqual(o.overdue.notices.map((x) => [x.pr, x.via]), [[2000, ['私信']]])
+  const m = run(fixture({ sentRecord: { open_id: 'ou_other', sent_at: at }, mentions: { day: '2026-10-20', sentAt: at, list: [{ pr: [2000], github: 'bob', name: '鲍勃' }] } }), ['--overdue-only', '--group-overdue', '--dry-run'])
+  assert.deepEqual(m.overdue.notices.map((x) => [x.pr, x.via]), [[2000, ['群日报@']]])
+  assert.deepEqual(m.overdue.gaps, [])
+})
+
+test('逾期通报：自己的 PR（PraiseZhu）不进群里的通报（由修 PR 的 bot 和台账跟）', () => {
+  const o = run(fixture({ author: 'PraiseZhu' }), ['--overdue-only', '--group-overdue', '--dry-run'])
+  assert.deepEqual(o.overdue.notices, [])
+  assert.ok(o.overdue.candidates.some((c) => c.pr === 2000 && /own PR/.test(c.skip)))
 })
