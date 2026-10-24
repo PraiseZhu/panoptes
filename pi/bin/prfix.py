@@ -63,6 +63,7 @@ NOTES = _E("PRFIX_NOTES") or "/workspace/praise-pr/notes"
 TMPROOT = _E("PRFIX_TMP") or W.wt_root("mivo-dry")
 OUT = _E("PRFIX_OUT") or f"{BASE}/out/praise-pr"
 GATES = _E("PRFIX_GATES") or f"{PI_CODE}/conf/gates.json"
+CI_RULES = _E("PRFIX_CI_RULES") or f"{PI_CODE}/conf/ci-rules"   # <repo name>.md: the target repo's CI rules brief (10-25)
 QA_LOCK = _E("PRFIX_QA_LOCK") or f"{QA}/argus-root/nightly.lock"   # the flock panoptes run-nightly.sh takes (exec 9>)
 RULINGS = "/workspace/fleet-standards/p2-rulings.md"
 LEDGER_DIR = f"{QA}/ledger/daily"
@@ -957,6 +958,22 @@ RULES = ("Rules: no git commit/push/stash/reset/checkout, no network, edit only 
          "checks: `npx vitest run <files>`, `npx vitest related --run <changed files>`, `npx tsc --noEmit -p <tsconfig>`, `npx eslint <files>`; "
          "no full test suite, no watch mode. Code may have moved since the report: locate by symbol. "
          "Your cwd is the bot's own throw-away worktree under /workspace/pi-work (not a person's checkout); the rest of the machine is read-only, /tmp is private to this call, and the bot removes the worktree itself when the ticket ends -- no cleanup needed. Never touch other worktrees or the bot's own code (pi/ in panoptes).")
+# 10-25 (Praise): fixes were sent back again and again for simple CI rules of the target repo (Windows-only reds, lint,
+# verify:i18n, the PR format gate). Every model step now opens with that repo's short CI rules brief, so the model
+# knows the rules before it starts instead of learning them from a red check. A missing brief is logged, not fatal.
+_BRIEFS = {}
+def ci_brief(repo=None):
+    """conf/ci-rules/<repo name>.md for REPO (or the given owner/name), "" when there is none (logged once)."""
+    name = (repo or REPO).rsplit("/", 1)[-1]
+    if name not in _BRIEFS:
+        p = os.path.join(CI_RULES, f"{name}.md")
+        try: _BRIEFS[name] = re.sub(r"(?s)<!--.*?-->\n?", "", _read(p)).strip()
+        except OSError as e: _BRIEFS[name] = ""; log(f"ci rules brief missing for {name}: {p} ({e.__class__.__name__}); prompts go without it")
+    return _BRIEFS[name]
+def step_prompt(k, prompt, repo=None):
+    """What one model step is sent: the step tag, the repo's CI rules brief, then the step's own prompt."""
+    b = ci_brief(repo)
+    return f"[step {k}]\n" + (f"{b}\n\n---\n\n" if b else "") + prompt
 FIX_FOLLOW = ("The regression test cases you wrote in TASK 1 are locked (restored before every check), so do not edit them; other cases in the "
               "same file count as existing tests. Existing tests: if one asserts the OLD "
               "buggy behaviour that this fix intentionally changes, update that expectation -- never skip/only/todo, never delete cases or "
@@ -1314,7 +1331,7 @@ def fix_one(c, A, d):
         texts = []
         def ask(k, prompt):
             yield_to_panoptes()
-            try: text, task = pi(TIER, wd, f"[step {k}]\n{prompt}", session, timeout=2400, write=True, skills=False, nice=True)
+            try: text, task = pi(TIER, wd, step_prompt(k, prompt), session, timeout=2400, write=True, skills=False, nice=True)
             except Exception as e: raise Transient(f"模型 {k} 调用失败：{str(e)[:300]}")
             res["model"].append({"step": k, "task": task, "text": text}); texts.append(text); return text
         # 1 reproduce (the model is told once when it wrote no test / its test passes on base)
@@ -1926,7 +1943,7 @@ def revise_merge(A, d, n, qa, fp, p, red):
         session = f"pi-line-prfix-{tag}-merge-{now_cst():%m%d%H%M%S}"
         def ask(k, prompt):
             yield_to_panoptes()
-            try: text, task = pi(TIER, wd, f"[step {k}]\n{prompt}", session, timeout=2400, write=True, skills=False, nice=True)
+            try: text, task = pi(TIER, wd, step_prompt(k, prompt), session, timeout=2400, write=True, skills=False, nice=True)
             except Exception as e: raise Transient(f"模型 {k} 调用失败：{str(e)[:300]}")
             res["model"].append({"step": k, "task": task, "text": text}); return text
         left = conflicted
@@ -2026,7 +2043,7 @@ def revise_one(A, d, n, qa, fp, p, red):
         def ask(k, prompt):
             yield_to_panoptes()
             before = snapshot(wd, sorted(set(changed(wd, head, junk)) | touched))
-            try: text, task = pi(TIER, wd, f"[step {k}]\n{prompt}", session, timeout=2400, write=True, skills=False, nice=True)
+            try: text, task = pi(TIER, wd, step_prompt(k, prompt), session, timeout=2400, write=True, skills=False, nice=True)
             except Exception as e: raise Transient(f"模型 {k} 调用失败：{str(e)[:300]}")
             after = snapshot(wd, sorted(set(changed(wd, head, junk)) | set(before)))
             touched.update(f for f in after if f not in before or after.get(f) != before.get(f))   # files the model itself wrote

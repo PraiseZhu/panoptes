@@ -92,6 +92,8 @@ bot 建的、用完就扔的东西只放在 `/workspace/pi-work/`（`bin/workroo
 | `credcheck` | 凭证检查：每天 7 点检查各种 token 还有没有效 | 1 * * * * @07 | 本机看护 |
 | `opsfix` | 修复复测：修复 PR 合并后用原来的用例重测 | 30 * * * * @09,12,16,20 retest --execute | 修测试系统 |
 
+**目标仓 CI 规则简报**：`conf/ci-rules/<仓库名>.md`（现有 `mivo-canvas-plugin.md`、`cindy.md`）。prfix 每一轮发给模型的提示词（repro、fix、推送前检查返工、docs、CI 红后的 revise、合 main 解冲突）都在 `[step …]` 后先带上目标仓的这份简报；文件缺了照常跑，日志记一行`ci rules brief missing`。每份 60 行以内，文件头注释写了来源文件（目标仓的 workflow / pre-push / PR 模板，以及 Mac mini 盯梢的分诊表 `PraiseZhu/vigil` `watchers/*/bin/*-ci-triage.mjs`），目标仓规则变了照着同步；注释不进提示词。
+
 公共模块（不单独跑）：`lib`、`jsonrec`、`gate_diff`、`gate_port`、`praise_notice`、`finding_policy`、`dm_compat`、`infra_outbound`、`run.sh`、`switch.sh`、`selftest.sh`、`pi-noskills.sh`。
 
 ## 模型的隔离环境
