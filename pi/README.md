@@ -39,7 +39,7 @@ bot 建的、用完就扔的东西只放在 `/workspace/pi-work/`（`bin/workroo
   - bot clone 里没有工作树在用的 bot 分支（`fix/qa-<N>-<fp8>`、`fix/infra-<sig8>`）→ 删；infrafix 的分支在它的 PR 还在路上时保留。
   - 已关闭的 bot PR 的远程分支（panoptes `fix/infra-*`；mivo 只删**关闭未合并**的 `qa-fix/*`，合并的 GitHub 自己删）：PR 正文必须带 bot 的标记，
     远程分支的最新提交必须等于 PR 的 head 或已在 main 里；gh 出错、分支被推进过 → 保留并写原因。
-  - `tmp/*`、旧位置 `/tmp/opsfix-retest`、`/tmp/pi-prfix`：超过 6 小时、没有进程在用 → 删；依赖缓存只留最新 2 份和正在被链接的。
+  - `tmp/*`：超过 6 小时、没有进程在用 → 删；依赖缓存只留最新 2 份和正在被链接的。
   - 测试证据 `argus-root/app/evidence/nightly/<日期>`：留 7 天、总量上限 3G（先删最老的，最新 2 天永远不删）；`cache/step-results`：留 14 天。每小时一次。
   - 剩余空间低于 15G：加紧模式（回收站立即清、缓存只留 1 份、证据上限减半），看门狗私信。
 - 硬边界：删之前把路径解析成真实路径，必须在 `/workspace/pi-work/` 或上面两个数据目录里；软链接不跟随；人建的工作树和分支、

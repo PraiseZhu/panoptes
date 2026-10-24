@@ -5,6 +5,10 @@ import os as _os
 _os.environ.setdefault('PRFIX_OWNERS', '*')
 _os.environ['PRFIX_DISPATCHED'] = '1'   # runs as if prwatch launched them (the cron fallback defers to a live prwatch)   # claim/round tests use other authors; owner filter has its own test
 for _k in [k for k in _os.environ if k.startswith('GIT_')]: del _os.environ[_k]   # never act on a hook's GIT_DIR (10-23)
+import tempfile as _tf
+_JCONF = _os.path.join(_tf.mkdtemp(prefix="prfix-test-jconf-"), "janitor.json")   # never the live conf/janitor.json (enforce=true since 10-25)
+with open(_JCONF, "w") as _f: _f.write('{"enforce": false}')
+_os.environ['JANITOR_CONF'] = _JCONF
 import argparse, contextlib, re, datetime as dt, importlib.util, io, json, os, shutil, subprocess, sys, tempfile, textwrap, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -755,6 +759,16 @@ class TestFixOneEndToEnd(GitTmp):
 
     def test_context_carries_the_tested_prs_diff(self):
         self.run_fix(); self.assertIn("Diff of the merged PR #1178", dict(self.prompts)["repro"])
+
+    def test_success_with_janitor_enforcing_drops_worktree_keeps_patch(self):
+        wf(_JCONF, '{"enforce": true}')
+        try: out, res = self.run_fix()
+        finally: wf(_JCONF, '{"enforce": false}')
+        self.assertEqual(out["status"], "pr_action_written", out)
+        self.assertFalse(os.path.isdir(self.wd)); self.assertFalse(prfix.branch_exists(self.br))   # outbound works from its own clone
+        a = self.acts[-1]
+        self.assertTrue(os.path.getsize(a["patch"]) > 0)
+        self.assertIn("src/foo.js", rf(a["patch"]))
 
     def test_success_keeps_worktree_and_writes_patch_body_action(self):
         out, res = self.run_fix()

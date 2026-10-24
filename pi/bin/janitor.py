@@ -38,7 +38,7 @@ INFRA_TICKETS = os.environ.get("JANITOR_INFRA_TICKETS") or f"{BASE}/out/infrafix
 # branch on merged / rejected. Janitor deletes such a branch only once the ticket has left this set (or no ticket names it).
 INFRA_IN_FLIGHT = {"running", "pr_action_written", "pr_open", "merge_action_written", "awaiting_praise", "ci_red"}
 DEFAULTS = {"enforce": False, "tmp_hours": 6, "nm_keep": 2, "salvage_max_bytes": 2 << 20, "free_gb_low": 15, "trash_grace_min": 10,
-            "remote_days": 30, "legacy_tmp": ["/tmp/opsfix-retest", "/tmp/pi-prfix"],
+            "remote_days": 30, "legacy_tmp": [],  # old /tmp homes of opsfix/prfix, empty since 10-25; dropped after the 7-day window
             "evidence": {"dir": "/workspace/mivo-qa/argus-root/app/evidence/nightly", "keep_days": 7, "cap_gb": 3, "keep_newest": 2},
             "step_results": {"dir": "/workspace/mivo-qa/argus-root/cache/step-results", "keep_days": 14}}
 

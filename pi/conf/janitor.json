@@ -1,6 +1,6 @@
 {
-  "_doc": "pi/bin/janitor.py (plan 2026-10-24 §4.4). enforce=false: every decision goes to out/janitor/last.json and the log, nothing is deleted (24 h rehearsal; .trash/ entries a job already threw away are purged either way). Defaults for every other key live in janitor.py DEFAULTS.",
-  "enforce": false,
+  "_doc": "pi/bin/janitor.py (plan 2026-10-24 §4.4). enforce=true since 2026-10-25 after the 24 h rehearsal (every dry-run decision reviewed: finished bot worktrees, nightly evidence > 7 days). Set false to go back to logging only. Defaults for every other key live in janitor.py DEFAULTS.",
+  "enforce": true,
   "tmp_hours": 6,
   "nm_keep": 2,
   "free_gb_low": 15,
