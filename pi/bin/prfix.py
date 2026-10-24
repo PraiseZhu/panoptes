@@ -901,7 +901,9 @@ def changed(wd, base=None, skip=()):
     package-lock.json and `skip` (pre-push build output) excluded. With base, a local commit does not hide the fix from later checks."""
     new = [f for f in untracked(wd) if f not in skip and not scratch(f)]
     if new: run(["git", "add", "-N", "--", *new], cwd=wd)
-    _, o = run(["git", "diff", "--name-only", "-z", *([base] if base else [])], cwd=wd)
+    # 10-24 review: no rename detection -- a move (the model may `git mv`) lists both paths, so the sensitive-file check and the
+    # stray-file check see where a file came from (a .github/ file moved away showed only its new name)
+    _, o = run(["git", "diff", "--no-renames", "--name-only", "-z", *([base] if base else [])], cwd=wd)
     return [f for f in o.split("\0") if f and f != "package-lock.json" and f not in skip]
 def is_test(f): return bool(RUNNABLE_TEST_RE.search(f) or TEST_SUPPORT_RE.search(f))
 def runnable(fs): return [f for f in fs if RUNNABLE_TEST_RE.search(f)]
@@ -2009,7 +2011,8 @@ def revise_one(A, d, n, qa, fp, p, red):
             try: text, task = pi(TIER, wd, f"[step {k}]\n{prompt}", session, timeout=2400, write=True, skills=False, nice=True)
             except Exception as e: raise Transient(f"模型 {k} 调用失败：{str(e)[:300]}")
             after = snapshot(wd, sorted(set(changed(wd, head, junk)) | set(before)))
-            touched.update(f for f in after if after.get(f) != before.get(f))   # files the model itself wrote (review 10-24)
+            touched.update(f for f in after if f not in before or after.get(f) != before.get(f))   # files the model itself wrote
+            # (review 10-24; "not in before": a file it deleted or moved away reads None both times)
             res["model"].append({"step": k, "task": task, "text": text}); texts.append(text); return text
         follow = ("The PR's regression test(s) must keep testing the bug: you may change how they run (Windows paths, timing, platform "
                   "differences) but never weaken them -- no skip/only/todo, no deleted cases or assertions. Do not touch docs/pr/. "
@@ -2070,7 +2073,7 @@ def revise_one(A, d, n, qa, fp, p, red):
         else:
             git("add", "-A", "--", *files, cwd=wd)
             akey = f"revise:{n}:{head[:12]}"
-            _, staged = git("diff", "--cached", "--name-only", "-z", head, cwd=wd)
+            _, staged = git("diff", "--cached", "--no-renames", "--name-only", "-z", head, cwd=wd)
             extra = sorted(set(f for f in staged.split("\0") if f) - set(files) - {"package-lock.json"})
             if extra: raise Deterministic(f"提交里混进了模型没改的文件，拒绝推送：{extra[:5]}")
             rc, o = git(*GIT_ID, "commit", "-q", "-m", title, "-m", f"QA: #{qa}\nFingerprint: {fp}\nPi-Revise: {akey}", cwd=wd)

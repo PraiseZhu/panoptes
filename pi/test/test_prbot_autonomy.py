@@ -182,6 +182,22 @@ class TestRevise(GitTmp):
         self.assertEqual(t["status"], "parked"); self.assertIn("不是这个 PR 能修的", t["last_error"]); self.assertTrue(t["next_retry_at"])
         self.assertFalse([a for a in self.acts if a["type"] == "slack.dm"])
 
+    def test_moving_a_ci_file_away_asks_praise(self):   # 10-24 review: a `git mv` out of .github/ used to show only its new name
+        seed = f"{self.tmp}/seed"; g = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", seed]
+        sh(*g, "checkout", "-q", self.BR); os.makedirs(f"{seed}/.github/workflows"); wf(f"{seed}/.github/workflows/ci.yml", "name: CI\n")
+        sh(*g, "add", "-A"); sh(*g, "commit", "-q", "-m", "ci"); sh(*g, "push", "-q", self.origin, self.BR)
+        self.head = self.pr["headRefOid"] = sh(*g, "rev-parse", "HEAD").strip(); sh(*g, "checkout", "-q", "main")
+        inner = prfix.pi
+        def mv(tier, cwd, *a, **k):
+            r = inner(tier, cwd, *a, **k)
+            if os.path.exists(f"{cwd}/.github/workflows/ci.yml"): sh("git", "-C", cwd, "mv", ".github/workflows/ci.yml", "ci.yml")
+            return r
+        prfix.pi = mv
+        rc, r = self.revise()
+        self.assertFalse([a for a in self.acts if a["type"] == "gh.pr.push-fix"], r)
+        t = json.dumps(prfix.load_tickets()["tickets"]["rev:1301"], ensure_ascii=False)
+        self.assertIn("CI 配置 / 仓库规则 / 密钥相关的文件：.github/workflows/ci.yml", t)   # kind 5 (ask Praise), not a stray-file stop
+
     def test_weakening_the_regression_test_never_lands(self):
         self.model = "weaken"
         rc, r = self.revise()

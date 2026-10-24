@@ -634,43 +634,83 @@ def _glob_re(g):
     return re.compile(out + r"\Z")
 _SENS = [(g, _glob_re(g)) for g in SENSITIVE_GLOBS]
 def is_test_path(f): return f.startswith("argus/tests/")
-def files_from_diff(diff):
-    """[(status, path)] from a unified git diff (A new / D deleted / R renamed / M otherwise) — for re-checks on a PR diff."""
-    out, cur = [], None
+_ESC = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
+_QTOK = r'"(?:[^"\\]|\\.)*"'
+def _unq(p):
+    """a path as git prints it -> the path. git C-quotes a name with a control char, quote, backslash or (core.quotepath, the
+    default) a non-ASCII byte: "a/\\344\\270\\255.md"; GitHub's PR diff does the same."""
+    if len(p) < 2 or p[0] != '"' or p[-1] != '"': return p
+    s, b, i = p[1:-1], bytearray(), 0
+    while i < len(s):
+        if s[i] == "\\" and re.match(r"[0-7]{3}", s[i + 1:i + 4]): b.append(int(s[i + 1:i + 4], 8)); i += 4
+        elif s[i] == "\\" and s[i + 1:i + 2] in _ESC: b.append(_ESC[s[i + 1]]); i += 2
+        else: b += s[i].encode("utf-8", "surrogateescape"); i += 1
+    return b.decode("utf-8", "surrogateescape")
+def _git_pair(rest):
+    """the "a/X b/Y" of a `diff --git` line -> (X, Y), None for a side it cannot read; either side may be C-quoted. Unquoted
+    names with spaces are split where both halves are the same path (everything but renames / copies, which also carry
+    `rename from` / `rename to` lines -- those win)."""
+    if rest.startswith('"'):
+        m = re.match(_QTOK, rest); a, b = (_unq(m.group(0)), _unq(rest[m.end():].strip())) if m else (None, None)
+    elif (m := re.search(rf" ({_QTOK})$", rest)): a, b = rest[:m.start()], _unq(m.group(1))
+    else:
+        n = len(rest); h = (n - 1) // 2
+        if n % 2 and rest[h] == " " and rest[2:h] == rest[h + 3:]: a, b = rest[:h], rest[h + 1:]
+        else:
+            m = re.match(r"(a/.+?) (b/.+)$", rest); a, b = (m.group(1), m.group(2)) if m else (None, None)
+    return (a[2:] if a and a.startswith("a/") else None), (b[2:] if b and b.startswith("b/") else None)
+def _diff_blocks(diff):
+    """a unified git diff -> one {"st", "old", "new", "head", "body"} per file: st A / D / R / C / M, paths unquoted, both ends
+    of a rename or copy kept (rename from/to and ---/+++ lines win over the header), body = the hunk lines."""
+    out, cur, hdr = [], None, False
     for l in (diff or "").splitlines():
-        m = re.match(r"diff --git a/(.+?) b/(.+)$", l)
-        if m:
-            if cur: out.append(cur)
-            cur = ["M", m.group(2)]; continue
-        if cur and l.startswith("new file mode"): cur[0] = "A"
-        elif cur and l.startswith("deleted file mode"): cur[0] = "D"
-        elif cur and l.startswith("rename from"): cur[0] = "R"
-    if cur: out.append(cur)
-    return [tuple(x) for x in out]
+        if l.startswith("diff --git "):
+            a, b = _git_pair(l[11:]); cur = {"st": "M", "old": a, "new": b, "head": l, "body": []}; out.append(cur); hdr = True; continue
+        if cur is None: continue
+        if not hdr: cur["body"].append(l); continue
+        if l.startswith("@@"): hdr = False
+        elif l.startswith("new file mode"): cur["st"] = "A"
+        elif l.startswith("deleted file mode"): cur["st"] = "D"
+        elif l.startswith(("rename from ", "copy from ")): cur["st"] = "R" if l[0] == "r" else "C"; cur["old"] = _unq(l.split(" ", 2)[2])
+        elif l.startswith(("rename to ", "copy to ")): cur["new"] = _unq(l.split(" ", 2)[2])
+        elif l.startswith(("--- ", "+++ ")):
+            p = _unq(l[4:].rstrip("\t"))                    # git puts a TAB after a name that has a space
+            if p.startswith("a/" if l[0] == "-" else "b/"): cur["old" if l[0] == "-" else "new"] = p[2:]
+    return out
+def files_from_diff(diff):
+    """[(status, path)] from a unified git diff (A new / D deleted / R renamed / C copied / M otherwise) -- for re-checks on a
+    PR diff. Both ends of a move are listed: a rename's old path as D (it is gone there), a copy's source as C (10-24 review: a
+    file moved out of pi/ or .github/ showed only where it went). A header it cannot read is ("?", header): never let through."""
+    out = []
+    for b in _diff_blocks(diff):
+        new, old = b["new"] or b["old"], b["old"] or b["new"]
+        if not new: out.append(("?", b["head"])); continue
+        if b["st"] == "D": out.append(("D", old)); continue
+        out.append((b["st"], new))
+        if b["st"] in ("R", "C") and old != new: out.append(("D" if b["st"] == "R" else "C", old))
+    return out
 def sensitive(diff_files, diff_text):
     """diff_files: [(status, path)], diff_text: unified diff. -> reasons (empty = auto-merge allowed as far as paths go)."""
     why = []
     for stt, f in diff_files:
+        if stt == "?": why.append(f"读不出 diff 里的文件名，无法复核：{f[:80]}"); continue
         g = next((g for g, r in _SENS if r.match(f)), None)
         if g: why.append(f"敏感路径 {f}（{g}）")
         if stt.startswith("D") and not is_test_path(f): why.append(f"删除文件 {f}")
         if stt.startswith("D") and is_test_path(f): why.append(f"删除测试 {f}")
-    cur = None; added = removed = 0; seen = set()
-    for l in diff_text.splitlines():
-        if l.startswith("diff --git "):
-            m = re.match(r"diff --git a/(.+?) b/(.+)$", l); cur = m.group(2) if m else None; continue
-        if l.startswith(("+++", "---")) or not cur: continue
-        if l.startswith("+") or l.startswith("-"):
-            body = l[1:]
-            if l.startswith("+"): added += 1
-            else: removed += 1
-            if cur in LINE_RULES and re.search(LINE_RULES[cur], body) and (cur, "line") not in seen:
-                why.append(f"{cur} 改到锁/issue/安装敏感行：{body.strip()[:80]}"); seen.add((cur, "line"))
-            if not is_test_path(cur) and CONTENT_RE.search(body) and (cur, "content") not in seen:
-                why.append(f"{cur} 改到密钥/外发相关代码：{body.strip()[:80]}"); seen.add((cur, "content"))
-            if is_test_path(cur) and l.startswith("-") and re.search(r"assert|\btest\(|\bit\(", body) and (cur, "weak") not in seen:
-                existing = not any(s.startswith("A") and f == cur for s, f in diff_files)
-                if existing: why.append(f"删改了已有测试的断言：{cur}"); seen.add((cur, "weak"))
+    added = removed = 0; seen = set()
+    for cur, l in ((b["new"] or b["old"], l) for b in _diff_blocks(diff_text) for l in b["body"]):
+        if not cur or not l.startswith(("+", "-")): continue
+        body = l[1:]
+        if l.startswith("+"): added += 1
+        else: removed += 1
+        if cur in LINE_RULES and re.search(LINE_RULES[cur], body) and (cur, "line") not in seen:
+            why.append(f"{cur} 改到锁/issue/安装敏感行：{body.strip()[:80]}"); seen.add((cur, "line"))
+        if not is_test_path(cur) and CONTENT_RE.search(body) and (cur, "content") not in seen:
+            why.append(f"{cur} 改到密钥/外发相关代码：{body.strip()[:80]}"); seen.add((cur, "content"))
+        if is_test_path(cur) and l.startswith("-") and re.search(r"assert|\btest\(|\bit\(", body) and (cur, "weak") not in seen:
+            existing = not any(s.startswith("A") and f == cur for s, f in diff_files)
+            if existing: why.append(f"删改了已有测试的断言：{cur}"); seen.add((cur, "weak"))
     if added + removed > MAX_LINES: why.append(f"改动 {added + removed} 行 > {MAX_LINES}，不算最小修复")
     if len(diff_files) > MAX_FILES: why.append(f"改了 {len(diff_files)} 个文件 > {MAX_FILES}")
     return why
@@ -711,7 +751,7 @@ def drop_worktree(wd, branch=None):
 
 def changed(wd):
     run(["git", "add", "-N", "--", "."], cwd=wd)
-    _, o = run(["git", "diff", "--name-only", "-z"], cwd=wd)
+    _, o = run(["git", "diff", "--no-renames", "--name-only", "-z"], cwd=wd)      # a move = both paths (else `add` misses the old one)
     return [f for f in o.split("\0") if f and not f.startswith("argus/node_modules/") and f != "argus/package-lock.json"]
 def runnable(fs): return [f for f in fs if re.match(r"^argus/tests/[^/]+\.test\.mjs$", f)]
 def snapshot(wd, files): return {f: (_read(os.path.join(wd, f), "rb") if os.path.isfile(os.path.join(wd, f)) else None) for f in files}
@@ -883,13 +923,15 @@ def fix_one(c, A, d):
         # 4 commit + auto-merge decision + action
         files = changed(wd)
         git("add", "-A", "--", *files, cwd=wd)
-        _, ns = git("diff", "--cached", "--name-status", "-z", base, cwd=wd)
+        # 10-24 review: no rename detection -- a move (the model may `git mv` itself) is a delete + an add, so every check sees
+        # where a file came from too; R / C rows still keep both ends in case renames come back
+        _, ns = git("diff", "--cached", "--no-renames", "--name-status", "-z", base, cwd=wd)
         tok = [x for x in ns.split("\0") if x]; dfiles = []; i = 0
         while i < len(tok):
             s_ = tok[i]; i += 1
-            if s_[:1] in ("R", "C"): dfiles.append((s_, tok[i + 1])); i += 2
+            if s_[:1] in ("R", "C"): dfiles += [(s_, tok[i + 1]), ("D" if s_[:1] == "R" else s_, tok[i])]; i += 2
             else: dfiles.append((s_, tok[i])); i += 1
-        _, dtext = git("diff", "--cached", base, cwd=wd)
+        _, dtext = git("diff", "--cached", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/", base, cwd=wd)
         # 10-24 (Pi line merged into panoptes pi/): the bot never changes itself -- a fix that touches pi/ is dropped, a human looks
         own = sorted({f for _, f in dfiles if f == "pi" or f.startswith("pi/")})
         if own: raise Deterministic(f"修复改到了 pi/（Pi 线自己的代码，infrafix 不许改）：{', '.join(own[:4])}")

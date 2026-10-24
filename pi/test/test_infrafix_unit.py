@@ -309,6 +309,34 @@ class TestSensitive(unittest.TestCase):
         self.assertTrue(self.S(diff("argus/src/a.mjs", [], [f"l{i}" for i in range(301)])))              # > 300 lines
         d = "diff --git a/argus/src/old.mjs b/argus/src/old.mjs\ndeleted file mode 100644\n--- a/argus/src/old.mjs\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n"
         self.assertTrue(any("删除文件" in w for w in self.S(d)))
+    def test_moves_and_quoted_names(self):   # 10-24 review: a move also shows where it came from; C-quoted (non-ASCII) names are read
+        with tempfile.TemporaryDirectory() as d:
+            g = lambda *a: sh(["git", "-C", d, "-c", "core.quotepath=true", "-c", "user.name=t", "-c", "user.email=t@t", *a])
+            g("init", "-q", "-b", "main")
+            for p, t in {".github/workflows/ci.yml": "name: CI\non: push\n", "argus/src/a b.mjs": "export const a = 1\n",
+                         "argus/src/中文.mjs": "export const b = 1\n", "argus/tests/keep.test.mjs": "test('k', () => assert.ok(1))\n"}.items():
+                wf(f"{d}/{p}", t)
+            g("add", "-A"); g("commit", "-q", "-m", "base")
+            g("mv", ".github/workflows/ci.yml", "ci.yml"); g("mv", "argus/src/a b.mjs", "argus/src/c d.mjs"); g("mv", "argus/tests/keep.test.mjs", "argus/keep.mjs")
+            wf(f"{d}/argus/src/中文.mjs", "const token = process.env.X\n", "a"); g("add", "-A")
+            gh_like = g("diff", "--cached", "-M", "HEAD")          # like `gh pr diff`: renames detected, non-ASCII names quoted
+            self.assertIn('"a/argus/src/\\344', gh_like)
+            fs = X.files_from_diff(gh_like)
+            for want in [("R", "ci.yml"), ("D", ".github/workflows/ci.yml"), ("R", "argus/src/c d.mjs"), ("D", "argus/src/a b.mjs"),
+                         ("R", "argus/keep.mjs"), ("D", "argus/tests/keep.test.mjs"), ("M", "argus/src/中文.mjs")]:
+                self.assertIn(want, fs)
+            why = X.sensitive(fs, gh_like)
+            for want in ("敏感路径 .github/workflows/ci.yml", "删除测试 argus/tests/keep.test.mjs", "argus/src/中文.mjs 改到密钥"):
+                self.assertTrue(any(want in w for w in why), (want, why))
+            plain = g("diff", "--cached", "--no-renames", "HEAD")  # what infrafix itself reads before committing
+            self.assertEqual(sorted(X.files_from_diff(plain)), sorted([("A", "ci.yml"), ("D", ".github/workflows/ci.yml"), ("A", "argus/src/c d.mjs"),
+                ("D", "argus/src/a b.mjs"), ("A", "argus/keep.mjs"), ("D", "argus/tests/keep.test.mjs"), ("M", "argus/src/中文.mjs")]))
+            self.assertTrue(any("中文.mjs 改到密钥" in w for w in X.sensitive(X.files_from_diff(plain), plain)))
+        cp = "diff --git a/scripts/catch-up.cron b/x.cron\nsimilarity index 100%\ncopy from scripts/catch-up.cron\ncopy to x.cron\n"
+        self.assertEqual(X.files_from_diff(cp), [("C", "x.cron"), ("C", "scripts/catch-up.cron")])
+        self.assertTrue(any("scripts/catch-up.cron" in w for w in self.S(cp)))
+        bad = "diff --git x y\n@@ -1 +1 @@\n-a\n+b\n"                     # a header it cannot read is never let through
+        self.assertEqual(X.files_from_diff(bad)[0][0], "?"); self.assertTrue(any("读不出" in w for w in self.S(bad)))
 
 # ====================================================================== 6. gates file
 class TestGates(Tmp):
@@ -438,12 +466,29 @@ class TestFixOne(GitTmp):
         self.assertEqual(out["status"], "pr_action_written")
         self.assertFalse(out["auto_merge"]); self.assertTrue(any(".github" in w for w in res["auto_merge_why"]))
 
+    def test_a_git_mv_by_the_model_shows_both_paths(self):   # 10-24 review: a staged move used to show only its new name
+        def fix_mv(wd): write_fix(wd); sh(["git", "-C", wd, "mv", "argus/tests/old.test.mjs", "argus/old.mjs"]); return "ROOT CAUSE x"
+        self.fake_pi({"repro": write_test, "fix1": fix_mv})
+        out, res = X.fix_one(dict(self.c), self.A(), "2026-10-23")
+        self.assertEqual(out["status"], "pr_action_written", (out.get("error"), res["steps"]))
+        self.assertFalse(out["auto_merge"]); self.assertTrue(any("删除测试 argus/tests/old.test.mjs" in w for w in res["auto_merge_why"]), res["auto_merge_why"])
+
     def test_a_fix_touching_pi_is_dropped(self):   # 10-24: the Pi line lives in panoptes pi/ -- the bot never changes itself
         def fix_self(wd): write_fix(wd); wf(f"{wd}/pi/bin/prfix.py", "x = 1\n"); return "ROOT CAUSE x"
         self.fake_pi({"repro": write_test, "fix1": fix_self})
         out, res = X.fix_one(dict(self.c), self.A(), "2026-10-23")
         self.assertEqual((out["status"], out["kind"]), ("failed", "deterministic")); self.assertIn("pi/", out["error"])
         self.assertFalse([a for a in self.actions if a.get("type") == "gh.infra.pr"]); self.assertFalse(os.path.exists(self.wt()))
+    def test_a_fix_moving_a_pi_file_out_is_dropped(self):   # 10-24 review: a move out of pi/ used to show only where it went
+        d = f"{self.tmp}/seed2"; sh(["git", "clone", "-q", self.origin, d]); wf(f"{d}/pi/bin/keep.py", "x = 1\n")
+        sh(f"git add -A && git -c user.name=t -c user.email=t@t commit -q -m pi && git push -q origin main", cwd=d)
+        def fix_mv(wd): write_fix(wd); sh(["git", "-C", wd, "mv", "pi/bin/keep.py", "argus/keep.py"]); return "ROOT CAUSE x"
+        self.fake_pi({"repro": write_test, "fix1": fix_mv})
+        out, res = X.fix_one(dict(self.c), self.A(), "2026-10-23")
+        self.assertEqual((out["status"], out["kind"]), ("failed", "deterministic"), out); self.assertIn("pi/bin/keep.py", out["error"])
+        self.assertFalse([a for a in self.actions if a.get("type") == "gh.infra.pr"])
+        mv = "diff --git a/pi/bin/keep.py b/argus/keep.py\nsimilarity index 100%\nrename from pi/bin/keep.py\nrename to argus/keep.py\n"
+        self.assertTrue(any("敏感路径 pi/bin/keep.py" in w for w in X.sensitive(X.files_from_diff(mv), mv)))   # outbound's re-check
 
     def test_dry_run_leaves_nothing(self):
         self.fake_pi({"repro": write_test, "fix1": write_fix})
@@ -544,6 +589,10 @@ class TestOutboundMerge(Tmp):
         wf(X.GATES, json.dumps({"infra_automerge": False}))
         g = FakeGh(pr_view(), GREEN); st, r, dms = self.run_do(self.act(), g)
         self.assertEqual(self.merged(g), []); self.assertIn("infra_automerge", dms[0][1])
+    def test_a_move_out_of_a_sensitive_path_blocks(self):   # 10-24 review: the PR diff's rename shows the old path too
+        mv = "diff --git a/.github/workflows/ci.yml b/ci.yml\nsimilarity index 100%\nrename from .github/workflows/ci.yml\nrename to ci.yml\n"
+        g = FakeGh(pr_view(), GREEN, mv); st, r, dms = self.run_do(self.act(), g)
+        self.assertEqual(self.merged(g), []); self.assertTrue(dms and ".github/workflows/ci.yml" in dms[0][1], dms)
     def test_stale_states(self):
         self.assertEqual(self.run_do(self.act(), FakeGh(pr_view(), [{"name": "CI", "status": "in_progress", "conclusion": ""}]))[0], "stale:ci running")
         self.assertEqual(self.run_do(self.act(), FakeGh(pr_view(), []))[0], "stale:ci none")
