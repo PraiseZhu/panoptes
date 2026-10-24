@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""python3 test/test_boxhealth_cleanup.py -- boxhealth's 7-day cleanup (2026-10-24: really deletes) and tz-drift notice, in a temp dir
+"""python3 test/test_boxhealth_cleanup.py -- boxhealth's 7-day cleanup (2026-10-24: really deletes), in a temp dir
 (a fake /tmp, a fake HOME with npm / pip caches, a fake QA lock). Never touches the real /tmp or caches."""
 import os, sys, time, json, fcntl, tempfile, shutil, subprocess, unittest
 T = tempfile.mkdtemp(prefix="boxhealth-test-")
-os.environ.update(HOME=f"{T}/home", BOXHEALTH_TMP_ROOT=f"{T}/tmp", BOXHEALTH_TZ_LOG=f"{T}/tz-drift.log", PI_STATE=f"{T}/state")
+os.environ.update(HOME=f"{T}/home", BOXHEALTH_TMP_ROOT=f"{T}/tmp", PI_STATE=f"{T}/state")
 B_ = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin"); sys.path.insert(0, B_)
 import boxhealth as B   # noqa: E402
 
@@ -53,17 +53,7 @@ class TestCleanup(unittest.TestCase):
         finally: f.close()
         c, locks = B.cleanup_candidates(); self.assertEqual(locks, []); self.assertIn(f"{T}/tmp/old.txt", dict(c))   # a lock FILE alone: not running
 
-    def test_tz_drift_lines_are_read_once(self):
-        open(B.TZ_DRIFT_LOG, "w").write("a\nb\n"); st = {}
-        self.assertEqual(B.tz_drifts(st), ["a", "b"]); self.assertEqual(B.tz_drifts(st), [])
-        open(B.TZ_DRIFT_LOG, "a").write("c\n"); self.assertEqual(B.tz_drifts(st), ["c"])
 
-    def test_tz_drift_dm_at_most_once_a_day(self):
-        st = {}
-        self.assertIn("2 次", B.tz_drift_event(st, ["x1", "x2"], "2026-10-24"))
-        self.assertIsNone(B.tz_drift_event(st, ["x3"], "2026-10-24")); self.assertIsNone(B.tz_drift_event(st, ["x4"], "2026-10-24"))
-        e = B.tz_drift_event(st, [], "2026-10-25"); self.assertIn("2 次", e); self.assertIn("x4", e)          # the day's drifts, counted
-        self.assertIsNone(B.tz_drift_event(st, [], "2026-10-26"))                                            # none since: no DM
 
 if __name__ == "__main__":
     try: unittest.main(verbosity=1)
