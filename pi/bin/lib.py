@@ -1,4 +1,4 @@
-import json, os, subprocess, sys, glob, datetime as dt, re
+import json, os, subprocess, sys, glob, datetime as dt, re, shutil, tempfile
 REPO = "xindong/mivo-canvas-plugin"
 # Where things live (10-24: the Pi line moved into PraiseZhu/panoptes pi/; three kinds of place, see pi/README.md):
 #   PI_CODE   this pi/ directory (code, conf, cron, tests) -- deployed with the /workspace/panoptes checkout
@@ -134,26 +134,55 @@ SANDBOX_HIDE_DIRS = ("~/.config/gh", "~/.config/mivo-qa", "~/.config/cindy-launc
                      "~/.claude/projects", "~/.claude/shell-snapshots", "~/.cursor", "~/.codex", "~/sand-data", "~/.local/share/keyrings",
                      "~/.ssh", "~/.pi-fallback.git", "/workspace/mivo-merger/secrets", "/workspace/migrate/vault")
 SANDBOX_HIDE_FILES = ("~/.claude/.credentials.json", "~/.git-credentials", "~/.netrc")
-def sandbox_prefix():
+# 10-24 Q4 (plan 2026-10-24): the machine is READ-ONLY for the model; on top of the secret hiding above, only these are writable:
+#   always       what the agent itself writes: ~/.pi (sessions, usage log), PI_STATE/out/tasks (task results), ~/.npm (npx cache)
+#   write=True   the call's cwd and, when cwd is a git worktree, its repo's git dir (index, objects, refs: git add / stash / commit)
+#   rw=(...)     extra dirs a job names (xstyle: its output dirs)
+#   /tmp         a private /tmp for a call in a bot worktree (PI_WORK/tmp/sbx-*, gone after the call); other calls keep /tmp
+# A person's checkouts, the deployed code (/workspace/panoptes), other tickets' worktrees and everything else cannot be changed.
+SANDBOX_RW_ALWAYS = ("~/.pi", f"{BASE}/out/tasks", "~/.npm")
+def _git_dir_of(d):
+    try:
+        r = subprocess.run(["git", "-C", d, "rev-parse", "--path-format=absolute", "--git-common-dir"], capture_output=True, text=True, timeout=30)
+        return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
+    except Exception: return None
+def sandbox_prefix(cwd=None, write=False, rw=(), tmp=None):
+    """bwrap argv for one model call (see SANDBOX_RW_ALWAYS above); [] when PI_NO_SANDBOX=1 or bwrap is missing"""
     if os.environ.get("PI_NO_SANDBOX") == "1" or not os.path.exists("/usr/bin/bwrap"): return []
-    a = ["/usr/bin/bwrap", "--dev-bind", "/", "/", "--unshare-pid", "--proc", "/proc", "--die-with-parent"]
-    for d in map(os.path.expanduser, SANDBOX_HIDE_DIRS):
+    a = ["/usr/bin/bwrap", "--ro-bind", "/", "/", "--dev-bind", "/dev", "/dev", "--unshare-pid", "--proc", "/proc", "--die-with-parent"]
+    if tmp: a += ["--bind", tmp, "/tmp"]                  # first: a writable dir under the real /tmp is bound again on top of it
+    w = [os.path.expanduser(x) for x in SANDBOX_RW_ALWAYS] + ([] if tmp else ["/tmp"])
+    if write and cwd:
+        w.append(os.path.abspath(cwd))
+        g = _git_dir_of(cwd)
+        if g: w.append(g)
+    w += [os.path.abspath(os.path.expanduser(x)) for x in rw]
+    for d in dict.fromkeys(w):
+        if os.path.isdir(d): a += ["--bind", d, d]
+    for d in map(os.path.expanduser, SANDBOX_HIDE_DIRS):     # after the binds: a writable parent never shows a hidden dir again
         if os.path.isdir(d): a += ["--tmpfs", d]
     for f in map(os.path.expanduser, SANDBOX_HIDE_FILES):
         if os.path.isfile(f): a += ["--ro-bind", "/dev/null", f]
     return a + ["--"]
 
-def pi(tier, cwd, prompt, session, timeout=600, write=False, web=False, skills=True, nice=False):
+def pi(tier, cwd, prompt, session, timeout=600, write=False, web=False, skills=True, nice=False, rw=()):
     """Run Pi via pi-auto (tier picks model/thinking). Returns (text, task_id).
     skills=False: pi without skill discovery (bin/pi-noskills.sh; 10-24: ~/.pi/agent/settings.json loads ~/.claude/skills, 36 KB of
     Claude Code skills in every coding step's system prompt). nice=True: the agent and the tests it runs at nice 10 (merge tests first)."""
     env = model_env({"PI_TASK_DIR": f"{BASE}/out/tasks", "PI_NOTIFY_OFF": "1", "PI_TASK_OWNER": "pi-line-cron"})   # never os.environ as is
     if not skills: env["PI_BIN"] = f"{PI_CODE}/bin/pi-noskills.sh"
-    cmd = sandbox_prefix() + (["nice", "-n", "10"] if nice else []) + [os.path.expanduser("~/tools/pi-call/pi-auto"), tier, cwd, prompt, "--session", session,
-           "--owner", "pi-line-cron", "--timeout", str(timeout)]
+    os.makedirs(f"{BASE}/out/tasks", exist_ok=True)
+    tmp = None
+    if os.path.realpath(cwd).startswith(os.path.realpath(PI_WORK) + os.sep):   # a bot worktree: its own /tmp for this call
+        os.makedirs(f"{PI_WORK}/tmp", exist_ok=True)
+        tmp = tempfile.mkdtemp(prefix="sbx-" + re.sub(r"[^A-Za-z0-9_.-]", "-", session)[:60] + "-", dir=f"{PI_WORK}/tmp")
+    cmd = sandbox_prefix(cwd, write, rw, tmp) + (["nice", "-n", "10"] if nice else []) + [os.path.expanduser("~/tools/pi-call/pi-auto"), tier, cwd, prompt,
+           "--session", session, "--owner", "pi-line-cron", "--timeout", str(timeout)]
     if not write: cmd.append("--no-write")
     if not web: cmd.append("--no-web")
-    r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=timeout + 120)
+    try: r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=timeout + 120)
+    finally:
+        if tmp: shutil.rmtree(tmp, ignore_errors=True)
     m = re.search(r"^RESULT (.+)$", r.stdout, re.M); t = re.search(r"^TASK (\S+)", r.stdout, re.M)
     if r.returncode != 0 or not m: raise RuntimeError(f"pi {tier} rc={r.returncode} {r.stdout[-300:]} {r.stderr[-300:]}")
     return open(m.group(1).strip()).read(), (t.group(1) if t else "?")
