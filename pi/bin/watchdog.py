@@ -184,8 +184,11 @@ def backup_rules_check(now, probs):
     except OSError: return
     heads = [i for i, l in enumerate(lines) if l.startswith("# grokbot-box check ")]
     if not heads: return
-    try: at = dt.datetime.strptime(" ".join(lines[heads[-1]].split()[3:5]), "%Y-%m-%d %H:%M:%S").replace(tzinfo=CST)
-    except ValueError: at = None
+    # 10-24: zone-free -- the header's epoch=, else the log file's mtime. Its wall-clock time is in whatever zone the box had when
+    # check.sh ran (the platform flips it), so reading it as Beijing time made a fresh run look 15 h old (false DM 10-24 22:45)
+    m = re.search(r"\bepoch=(\d{9,})", lines[heads[-1]])
+    try: at = dt.datetime.fromtimestamp(int(m.group(1)) if m else os.path.getmtime(CHECK_LOG), CST)
+    except (OSError, ValueError, OverflowError): at = None
     if at and (now - at).total_seconds() > 3 * 3600:
         probs["backup:rules-stale"] = PN.item("fyi", "备份规则检查停了（不急）", f"每小时 40 分检查备份是否合规的任务，最后一次是 {at:%m-%d %H:%M}。",
             "备份里混进公司代码、漏备份某个机器人之类的问题没人发现。",
