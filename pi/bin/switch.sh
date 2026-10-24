@@ -31,11 +31,10 @@ $VERB these Grok Bot routines (in the Grok Bot app; bot-to-bot scheduling inside
   备份管家         : 「grokbot-box 推送监控」:40
   电脑运维         : box-health :17        (Pi job gated by takeover/boxhealth)
   Cindy 管家       : 「Cindy 保活」@every 5m (Pi job gated by takeover/cindy)
-  知识沉淀         : 周五 8:04 选题, 工作日 10:04 X 风格收集 (needs X_BEARER_TOKEN + takeover/xstyle)
   Jasper           : 9:00 简报
 T
 if [ $MODE = pi ]; then
   echo; echo "Pi takeover markers present: $(ls $B/takeover 2>/dev/null | tr '\n' ' ')"
-  echo "Gated jobs without marker stay off: roster dailyretro xstyle (touch $B/takeover/<name> to enable)"
+  echo "Gated jobs without marker stay off: roster dailyretro (touch $B/takeover/<name> to enable)"
   [ -e $B/outbound-enabled ] || [ $OUT = 1 ] || echo "NOTE: outbound still closed (files only). Re-run with --with-outbound to let bin/outbound.py send."
 fi

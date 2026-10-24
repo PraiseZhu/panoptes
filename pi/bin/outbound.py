@@ -154,7 +154,7 @@ def relay_text(a):
 # 原来发给 Grok / 别的 bot / 群的消息转给 Praise 时的标题（2026-10-24 Praise：私信看不懂 —— 不再用「【job · 原发 Grok 私聊 → X】」这种内部抬头）
 # 先按 key 前缀（同一个 out/<job>/ 目录里有几种），再按 job（= out/ 下的目录名，pmnudge 也写在 out/pm/）
 RELAY_KEY_TITLES = {"pm-chief:": "白天催办汇总", "nudge:": "白天催办", "pm-cos:": "测试项目经理的核对汇总", "pm-retro:": "测试项目经理的核对汇总"}
-RELAY_TITLES = {"jasper": "今天的工作简报", "knowledge": "知识沉淀的选题和总结", "pm": "测试项目经理的核对汇总",
+RELAY_TITLES = {"jasper": "今天的工作简报", "pm": "测试项目经理的核对汇总",
                 "dailyretro": "日报复盘", "prretro": "修 PR 的复盘", "opsreview": "测试系统运维复盘", "followup": "作者跟进", "daily": "QA 日报",
                 "p2": "P2 裁决建议", "compare": "Pi 线和 Grok 线的对比"}
 def relay_item(a, job):

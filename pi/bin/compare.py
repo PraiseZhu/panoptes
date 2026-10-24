@@ -82,7 +82,7 @@ def main():
     # 合并官
     pm_ = rd(f"{BASE}/out/merger/{run_day}.md") or ""; au = [l for l in (rd("/workspace/mivo-merger/audit.log") or "").splitlines() if l.startswith(utc_window(day)[0][:10]) or l.startswith(utc_window(day)[1][:10])]
     L.append(f"| 合并官 | out/merger（合格 {len(re.findall('✅', pm_))} 次） | audit.log 当日 {len(au)} 行（Grok 线影子轮询已停，仅巡检） | 双方均 0 合并即一致 |")
-    for k, p in (("Praise PR 复盘/修复", "praise-pr"), ("Jasper 简报", "jasper"), ("机器类核查", "box"), ("知识沉淀", "knowledge")):
+    for k, p in (("Praise PR 复盘/修复", "praise-pr"), ("Jasper 简报", "jasper"), ("机器类核查", "box")):
         fs = sorted(glob.glob(f"{BASE}/out/{p}/{run_day}*")); L.append(f"| {k} | {len(fs)} 个文件 | 无盘上可比产出（Grok 线输出在聊天/routine 记录中） | 人工抽查 |")
     write_atomic(f"{BASE}/out/compare/{day}.md", "\n".join(L) + "\n")
 if __name__ == "__main__": main()

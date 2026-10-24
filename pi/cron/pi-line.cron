@@ -31,7 +31,6 @@ R=/workspace/panoptes/pi/bin/run.sh
 5  * * * * box $R handoff @00
 20 * * * * box $R handoff @06,15
 35 * * * * box $R handoff @18
-5  * * * * box $R knowledge @08
 35 * * * * box $R daily @08
 5  * * * * box $R jasper @09
 45 * * * * box $R prretro @09
@@ -50,7 +49,6 @@ R=/workspace/panoptes/pi/bin/run.sh
 17 * * * * box $R boxhealth
 23 * * * * box $R roster @08
 56 * * * * box $R dailyretro @09
-4  * * * * box $R xstyle @10
 */10 * * * * box $R outbound
 1  * * * * box $R credcheck @07
 # 10-23 运维：修复 PR 原用例复测（只写文件；内存<3G 或 panoptes nightly.lock 被占则跳过）。数据日=昨天；排在 08:35 日报后、10:07 catch-up 和 10:35 pm 前
