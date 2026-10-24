@@ -748,6 +748,18 @@ class TestFixOneEndToEnd(GitTmp):
         self.sessions.clear(); import time as _t; _t.sleep(1.1); self.run_fix()
         self.assertTrue(set(self.sessions).isdisjoint(first))                               # a retry never resumes an older run
 
+    def test_every_step_opens_with_the_repos_ci_rules_brief(self):   # 10-25 Praise: rules known before the fix, not after a red check
+        self.seed_commit({"FAIL_LINT": "1"}); self.model["prepush1-"] = "fix_lint"
+        out, _ = self.run_fix(); self.assertEqual(out["status"], "pr_action_written", out)
+        steps = [k for k, _ in self.prompts if not k.startswith("judge-")]
+        for want in ("repro", "fix1", "prepush1-1", "docs"): self.assertIn(want, steps)
+        for k, p in self.prompts:
+            if k.startswith("judge-"): continue
+            head = p.split("\n", 2)
+            self.assertEqual(head[0], f"[step {k}]")
+            self.assertIn("CI rules brief: xindong/mivo-canvas-plugin", head[1], k)
+            self.assertNotIn("<!--", p.split("---", 1)[0], k)                         # the source note stays in the file
+
     def test_repro_gets_one_more_try(self):
         self.model.update(repro="nothing", repro2="ok")
         out, _ = self.run_fix(); self.assertEqual(out["status"], "pr_action_written", out)
@@ -932,6 +944,35 @@ class TestOutboundSnippet(GitTmp):
         self.assertEqual(m.fixpr_docs_rename(d, br, a, 1240), "docs/pr/1240: already renamed")       # idempotent
         log = sh("git", "--git-dir", self.origin, "log", "--format=%s", br).splitlines()
         self.assertEqual(len(log), 3)   # seed, fix, rename: no rewrite of history (no force)
+
+
+class TestCiBrief(Tmp):
+    """10-25: each target repo's CI rules brief (conf/ci-rules/<repo>.md) heads every model step; missing -> logged, not fatal."""
+    def setUp(self):
+        super().setUp(); self.orig = (prfix.CI_RULES, dict(prfix._BRIEFS)); prfix._BRIEFS.clear()
+    def tearDown(self):
+        prfix.CI_RULES = self.orig[0]; prfix._BRIEFS.clear(); prfix._BRIEFS.update(self.orig[1]); super().tearDown()
+    def test_shipped_briefs_exist_short_and_name_their_sources(self):
+        for name in ("mivo-canvas-plugin", "cindy"):
+            raw = rf(f"{prfix.PI_CODE}/conf/ci-rules/{name}.md")
+            self.assertLessEqual(len(raw.splitlines()), 60, name); self.assertIn("Sources", raw)
+        self.assertIn("makecindy/cindy", prfix.ci_brief("makecindy/cindy"))
+        self.assertIn(".githooks/pre-push", prfix.ci_brief())                             # REPO = the mivo plugin repo
+    def test_brief_heads_the_prompt_and_drops_comments(self):
+        prfix.CI_RULES = self.tmp; wf(f"{self.tmp}/demo.md", "<!-- source: x -->\n# demo rules\n- run lint\n")
+        p = prfix.step_prompt("fix1", "TASK 2: fix it", repo="org/demo")
+        self.assertEqual(p, "[step fix1]\n# demo rules\n- run lint\n\n---\n\nTASK 2: fix it")
+    def test_missing_brief_is_logged_and_the_prompt_goes_without_it(self):
+        prfix.CI_RULES = f"{self.tmp}/nope"; buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            p = prfix.step_prompt("repro", "TASK 1", repo="org/none"); prfix.step_prompt("fix1", "TASK 2", repo="org/none")
+        self.assertEqual(p, "[step repro]\nTASK 1")
+        self.assertEqual(buf.getvalue().count("ci rules brief missing for none"), 1)        # once per run, not per step
+    def test_every_model_step_in_prfix_goes_through_step_prompt(self):   # repro / fix / prepush / docs / revise / merge rounds
+        src = rf(os.path.join(BIN, "prfix.py"))
+        calls = re.findall(r"pi\(TIER, wd, ([^,]+),", src)
+        self.assertEqual(len(calls), 3, calls)                                           # fix_one, revise_merge, revise_one
+        self.assertTrue(all(c.startswith("step_prompt(") for c in calls), calls)
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

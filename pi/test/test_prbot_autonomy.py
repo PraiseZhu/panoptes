@@ -159,7 +159,9 @@ class TestRevise(GitTmp):
         self.assertEqual((rc, r["status"]), (0, "pr_action_written"), r)
         a = self.acts[-1]
         self.assertEqual((a["type"], a["pr"], a["branch"], a["head"]), ("gh.pr.push-fix", 1301, self.BR, self.head))
-        self.assertIn("windows path", self.prompts[0]); self.assertIn("unit (windows, 2)", self.prompts[0]); self.assertNotIn("review-pr", self.prompts[0])
+        brief, own = self.prompts[0].split("\n---\n", 1)                              # 10-25: the repo's CI rules brief comes first
+        self.assertIn("CI rules brief: xindong/mivo-canvas-plugin", brief)
+        self.assertIn("windows path", own); self.assertIn("unit (windows, 2)", own); self.assertNotIn("review-pr", own)
         d = f"{self.tmp}/check"; sh("git", "clone", "-q", "--branch", self.BR, self.origin, d)
         sh("git", "-C", d, "apply", "--check", a["patch"])                              # applies onto the PR head
         self.assertIn("WINFIX", open(a["patch"]).read())
