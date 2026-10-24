@@ -9,7 +9,7 @@ def age_min(p):
 import time
 def main():
     d = today(); L = [f"## {now_cst().strftime('%H:%M')}"]
-    a = age_min("/tmp/grokbot-box-sync.log"); L.append(f"- 备份: sync 日志 {a} 分钟前更新（cron :17 每小时；>70 算异常）{'⚠' if a is None or a > 70 else '✓'}")
+    a = age_min("/workspace/grokbot-box-check/sync.log"); L.append(f"- 备份: sync 日志 {a} 分钟前更新（cron :17 每小时；>70 算异常）{'⚠' if a is None or a > 70 else '✓'}")
     loc = sh("git -C /workspace/grokbot-box rev-parse HEAD"); rem = sh("git -C /workspace/grokbot-box ls-remote origin HEAD | cut -f1")
     L.append(f"- 备份: 本地 {loc[:8]} vs 远端 {rem[:8]} {'✓' if loc == rem else '⚠ 未推送/不一致'}")
     lc = sh("git -C /workspace/grokbot-box log -1 --format=%cI"); L.append(f"- 备份: 最近提交 {cst(lc) if lc else '?'}")
