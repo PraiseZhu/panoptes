@@ -99,4 +99,16 @@ bot 建的、用完就扔的东西只放在 `/workspace/pi-work/`（`bin/workroo
 ## 模型的隔离环境
 
 `lib.pi()` 启动模型时：环境变量只给白名单（`lib.model_env`），外面再套一层 bwrap（`lib.sandbox_prefix`）：单独的 PID 命名空间和 /proc，存密钥的目录都被遮住。
-`PI_NO_SANDBOX=1` 只用于排查问题。收紧成「整机只读 + 白名单可写」的计划见 docs/pi/README.md。
+
+**整机只读**（10-24，Q4）：模型能改的只有下面这些，别的一律改不了（试了会得到 Read-only file system）——
+
+| 可写 | 什么时候 |
+|---|---|
+| `~/.pi`（会话、用量日志）、`/workspace/mivo-qa/pi/out/tasks`（任务结果）、`~/.npm`（npx 缓存） | 每次调用（模型程序自己要写） |
+| 当前工作目录 + 它所在仓库的 git 目录（`git add` / `stash` / `commit` 要写 index、objects、refs） | 只有 `write=True` 的调用（prfix、infrafix、xstyle） |
+| 作业指名的目录（`rw=`）：xstyle 的输出目录、pi 模式下的风格库 `x-trending` | 只给那一个作业 |
+| `/tmp` | 在 bot 工作树里的调用：一个私有的 `/tmp`（`/workspace/pi-work/tmp/sbx-*`，调用结束就删），看不到机器上真正的 /tmp；其他调用照旧 |
+
+改不了的包括：panoptes 部署签出（bot 自己的代码）、人的签出、别的单子的工作树、`/workspace/mivo-qa/pi` 的开关和台账、家目录。
+2026-10-24 实测：mivo 工作树里 vitest、eslint、tsc、git add/stash 在沙箱内外结果一致；一次真实模型调用能在工作树里写文件，写 `/workspace/panoptes` 被拒。
+单测 `test/test_model_env.py`（机器允许 bwrap 时会真的跑一次，按真实磁盘上的结果判断）。`PI_NO_SANDBOX=1` 只用于排查问题。

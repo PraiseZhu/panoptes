@@ -45,11 +45,31 @@ class T(unittest.TestCase):
         try:
             p = lib.sandbox_prefix()
             if not os.path.exists("/usr/bin/bwrap"): self.assertEqual(p, []); return
-            self.assertEqual(p[:2], ["/usr/bin/bwrap", "--dev-bind"]); self.assertIn("--unshare-pid", p); self.assertEqual(p[-1], "--")
+            self.assertEqual(p[:4], ["/usr/bin/bwrap", "--ro-bind", "/", "/"]); self.assertIn("--unshare-pid", p); self.assertEqual(p[-1], "--")
             self.assertIn(["--tmpfs", d], [p[i:i + 2] for i in range(len(p))]); self.assertNotIn(f"{self.tmp}/missing", p)
             self.assertIn(["--ro-bind", "/dev/null", f], [p[i:i + 3] for i in range(len(p))])
             os.environ["PI_NO_SANDBOX"] = "1"; self.assertEqual(lib.sandbox_prefix(), [])
         finally: lib.SANDBOX_HIDE_DIRS, lib.SANDBOX_HIDE_FILES = saved
+
+    def test_sandbox_is_read_only_but_for_the_call_s_own_dirs(self):   # 10-24 Q4
+        import subprocess
+        wd = f"{self.tmp}/wt"; os.makedirs(wd); subprocess.run(["git", "init", "-q", wd], check=True)
+        tmp = f"{self.tmp}/private-tmp"; os.makedirs(tmp); other = f"{self.tmp}/other"; os.makedirs(other)
+        pairs = lambda p: [p[i:i + 3] for i in range(len(p))]
+        p = lib.sandbox_prefix(wd, True, (), tmp)
+        if not p: return                                                       # no bwrap here
+        self.assertIn(["--bind", wd, wd], pairs(p)); self.assertIn(["--bind", f"{wd}/.git", f"{wd}/.git"], pairs(p))
+        self.assertIn(["--bind", tmp, "/tmp"], pairs(p)); self.assertNotIn(["--bind", "/tmp", "/tmp"], pairs(p))
+        if "--tmpfs" in p: self.assertTrue(max(i for i, x in enumerate(p) if x == "--bind") < min(i for i, x in enumerate(p) if x == "--tmpfs"))   # hides last
+        ro = lib.sandbox_prefix(wd, False)                                      # write=False: its cwd stays read-only, real /tmp
+        self.assertNotIn(["--bind", wd, wd], pairs(ro)); self.assertIn(["--bind", "/tmp", "/tmp"], pairs(ro))
+        self.assertIn(["--bind", other, other], pairs(lib.sandbox_prefix(wd, True, rw=[other])))
+        if subprocess.run(p + ["true"], capture_output=True).returncode != 0: return   # bwrap present but not allowed here (CI)
+        r = subprocess.run(p + ["bash", "-c", f"touch {wd}/ok; touch /tmp/ok; touch {other}/no; touch {self.tmp}/no; touch /etc/no; true"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)                             # judged by what reached the real disk:
+        self.assertTrue(os.path.exists(f"{wd}/ok") and os.path.exists(f"{tmp}/ok"))   # its worktree + its private /tmp
+        self.assertFalse(os.path.exists(f"{other}/no") or os.path.exists(f"{self.tmp}/no") or os.path.exists("/etc/no"))
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

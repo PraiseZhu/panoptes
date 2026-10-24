@@ -39,7 +39,9 @@ def main():
                 try: cands += [t for t in x_search(q, days=days) if t["id"] not in have and t["media"] and t["id"] not in {c["id"] for c in cands}]
                 except Exception as e: log("x_search fail", str(e)[:200])
             if len(cands) >= DAY_MIN * 2: break
-        txt, tid = pi("work", "/tmp", prompt(d, outdir, cands[:40], DAY_MIN, m == "pi"), f"xstyle-{d}", timeout=900, write=True, web=True)
+        os.makedirs(outdir, exist_ok=True)   # 10-24 Q4: the sandbox is read-only but for these (the style library only in pi mode)
+        txt, tid = pi("work", "/tmp", prompt(d, outdir, cands[:40], DAY_MIN, m == "pi"), f"xstyle-{d}", timeout=900, write=True, web=True,
+                      rw=[outdir] + ([STYLE_LIB] if m == "pi" else []))
         got = re.search(r"SETS=(\d+)", txt); n = int(got.group(1)) if got else 0
         write_atomic(f"{BASE}/out/knowledge/{d}.xstyle.md", head + f"- task {tid}；今日 {n} 套" + ("" if n >= DAY_MIN else f"（< {DAY_MIN}，未达标）") + f"\n\n{txt}\n")
     if now_cst().weekday() == 4 or os.environ.get("XSTYLE_WEEKLY"):
