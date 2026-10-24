@@ -351,8 +351,30 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   const prDiff = await diffForReview({ repo, sha, baseSha, extraRefspecs })
   if (wantCov && !par.parallel) covRun = startCov()
   const cov = await covRun
-  // 覆盖率轮次可能很久：跑完再看一次时间预算，超了就不再重跑 / 跑基线（外层按 pr-timeout 记未测完）
-  if (overBudget()) return out
+  // 检查清单（每步带维度）；超时 / 不可用的步骤同时以自己的 step id 记进 qa_tool_failures
+  const stepById = Object.fromEntries(profile.steps.map((s) => [s.id, s]))
+  const checkRows = (results) => (results ?? []).map((r) => {
+    const step = stepById[r.id] ?? { id: r.id, kind: r.kind }
+    if (r.unavailable) health.qa_tool_failures.push({ pr: number, stage: r.id, dimension: toBox(step, profile), message: `check could not run: ${r.unavailableReasonZh}` })
+    if (r.timedOut) health.qa_tool_failures.push({ pr: number, stage: r.id, dimension: toBox(step, profile), message: `check timed out after ${Math.round(r.durationMs / 60000)} min` })
+    return {
+      id: r.id, name: r.nameZh, kind: r.kind, dimension: toBox(step, profile), qa_dimensions: step.covers ?? [],
+      status: r.unavailable ? 'unavailable' : r.timedOut ? 'timeout' : r.ok ? 'pass' : 'fail',
+      exit_code: r.exitCode, signal: r.signal ?? null, ended_at: r.endedAt ?? null, duration_ms: r.durationMs, failure_count: r.failures?.length ?? 0,
+      ...(r.unavailable ? { unavailable_reason: r.unavailableReasonZh } : {}),
+      ...(r.probeReport ? { sub_checks: probeSummary(r.probeReport) } : {}),
+      ...(r.shards ? { shards: r.shards } : {}),
+      ...(r.reused ? { reused: true, reused_from: r.reusedFrom } : {}),
+    }
+  })
+  // 时间预算用完的收尾：不再重跑 / 跑基线（外层按 pr-timeout 记未测完）。被打断那一轮跑完的检查要交给 partial_result
+  // （report-schema：{ verdict, checks, evidence_dir }），否则报告只剩一条笼统的 budget exceeded，看不出是哪一步吃掉了预算
+  const budgetPartial = () => {
+    out.partial_result = { verdict: out.verdict, checks: checkRows(first), evidence_dir: out.evidence_dir ?? null }
+    return out
+  }
+  // 覆盖率轮次可能很久：跑完再看一次时间预算
+  if (overBudget()) return budgetPartial()
   const readAtSha = (file) => { try { return execFileSync('git', ['-C', mirrorPath(repo), 'show', `${sha}:${file}`], { encoding: 'utf8', maxBuffer: 8 << 20 }) } catch { return null } }
   out.coverage_gate = computeCoverageGate({ first: Array.isArray(cov) ? cov : [], prDiff, covError: cov?.error, changedFiles: files.map((f) => f.filename), readFile: readAtSha })
 
@@ -363,7 +385,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     if (failed.some((id) => profile.steps.find((x) => x.id === id)?.trialOnly)) {
       out.rerun_idle_wait = await waitForIdle()
       // 等空闲可能很久：等完再看一次时间预算，超了就不重跑
-      if (overBudget()) return out
+      if (overBudget()) return budgetPartial()
     }
     rerun = await executeOnSha({ ...common, label: 'h2', sha, stepIds: failed })
     const still = failed.filter((id) => failedIds(rerun).includes(id))
@@ -400,21 +422,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   out.skipped_steps.push(...probeSkippedSteps(first, profile))
 
   // 检查清单（每步带维度）
-  const stepById = Object.fromEntries(profile.steps.map((s) => [s.id, s]))
-  for (const r of first) {
-    const step = stepById[r.id] ?? { id: r.id, kind: r.kind }
-    out.checks.push({
-      id: r.id, name: r.nameZh, kind: r.kind, dimension: toBox(step, profile), qa_dimensions: step.covers ?? [],
-      status: r.unavailable ? 'unavailable' : r.timedOut ? 'timeout' : r.ok ? 'pass' : 'fail',
-      exit_code: r.exitCode, signal: r.signal ?? null, ended_at: r.endedAt ?? null, duration_ms: r.durationMs, failure_count: r.failures?.length ?? 0,
-      ...(r.unavailable ? { unavailable_reason: r.unavailableReasonZh } : {}),
-      ...(r.probeReport ? { sub_checks: probeSummary(r.probeReport) } : {}),
-      ...(r.shards ? { shards: r.shards } : {}),
-      ...(r.reused ? { reused: true, reused_from: r.reusedFrom } : {}),
-    })
-    if (r.unavailable) health.qa_tool_failures.push({ pr: number, stage: r.id, dimension: toBox(step, profile), message: `check could not run: ${r.unavailableReasonZh}` })
-    if (r.timedOut) health.qa_tool_failures.push({ pr: number, stage: r.id, dimension: toBox(step, profile), message: `check timed out after ${Math.round(r.durationMs / 60000)} min` })
-  }
+  out.checks.push(...checkRows(first))
 
   // 失败检查 → findings
   if (setupFailed(first)) {
@@ -1555,7 +1563,7 @@ export async function processTargets(targets, { opts = {}, health, startedAt = n
       const code = byTimeout ? 'pr-timeout' : cutCode
       const why = byTimeout ? `per-PR time budget of ${opts.prTimeoutMin} min exceeded` : burst ? burstReason(deadlineMs, 'while this PR was being tested') : `run deadline ${new Date(deadlineMs).toISOString()} reached`
       const e = notTestedEntry(t, code, why)
-      if (result) e.partial_result = { verdict: result.verdict, checks: result.checks, evidence_dir: result.evidence_dir ?? null }
+      if (result) e.partial_result = result.partial_result ?? { verdict: result.verdict, checks: result.checks, evidence_dir: result.evidence_dir ?? null }
       health.qa_tool_failures.push({ pr: t.number, stage: code, message: why })
       result = e
     }
