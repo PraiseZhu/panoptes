@@ -362,7 +362,7 @@ class TestFixOne(GitTmp):
     def test_success_red_green_revert_commit_action(self):
         calls = self.fake_pi({"repro": write_test, "fix1": write_fix})
         out, res = X.fix_one(dict(self.c), self.A(), "2026-10-23")
-        self.assertEqual(out["status"], "pr_action_written", res["steps"])
+        self.assertEqual(out["status"], "pr_action_written", (out.get("error"), res["steps"]))
         self.assertTrue(out["auto_merge"], res["auto_merge_why"])
         self.assertEqual([(t, s, w) for t, s, w in calls], [("deep", "repro", True), ("deep", "fix1", True)])
         names = [k for k, ok, _ in res["steps"]]; oks = [ok for k, ok, _ in res["steps"]]
