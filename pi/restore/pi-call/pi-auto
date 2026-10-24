@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# pi-auto <tier> <cwd> "<prompt>" [pi-task run flags...]  — tier picks model+thinking; never pass --model/--thinking.
+# Recreated 2026-10-23 after box reset (original not in grokbot-box backup).
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+export PATH=$HOME/.local/node22/bin:$HOME/.local/bin:$PATH
+tier=${1:?tier}; shift
+case "$tier" in
+  quick)      m=tap/deepseek/deepseek-flash;       t=low ;;
+  work)       m=tap/deepseek/deepseek-flash;       t=high ;;
+  heavy)      m=tap/deepseek/deepseek-v4.1-flash;  t=high ;;
+  deep)       m=tap/deepseek/deepseek-v4.1-flash;  t=max ;;
+  review)     m=tap/openai/gpt-6-luna;             t=max ;;
+  judge)      m=tap/anthropic/claude-opus-5-5;     t=medium ;;
+  judge-hard) m=tap/anthropic/claude-opus-5-5;     t=high ;;
+  *) echo "pi-auto: unknown tier $tier (quick|work|heavy|deep|review|judge|judge-hard)" >&2; exit 64 ;;
+esac
+for a in "$@"; do case "$a" in --model|--thinking) echo "pi-auto: --model/--thinking not allowed" >&2; exit 64;; esac; done
+[ -z "${DEEPSEEK_API_KEY:-}" ] && [ -r "$HOME/.pi-fallback-secret/env" ] && { set -a; . "$HOME/.pi-fallback-secret/env"; set +a; }
+[ -n "${DEEPSEEK_API_KEY:-}" ] || { echo "pi-auto: DEEPSEEK_API_KEY unset (~/.pi-fallback-secret/env missing)" >&2; exit 78; }
+cwd=$1; prompt=$2; shift 2
+exec node "$here/pi-task.mjs" run "$cwd" "$prompt" --model "$m" --thinking "$t" "$@"

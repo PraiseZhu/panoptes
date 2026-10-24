@@ -1,0 +1,51 @@
+{
+  "providers": {
+    "tap": {
+      "baseUrl": "https://llm-proxy.tapsvc.com/v1",
+      "api": "openai-completions",
+      "apiKey": "$DEEPSEEK_API_KEY",
+      "models": [
+        {
+          "id": "deepseek/deepseek-flash",
+          "reasoning": true,
+          "contextWindow": 1000000,
+          "maxTokens": 65536,
+          "thinkingLevelMap": {
+            "xhigh": "max",
+            "max": "max"
+          }
+        },
+        {
+          "id": "deepseek/deepseek-v4.1-flash",
+          "reasoning": true,
+          "contextWindow": 1000000,
+          "maxTokens": 65536,
+          "thinkingLevelMap": {
+            "xhigh": "max",
+            "max": "max"
+          }
+        },
+        {
+          "id": "anthropic/claude-opus-5-5",
+          "reasoning": true,
+          "contextWindow": 200000,
+          "maxTokens": 32000,
+          "thinkingLevelMap": {
+            "xhigh": null,
+            "max": null
+          }
+        },
+        {
+          "id": "openai/gpt-6-luna",
+          "reasoning": true,
+          "contextWindow": 400000,
+          "maxTokens": 64000,
+          "thinkingLevelMap": {
+            "xhigh": "xhigh",
+            "max": "xhigh"
+          }
+        }
+      ]
+    }
+  }
+}

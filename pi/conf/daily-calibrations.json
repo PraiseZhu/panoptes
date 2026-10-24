@@ -1,0 +1,17 @@
+{
+ "_doc": "Mivo QA 日报 calibrations for Pi daily.py. by_day.<数据日>.corrections = 「补测结果（之前合并的 PR）」 lines (运维 校准 / Praise rulings, copied from the Grok line). by_day.<数据日>.hold = PRs in the window that the published report did not carry; they stay in out/daily/<day>.json as carry_over and are NOT rendered/DM'd for that day. Only add entries with a source.",
+ "by_day": {
+  "2026-10-22": {
+   "corrections": [
+    "更正：#1145（10 月 21 日合并）那条审查 P1 经核实是误报，整体从 P1 改为 P2，只剩新代码测试覆盖偏低（82%）要补。",
+    "更正：#1153（10 月 21 日合并）那个单元测试失败是测试机环境问题，跟这个 PR 无关，从 P2 改为 P3，无需处理。",
+    "更正：#1144（10 月 21 日合并）那条 AI 补测线索作废，审查 P1 经确认是有意这样设计，整体改为 P3，无需处理。",
+    "#918 的 P1 代码已经修了，但还要管理员在仓库设置里改好环境保护后才算生效，目前是“代码已修、等管理员改设置”。"
+   ],
+   "hold": {
+    "434": "merged 2026-10-22T15:38:39Z (23:38 北京, inside the 10-22 window) but its QA report was generated 10-23 00:01 北京 and the Grok 10-22 run worked from the PR list frozen in resume (22:40) + 运维's '10-22 已测完' list, so the sent report has 24 PRs. Its only P2 is api-probe 「按画布列出已挂资产」 status=unverified (rerun incomplete / not comparable) = suspected stale probe (运维 resume:40). Carry to the next report as a late-merge note once 运维 rules on the probe; do not @/DM until then. NOTE: dm:2026-10-22:434 was already sent by the Pi line at 11:50 (incident)."
+   },
+   "lead_only": {"1211": "AI-test only P2; Praise PR ruled mock-auth false positive (运维 resume:12)"}
+  }
+ }
+}

@@ -39,3 +39,13 @@ report/content-*.json
 report/mentions-*.json
 report/sample-*.json
 report/sample-*.txt
+
+# Pi line (pi/): runtime state lives in /workspace/mivo-qa/pi, throw-away work in /workspace/pi-work -- never in the repo
+pi/out/
+pi/build/
+pi/takeover/
+pi/outbound-enabled
+pi/outbound-disabled-types*
+pi/ops-repair-enabled
+pi/**/*.bak*
+pi/**/__pycache__/

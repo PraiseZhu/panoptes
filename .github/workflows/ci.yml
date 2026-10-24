@@ -57,6 +57,20 @@ jobs:
           node -e 'JSON.parse(require("fs").readFileSync("report/allowed-chats.example.json","utf8"))'
           python -m py_compile scripts/*.py
 
+      # Pi line (pi/, merged in 10-24): every script compiles, every shell script parses, every pi/test/test_*.py passes
+      # (no network, no model; tests that need the box's own data skip themselves)
+      - name: Pi line selftest
+        run: bash pi/bin/selftest.sh
+
+      # infrafix (fix/infra-* branches) fixes panoptes itself and must never change the Pi line that runs it
+      - name: infra fixes never touch pi/
+        if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'fix/infra-')
+        run: |
+          git fetch -q --no-tags --unshallow origin || git fetch -q --no-tags origin "${{ github.base_ref }}"
+          if git diff --name-only "origin/${{ github.base_ref }}...HEAD" | grep -E '^pi/'; then
+            echo "::error::an infrafix PR (fix/infra-*) changes pi/ -- the bot may not change itself"; exit 1
+          fi
+
       - name: argus tests
         working-directory: argus
         env:
