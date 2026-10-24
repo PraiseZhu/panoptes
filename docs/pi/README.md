@@ -70,7 +70,7 @@ panoptes catch-up 每 2 小时 :07 + 每次合并（mergewatch）起跑；修 PR
 | boxhealth.py | 只告警真问题：平台僵尸（Xvfb 等）不算；内存看连续 ≥5 分钟 <3G 或 swap>4G；按状态变化发、恢复发一次 | :17 | out/box/alert-state.json |
 | opsenv.py | panoptes 自动部署：main、干净、落后、目标提交 CI 全成功、两把锁都空闲才 ff-only；状态变化私信 | :25 | out/ops/env-state.json |
 | run.sh | 先编译检查（失败 rc=3，watchdog 告警）；零模型作业不受 3G 门；重作业最多等 10 分钟内存 | — | — |
-| grokbot-box/sync.sh | push 被拒（快照分叉）时以 origin 为底重提交再推（不 force） | :17 | /tmp/grokbot-box-sync.log |
+| grokbot-box/sync.sh | push 被拒（快照分叉）时以 origin 为底重提交再推（不 force） | :17 | /workspace/grokbot-box-check/sync.log |
 | ~/.config/cindy-launch/nudge-loop.sh | 不依赖 cron 的 cron 看门狗：每 60 秒 cron 不在就 sudo -n 拉起 | 常驻 | /workspace/box-ops/cron-restarts.log |
 | takeover/dailyretro、roster | 日报复盘、花名册恢复（复盘经 outbound 私信 Praise）；switch.sh / restore 60 段同步管理这两个标记 | — | — |
 

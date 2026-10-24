@@ -148,7 +148,7 @@ def merge_report_check(now, probs, st):
 
 
 def backup_check(now, probs):
-    try: lines = open("/tmp/grokbot-box-sync.log", errors="replace").read().splitlines()[-400:]
+    try: lines = open("/workspace/grokbot-box-check/sync.log", errors="replace").read().splitlines()[-400:]
     except OSError: lines = []
     res = [l for l in lines if l.startswith(("pushed", "PUSH FAILED", "no changes", "SECRET SCAN HIT"))]
     head = subprocess.run(["git", "-C", "/workspace/grokbot-box", "log", "-1", "--format=%ct"], capture_output=True, text=True).stdout.strip()
@@ -166,11 +166,11 @@ def backup_check(now, probs):
             ("每小时一次的机器备份，这次在要备份的文件里发现了像密钥的内容，为了不把密钥传到 GitHub，整次备份没推。" if secret
              else "每小时一次的机器备份（推到 GitHub 的 grokbot-box），最近一次没推上去。"),
             "这段时间的改动没有备份，机器再出事（像昨晚被回滚）就找不回来。",
-            todo=PN.ask_session(f"grokbot-box 备份同步失败（{res[-1][:60]}），看 /tmp/grokbot-box-sync.log，" +
+            todo=PN.ask_session(f"grokbot-box 备份同步失败（{res[-1][:60]}），看 /workspace/grokbot-box-check/sync.log，" +
                                 ("找出被拦下的文件，把密钥移出备份范围或加进排除名单，再推一次" if secret else "查原因修好，再推一次")))
     if age_h > 3: probs["backup:stale"] = PN.item("action", "机器备份停了", f"机器备份本该每小时推一次，已经 {age_h:.1f} 小时没有新的了。",
         "这段时间的改动没有备份，机器再出事（像昨晚被回滚）就找不回来。",
-        todo=PN.ask_session(f"grokbot-box 备份已 {age_h:.1f} 小时没有新提交，看 /tmp/grokbot-box-sync.log 和 /etc/cron.d/grokbot-box-sync，查原因修好"))
+        todo=PN.ask_session(f"grokbot-box 备份已 {age_h:.1f} 小时没有新提交，看 /workspace/grokbot-box-check/sync.log 和 /etc/cron.d/grokbot-box-sync，查原因修好"))
 
 
 CHECK_LOG = "/workspace/grokbot-box-check/check.log"

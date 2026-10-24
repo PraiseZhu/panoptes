@@ -18,13 +18,13 @@ def main():
       "Mivo QA 运维": {"review_ops_latest": sorted(glob.glob("/workspace/review-ops/daily/*.md"))[-1],
                      "catch_up_log_age_h": age("/workspace/mivo-qa/argus-root/logs/catch-up-cron.log")},
       "Mivo 合并官": {"PAUSED": os.path.exists("/workspace/mivo-merger/PAUSED"), "audit_age_h": age("/workspace/mivo-merger/audit.log")},
-      "备份管家": {"sync_log_age_h": age("/tmp/grokbot-box-sync.log")},
+      "备份管家": {"sync_log_age_h": age("/workspace/grokbot-box-check/sync.log")},
       "电脑运维": {"memlog_age_h": age("/workspace/box-ops/mem.log")},
       "pi_line_outputs": sorted(os.path.relpath(p, BASE) for p in glob.glob(f"{BASE}/out/*/{y}*") + glob.glob(f"{BASE}/out/*/{d}*"))[:60],
     }
     if mode() == "pi":   # 10-23: Pi line is the production line -> its outputs are the bots' deliveries
         tk = jload_(f"{BASE}/out/praise-pr/tickets.json", {}).get("tickets", {}); wd = jload_(f"{BASE}/out/watchdog/state.json", {})
-        sync = [l for l in open("/tmp/grokbot-box-sync.log", errors="replace").read().splitlines()[-300:] if l.startswith(("pushed", "PUSH FAILED", "no changes"))] if os.path.exists("/tmp/grokbot-box-sync.log") else []
+        sync = [l for l in open("/workspace/grokbot-box-check/sync.log", errors="replace").read().splitlines()[-300:] if l.startswith(("pushed", "PUSH FAILED", "no changes"))] if os.path.exists("/workspace/grokbot-box-check/sync.log") else []
         facts["pi_line_evidence"] = {
             "Mivo QA 日报": {"daily_md": os.path.exists(f"{BASE}/out/daily/{y}.md"), "slack_sent_for_yesterday": facts["Mivo QA 日报"]["slack_sent_for_yesterday"]},
             "Mivo 测试项目经理": {"pm_md": os.path.exists(f"{BASE}/out/pm/{y}.md") or os.path.exists(f"{BASE}/out/pm/{d}.md")},

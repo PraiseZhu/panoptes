@@ -51,7 +51,7 @@ def du(paths):
 KEEP_DAYS = 7
 TMP_ROOT = os.environ.get("BOXHEALTH_TMP_ROOT") or "/tmp"          # tests only
 TZ_DRIFT_LOG = os.environ.get("BOXHEALTH_TZ_LOG") or "/workspace/box-ops/tz-drift.log"
-LOGS_CAP = ["/var/log/earlyoom.log", "/tmp/grokbot-box-sync.log", "/workspace/box-ops/*.log", "/workspace/grokbot-box-check/*.log"]
+LOGS_CAP = ["/var/log/earlyoom.log", "/workspace/box-ops/*.log", "/workspace/grokbot-box-check/*.log"]
 LOG_MAX, LOG_KEEP = 200 << 20, 20 << 20
 BLACK = re.compile(r"(?i)cindy|keyring|restic|snapshot|box-restore|agent-data|^\.x11|^\.ice|^\.font|^tmux|^ssh-|^systemd|^sand|^xdg")
 QA_LOCKS = [f"/workspace/mivo-qa/argus-root/{n}" for n in ("nightly.lock", ".nightly.lock", "catch-up.lock", ".catch-up.lock")]
