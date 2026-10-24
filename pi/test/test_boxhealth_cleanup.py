@@ -58,6 +58,13 @@ class TestCleanup(unittest.TestCase):
         self.assertEqual(B.tz_drifts(st), ["a", "b"]); self.assertEqual(B.tz_drifts(st), [])
         open(B.TZ_DRIFT_LOG, "a").write("c\n"); self.assertEqual(B.tz_drifts(st), ["c"])
 
+    def test_tz_drift_dm_at_most_once_a_day(self):
+        st = {}
+        self.assertIn("2 次", B.tz_drift_event(st, ["x1", "x2"], "2026-10-24"))
+        self.assertIsNone(B.tz_drift_event(st, ["x3"], "2026-10-24")); self.assertIsNone(B.tz_drift_event(st, ["x4"], "2026-10-24"))
+        e = B.tz_drift_event(st, [], "2026-10-25"); self.assertIn("2 次", e); self.assertIn("x4", e)          # the day's drifts, counted
+        self.assertIsNone(B.tz_drift_event(st, [], "2026-10-26"))                                            # none since: no DM
+
 if __name__ == "__main__":
     try: unittest.main(verbosity=1)
     finally: shutil.rmtree(T, ignore_errors=True)
