@@ -6,10 +6,11 @@ appends one line to /workspace/box-ops/health.log. Small fixes (sudo -n, idempot
 PI_BOXHEALTH_DRYRUN=1 / --dry-run -> report fixes and the cleanup list without doing them.
 Cleanup (2026-10-24, Praise: "超过 7 天自动删，要真删"): really deletes, every run, what is older than 7 days in the whitelist --
 npm / pip caches (per file), apt's downloaded .debs, this user's top-level /tmp entries that nothing touched for 7 days and no
-process holds (cwd / root / open fd, as panoptes scripts/sweep-tmp.sh), /tmp/cindy.deb -- and cuts a log over 200 MB in LOGS_CAP to
-its last 20 MB. Never the blacklist (Cindy / cindy-launch / CindyGlobal, keyrings, restic, snapshots, box-restore, agent-data). Not
-while a QA run holds its lock (flock -n, not "the lock file exists": those files stay for good). QA artifacts (evidence,
-step-results, run caches, /tmp/argus-*) are janitor's and panoptes' sweep-tmp.sh's, never this script's.
+process holds (cwd / root / open fd, as panoptes scripts/sweep-tmp.sh), /tmp/cindy.deb, log files in LOG_DIRS older than 7 days
+(this script is the only one that deletes logs: age = the date in the file name, else its mtime) -- and cuts a log over 200 MB in
+LOGS_CAP to its last 20 MB. Never the blacklist (Cindy / cindy-launch / CindyGlobal, keyrings, restic, snapshots, box-restore,
+agent-data), never /tmp/argus-* (panoptes' sweep-tmp.sh) and never anything a process holds -- so a running QA run (flock -n on
+its lock; only reported) does not stop the rest. QA evidence, step-results and bot work dirs are janitor's.
 Time zone: the sand platform's own setting decides (Praise 10-24: "时区就按 grok bot 官方的走 不去动他"); nothing here reads or
 changes it. box-ops cron (/etc/cron.d/box-ops) does NO cleanup, so cleanup has a single owner: this script."""
 from lib import *
@@ -53,6 +54,15 @@ TMP_ROOT = os.environ.get("BOXHEALTH_TMP_ROOT") or "/tmp"          # tests only
 LOGS_CAP = ["/var/log/earlyoom.log", "/workspace/box-ops/*.log", "/workspace/grokbot-box-check/*.log"]
 LOG_MAX, LOG_KEEP = 200 << 20, 20 << 20
 BLACK = re.compile(r"(?i)cindy|keyring|restic|snapshot|box-restore|agent-data|^\.x11|^\.ice|^\.font|^tmux|^ssh-|^systemd|^sand|^xdg")
+LOG_DIRS = (os.environ.get("BOXHEALTH_LOG_DIRS") or "/workspace/mivo-qa/argus-root/logs:/workspace/mivo-qa/pi/out/logs:/workspace/box-ops:"
+            "/workspace/grokbot-box-check").split(":")                 # env: tests only
+LOG_NAME = re.compile(r"\.log($|[.-])")                     # x.log, x.log.1, x.log.gz, mem.log.20261016-022110.gz
+NAME_DAY = re.compile(r"(20\d\d)-?(\d\d)-?(\d\d)")
+def log_day(name):
+    """the day a log file is about: the date in its name (nightly-20261016T..., prwatch-2026-10-16.log), None when it has none"""
+    m = NAME_DAY.search(name)
+    try: return dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
+    except ValueError: return None
 QA_LOCKS = [f"/workspace/mivo-qa/argus-root/{n}" for n in ("nightly.lock", ".nightly.lock", "catch-up.lock", ".catch-up.lock")]
 def lock_held(p):
     """a QA lock someone holds right now (flock -n fails) -- the files themselves never go away"""
@@ -77,16 +87,26 @@ def cleanup_candidates():
         c += [(p, "file") for p in sh(f"find {root} -type f -mtime +{KEEP_DAYS} 2>/dev/null").splitlines() if p]
     c += [(p, "sudo") for p in sh(f"find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -mtime +{KEEP_DAYS} 2>/dev/null").splitlines() if p]
     if os.path.exists(f"{TMP_ROOT}/cindy.deb"): c.append((f"{TMP_ROOT}/cindy.deb", "file"))
-    if not locks:
-        held = held_paths(); me = os.getuid()
-        for name in sorted(os.listdir(TMP_ROOT)):
-            p = f"{TMP_ROOT}/{name}"
-            try: stt = os.lstat(p)
-            except OSError: continue
-            if stt.st_uid != me or BLACK.search(name) or name.startswith("argus-") or name == "cindy.deb": continue
-            if any(h == p or h.startswith(p + "/") for h in held): continue
-            if sh(f"find '{p}' -mmin -{KEEP_DAYS * 1440} -print -quit 2>/dev/null"): continue    # anything inside touched within 7 days
-            c.append((p, "tree" if os.path.isdir(p) and not os.path.islink(p) else "file"))
+    held = held_paths(); me = os.getuid()
+    cutoff = now_cst().date() - dt.timedelta(days=KEEP_DAYS)          # a full 7-day window stays (infrafix reads 7 days)
+    for d in LOG_DIRS:
+        try: names = sorted(os.listdir(d))
+        except OSError: continue
+        for name in names:
+            p = f"{d}/{name}"
+            if not LOG_NAME.search(name) or os.path.islink(p) or not os.path.isfile(p) or p in held: continue
+            day = log_day(name)
+            old = day < cutoff if day else time.time() - os.path.getmtime(p) > KEEP_DAYS * 86400
+            if old: c.append((p, "file"))
+    # 10-24 review: a QA run holding its lock no longer stops /tmp -- argus-* are never ours and held paths are skipped anyway
+    for name in sorted(os.listdir(TMP_ROOT)):
+        p = f"{TMP_ROOT}/{name}"
+        try: stt = os.lstat(p)
+        except OSError: continue
+        if stt.st_uid != me or BLACK.search(name) or name.startswith("argus-") or name == "cindy.deb": continue
+        if any(h == p or h.startswith(p + "/") for h in held): continue
+        if sh(f"find '{p}' -mmin -{KEEP_DAYS * 1440} -print -quit 2>/dev/null"): continue    # anything inside touched within 7 days
+        c.append((p, "tree" if os.path.isdir(p) and not os.path.islink(p) else "file"))
     for pat in LOGS_CAP:
         for p in glob.glob(pat):
             try:
@@ -166,7 +186,7 @@ def main():
     if fixed and not DRY and len(bad) < len(fixed): events.append("已修复: " + "; ".join(f for f in fixed if f not in bad))
     line = (f"{t.strftime('%F %T')} CST [pi-line{' dry' if DRY else ''}] avail={avail}MB low_streak={low_min}min load={load} disk={disk} zombies={zomb}(ours {len(ours)}) top={top.strip()} "
             f"clean={'done freed=' + str(freed // 2**20) + 'MB' if clean else 'dry'} candidates={len(cand)}项/{cand_b // 2**20}M"
-            f"{' (测试在跑，/tmp 不清: ' + ','.join(os.path.basename(l) for l in locks) + ' 被占)' if locks else ''} "
+            f"{' (测试在跑: ' + ','.join(os.path.basename(l) for l in locks) + ' 被占；只清它没在用的)' if locks else ''} "
             f"janitor={janitor_summary()} "
             f"issues={'; '.join(issues) or 'none'} fixed={'; '.join(fixed) or 'none'}")
     if DRY: print(line); print("candidates:", *(f"{k} {p}" for p, k in cand), sep="\n  ")
