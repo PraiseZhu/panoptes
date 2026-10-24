@@ -96,6 +96,20 @@ class TestBackupRules(unittest.TestCase):
         p = {}; watchdog.backup_rules_check(now, p); self.assertEqual(list(p), ["backup:rules-stale"])
 
 
+class TestBackupSessions(unittest.TestCase):   # 10-24: conversations backup + logs branch, fyi only
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="watchdog-sync-"); self.saved = watchdog.SYNC_LOG; watchdog.SYNC_LOG = f"{self.tmp}/sync.log"
+    def tearDown(self):
+        watchdog.SYNC_LOG = self.saved; shutil.rmtree(self.tmp, ignore_errors=True)
+    def run_(self, text):
+        open(watchdog.SYNC_LOG, "w").write(text); p = {}; watchdog.backup_check(watchdog.now_cst(), p)
+        return {k.split(":")[1]: v for k, v in p.items() if k.startswith("backup:") and k.split(":")[1] in ("sessions-skip", "sessions-1g", "logs-ring")}
+    def test_lines_of_the_last_runs(self):
+        self.assertEqual(self.run_("sessions-export: wrote 3\ncommitted\npushed\n"), {})
+        p = self.run_("SESSIONS SECRET SKIP: sessions/claude-code/2026-10/x/abc.jsonl\nsessions-export: wrote 1\nSESSIONS OVER 1G\ncommitted\npushed\nWARN logs-ring failed (main backup not affected)\n")
+        self.assertEqual(sorted(p), ["logs-ring", "sessions-1g", "sessions-skip"]); self.assertTrue(all(v["kind"] == "fyi" for v in p.values()))
+        self.assertIn("abc.jsonl", p["sessions-skip"]["what"])
+
 class TestPrBotAndVigil(unittest.TestCase):
     """10-24: nothing watched the 修 PR bot line, nor the Mac mini watcher (down 21:54-03:20 unnoticed)."""
     def setUp(self):

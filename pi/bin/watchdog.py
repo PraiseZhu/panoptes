@@ -147,8 +147,9 @@ def merge_report_check(now, probs, st):
     st["merged_checked_at"] = time.time(); st["merged_probs"] = mp; probs.update(mp)
 
 
+SYNC_LOG = "/workspace/grokbot-box-check/sync.log"
 def backup_check(now, probs):
-    try: lines = open("/workspace/grokbot-box-check/sync.log", errors="replace").read().splitlines()[-400:]
+    try: lines = open(SYNC_LOG, errors="replace").read().splitlines()[-400:]
     except OSError: lines = []
     res = [l for l in lines if l.startswith(("pushed", "PUSH FAILED", "no changes", "SECRET SCAN HIT"))]
     head = subprocess.run(["git", "-C", "/workspace/grokbot-box", "log", "-1", "--format=%ct"], capture_output=True, text=True).stdout.strip()
@@ -168,6 +169,20 @@ def backup_check(now, probs):
             "这段时间的改动没有备份，机器再出事（像昨晚被回滚）就找不回来。",
             todo=PN.ask_session(f"grokbot-box 备份同步失败（{res[-1][:60]}），看 /workspace/grokbot-box-check/sync.log，" +
                                 ("找出被拦下的文件，把密钥移出备份范围或加进排除名单，再推一次" if secret else "查原因修好，再推一次")))
+    # 10-24 (box-ops plan §C §E): what the last runs said about the conversations backup and the 7-day logs branch -- fyi only
+    tail = lines[-60:]
+    skips = sorted({l.split(":", 1)[1].strip() for l in tail if l.startswith("SESSIONS SECRET SKIP:")})
+    if skips:
+        probs["backup:sessions-skip:" + hashlib.sha1("|".join(skips).encode()).hexdigest()[:8]] = PN.item("fyi", "有个对话没进备份（不急）",
+            f"对话备份时，{len(skips)} 个对话文件遮蔽后还是被密钥扫描拦下了（{skips[0]}），只跳过了它，其余备份照常推送。",
+            "这个对话暂时没有备份；它下次变动时会再试。", todo="不急，有空时" + PN.ask_session(
+                f"grokbot-box 的 sessions 备份跳过了 {skips[0]}（SESSIONS SECRET SKIP），看是哪段像密钥：是真密钥就补进 tools/redact.py 的规则，是误报就加 .secret-allowlist"))
+    if any(l.startswith("SESSIONS OVER 1G") for l in tail):
+        probs["backup:sessions-1g"] = PN.item("fyi", "对话备份超过 1G 了（不急）", "备份仓里的对话记录（sessions/）已经超过 1G。对话是永久保留的，所以会一直涨。",
+            "备份仓变大，推送和恢复都会变慢。", todo="不急，有空时决定要不要把更早的对话挪出备份仓，或者把工具输出再截短")
+    if any(l.startswith(("WARN logs-ring failed", "logs-ring FAILED")) for l in tail[-20:]):
+        probs["backup:logs-ring"] = PN.item("fyi", "日志备份分支没更新（不急）", "每天一次把最近 7 天的日志推到备份仓 logs 分支，这次失败了；主备份不受影响。",
+            "出事时查不到最近几天的日志。", todo="不急，有空时" + PN.ask_session("grokbot-box 的 tools/logs-ring.py 失败，看 /workspace/grokbot-box-check/sync.log 里 logs-ring 那行"))
     if age_h > 3: probs["backup:stale"] = PN.item("action", "机器备份停了", f"机器备份本该每小时推一次，已经 {age_h:.1f} 小时没有新的了。",
         "这段时间的改动没有备份，机器再出事（像昨晚被回滚）就找不回来。",
         todo=PN.ask_session(f"grokbot-box 备份已 {age_h:.1f} 小时没有新提交，看 /workspace/grokbot-box-check/sync.log 和 /etc/cron.d/grokbot-box-sync，查原因修好"))
