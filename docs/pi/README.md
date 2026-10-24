@@ -1,6 +1,6 @@
 # Pi line · 2026-10-23 建，北京时间
 
-> **2026-10-24：Pi 线并入 panoptes。** 代码在 `pi/`（部署在 `/workspace/panoptes/pi`），要留的数据在 `/workspace/mivo-qa/pi/`，用完就扔的工作目录在 `/workspace/pi-work/`。下文写到 `/workspace/panoptes/pi/bin`、`conf`、`test` 的地方，现在对应 `pi/` 下的同名目录；写到 `/workspace/mivo-qa/pi/out`、`takeover`、`outbound-*` 的地方，现在对应 `/workspace/mivo-qa/pi/` 下的同名文件。改动只走 PR。
+> **2026-10-24：Pi 线并入 panoptes。** 代码在 `pi/`（部署在 `/workspace/panoptes/pi`），要留的数据在 `/workspace/mivo-qa/pi/`，用完就扔的工作目录在 `/workspace/pi-work/`。下文的路径已经换成新位置；10-23 的验收、对比记录和迁移简报保留原来的 `/workspace/pi-fallback/...` 写法（各文件顶部有说明）。改动只走 PR。
 
 10-23 16:10 起正式接管（fleet-mode=pi + outbound-enabled，真实外发；Grok 对应 routine 已暂停）。10-23 上午的影子期只写文件，下文「影子产出」「对比」列是那时的记录。代码：`/workspace/panoptes/pi/bin/`，产出：`/workspace/mivo-qa/pi/out/`，cron：`/etc/cron.d/pi-fallback`（副本 `/workspace/panoptes/pi/cron/pi-line.cron`）。不改 Grok 线任何东西。
 
