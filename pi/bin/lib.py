@@ -137,7 +137,7 @@ SANDBOX_HIDE_FILES = ("~/.claude/.credentials.json", "~/.git-credentials", "~/.n
 # 10-24 Q4 (plan 2026-10-24): the machine is READ-ONLY for the model; on top of the secret hiding above, only these are writable:
 #   always       what the agent itself writes: ~/.pi (sessions, usage log), PI_STATE/out/tasks (task results), ~/.npm (npx cache)
 #   write=True   the call's cwd and, when cwd is a git worktree, its repo's git dir (index, objects, refs: git add / stash / commit)
-#   rw=(...)     extra dirs a job names (xstyle: its output dirs)
+#   rw=(...)     extra dirs a job names (e.g. an output dir)
 #   /tmp         a private /tmp for a call in a bot worktree (PI_WORK/tmp/sbx-*, gone after the call); other calls keep /tmp
 # A person's checkouts, the deployed code (/workspace/panoptes), other tickets' worktrees and everything else cannot be changed.
 SANDBOX_RW_ALWAYS = ("~/.pi", f"{BASE}/out/tasks", "~/.npm")

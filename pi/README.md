@@ -73,7 +73,6 @@ bot 建的、用完就扔的东西只放在 `/workspace/pi-work/`（`bin/workroo
 | `janitor` | 自动清理：bot 用完的工作目录、临时文件、旧缓存、过期测试证据，以及已关闭 bot PR 的远程分支（见下节） | 7-59/10 * * * * | 本机看护 |
 | `boxcheck` | 机器巡检：每小时只读检查机器状态 | 45 * * * * | 本机看护 |
 | `handoff` | 交接仓回执扫描：扫严健、钟行天交接仓里作者的回复 | 5 * * * * @00；20 * * * * @06,15；35 * * * * @18 | PR bot |
-| `knowledge` | 知识沉淀选题：每周五出公众号选题 | 5 * * * * @08 | 知识/文风 |
 | `daily` | QA 日报：每天 8:35 出昨天合并 PR 的测试日报，并给作者发私信 | 35 * * * * @08 | 项目管理/日报 |
 | `jasper` | 每日简报：每天 9:05 整理给你的工作简报 | 5 * * * * @09 | 知识/文风 |
 | `prretro` | 修 PR 复盘：每天 9:45 复盘修 PR bot 前一天的工作 | 45 * * * * @09 | PR bot |
@@ -89,7 +88,6 @@ bot 建的、用完就扔的东西只放在 `/workspace/pi-work/`（`bin/workroo
 | `boxhealth` | 机器体检：每小时看内存、进程、磁盘，能修的自动修；按「超过 7 天自动删」真删 npm / pip / apt 缓存、/tmp 里 7 天没动又没人用的东西、日志目录（测试日志、Pi 线日志、box-ops 轮转文件、备份检查日志）里超过 7 天的日志（按文件名里的日期，没有日期看修改时间；删日志只有它一家），超过 200MB 的日志截到最后 20MB | 17 * * * * | 本机看护 |
 | `roster` | roster | 23 * * * * @08 | 项目管理/日报 |
 | `dailyretro` | 日报复盘：每天 9:56 复盘日报 | 56 * * * * @09 | 项目管理/日报 |
-| `xstyle` | xstyle | 4 * * * * @10 | 知识/文风 |
 | `outbound` | 消息外发：把各个机器人要发的私信、群消息和 GitHub 操作真正发出去 | */10 * * * * | 对外发送 |
 | `credcheck` | 凭证检查：每天 7 点检查各种 token 还有没有效 | 1 * * * * @07 | 本机看护 |
 | `opsfix` | 修复复测：修复 PR 合并后用原来的用例重测 | 30 * * * * @09,12,16,20 retest --execute | 修测试系统 |
@@ -105,8 +103,8 @@ bot 建的、用完就扔的东西只放在 `/workspace/pi-work/`（`bin/workroo
 | 可写 | 什么时候 |
 |---|---|
 | `~/.pi`（会话、用量日志）、`/workspace/mivo-qa/pi/out/tasks`（任务结果）、`~/.npm`（npx 缓存） | 每次调用（模型程序自己要写） |
-| 当前工作目录 + 它所在仓库的 git 目录（`git add` / `stash` / `commit` 要写 index、objects、refs） | 只有 `write=True` 的调用（prfix、infrafix、xstyle） |
-| 作业指名的目录（`rw=`）：xstyle 的输出目录、pi 模式下的风格库 `x-trending` | 只给那一个作业 |
+| 当前工作目录 + 它所在仓库的 git 目录（`git add` / `stash` / `commit` 要写 index、objects、refs） | 只有 `write=True` 的调用（prfix、infrafix） |
+| 作业指名的目录（`rw=`） | 只给那一个作业（2026-10-25 起没有作业用到） |
 | `/tmp` | 在 bot 工作树里的调用：一个私有的 `/tmp`（`/workspace/pi-work/tmp/sbx-*`，调用结束就删），看不到机器上真正的 /tmp；其他调用照旧 |
 
 改不了的包括：panoptes 部署签出（bot 自己的代码）、人的签出、别的单子的工作树、`/workspace/mivo-qa/pi` 的开关和台账、家目录。

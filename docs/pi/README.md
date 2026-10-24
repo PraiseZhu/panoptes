@@ -31,8 +31,7 @@
 | 备份管家 | grokbot-box 每小时推送 | 已是 cron；boxcheck.py 核日志新鲜度、本地=远端 | 每小时 :45 | 无 | out/box/<日>.md | — | ✅ 不需 Grok |
 | 电脑运维 | 保活/内存日志/轮转 + box-health | 已是 cron（box-ops）；boxhealth.py（takeover/boxhealth）接管 box-health；boxcheck.py 只查 | boxhealth 每小时 :17；boxcheck :45 | 无 | out/box/<日>.health.md、<日>.md、<日>.actions.json | — | ✅ boxhealth.py 已接管（清理默认只列） |
 | Cindy 管家 | 每 5 分钟 ensure-cindy.sh | cindy.py（takeover/cindy）每次调 ensure-cindy.sh；boxcheck.py 只查 | 每 5 分钟 | 无 | out/cindy/<日>.md | — | ✅ 已接管 by cindy.py（ensure 有接管守卫，Grok routine 已暂停） |
-| 知识沉淀 | 周五 08:04 10 个选题 | knowledge.py | 每天 08:05（仅周五出题） | work | out/knowledge/<日>.md | 人工 | ✅ |
-| | 工作日 10:04 X 风格收集 | xstyle.py | 10:04 | 有 | — | takeover/xstyle（没建：缺 X_BEARER_TOKEN） | ⛔ 缺密钥 |
+| ~~知识沉淀~~ | 2026-10-25 起知识沉淀的工作转到其他账号，本机不再承担；knowledge.py / xstyle.py / xstyle_weekly.py 和两条 cron 已删除 | — | — | — | — | — | 已移除 |
 | Jasper | 9:00 简报（舰队部分）+ 舰队核查 | jasper.py | 09:05 | work | out/jasper/<日>.md、.facts.json | 人工 | ✅（Slack/邮件/日历部分 ⛔） |
 | — | 对比 | compare.py | 12:50 | 无 | out/compare/<数据日>.md | — | ✅ |
 
@@ -43,7 +42,6 @@
 | 交接 issue 开/关、PR ready、开修复 PR、合并、PR 留言 | gh 写；本阶段禁止 | 盒上 gh（PraiseZhu）已可写，只差批准 |
 | 日报 09:56 复盘、PM/运维发「MivoCanvas QA」Grok 群、给 Chief of Staff 进展、SendToAgent 催办 | Grok Bot 内部群/agent 消息，没有外部 API | 无（Grok 宕机时改发 Slack/飞书需 Praise 定渠道） |
 | Jasper 扫 Slack/邮件/日历/会议纪要 | Grok 连接器 OAuth | Slack user token、Gmail/Calendar OAuth refresh token（Praise 授权给脚本） |
-| 知识沉淀 X 热门长文风格收集、公众号/X 草稿 | X 连接器 | X API bearer/OAuth（及公众号 AppSecret） |
 | 和 Praise 对话、拍板事项 | 人 | — |
 | ~~Cindy 保活、box-health~~ | 10-23 已由 cindy.py / boxhealth.py 接管（见覆盖表） | box-health 真删清理需 Praise 批（PI_BOXHEALTH_CLEAN=1） |
 
@@ -51,7 +49,7 @@
 panoptes catch-up 每 2 小时 :07 + 每次合并（mergewatch）起跑；修 PR 不再让路，和合并测试同时跑，内存是唯一门槛（10-23 Praise），并发规则见文末 10-24。所有重作业 MemAvailable<3G 等待或跳过。
 
 ## 10-23 增补（100% 版）
-- 新作业：outbound.py（外发执行器，*/10，闸门 = fleet-mode=pi 且 outbound-enabled；台账 out/outbound/ledger.json）、cindy.py（*/5，takeover/cindy）、boxhealth.py（:17，takeover/boxhealth，清理默认只列）、dailyretro.py（09:56，takeover/dailyretro）、roster.py（1/15 08:23，takeover/roster）、xstyle.py（工作日 10:04，takeover/xstyle，需 X bearer）、credcheck.py（07:01）。
+- 新作业：outbound.py（外发执行器，*/10，闸门 = fleet-mode=pi 且 outbound-enabled；台账 out/outbound/ledger.json）、cindy.py（*/5，takeover/cindy）、boxhealth.py（:17，takeover/boxhealth，清理默认只列）、dailyretro.py（09:56，takeover/dailyretro）、roster.py（1/15 08:23，takeover/roster）、xstyle.py（工作日 10:04，takeover/xstyle，需 X bearer；2026-10-25 随知识沉淀移出本机删除）、credcheck.py（07:01）。
 - 切换：`bin/switch.sh pi|grok [--with-outbound] [--dry-run]`。测试覆盖：`PI_FLEET_MODE` / `PI_TAKEOVER_DIR` 环境变量（只用于测试）。
 - 重置恢复：grokbot-box `restore.d/60-pi-line.sh` + `/workspace/panoptes/pi/restore/`。E2E：e2e-2026-10-23.md。
 

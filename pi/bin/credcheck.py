@@ -13,9 +13,6 @@ NEED = {  # name: (who uses it, minimal scope, read-only probe)
  "GOOGLE_OAUTH_CLIENT_SECRET": ("Jasper Gmail/Calendar", "OAuth client secret", None),
  "GMAIL_REFRESH_TOKEN": ("Jasper mail scan", "https://www.googleapis.com/auth/gmail.readonly", None),
  "GCAL_REFRESH_TOKEN": ("Jasper calendar", "https://www.googleapis.com/auth/calendar.readonly", None),
- "X_BEARER_TOKEN": ("知识沉淀 X 风格收集 (xstyle.py)", "app-only bearer (tweet.read, users.read)", None),
- "WECHAT_APPID": ("公众号草稿", "公众号 AppID", None),
- "WECHAT_APPSECRET": ("公众号草稿 (draft/add only)", "AppSecret + server IP whitelist", None),
 }
 def probe(kind):
     try:
