@@ -108,6 +108,14 @@ def really_clean(cand):
 def shutil_free():
     import shutil
     return shutil.disk_usage("/").free
+def tz_drift_event(st, drifts, day):
+    """10-24: the platform keeps pushing the device's zone -> at most one DM a day; drifts in between are counted, not lost"""
+    st["tz_drift_pending"] = st.get("tz_drift_pending", 0) + len(drifts)
+    if drifts: st["tz_drift_last"] = drifts[-1]
+    if not st["tz_drift_pending"] or st.get("tz_drift_dm_day") == day: return None
+    e = f"时区漂移: {st['tz_drift_pending']} 次，最近一次 " + (st.get("tz_drift_last") or "")
+    st["tz_drift_dm_day"] = day; st["tz_drift_pending"] = 0
+    return e
 def tz_drifts(st):
     """new lines in box-ops-ensure.sh's /workspace/box-ops/tz-drift.log since the last run"""
     try: lines = open(TZ_DRIFT_LOG).read().splitlines()
@@ -168,8 +176,8 @@ def main():
     if clean and cand:
         freed = really_clean(cand)
         if freed > 500 * 2**20: events.append(f"清理释放 {freed // 2**20}MB > 500MB")
-    drifts = tz_drifts(st)
-    if drifts: events.append(f"时区漂移: {len(drifts)} 次，最近一次 " + drifts[-1])
+    e = tz_drift_event(st, tz_drifts(st), d)
+    if e: events.append(e)
     bad = [f for f in fixed if "失败" in f]
     if bad and not DRY: alerts.append(("fix-failed", "自动修复失败: " + "; ".join(bad)))
     if fixed and not DRY and len(bad) < len(fixed): events.append("已修复: " + "; ".join(f for f in fixed if f not in bad))
@@ -209,8 +217,8 @@ def main():
         if e.startswith("已修复: "): items.append(PN.item("fyi", "机器体检自己修好了一处问题", f"发现并修好了：{e[len('已修复: '):][:150]}。"))
         elif e.startswith("清理释放 "): items.append(PN.item("fyi", "机器清理释放了不少空间", f"按「超过 7 天自动删」{e[len('清理释放 '):].split(' >')[0]}。",
             "不影响使用。"))
-        elif e.startswith("时区漂移: "): items.append(PN.item("auto", "系统时区被改了，已经改回洛杉矶", f"上一小时有程序把机器时区改了 {e.split('时区漂移: ')[1].split(' 次')[0]} 次（最近一次改成 {e.split('localtime=')[-1].split(' ')[0]}），每分钟的自检都已经改回 America/Los_Angeles。",
-            "不影响 Pi 线（它按北京时间出日报，不看系统时区）。", auto="每分钟自动检查并改回；记录在 /workspace/box-ops/tz-drift.log"))
+        elif e.startswith("时区漂移: "): items.append(PN.item("auto", "系统时区被改了，已经改回洛杉矶", f"自上次告诉你以来，有程序把机器时区改了 {e.split('时区漂移: ')[1].split(' 次')[0]} 次（最近一次改成 {e.split('localtime=')[-1].split(' ')[0]}），每分钟的自检都已经改回 America/Los_Angeles。",
+            "不影响 Pi 线（它按北京时间出日报，不看系统时区）。", auto="每分钟自动检查并改回，这条私信一天最多一次；记录在 /workspace/box-ops/tz-drift.log。要根治：在 Cindy / 平台设置里把这台机器的时区设成洛杉矶"))
         elif "/node_modules" in e and "改名" in e: items.append(PN.item("fyi", "机器根目录多出来的 node_modules 被挪开了",
             f"机器根目录（/）下出现了一个 node_modules 文件夹，会干扰测试，已经改名挪开（没删）：{e.split('已改名 ')[-1].split('，')[0]}。",
             "如果修 PR bot 正好在用它，可能要重装依赖。", todo="告诉修测试的会话一声，让修 PR bot 那边知道这件事"))
