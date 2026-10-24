@@ -4,7 +4,7 @@ import { join, dirname, basename, resolve, relative, isAbsolute } from 'node:pat
 import { homedir, tmpdir } from 'node:os'
 import { run, isStopping, overBudget } from './exec.mjs'
 import { RUNS_DIR, MIRRORS_DIR, NPM_CACHE_DIR, UV_CACHE_DIR, UV_PYTHON_DIR, CACHE_DIR, CODE_DIR } from './paths.mjs'
-import { log, sleep, toPlainZh } from './util.mjs'
+import { log, toPlainZh, waitWithinBudget } from './util.mjs'
 import { machineLoad } from './memory.mjs'
 import { gitTokenFor } from './github.mjs'
 import { fileURLToPath } from 'node:url'
@@ -63,9 +63,11 @@ export async function ensureMirror(repo, neededSha = null, { extraRefspecs = [] 
   let res
   for (let attempt = 1; attempt <= 3; attempt++) {
     res = await run('git', [...auth.args, '-C', dir, 'fetch', '--prune', 'origin', '+refs/heads/*:refs/heads/*', '+refs/heads/*:refs/remotes/origin/*', ...extraRefspecs], { env, timeoutMs: 20 * 60_000 })
-    if (res.ok || isStopping()) break
+    if (res.ok || isStopping() || overBudget()) break
     log('info', 'mirror fetch retry', { repo, attempt })
-    await sleep(attempt * 15_000)
+    // 预算用完（run() 一开就返回 budgetExceeded，没起进程）不是网络抖动：等下去也不可能成功，
+    // 每次等待也不越过 PR 时间预算（#1166：45 min 预算跑成 46 min 32 s，正是这 15+30+45 s）
+    if (!await waitWithinBudget(attempt * 15_000)) break
   }
   if (!res.ok) {
     const have = neededSha && (await run('git', ['-C', dir, 'cat-file', '-e', `${neededSha}^{commit}`], { env: baseEnv(), timeoutMs: 30_000 })).ok
