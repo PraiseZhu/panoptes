@@ -758,7 +758,8 @@ def ci_local(wd):
         return rc
     for f, sh in (("run-nightly.sh", "bash"), ("mini/check-queue.sh", "bash"), ("scripts/chromium-linux.sh", "sh")):
         if os.path.exists(f"{wd}/{f}"): st(f"{sh} -n {f}", [sh, "-n", f])
-    if shutil.which("shellcheck"): st("shellcheck", ["shellcheck"] + [f for f in ("run-nightly.sh", "mini/check-queue.sh", "scripts/chromium-linux.sh") if os.path.exists(f"{wd}/{f}")])
+    sc = [f for f in ("run-nightly.sh", "mini/check-queue.sh", "scripts/chromium-linux.sh") if os.path.exists(f"{wd}/{f}")]
+    if shutil.which("shellcheck") and sc: st("shellcheck", ["shellcheck"] + sc)   # no files: nothing to check (shellcheck alone exits 1)
     else: notes.append("本机没装 shellcheck，这一步只在 CI 上跑")
     for f in sorted(glob.glob(f"{wd}/scripts/*.mjs") + glob.glob(f"{wd}/report/*.mjs")): st(f"node --check {os.path.relpath(f, wd)}", ["node", "--check", f])
     if os.path.exists(f"{wd}/report/allowed-chats.example.json"):
