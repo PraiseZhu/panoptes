@@ -3,7 +3,7 @@
 (a fake /tmp, a fake HOME with npm / pip caches, a fake QA lock). Never touches the real /tmp or caches."""
 import os, sys, time, json, fcntl, tempfile, shutil, subprocess, unittest
 T = tempfile.mkdtemp(prefix="boxhealth-test-")
-os.environ.update(HOME=f"{T}/home", BOXHEALTH_TMP_ROOT=f"{T}/tmp", PI_STATE=f"{T}/state")
+os.environ.update(HOME=f"{T}/home", BOXHEALTH_TMP_ROOT=f"{T}/tmp", PI_STATE=f"{T}/state", BOXHEALTH_LOG_DIRS=f"{T}/logs1:{T}/logs2")
 B_ = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin"); sys.path.insert(0, B_)
 import boxhealth as B   # noqa: E402
 
@@ -18,7 +18,7 @@ def age_dir(p, days):
 
 class TestCleanup(unittest.TestCase):
     def setUp(self):
-        for d in ("home", "tmp"): shutil.rmtree(f"{T}/{d}", ignore_errors=True); os.makedirs(f"{T}/{d}")
+        for d in ("home", "tmp", "logs1", "logs2"): shutil.rmtree(f"{T}/{d}", ignore_errors=True); os.makedirs(f"{T}/{d}")
         B.QA_LOCKS = [f"{T}/nightly.lock"]; open(B.QA_LOCKS[0], "a").close()
     def paths(self): return {p: k for p, k in B.cleanup_candidates()[0]}
 
@@ -45,15 +45,27 @@ class TestCleanup(unittest.TestCase):
         self.assertFalse(os.path.exists(f"{T}/home/.npm/_cacache/content-v2/a")); self.assertTrue(os.path.exists(f"{T}/home/.npm/_cacache/content-v2/b"))
         self.assertEqual(os.path.getsize(big), B.LOG_KEEP); self.assertTrue(open(big, "rb").read().endswith(b"TAIL"))
 
-    def test_nothing_in_tmp_while_qa_holds_its_lock(self):
-        mk(f"{T}/tmp/old.txt", 10)
+    def test_qa_holding_its_lock_does_not_stop_tmp(self):   # 10-24 review: it used to skip all of /tmp, often for the whole :17 slot
+        mk(f"{T}/tmp/old.txt", 10); mk(f"{T}/tmp/argus-run-9/f", 30); age_dir(f"{T}/tmp/argus-run-9", 30)
         f = open(B.QA_LOCKS[0], "a"); fcntl.flock(f, fcntl.LOCK_EX)
-        try:
-            c, locks = B.cleanup_candidates(); self.assertEqual(locks, B.QA_LOCKS); self.assertNotIn(f"{T}/tmp/old.txt", dict(c))
+        try: c, locks = B.cleanup_candidates()
         finally: f.close()
-        c, locks = B.cleanup_candidates(); self.assertEqual(locks, []); self.assertIn(f"{T}/tmp/old.txt", dict(c))   # a lock FILE alone: not running
+        self.assertEqual(locks, B.QA_LOCKS); self.assertIn(f"{T}/tmp/old.txt", dict(c)); self.assertNotIn(f"{T}/tmp/argus-run-9", dict(c))
 
-
+    def test_logs_older_than_7_days_by_name_else_mtime(self):
+        old = (B.now_cst().date() - B.dt.timedelta(days=9)); edge = (B.now_cst().date() - B.dt.timedelta(days=7))
+        mk(f"{T}/logs1/nightly-{old:%Y%m%d}T010101.log", 0)            # restored yesterday, about 9 days ago: by name -> goes
+        mk(f"{T}/logs1/prwatch-{edge:%Y-%m-%d}.log", 0)                 # exactly 7 days ago: still in the window
+        mk(f"{T}/logs1/control.log", 1); mk(f"{T}/logs1/tmp-sweep.log", 9)   # no date: mtime decides
+        mk(f"{T}/logs2/mem.log.{old:%Y%m%d}-022110.gz", 0); mk(f"{T}/logs2/mem.log.2.gz", 3); mk(f"{T}/logs2/box-ops-mem.logrotate.bak.{old:%Y%m%d}", 30)
+        mk(f"{T}/logs2/severity-pin.json", 30)
+        c = self.paths()
+        for gone in (f"logs1/nightly-{old:%Y%m%d}T010101.log", "logs1/tmp-sweep.log", f"logs2/mem.log.{old:%Y%m%d}-022110.gz"): self.assertIn(f"{T}/{gone}", c, gone)
+        for kept in (f"logs1/prwatch-{edge:%Y-%m-%d}.log", "logs1/control.log", "logs2/mem.log.2.gz", f"logs2/box-ops-mem.logrotate.bak.{old:%Y%m%d}", "logs2/severity-pin.json"):
+            self.assertNotIn(f"{T}/{kept}", c, kept)
+        p = f"{T}/logs1/held-{old:%Y%m%d}.log"; mk(p, 9); h = open(p)
+        try: self.assertNotIn(p, self.paths())                          # a log a process has open stays
+        finally: h.close()
 
 if __name__ == "__main__":
     try: unittest.main(verbosity=1)
