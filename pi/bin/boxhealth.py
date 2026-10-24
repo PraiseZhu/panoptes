@@ -52,6 +52,12 @@ def cleanup_candidates():
     if not locks:
         c += [p for p in glob.glob(f"{A}/cache/runs/*") if now - os.path.getmtime(p) > 14 * 86400]
     return c, locks
+def janitor_summary():
+    """10-24: bot work dirs / scratch / old evidence are janitor's (pi/bin/janitor.py); this line only shows its last report"""
+    r = jload(f"{BASE}/out/janitor/last.json", None)
+    if not r: return "none"
+    return (f"{r.get('mode')}@{str(r.get('ran_at', ''))[11:16]} root={(r.get('root_bytes') or 0) >> 20}M trash={r.get('trash_entries', 0)} "
+            f"unmarked={len(r.get('unmarked') or [])} errors={len(r.get('errors') or [])}")
 def main():
     m = mode(); tk = takeover("boxhealth")   # parity gate: Grok routine runs iff fleet-mode!=pi; Pi runs iff fleet-mode==pi AND marker
     if m != "pi" or not tk:
@@ -109,6 +115,7 @@ def main():
     line = (f"{t.strftime('%F %T')} CST [pi-line{' dry' if DRY else ''}] avail={avail}MB low_streak={low_min}min load={load} disk={disk} zombies={zomb}(ours {len(ours)}) top={top.strip()} "
             f"clean={'done freed=' + str(freed // 2**20) + 'MB' if clean else 'list-only'} candidates={len(cand)}项/{cand_b // 2**20}M"
             f"{' (mivo runs 跳过: ' + ','.join(os.path.basename(l) for l in locks) + ' 在)' if locks else ''} "
+            f"janitor={janitor_summary()} "
             f"issues={'; '.join(issues) or 'none'} fixed={'; '.join(fixed) or 'none'}")
     if DRY: print(line); print("candidates:", *cand, sep="\n  ")
     else:

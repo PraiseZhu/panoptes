@@ -21,6 +21,7 @@ state() -> "done" | "pending" | "stale:<why>" (stale = not now, re-checked next 
 Env for tests: INFRA_GATES (gates file)."""
 import json, os, re, shutil, subprocess, tempfile, datetime as dt
 import praise_notice as PN
+import workroot as W
 
 PANOPTES_REPO = "PraiseZhu/panoptes"
 ISSUE_REPO = "PraiseZhu/pr-qa-agent-deploy"
@@ -76,7 +77,7 @@ def h_pr(a, gh):
         return f"patch {os.path.getsize(patch)}B, perm={v['viewerPermission']}, base={v['defaultBranchRef']['name']}, auto_merge={a.get('auto_merge')}"
     def do():
         validate()
-        d = tempfile.mkdtemp(prefix="pi-infrapr-")
+        d = W.mkdtemp("pi-infrapr-")   # PI_WORK/tmp: janitor removes what a killed run leaves
         try:
             r = subprocess.run(["gh", "repo", "clone", repo, d, "--", "--depth", "50", "-q"], capture_output=True, text=True, timeout=600)
             if r.returncode: raise RuntimeError(f"clone rc={r.returncode}: {r.stderr[-200:]}")

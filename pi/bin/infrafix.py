@@ -61,13 +61,16 @@ import sys, shutil, argparse, fcntl, time, contextlib, hashlib, signal, tempfile
 from lib import *
 import lib
 import praise_notice as PN
+import workroot as W
 os.environ["PATH"] = "/usr/local/bin:" + os.environ.get("PATH", "")
 
 _E = os.environ.get
 TIER = _E("INFRA_TIER") or "deep"   # pi-auto deep = deepseek-v4.1-flash, thinking max: same as prfix (Praise 10-24 for the PR bot; was heavy = high)
-PANOPTES = _E("INFRA_GIT") or "/workspace/panoptes"            # git dir we branch from (worktrees only)
+# 10-24 (plan §4.1): fetch, worktrees and fix branches in the bot's own clone under PI_WORK, worktrees marked .pi-owned.json;
+# the deployed checkout /workspace/panoptes is only read (deploy check; file hints for a read-only run before the clone exists)
+PANOPTES = _E("INFRA_GIT") or W.clone_dir("panoptes")          # git dir we branch from
 LIVE = _E("INFRA_LIVE") or "/workspace/panoptes"               # deployed checkout: read-only here (deploy check)
-WT_ROOT = _E("INFRA_WT_ROOT") or f"{PANOPTES}/.worktrees"
+WT_ROOT = _E("INFRA_WT_ROOT") or W.wt_root("panoptes")
 NOTES = _E("INFRA_NOTES") or "/workspace/praise-pr/notes"
 OUT = _E("INFRA_OUT") or f"{BASE}/out/infrafix"
 GATES = _E("INFRA_GATES") or f"{PI_CODE}/conf/gates.json"
@@ -736,8 +739,8 @@ def drop_worktree(wd, branch=None):
     if wd:
         wd = os.path.abspath(wd)
         if not ours_dir(wd): raise ValueError(f"refuse to remove {wd}: not an infrafix worktree")
-        if wd in {w["path"] for w in worktrees()}:
-            rc, o = git("worktree", "remove", "--force", "--force", wd); msg.append(f"worktree remove rc={rc}{'' if rc == 0 else ' ' + tail(o, 2)}")
+        if wd in {w["path"] for w in worktrees()}:   # 10-24: rename into the trash (instant), rm -rf in the background, prune
+            W.trash(wd); rc, o = git("worktree", "prune"); msg.append(f"worktree -> trash, prune rc={rc}{'' if rc == 0 else ' ' + tail(o, 2)}")
         if os.path.isdir(wd) and wd not in {w["path"] for w in worktrees()}:
             shutil.rmtree(wd, ignore_errors=True); msg.append("rm -rf 残留目录")
         git("worktree", "prune")
@@ -860,6 +863,8 @@ def fix_one(c, A, d):
         rc, o = git("worktree", "add", "-q", *(["--detach", wd, base] if A.dry_run else ["-b", branch, wd, base]))
         if rc: raise Transient(f"worktree add 失败：{tail(o, 3)}")
         created = True
+        W.mark(wd, "dry" if A.dry_run else "infrafix", repo="panoptes", clone=os.path.abspath(PANOPTES), ticket=c["sig"],
+               branch=None if A.dry_run else branch, base_sha=base, lock=f"{OUT}/infrafix.run.lock", tickets=f"{OUT}/tickets.json", ticket_key=c["sig"])
         rc, o = npm_ci(wd); step("npm ci（argus）", rc == 0, f"rc={rc}\n{o}")
         if rc: raise Transient(f"npm ci rc={rc}")
         ctx = context_text(c)
@@ -1310,6 +1315,11 @@ def main(argv=None):
         print(f"已删除单子 {ks[0]}（原状态 {old.get('status')}）；下次 --next 按规则重新判断"); return 0
     real_out = sys.stdout
     ro = A.list or A.pending_json
+    if os.path.abspath(PANOPTES) == W.clone_dir("panoptes"):   # the default bot clone (tests point PANOPTES at their own repo)
+        if not ro:   # a real run: the bot clone, made once, fetched before gather (its file hints grep origin/main)
+            try: W.ensure_clone("panoptes"); git("fetch", "-q", "origin", "main", t=300)
+            except Exception as e: return finish({"status": "error", "error": f"bot clone 建不起来：{str(e)[:250]}"}, 1, A)
+        elif not os.path.exists(f"{PANOPTES}/.git"): globals()["PANOPTES"] = LIVE   # read-only git grep only
     if A.pending_json: sys.stdout = sys.stderr       # helper logs must never corrupt the JSON on stdout
     try:
         try: ctx = gather(strict=not ro)

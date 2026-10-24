@@ -22,7 +22,7 @@ Checks (all from files already on disk, plus one `gh pr list` every 30 min):
     above never saw the 02:07-02:28 outage after the restore (keys not restored), and nobody was told.
 Cron: */5, own quiet log out/logs/watchdog-<day>.log (only on change). --dry-run prints findings, sends nothing.
 """
-import sys, time, glob
+import sys, time, glob, hashlib
 from lib import *
 try:
     import praise_notice as PN
@@ -41,7 +41,7 @@ DRY = "--dry-run" in sys.argv
 LOGS = f"{BASE}/out/logs"
 STATE = f"{BASE}/out/watchdog/state.json"
 CADENCE = {  # job: max minutes between clean runs (hourly jobs: one missed slot is tolerated)
-    "cindy": 20, "outbound": 40, "merger": 75, "boxhealth": 150, "boxcheck": 150, "opsenv": 150, "opsdeploy": 40,
+    "cindy": 20, "outbound": 40, "merger": 75, "boxhealth": 150, "boxcheck": 150, "opsenv": 150, "opsdeploy": 40, "janitor": 40,
 }
 DAILY = {  # job: [(Beijing hour, minute)] -- mirrors pi-fallback.cron
     "credcheck": [(7, 1)], "knowledge": [(8, 5)], "daily": [(8, 35)], "jasper": [(9, 5)], "opsfix": [(9, 30)],
@@ -279,6 +279,39 @@ def infra_check(now, probs):
                 link=f"https://github.com/PraiseZhu/panoptes/pull/{t.get('pr')}")
 
 
+def janitor_check(now, probs):
+    """10-24 plan §8 (alerts only, janitor itself never pages): disk under its low-water mark; a bot work dir without the marker
+    (janitor never deletes those); trash that stays (> 1 h: rm keeps failing); once janitor enforces, a finished job's work dir
+    still there after 4 h; a job holding its work dir > 4 h. "Janitor did not run" / "failed 3 times" come from job_checks."""
+    r = jload(f"{BASE}/out/janitor/last.json", None)
+    if not r: return
+    try: age = (now - dt.datetime.fromisoformat(r["ran_at"])).total_seconds() / 60
+    except Exception: return
+    if age > 60: return                                    # stale report: job_checks already says the janitor stopped
+    low = jload(f"{PI_CODE}/conf/janitor.json", {}).get("free_gb_low", 15)
+    if r.get("free_gb") is not None and r["free_gb"] < low:
+        probs["janitor:disk"] = PN.item("action", "机器磁盘快满了", f"剩余空间只有 {r['free_gb']}G（低于 {low}G）。自动清理已经进入加紧模式（回收站马上清空、缓存减到最少），还是不够。",
+            "磁盘满了测试、修复、外发都会失败。", todo=PN.ask_session(f"Pi 线机器剩余空间只有 {r['free_gb']}G，查一下哪里占的（du -xh /workspace | sort -h | tail），清掉不要的"))
+    if r.get("unmarked"):
+        paths = sorted(u["path"] for u in r["unmarked"])
+        probs["janitor:unmarked:" + hashlib.sha1("|".join(paths).encode()).hexdigest()[:8]] = PN.item("fyi", "bot 的工作目录里有来路不明的目录（不急）",
+            f"{PI_WORK} 下有 {len(paths)} 个目录没有 bot 的身份标记（{', '.join(os.path.basename(p) for p in paths[:3])}）。自动清理不会删它们。",
+            "只是占地方，不影响运行。", todo=f"不急，有空时看一眼：是人放的就挪走，没用就删掉（{paths[0]}）")
+    if (r.get("trash_oldest_min") or 0) > 60:
+        probs["janitor:trash"] = PN.item("fyi", "回收站一直清不掉（不急）", f"bot 用完扔进回收站的目录，最老的已经放了 {r['trash_oldest_min'] // 60} 小时，按理 10 分钟内就会被删掉。",
+            "只是占地方。", todo=f"不急，有空时{PN.ask_session('Pi 线 janitor 的回收站一直清不掉，看 out/logs/janitor-*.log 的 purge 行')}")
+    if r.get("mode") == "enforce":
+        stuck = [x for x in r.get("skipped") or [] if x.get("age_h", 0) > 4 and "还在跑" not in x.get("why", "") and "正在运行" not in x.get("why", "")]
+        if stuck:
+            probs["janitor:stuck"] = PN.item("fyi", "有 bot 用完的目录一直清不掉（不急）", f"{len(stuck)} 个目录用完 4 小时以上了还在（{stuck[0]['path']}：{stuck[0]['why']}）。",
+                "只是占地方。", todo=f"不急，有空时{PN.ask_session('Pi 线 janitor 有目录一直清不掉，看 out/janitor/last.json 的 skipped')}")
+    for x in r.get("long_running") or []:
+        name, hrs = os.path.basename(x["path"]), x["hours"]
+        ask = PN.ask_session(f"Pi 线有个工作目录被占了 {hrs} 小时：{x['path']}，看对应作业的日志是不是卡住了")
+        probs[f"janitor:long:{name}"] = PN.item("fyi", "有个修复单子跑了很久（不急）", f"{name} 已经占着工作目录 {hrs} 小时（{x['why']}）。",
+            "可能卡住了，后面同类的单子会排队。", todo=f"不急，有空时{ask}")
+
+
 def send(text, key, bypass):
     if DRY: print("WOULD SEND", key, "\n" + text); return
     d = today()
@@ -410,7 +443,7 @@ def main():
     for fn in (lambda: job_checks(now, probs, since), lambda: mergewatch_check(now, probs), lambda: merge_report_check(now, probs, st),
                lambda: backup_check(now, probs), lambda: backup_rules_check(now, probs), lambda: panoptes_check(now, probs, st),
                lambda: infra_check(now, probs), lambda: prfix_check(now, probs), lambda: vigil_check(now, probs, st),
-               lambda: outbound_health_check(now, probs)):
+               lambda: outbound_health_check(now, probs), lambda: janitor_check(now, probs)):
         try: fn()
         except Exception as e: probs[f"watchdog:{getattr(fn, '__name__', 'check')}"] = PN.item("action", "「看门狗」自己出错了",
             "专门盯各个自动化有没有停摆的看门狗，自己的一项检查出错了。", "那一项坏了也不会有人告诉你。",
