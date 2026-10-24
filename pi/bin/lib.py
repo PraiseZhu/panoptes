@@ -171,7 +171,8 @@ def pi(tier, cwd, prompt, session, timeout=600, write=False, web=False, skills=T
     Claude Code skills in every coding step's system prompt). nice=True: the agent and the tests it runs at nice 10 (merge tests first)."""
     env = model_env({"PI_TASK_DIR": f"{BASE}/out/tasks", "PI_NOTIFY_OFF": "1", "PI_TASK_OWNER": "pi-line-cron"})   # never os.environ as is
     if not skills: env["PI_BIN"] = f"{PI_CODE}/bin/pi-noskills.sh"
-    os.makedirs(f"{BASE}/out/tasks", exist_ok=True)
+    try: os.makedirs(f"{BASE}/out/tasks", exist_ok=True)      # the sandbox binds it writable only when it exists
+    except OSError: pass
     tmp = None
     if os.path.realpath(cwd).startswith(os.path.realpath(PI_WORK) + os.sep):   # a bot worktree: its own /tmp for this call
         os.makedirs(f"{PI_WORK}/tmp", exist_ok=True)

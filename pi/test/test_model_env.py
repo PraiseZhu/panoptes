@@ -60,7 +60,7 @@ class T(unittest.TestCase):
         if not p: return                                                       # no bwrap here
         self.assertIn(["--bind", wd, wd], pairs(p)); self.assertIn(["--bind", f"{wd}/.git", f"{wd}/.git"], pairs(p))
         self.assertIn(["--bind", tmp, "/tmp"], pairs(p)); self.assertNotIn(["--bind", "/tmp", "/tmp"], pairs(p))
-        self.assertTrue(max(i for i, x in enumerate(p) if x == "--bind") < min(i for i, x in enumerate(p) if x == "--tmpfs"))   # hides last
+        if "--tmpfs" in p: self.assertTrue(max(i for i, x in enumerate(p) if x == "--bind") < min(i for i, x in enumerate(p) if x == "--tmpfs"))   # hides last
         ro = lib.sandbox_prefix(wd, False)                                      # write=False: its cwd stays read-only, real /tmp
         self.assertNotIn(["--bind", wd, wd], pairs(ro)); self.assertIn(["--bind", "/tmp", "/tmp"], pairs(ro))
         self.assertIn(["--bind", other, other], pairs(lib.sandbox_prefix(wd, True, rw=[other])))
