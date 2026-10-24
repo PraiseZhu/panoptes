@@ -18,6 +18,7 @@ By default it never writes to GitHub.*
 | `argus/` | Vendored from [`PraiseZhu/project-argus`](https://github.com/PraiseZhu/project-argus) at **`ad4977e`** (`ad4977ed5aeb2649abc108111a2581fc391e42e8`), plus the Linux port (nightly CLI, bubblewrap sandbox, ming-qa integration, Playwright smoke). The first commit is the untouched snapshot, so `git diff HEAD~1 -- argus/` is exactly the port. |
 | `ming-qa/` | Git submodule → [`mingdui/ming-qa`](https://github.com/mingdui/ming-qa) pinned at **`3ae36dd`**. |
 | `run-nightly.sh`, `mini/`, `scripts/`, `llm-models.json` | Written for the Linux box deployment. |
+| `pi/`, `docs/pi/` | The Pi line, imported 2026-10-24 as one snapshot from the box's `/workspace/pi-fallback` (history before that: the box's `~/.pi-fallback.git`). |
 
 panoptes is **not** a fork and does not sync with project-argus. The Mac mini keeps running project-argus unchanged;
 nothing here is pushed upstream.
@@ -35,6 +36,8 @@ panoptes/
 ├── report/                 daily report: send-feishu-report.mjs (sender), REPORT-STYLE.md, build-sample-*.mjs,
 │                           allowed-chats.example.json ($QA_HOME/report/send-feishu-report.mjs is a symlink here)
 ├── llm-models.json         models available on the gateway (reference only)
+├── pi/                     the Pi line (Praise's automation: PR bot, test-system self-repair, reports, box care) -- see pi/README.md
+├── docs/pi/                Pi line run book and history
 └── secrets.env.example
 ```
 

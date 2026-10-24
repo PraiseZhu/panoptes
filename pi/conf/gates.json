@@ -1,0 +1,13 @@
+{
+  "_doc": "Praise 闸名单。prfix.py 任何模式（含 --qa）都读它；outbound.py h_fixpr 外发前再读一次。key = 报告 PR 号，value = 原因。 infra_hold（infrafix.py）：key = 故障签名 inf1-… 或前 8 位 sig8，value = 原因；命中的签名列成「待 Praise 决定」，任何模式（含 --sig）都不修。infra_automerge：false = infra PR 一律不自动合并（只私信你看），缺省/true = 满足条件时自动合并。",
+  "no_fix_pr": {
+    "923": "Praise 闸：#923 修复 PR 不得创建"
+  },
+  "infra_hold": {
+    "_doc": "删掉一条 = 允许 infrafix 按规则去修",
+    "inf1-4461a20814ed1faa3310": "已由 panoptes #20（加 code_review.ran，c8b7bc4 版）修复合并。保险起见保留到 #20 部署后 7 天窗口里的旧报告过期（约 10-31）再删：infrafix 自带的修法提示是被否掉的 7a960e8 那版",
+    "6a6e6cde": "api-probe「登录：按画布列出已挂资产」在基线上也失败（12 次，10-23 01:01–10-24 03:07）：是探针的旧语义，已由 panoptes #18 修好，10-24 03:08 部署后没再出现。新的「检查项级故障」信号（10-24）把它从旧报告里认了出来；保留到约 10-31 旧报告过期再删"
+  },
+  "infra_automerge": true,
+  "_doc_infra_automerge": "10-23 上线先 false；10-24 第一张 infra PR（panoptes #20）已合并，Praise 授权全部收尾后改 true：满足条件（先红后绿的复现测试、本地全量测试、CI 全绿、不碰敏感文件）就自动合并 + opsenv 自动部署"
+}

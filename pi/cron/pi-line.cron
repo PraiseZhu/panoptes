@@ -1,0 +1,56 @@
+# Pi line — runs every fleet duty without Grok Bot (LIVE since 10-23: fleet-mode=pi + outbound-enabled; outbound.py sends).
+# Code: /workspace/panoptes/pi (PraiseZhu/panoptes pi/, changes by PR only; this file = pi/cron/pi-line.cron, installed as
+# /etc/cron.d/pi-fallback). State: /workspace/mivo-qa/pi. Docs: pi/README.md, docs/pi/. History before 10-24: ~/.pi-fallback.git
+# The platform may switch the box time zone at any time (seen 10-23: Asia/Shanghai, Asia/Taipei, America/Los_Angeles), so
+# nothing here depends on it: entries fire hourly at a fixed minute and run.sh gates on the Beijing hour (@HH[,HH]).
+# panoptes catch-up's own "7 */2" therefore lands on odd OR even Beijing hours; heavy work coordinates through
+# /workspace/mivo-qa/argus-root/nightly.lock instead of clock slots.
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+R=/workspace/panoptes/pi/bin/run.sh
+# --- every minute (zero-model, own quiet log; not via run.sh so it also runs under low memory) ---
+# merge -> test: git ls-remote main; when it moves, launch panoptes catch-up in event mode right away (10-23: replaces the
+# Grok on-merge routine; the 2-hourly panoptes-catch-up cron stays as safety net)
+* * * * * box /usr/bin/python3 /workspace/panoptes/pi/bin/mergewatch.py >>/workspace/mivo-qa/pi/out/logs/mergewatch-cron.log 2>&1
+# prwatch: Praise PR bot dispatcher -- new P0/P1 -> DM; drafts green -> ready at once; fix dispatch when takeover/prfix-event exists
+* * * * * box /usr/bin/python3 /workspace/panoptes/pi/bin/prwatch.py >>/workspace/mivo-qa/pi/out/logs/prwatch-cron.log 2>&1
+# watchdog: notices when the automation itself stops (stale/failed/missed jobs, merge without report, backup, mergewatch,
+# panoptes deploy) and DMs Praise once per state change; bypasses outbound when outbound is the problem
+*/5 * * * * box /usr/bin/python3 /workspace/panoptes/pi/bin/watchdog.py >>/workspace/mivo-qa/pi/out/logs/watchdog-cron.log 2>&1
+# --- every hour (zero-model) ---
+13,43 * * * * box $R merger
+25 * * * * box $R opsenv
+# panoptes deploy between the opsenv runs (10-24): the same guarded fast-forward every 10 min, so a merged test-system fix does not
+# wait an hour behind a running merge test (quiet when there is nothing to deploy)
+3-59/10 * * * * box $R opsdeploy
+45 * * * * box $R boxcheck
+# --- daily, minute :HH gated by Beijing hour ---
+5  * * * * box $R handoff @00
+20 * * * * box $R handoff @06,15
+35 * * * * box $R handoff @18
+5  * * * * box $R knowledge @08
+35 * * * * box $R daily @08
+5  * * * * box $R jasper @09
+45 * * * * box $R prretro @09
+5  * * * * box $R pmnudge @10,12,14,16,18,20
+15 * * * * box $R opsreview @11
+35 * * * * box $R pm @10
+20 * * * * box $R p2 @12,18
+50 * * * * box $R compare @12
+20 * * * * box $R prfix @14
+40 * * * * box $R ledger @23
+# 10-23 QA 闭环：Grok mivo-qa-followup-scan 06:17 / mivo-qa-followup 15:17（06 点 = scan 只查回复，15 点 = remind）。:17 是 boxhealth，改 :27；
+# pi 模式 + 外发闸开 + feishu.dm 未禁 时真实更新 followup/state.json，私信经 outbound（:30 那一轮）发出
+27 * * * * box $R followup @06,15
+# --- takeover-gated jobs (no-op unless takeover/<name> exists) + outbound executor (no-op unless fleet-mode=pi AND outbound-enabled) ---
+*/5 * * * * box $R cindy
+17 * * * * box $R boxhealth
+23 * * * * box $R roster @08
+56 * * * * box $R dailyretro @09
+4  * * * * box $R xstyle @10
+*/10 * * * * box $R outbound
+1  * * * * box $R credcheck @07
+# 10-23 运维：修复 PR 原用例复测（只写文件；内存<3G 或 panoptes nightly.lock 被占则跳过）。数据日=昨天；排在 08:35 日报后、10:07 catch-up 和 10:35 pm 前
+# 10-23 晚：范围改为「上次成功复测之后合并的 QA: #N 修复 PR」（out/ops/retest-state.json 水位线）；内存<3G / nightly.lock 等 20 分钟仍被占
+# -> rc 75 不消耗水位线，下个时段自动补；回写台账后生成交接 issue 关/重开动作（outbound 执行）。12/16/20 点为重试/当天补测
+30 * * * * box $R opsfix @09,12,16,20 retest --execute
