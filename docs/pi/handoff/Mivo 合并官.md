@@ -8,7 +8,7 @@
 | 与 Grok 判定回放 | bin/merger_replay.py（离线） | 手动 | out/merger/replay-2026-10-23.md |
 
 ## 写了哪些文件
-- `/workspace/pi-fallback/bin/merger.py` 重写（旧版留 `merger.py.bak-20261023-12xx`）。门：非草稿；有 review:merge-ready；base=main；MERGEABLE+CLEAN（BEHIND=WAIT）；8 项必需检查逐项 SUCCESS（取 head 上每个名字最新一次，不看总状态；清单读 policy.json）；讨论全解决；无 CHANGES_REQUESTED（reviewDecision）；conventional 标题；head 为 release/*、plugin/green、main 或改到 scripts/ops/、scripts/loops/automerge/、agent-use/（外加 policy.json humanOnlyPaths）→ HUMAN。判定：MERGE/WAIT/BLOCK/HUMAN。
+- `/workspace/panoptes/pi/bin/merger.py` 重写（旧版留 `merger.py.bak-20261023-12xx`）。门：非草稿；有 review:merge-ready；base=main；MERGEABLE+CLEAN（BEHIND=WAIT）；8 项必需检查逐项 SUCCESS（取 head 上每个名字最新一次，不看总状态；清单读 policy.json）；讨论全解决；无 CHANGES_REQUESTED（reviewDecision）；conventional 标题；head 为 release/*、plugin/green、main 或改到 scripts/ops/、scripts/loops/automerge/、agent-use/（外加 policy.json humanOnlyPaths）→ HUMAN。判定：MERGE/WAIT/BLOCK/HUMAN。
 - PAUSED 在 → 只写 .md，不写任何动作。不在 → `merge:<PR>:<headSHA>`（每轮 ≤1，取号最小）+ BLOCK/HUMAN 的 `comment:<PR>:<reasonHash>`（中文，结尾 `<!-- mivo-merger -->`）。
 - `blockers(p)` 保留给 outbound.py 复核用，现在等于“judge≠MERGE 就拒”。
 - `bin/merger_replay.py`、`out/merger/replay-2026-10-23.md`。

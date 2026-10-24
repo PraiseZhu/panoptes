@@ -36,7 +36,7 @@
 5. 正文以 `<!--`/SHADOW 开头的草稿禁止外发（11:50 事故）。另外 Pi 已在 11:50 发出 `dm:2026-10-22:434`（feishu-sent.json 里有记录），以后不会重发。
 
 ## dry-run 结果
-命令：`cd /workspace/pi-fallback/bin && python3 daily.py 2026-10-22 --render-only --diff-sent`。只读 gh 查询，写 `.render.md` 和 `.diff`。
+命令：`cd /workspace/panoptes/pi/bin && python3 daily.py 2026-10-22 --render-only --diff-sent`。只读 gh 查询，写 `.render.md` 和 `.diff`。
 - 输出：窗口 25 个，hold 掉 #434 → P1 7 / P2 3 / P3 14，故障 0。
 - 和 Grok 已发稿**一致**的部分：开头一句逐字相同；各节标题和个数；24 个 PR 的顺序和分级；@ 的集合（严健 1、钟行天 2、朱赞 6，#1211/P3 不 @）；私信 9 行的 PR、收件人、状态；P3 的三组分法；更正 4 行；全仓 82% 和 #1174 87%；系统状态；分级说明。
 - 仍有差异（diff 共 112 行，都是措辞）：

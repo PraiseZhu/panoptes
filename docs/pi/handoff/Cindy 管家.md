@@ -14,7 +14,7 @@
 | 只查进程（不重启） | boxcheck.py | `45 * * * *` |
 
 ## 脚本
-- `/workspace/pi-fallback/bin/cindy.py`（门控：`takeover/cindy` 存在才动；`--dry-run` / `PI_CINDY_DRYRUN=1` 只读）
+- `/workspace/panoptes/pi/bin/cindy.py`（门控：`takeover/cindy` 存在才动；`--dry-run` / `PI_CINDY_DRYRUN=1` 只读）
 - `~/.config/cindy-launch/ensure-cindy.sh`（唯一执行逻辑，Pi 与 Grok 共用）、`start-cindy.sh`、`nudge-loop.sh`
 - `run.sh`：MemAvailable<3G 跳过、`/tmp/pi-fallback-cindy.lock` flock、日志 out/logs。
 
@@ -28,8 +28,8 @@ bin/run.sh cindy                                     # 真跑 → ensure-cindy.s
 真跑前后 Cindy PID 均为 53786（0.1.115，cloud 登录，窗口在），未被重启。
 
 ## 产出路径
-- 运行记录：`/workspace/pi-fallback/out/cindy/<日>.md`（dry-run：`<日>.dryrun.md`）
-- 日志：`/workspace/pi-fallback/out/logs/cindy-<日>.log`；ensure 启动日志 `~/.local/state/cindy.log`；apt 日志 `/tmp/cindy-apt.log`
+- 运行记录：`/workspace/mivo-qa/pi/out/cindy/<日>.md`（dry-run：`<日>.dryrun.md`）
+- 日志：`/workspace/mivo-qa/pi/out/logs/cindy-<日>.log`；ensure 启动日志 `~/.local/state/cindy.log`；apt 日志 `/tmp/cindy-apt.log`
 
 ## 与 Grok 对比结果
 - 旧 cindy.py：只在进程不在时才调 ensure → 缺：下载更新安装、每日 manifest 更新、非脚本启动重启、无窗口重启、轻推。**已修**：每次都调 ensure（与 Grok routine 完全同一脚本），等价。
@@ -56,7 +56,7 @@ bin/run.sh cindy                                     # 真跑 → ensure-cindy.s
 - 确认是否永久由 Pi 线接管（决定 Grok routine 是删除还是保留暂停）。
 
 ## 增补 2026-10-23 13:51 北京时间：switch.sh 同步 takeover 标记
-- 改动：`bin/switch.sh` 新增——`switch.sh pi` 创建 `takeover/cindy`、`takeover/boxhealth`；`switch.sh grok` 删除二者；`--dry-run` 只打印。备份 `/workspace/pi-fallback/bin/switch.sh.bak-20261023-1351`。（解决上文未解决问题 3）
+- 改动：`bin/switch.sh` 新增——`switch.sh pi` 创建 `takeover/cindy`、`takeover/boxhealth`；`switch.sh grok` 删除二者；`--dry-run` 只打印。备份 `/workspace/panoptes/pi/bin/switch.sh.bak-20261023-1351`。（解决上文未解决问题 3）
 - 只做了 dry-run，未真切换；fleet-mode 仍为 pi，外发闸未动，takeover/ 仍有 boxhealth、cindy。
 
 ```
@@ -64,8 +64,8 @@ bin/run.sh cindy                                     # 真跑 → ensure-cindy.s
 fleet-mode: pi -> grok
 DRY: echo grok > /workspace/fleet-mode
 outbound-enabled: absent
-DRY: rm -f /workspace/pi-fallback/takeover/cindy
-DRY: rm -f /workspace/pi-fallback/takeover/boxhealth
+DRY: rm -f /workspace/mivo-qa/pi/takeover/cindy
+DRY: rm -f /workspace/mivo-qa/pi/takeover/boxhealth
 
 RESUME these Grok Bot routines (in the Grok Bot app; bot-to-bot scheduling inside Grok stays on Grok):
   Mivo QA 日报     : mivo-qa-daily-report 08:30, retro 09:56, followup 15:17, followup-scan 06:17, handoff 回执 18:30/00:00, ledger 23:30, roster 1/15 08:23
@@ -82,8 +82,8 @@ RESUME these Grok Bot routines (in the Grok Bot app; bot-to-bot scheduling insid
 fleet-mode: pi -> pi
 DRY: echo pi > /workspace/fleet-mode
 outbound-enabled: absent
-DRY: mkdir -p /workspace/pi-fallback/takeover && touch /workspace/pi-fallback/takeover/cindy
-DRY: mkdir -p /workspace/pi-fallback/takeover && touch /workspace/pi-fallback/takeover/boxhealth
+DRY: mkdir -p /workspace/mivo-qa/pi/takeover && touch /workspace/mivo-qa/pi/takeover/cindy
+DRY: mkdir -p /workspace/mivo-qa/pi/takeover && touch /workspace/mivo-qa/pi/takeover/boxhealth
 
 PAUSE these Grok Bot routines (in the Grok Bot app; bot-to-bot scheduling inside Grok stays on Grok):
   Mivo QA 日报     : mivo-qa-daily-report 08:30, retro 09:56, followup 15:17, followup-scan 06:17, handoff 回执 18:30/00:00, ledger 23:30, roster 1/15 08:23
@@ -98,6 +98,6 @@ PAUSE these Grok Bot routines (in the Grok Bot app; bot-to-bot scheduling inside
   Jasper           : 9:00 简报
 
 Pi takeover markers present: boxhealth cindy 
-Gated jobs without marker stay off: roster dailyretro xstyle (touch /workspace/pi-fallback/takeover/<name> to enable)
+Gated jobs without marker stay off: roster dailyretro xstyle (touch /workspace/mivo-qa/pi/takeover/<name> to enable)
 NOTE: outbound still closed (files only). Re-run with --with-outbound to let bin/outbound.py send.
 ```

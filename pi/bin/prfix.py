@@ -955,7 +955,8 @@ def explanation(text):
 RULES = ("Rules: no git commit/push/stash/reset/checkout, no network, edit only inside cwd, never kill processes, delete scratch / debug "
          "files you create (new files must be part of the fix). You may run targeted "
          "checks: `npx vitest run <files>`, `npx vitest related --run <changed files>`, `npx tsc --noEmit -p <tsconfig>`, `npx eslint <files>`; "
-         "no full test suite, no watch mode. Code may have moved since the report: locate by symbol.")
+         "no full test suite, no watch mode. Code may have moved since the report: locate by symbol. "
+         "Your cwd is the bot's own throw-away worktree under /workspace/pi-work (not a person's checkout); the rest of the machine is read-only, /tmp is private to this call, and the bot removes the worktree itself when the ticket ends -- no cleanup needed. Never touch other worktrees or the bot's own code (pi/ in panoptes).")
 FIX_FOLLOW = ("The regression test cases you wrote in TASK 1 are locked (restored before every check), so do not edit them; other cases in the "
               "same file count as existing tests. Existing tests: if one asserts the OLD "
               "buggy behaviour that this fix intentionally changes, update that expectation -- never skip/only/todo, never delete cases or "
