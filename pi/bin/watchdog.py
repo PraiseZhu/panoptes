@@ -160,7 +160,7 @@ def backup_check(now, probs):
             "每小时的机器备份发现：GitHub 上的备份比这台机器新 2 小时以上，像是机器被平台恢复成了旧快照。为了不让旧状态盖掉好的备份，这次没推。",
             "这台机器上的脚本、状态可能都退回了旧版本，自动化可能按旧规则在跑，最近的改动也可能丢了。",
             todo=PN.ask_session("盒子疑似被回滚（/workspace/box-ops/ROLLBACK-SUSPECTED）。别强推、别跑 restore.sh，"
-                                "按 /workspace/fleet-standards/pi-line/README.md「疑似回滚时怎么恢复」逐项恢复"))
+                                "按 /workspace/panoptes/docs/pi/README.md「疑似回滚时怎么恢复」逐项恢复"))
     elif res and not res[-1].startswith(("pushed", "no changes")):
         secret = res[-1].startswith("SECRET SCAN HIT")
         probs["backup:push"] = PN.item("action", "机器备份没推上去" + ("（发现疑似密钥）" if secret else ""),

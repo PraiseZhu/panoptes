@@ -9,6 +9,7 @@ import tempfile as _tf
 _JCONF = _os.path.join(_tf.mkdtemp(prefix="prfix-test-jconf-"), "janitor.json")   # never the live conf/janitor.json (enforce=true since 10-25)
 with open(_JCONF, "w") as _f: _f.write('{"enforce": false}')
 _os.environ['JANITOR_CONF'] = _JCONF
+import atexit as _ax, shutil as _sh; _ax.register(_sh.rmtree, _os.path.dirname(_JCONF), True)   # no temp dir left behind per run
 import argparse, contextlib, re, datetime as dt, importlib.util, io, json, os, shutil, subprocess, sys, tempfile, textwrap, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
