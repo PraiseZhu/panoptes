@@ -71,7 +71,8 @@ class TestBackupRules(unittest.TestCase):
     def tearDown(self):
         watchdog.CHECK_LOG = self.saved; shutil.rmtree(self.tmp, ignore_errors=True)
     def log(self, at, *rules):
-        with open(watchdog.CHECK_LOG, "a") as f: f.write(f"# grokbot-box check {at:%Y-%m-%d %H:%M:%S} CST mode=pi\n" + "".join(r + "\n" for r in rules))
+        with open(watchdog.CHECK_LOG, "a") as f:
+            f.write(f"# grokbot-box check {at:%Y-%m-%d %H:%M:%S} CST epoch={int(at.timestamp())} mode=pi\n" + "".join(r + "\n" for r in rules))
     def test_only_the_newest_block_and_only_rules_not_covered_elsewhere(self):
         now = watchdog.now_cst()
         self.log(now - watchdog.dt.timedelta(hours=2), "FAIL bot dir not backed up: old")              # older block: ignored
@@ -85,6 +86,14 @@ class TestBackupRules(unittest.TestCase):
         self.log(watchdog.now_cst() - watchdog.dt.timedelta(hours=4), "PASS cron file")
         p = {}; watchdog.backup_rules_check(watchdog.now_cst(), p)
         self.assertEqual(list(p), ["backup:rules-stale"])
+    def test_the_box_zone_does_not_matter(self):   # 10-24 22:45 false DM: a run at 22:40 CST wrote "07:40:01 PDT"
+        now = watchdog.now_cst(); pdt = now.astimezone(watchdog.dt.timezone(watchdog.dt.timedelta(hours=-7)))
+        with open(watchdog.CHECK_LOG, "w") as f: f.write(f"# grokbot-box check {pdt:%Y-%m-%d %H:%M:%S} PDT epoch={int(now.timestamp())} mode=pi\nPASS x\n")
+        p = {}; watchdog.backup_rules_check(now, p); self.assertEqual(p, {})
+        with open(watchdog.CHECK_LOG, "w") as f: f.write(f"# grokbot-box check {pdt:%Y-%m-%d %H:%M:%S} PDT mode=pi\nPASS x\n")   # older check.sh: mtime
+        p = {}; watchdog.backup_rules_check(now, p); self.assertEqual(p, {})
+        t = now.timestamp() - 4 * 3600; os.utime(watchdog.CHECK_LOG, (t, t))
+        p = {}; watchdog.backup_rules_check(now, p); self.assertEqual(list(p), ["backup:rules-stale"])
 
 
 class TestPrBotAndVigil(unittest.TestCase):
