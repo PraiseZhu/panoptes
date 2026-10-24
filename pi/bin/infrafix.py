@@ -738,7 +738,8 @@ def node_tests(wd, files, t=600):
 def node_verdict(rc, out):
     if rc == 124: raise Transient(f"测试超时：{tail(out, 3)}")
     if rc == 127: raise Transient(f"测试起不来：{tail(out, 3)}")
-    mt = re.search(r"^ℹ tests (\d+)", out or "", re.M); mf = re.search(r"^ℹ fail (\d+)", out or "", re.M)
+    # spec reporter ("ℹ tests N") or TAP ("# tests N"): node picks by environment (CI runners print TAP)
+    mt = re.search(r"^(?:ℹ|#) tests (\d+)", out or "", re.M); mf = re.search(r"^(?:ℹ|#) fail (\d+)", out or "", re.M)
     if not mt: raise Transient(f"node --test 没有输出摘要（没跑起来？）：{tail(out, 3)}")
     if int(mt.group(1)) == 0: raise Transient("没有跑到任何测试")
     return "pass" if rc == 0 and mf and int(mf.group(1)) == 0 else "fail"
@@ -770,7 +771,7 @@ def ci_local(wd):
     shutil.rmtree(pyc, ignore_errors=True)
     bad = [s for s in steps if s["rc"] != 0]
     tests = next((s for s in steps if s["step"] == "npm test"), {})
-    m = re.search(r"ℹ pass (\d+)", tests.get("tail") or ""); f_ = re.search(r"ℹ fail (\d+)", tests.get("tail") or "")
+    m = re.search(r"(?:ℹ|#) pass (\d+)", tests.get("tail") or ""); f_ = re.search(r"(?:ℹ|#) fail (\d+)", tests.get("tail") or "")
     return {"ok": not bad, "steps": steps, "failed": [s["step"] for s in bad], "timeout": any(s["rc"] == 124 for s in bad), "notes": notes,
             "pass": int(m.group(1)) if m else None, "fail": int(f_.group(1)) if f_ else None, "seconds": sum(s["s"] for s in steps)}
 
