@@ -3,8 +3,15 @@
 checks mem/load/top/disk/zombies, cron + /etc/cron.d perms, mem.log freshness, earlyoom --avoid, swap + swappiness;
 appends one line to /workspace/box-ops/health.log. Small fixes (sudo -n, idempotent): cron.d chown/chmod, box-ops-ensure.sh
 (earlyoom/swap/swappiness), start cron, mv /node_modules -> /node_modules.bak-<ts> (never delete).
-PI_BOXHEALTH_DRYRUN=1 -> report fixes without doing them. Cleanup of the whitelist is LIST-ONLY unless PI_BOXHEALTH_CLEAN=1.
-box-ops cron (/etc/cron.d/box-ops) does NO cleanup, so cleanup has a single owner: this script."""
+PI_BOXHEALTH_DRYRUN=1 / --dry-run -> report fixes and the cleanup list without doing them.
+Cleanup (2026-10-24, Praise: "超过 7 天自动删，要真删"): really deletes, every run, what is older than 7 days in the whitelist --
+npm / pip caches (per file), apt's downloaded .debs, this user's top-level /tmp entries that nothing touched for 7 days and no
+process holds (cwd / root / open fd, as panoptes scripts/sweep-tmp.sh), /tmp/cindy.deb -- and cuts a log over 200 MB in LOGS_CAP to
+its last 20 MB. Never the blacklist (Cindy / cindy-launch / CindyGlobal, keyrings, restic, snapshots, box-restore, agent-data). Not
+while a QA run holds its lock (flock -n, not "the lock file exists": those files stay for good). QA artifacts (evidence,
+step-results, run caches, /tmp/argus-*) are janitor's and panoptes' sweep-tmp.sh's, never this script's.
+Time zone (10-24): box-ops-ensure.sh pins America/Los_Angeles every minute and logs a drift to /workspace/box-ops/tz-drift.log;
+a new line there -> one DM. box-ops cron (/etc/cron.d/box-ops) does NO cleanup, so cleanup has a single owner: this script."""
 from lib import *
 import praise_notice as PN
 import glob, time
@@ -41,17 +48,72 @@ def fix(desc, cmd, fixed):
     fixed.append(desc + ("" if r.returncode == 0 else f" (失败 rc={r.returncode})"))
 def du(paths):
     return sum(int(sh(f"du -sb {p} 2>/dev/null | cut -f1") or 0) for p in paths)
+KEEP_DAYS = 7
+TMP_ROOT = os.environ.get("BOXHEALTH_TMP_ROOT") or "/tmp"          # tests only
+TZ_DRIFT_LOG = os.environ.get("BOXHEALTH_TZ_LOG") or "/workspace/box-ops/tz-drift.log"
+LOGS_CAP = ["/var/log/earlyoom.log", "/tmp/grokbot-box-sync.log", "/workspace/box-ops/*.log", "/workspace/grokbot-box-check/*.log"]
+LOG_MAX, LOG_KEEP = 200 << 20, 20 << 20
+BLACK = re.compile(r"(?i)cindy|keyring|restic|snapshot|box-restore|agent-data|^\.x11|^\.ice|^\.font|^tmux|^ssh-|^systemd|^sand|^xdg")
+QA_LOCKS = [f"/workspace/mivo-qa/argus-root/{n}" for n in ("nightly.lock", ".nightly.lock", "catch-up.lock", ".catch-up.lock")]
+def lock_held(p):
+    """a QA lock someone holds right now (flock -n fails) -- the files themselves never go away"""
+    import fcntl
+    try: f = open(p, "a")
+    except OSError: return False
+    try: fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); fcntl.flock(f, fcntl.LOCK_UN); return False
+    except BlockingIOError: return True
+    finally: f.close()
+def held_paths():
+    out = set()
+    for p in glob.glob("/proc/[0-9]*"):
+        for x in [f"{p}/cwd", f"{p}/root", *glob.glob(f"{p}/fd/*")]:
+            try: out.add(os.readlink(x))
+            except OSError: pass
+    return out
 def cleanup_candidates():
-    H = os.path.expanduser("~"); now = time.time(); c = []
-    c += [p for p in [f"{H}/.npm/_cacache", f"{H}/.cache/pip", "/tmp/cindy.deb"] if os.path.exists(p)]
-    c += [p for p in sh("find /tmp -maxdepth 1 -user box -type f -mtime +3 2>/dev/null").splitlines() if p]
-    for p in glob.glob("/tmp/argus-run-*"):   # >24h and no lock inside
-        if now - os.path.getmtime(p) > 86400 and not glob.glob(f"{p}/*.lock"): c.append(p)
-    A = "/workspace/mivo-qa/argus-root"
-    locks = [f"{A}/{n}" for n in ("nightly.lock", ".nightly.lock", "catch-up.lock", ".catch-up.lock") if os.path.exists(f"{A}/{n}")]
+    """-> ([(path, kind)], running QA locks). kind: file (unlink) / tree (rm -rf) / trunc (cut a log to its tail)"""
+    H = os.path.expanduser("~"); c = []
+    locks = [l for l in QA_LOCKS if os.path.exists(l) and lock_held(l)]
+    for root in (f"{H}/.npm/_cacache", f"{H}/.npm/_npx", f"{H}/.cache/pip"):   # cache entries, one by one: what was used stays
+        c += [(p, "file") for p in sh(f"find {root} -type f -mtime +{KEEP_DAYS} 2>/dev/null").splitlines() if p]
+    c += [(p, "sudo") for p in sh(f"find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -mtime +{KEEP_DAYS} 2>/dev/null").splitlines() if p]
+    if os.path.exists(f"{TMP_ROOT}/cindy.deb"): c.append((f"{TMP_ROOT}/cindy.deb", "file"))
     if not locks:
-        c += [p for p in glob.glob(f"{A}/cache/runs/*") if now - os.path.getmtime(p) > 14 * 86400]
+        held = held_paths(); me = os.getuid()
+        for name in sorted(os.listdir(TMP_ROOT)):
+            p = f"{TMP_ROOT}/{name}"
+            try: stt = os.lstat(p)
+            except OSError: continue
+            if stt.st_uid != me or BLACK.search(name) or name.startswith("argus-") or name == "cindy.deb": continue
+            if any(h == p or h.startswith(p + "/") for h in held): continue
+            if sh(f"find '{p}' -mmin -{KEEP_DAYS * 1440} -print -quit 2>/dev/null"): continue    # anything inside touched within 7 days
+            c.append((p, "tree" if os.path.isdir(p) and not os.path.islink(p) else "file"))
+    for pat in LOGS_CAP:
+        for p in glob.glob(pat):
+            try:
+                if os.path.isfile(p) and os.path.getsize(p) > LOG_MAX: c.append((p, "trunc"))
+            except OSError: pass
     return c, locks
+def really_clean(cand):
+    """really delete / truncate; -> bytes freed (by the disk, not by the list)"""
+    before = shutil_free()
+    for p, kind in cand:
+        if kind == "file": sh(f"rm -f -- '{p}'")
+        elif kind == "tree": sh(f"rm -rf --one-file-system -- '{p}'")
+        elif kind == "sudo": sh(f"sudo -n rm -f -- '{p}'")
+        elif kind == "trunc": sh(f"tail -c {LOG_KEEP} '{p}' > '{p}.cut' && cat '{p}.cut' > '{p}' && rm -f '{p}.cut'")
+    for root in (os.path.expanduser("~/.npm/_cacache"), os.path.expanduser("~/.cache/pip")):
+        sh(f"find {root} -mindepth 1 -type d -empty -delete 2>/dev/null")
+    return max(0, shutil_free() - before)
+def shutil_free():
+    import shutil
+    return shutil.disk_usage("/").free
+def tz_drifts(st):
+    """new lines in box-ops-ensure.sh's /workspace/box-ops/tz-drift.log since the last run"""
+    try: lines = open(TZ_DRIFT_LOG).read().splitlines()
+    except OSError: return []
+    seen = st.get("tz_drift_lines", 0); st["tz_drift_lines"] = len(lines)
+    return lines[seen:] if len(lines) >= seen else lines
 def janitor_summary():
     """10-24: bot work dirs / scratch / old evidence are janitor's (pi/bin/janitor.py); this line only shows its last report"""
     r = jload(f"{BASE}/out/janitor/last.json", None)
@@ -101,23 +163,22 @@ def main():
         issues.append(f"根目录有 /node_modules（{', '.join(sorted(os.listdir('/node_modules')))[:120]}）")
         fix(f"sudo mv /node_modules {dst}（未删除；需通知 Praise PR bot）", f"sudo -n mv /node_modules {dst}", fixed)
         events.append(f"/node_modules 已改名 {dst}，请转告 Praise PR bot" if not DRY else "/node_modules 待改名")
-    cand, locks = cleanup_candidates(); cand_b = du(cand) if cand else 0
-    clean = os.environ.get("PI_BOXHEALTH_CLEAN") == "1" and not DRY; freed = 0
+    cand, locks = cleanup_candidates(); cand_b = du([p for p, k in cand if k != "trunc"]) if cand else 0
+    clean = not DRY; freed = 0
     if clean and cand:
-        before = int(sh("df -B1 / | awk 'NR==2{print $4}'") or 0)
-        for p in cand: sh(f"rm -rf -- '{p}'")
-        sh("sudo -n apt-get clean")
-        freed = int(sh("df -B1 / | awk 'NR==2{print $4}'") or 0) - before
+        freed = really_clean(cand)
         if freed > 500 * 2**20: events.append(f"清理释放 {freed // 2**20}MB > 500MB")
+    drifts = tz_drifts(st)
+    if drifts: events.append(f"时区漂移: {len(drifts)} 次，最近一次 " + drifts[-1])
     bad = [f for f in fixed if "失败" in f]
     if bad and not DRY: alerts.append(("fix-failed", "自动修复失败: " + "; ".join(bad)))
     if fixed and not DRY and len(bad) < len(fixed): events.append("已修复: " + "; ".join(f for f in fixed if f not in bad))
     line = (f"{t.strftime('%F %T')} CST [pi-line{' dry' if DRY else ''}] avail={avail}MB low_streak={low_min}min load={load} disk={disk} zombies={zomb}(ours {len(ours)}) top={top.strip()} "
-            f"clean={'done freed=' + str(freed // 2**20) + 'MB' if clean else 'list-only'} candidates={len(cand)}项/{cand_b // 2**20}M"
-            f"{' (mivo runs 跳过: ' + ','.join(os.path.basename(l) for l in locks) + ' 在)' if locks else ''} "
+            f"clean={'done freed=' + str(freed // 2**20) + 'MB' if clean else 'dry'} candidates={len(cand)}项/{cand_b // 2**20}M"
+            f"{' (测试在跑，/tmp 不清: ' + ','.join(os.path.basename(l) for l in locks) + ' 被占)' if locks else ''} "
             f"janitor={janitor_summary()} "
             f"issues={'; '.join(issues) or 'none'} fixed={'; '.join(fixed) or 'none'}")
-    if DRY: print(line); print("candidates:", *cand, sep="\n  ")
+    if DRY: print(line); print("candidates:", *(f"{k} {p}" for p, k in cand), sep="\n  ")
     else:
         open("/workspace/box-ops/health.log", "a").write(line + "\n")
         out = f"{BASE}/out/box/{d}.health.md"; old = open(out).read() if os.path.exists(out) else f"# box-health {d}（Pi line）\n"
@@ -146,6 +207,10 @@ def main():
         st.update(sig="", since=None, sent_at=0)
     for e in events:
         if e.startswith("已修复: "): items.append(PN.item("fyi", "机器体检自己修好了一处问题", f"发现并修好了：{e[len('已修复: '):][:150]}。"))
+        elif e.startswith("清理释放 "): items.append(PN.item("fyi", "机器清理释放了不少空间", f"按「超过 7 天自动删」{e[len('清理释放 '):].split(' >')[0]}。",
+            "不影响使用。"))
+        elif e.startswith("时区漂移: "): items.append(PN.item("auto", "系统时区被改了，已经改回洛杉矶", f"上一小时有程序把机器时区改了 {e.split('时区漂移: ')[1].split(' 次')[0]} 次（最近一次改成 {e.split('localtime=')[-1].split(' ')[0]}），每分钟的自检都已经改回 America/Los_Angeles。",
+            "不影响 Pi 线（它按北京时间出日报，不看系统时区）。", auto="每分钟自动检查并改回；记录在 /workspace/box-ops/tz-drift.log"))
         elif "/node_modules" in e and "改名" in e: items.append(PN.item("fyi", "机器根目录多出来的 node_modules 被挪开了",
             f"机器根目录（/）下出现了一个 node_modules 文件夹，会干扰测试，已经改名挪开（没删）：{e.split('已改名 ')[-1].split('，')[0]}。",
             "如果修 PR bot 正好在用它，可能要重装依赖。", todo="告诉修测试的会话一声，让修 PR bot 那边知道这件事"))
