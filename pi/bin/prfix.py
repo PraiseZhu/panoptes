@@ -219,7 +219,10 @@ def _write(p, data, mode="w"):
     with open(p, mode) as f: f.write(data)
 def _rjson(p): return json.loads(_read(p))
 def tail(s, n=60): return "\n".join((s or "").rstrip().splitlines()[-n:])
-def git(*a, cwd=None, t=600): return run(["git", *a], cwd=cwd or GIT, t=t)
+def git(*a, cwd=None, t=600):
+    if cwd is None and not os.path.exists(GIT) and os.path.abspath(GIT) == W.clone_dir("mivo"):
+        W.ensure_clone("mivo")      # 10-24: the bot clone, made on first use (a test pointing GIT elsewhere never gets here)
+    return run(["git", *a], cwd=cwd or GIT, t=t)
 def fp8(fp): return (fp or "")[4:12]
 def iso(t): return t.astimezone(CST).isoformat(timespec="seconds") if t else None
 def ts(s):
@@ -249,6 +252,7 @@ def repo_lock():
     """10-24 parallel runs: serialise what changes the shared clone's metadata (fetch, worktree add/remove/prune, branch -D).
     Edits, tests, commit and pre-push inside a ticket's own worktree run in parallel."""
     if os.path.abspath(GIT) == W.clone_dir("mivo"):           # the bot clone: the same lock janitor / opsfix take
+        W.ensure_clone("mivo")                                 # made once, before the lock (cloning takes that lock itself)
         with W.repo_lock("mivo"): yield
         return
     os.makedirs(OUT, exist_ok=True)
@@ -2140,11 +2144,6 @@ def main(argv=None):
     ap.add_argument("--allow-sensitive", action="store_true", help="Praise said yes: this fix may touch CI config / repo rules / secrets files")
     A = ap.parse_args(argv); A_ALLOW["sensitive"] = bool(A.allow_sensitive) and bool(A.qa or A.revise)
     if A.fp and not A.qa: ap.error("--fp needs --qa")
-    if not (A.list or A.pending_json) and os.path.abspath(GIT) == W.clone_dir("mivo"):   # the bot clone, made once (fetch only)
-        try: W.ensure_clone("mivo")
-        except Exception as e:
-            if A.cleanup_stale: print(f"prfix: bot clone: {e}"); return 1
-            return finish({"status": "error", "pr": A.revise, "error": f"bot clone 建不起来：{str(e)[:250]}"}, 1, A)
     if A.cleanup_stale: return cleanup_stale(A.yes)
     if A.revise:
         try: return revise(A)

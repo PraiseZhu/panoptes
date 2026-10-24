@@ -62,6 +62,7 @@ class Base(unittest.TestCase):
         W.REPOS.clear(); W.REPOS.update(self.saved)
     def conf(self, c, data_dirs=True):
         if data_dirs: c = {"evidence": {"dir": f"{T}/data/evidence"}, "step_results": {"dir": f"{T}/data/steps"}, "legacy_tmp": [f"{T}/data/legacy"], **c}
+        c = {"free_gb_low": 0, **c}       # a CI runner has < 15 G free: never aggressive unless the test says so
         json.dump(c, open(f"{T}/janitor.json", "w"))
     def gh(self, fx): json.dump(fx, open(f"{T}/gh.json", "w"))
     def gh_calls(self):
