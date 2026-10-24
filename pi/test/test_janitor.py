@@ -27,6 +27,13 @@ sys.exit(3)
 B = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin"); sys.path.insert(0, B)
 import workroot as W   # noqa: E402
 import janitor as J    # noqa: E402
+# 10-24: every built-in default path points into T as well -- a test conf that leaves one out must never fall back to the box's
+# real dirs (one did: test_10 with enforce=true removed the real /tmp/opsfix-retest/nm-* cache before this line existed)
+J.DEFAULTS.update(legacy_tmp=[f"{T}/data/legacy"], evidence={**J.DEFAULTS["evidence"], "dir": f"{T}/data/evidence"},
+                  step_results={**J.DEFAULTS["step_results"], "dir": f"{T}/data/steps"})
+REAL = ["/tmp/opsfix-retest", "/tmp/pi-prfix", "/workspace/mivo-qa/argus-root/app/evidence/nightly", "/workspace/mivo-qa/argus-root/cache/step-results", "/workspace/pi-work"]
+def real_state(): return {p: (sorted(os.listdir(p)) if os.path.isdir(p) else None) for p in REAL}
+REAL_BEFORE = real_state()
 
 def sh(*a, cwd=None):
     r = subprocess.run(a, cwd=cwd, capture_output=True, text=True)
@@ -239,6 +246,12 @@ class TestWatchdog(Base):
         probs = {}; WD.janitor_check(now, probs); self.assertEqual(probs, {})      # rehearsal: leftovers are expected, nothing to say
         r["ran_at"] = (now - __import__("datetime").timedelta(hours=3)).isoformat(); r["free_gb"] = 1; json.dump(r, open(f, "w"))
         probs = {}; WD.janitor_check(now, probs); self.assertEqual(probs, {})      # stale report: "janitor stopped" is job_checks' to say
+
+class TestZZIsolation(unittest.TestCase):
+    def test_99_nothing_outside_the_sandbox_was_deleted(self):   # production jobs may add entries meanwhile; none may go
+        now = real_state()
+        for p, before in REAL_BEFORE.items():
+            self.assertEqual(sorted(set(before or []) - set(now[p] or [])), [], p)
 
 if __name__ == "__main__":
     try: unittest.main(verbosity=1)
