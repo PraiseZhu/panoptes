@@ -1,3 +1,5 @@
+> 历史记录（写于 10-24 Pi 线并入 panoptes 之前）：文中的 `/workspace/pi-fallback/...` 是旧位置——代码现在在 `/workspace/panoptes/pi/`，状态在 `/workspace/mivo-qa/pi/`，对照见 `pi/README.md`「三类存放位置」。
+
 # Cindy 管家 · Grok↔Pi 机制对齐表（2026-10-23 13:55 北京时间）
 
 E = `~/.config/cindy-launch/ensure-cindy.sh`（两条线共用的唯一执行脚本），C = `/workspace/pi-fallback/bin/cindy.py`，R = `bin/run.sh`。行号来自 `grep -n`（13:54）。

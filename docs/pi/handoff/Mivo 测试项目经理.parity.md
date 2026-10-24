@@ -1,3 +1,5 @@
+> 历史记录（写于 10-24 Pi 线并入 panoptes 之前）：文中的 `/workspace/pi-fallback/...` 是旧位置——代码现在在 `/workspace/panoptes/pi/`，状态在 `/workspace/mivo-qa/pi/`，对照见 `pi/README.md`「三类存放位置」。
+
 # 机制对齐表 · Mivo 测试项目经理（第二阶段，2026-10-23 14:05 北京时间）
 
 范围：Grok 线机制以 fleet-standards/Mivo 测试项目经理.md、daily-runbook.md 和 pm-daily/2026-10-2{1,2}.md 的真实产出为准。Pi 线代码在 `/workspace/pi-fallback/bin/{pm,pmnudge,p2}.py`，本阶段改动前的备份是 `*.bak-20261023-13xx-parity`。

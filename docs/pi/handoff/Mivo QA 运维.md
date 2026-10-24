@@ -21,7 +21,7 @@
 
 ## b) opsenv.py
 - 检查项：bootstrap-box.sh --check（chromium、bubblewrap、node/npm、venv、catch-up cron 加守护进程、apt 依赖），另外抽查 chromium、node、npm、venv、cron 文件、cron 守护进程、仓库完整性；还查 panoptes HEAD 和 origin 是否一致（用 ls-remote）、有没有改过的已跟踪文件、gh 登录、secrets.env 是不是 600 权限。
-- 修复：要同时满足三条才会执行 /workspace/panoptes/bootstrap-box.sh——`/workspace/pi-fallback/ops-repair-enabled` 存在、fleet-mode=pi、panoptes 没在跑。修完会再查一遍。**这个开关文件我没建**，所以现在只查不修。
+- 修复：要同时满足三条才会执行 /workspace/panoptes/bootstrap-box.sh——`/workspace/mivo-qa/pi/ops-repair-enabled` 存在、fleet-mode=pi、panoptes 没在跑。修完会再查一遍。**这个开关文件我没建**，所以现在只查不修。
 - 修掉的 bug：旧版的 pgrep 会把自己的 shell 也算成“panoptes 运行中”（10-23 日志里有一行是这样）。
 - 和 Grok 比：Grok env-guard 在盘上没有记录，没法逐行对比。检查范围按 routine 的描述（chromium/cron/node/npm/venv/catch-up/repo）全部覆盖了。12:24 实跑结果：全部就绪，panoptes 运行中（catch-up）。
 
@@ -52,7 +52,7 @@
 
 ## 怎么启用（我没启用）
 - 两个 cron 已经在 /etc/cron.d/pi-fallback 里：`25 * * * * opsenv`、`15 * * * * opsreview @11`（只写文件）。
-- 要让自检真的修复：`touch /workspace/pi-fallback/ops-repair-enabled`，并且 fleet-mode=pi；同时要停掉 Grok 的 panoptes-env-guard，免得两边一起修。
+- 要让自检真的修复：`touch /workspace/mivo-qa/pi/ops-repair-enabled`，并且 fleet-mode=pi；同时要停掉 Grok 的 panoptes-env-guard，免得两边一起修。
 - 群消息：Grok 群没有 API。Praise 定好替代渠道（Slack/飞书）以后，把 action 的 type 改成 slack.post 或 feishu.group，再由 Jasper 开闸。
 - Grok 线的 mivo-qa-on-merge、panoptes-env-guard、panoptes-daily-review 在 Pi 线运行期间不要恢复。
 

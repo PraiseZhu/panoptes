@@ -1,13 +1,13 @@
 # Pi line · 2026-10-23 建，北京时间
 
-> **2026-10-24：Pi 线并入 panoptes。** 代码在 `pi/`（部署在 `/workspace/panoptes/pi`），要留的数据在 `/workspace/mivo-qa/pi/`，用完就扔的工作目录在 `/workspace/pi-work/`。下文写到 `/workspace/pi-fallback/bin`、`conf`、`test` 的地方，现在对应 `pi/` 下的同名目录；写到 `/workspace/pi-fallback/out`、`takeover`、`outbound-*` 的地方，现在对应 `/workspace/mivo-qa/pi/` 下的同名文件。改动只走 PR。
+> **2026-10-24：Pi 线并入 panoptes。** 代码在 `pi/`（部署在 `/workspace/panoptes/pi`），要留的数据在 `/workspace/mivo-qa/pi/`，用完就扔的工作目录在 `/workspace/pi-work/`。下文写到 `/workspace/panoptes/pi/bin`、`conf`、`test` 的地方，现在对应 `pi/` 下的同名目录；写到 `/workspace/mivo-qa/pi/out`、`takeover`、`outbound-*` 的地方，现在对应 `/workspace/mivo-qa/pi/` 下的同名文件。改动只走 PR。
 
-10-23 16:10 起正式接管（fleet-mode=pi + outbound-enabled，真实外发；Grok 对应 routine 已暂停）。10-23 上午的影子期只写文件，下文「影子产出」「对比」列是那时的记录。代码：`/workspace/pi-fallback/bin/`，产出：`/workspace/pi-fallback/out/`，cron：`/etc/cron.d/pi-fallback`（副本 `/workspace/pi-fallback/pi-fallback.cron`）。不改 Grok 线任何东西。
+10-23 16:10 起正式接管（fleet-mode=pi + outbound-enabled，真实外发；Grok 对应 routine 已暂停）。10-23 上午的影子期只写文件，下文「影子产出」「对比」列是那时的记录。代码：`/workspace/panoptes/pi/bin/`，产出：`/workspace/mivo-qa/pi/out/`，cron：`/etc/cron.d/pi-fallback`（副本 `/workspace/panoptes/pi/cron/pi-line.cron`）。不改 Grok 线任何东西。
 
 ## 开关与外发闸
 - `/workspace/fleet-mode`：`grok`（现在）或 `pi`。每个作业启动时读取并记到日志；两种模式下**都只写文件**。
 - 外发（Slack/飞书/gh 写/SendToAgent）只写进 `out/<job>/<date>.actions.json`，每条带幂等 key（如 `mivo-daily-report:<日期>`、`dm:<日期>:<PR>`、`handoff:<PR>:<fingerprint>`、`merge:<PR>:<headSHA>`、`fixpr:<PR>:<fingerprint>`、`ready:<PR>`），并注明去重依据文件（sent.json、feishu-sent.json、issues.json）。
-- 只有 `fleet-mode=pi` **且** `/workspace/pi-fallback/outbound-enabled` 存在时闸门才打开，`bin/outbound.py` 真实外发；`outbound-disabled-types` 里的类型永不外发（10-23 起锁的是合并官的合并 / 评论类，Praise 定）。status=done 的 key 永不重做。
+- 只有 `fleet-mode=pi` **且** `/workspace/mivo-qa/pi/outbound-enabled` 存在时闸门才打开，`bin/outbound.py` 真实外发；`outbound-disabled-types` 里的类型永不外发（10-23 起锁的是合并官的合并 / 评论类，Praise 定）。status=done 的 key 永不重做。
 - 公共：`run.sh` 内存 MemAvailable < 3G 跳过、每作业 flock、按北京小时门控（盒子是洛杉矶时间）、日志 `out/logs/<job>-<日期>.log`；密钥从 `~/.pi-fallback-secret/env`（600，不在任何 git 仓/备份同步路径）读入，日志只写 set/unset。
 - 模型只经 `~/tools/pi-call/pi-auto <tier>`；任务记录 `out/tasks/`，owner=`pi-line-cron`。
 
@@ -53,13 +53,13 @@ panoptes catch-up 每 2 小时 :07 + 每次合并（mergewatch）起跑；修 PR
 ## 10-23 增补（100% 版）
 - 新作业：outbound.py（外发执行器，*/10，闸门 = fleet-mode=pi 且 outbound-enabled；台账 out/outbound/ledger.json）、cindy.py（*/5，takeover/cindy）、boxhealth.py（:17，takeover/boxhealth，清理默认只列）、dailyretro.py（09:56，takeover/dailyretro）、roster.py（1/15 08:23，takeover/roster）、xstyle.py（工作日 10:04，takeover/xstyle，需 X bearer）、credcheck.py（07:01）。
 - 切换：`bin/switch.sh pi|grok [--with-outbound] [--dry-run]`。测试覆盖：`PI_FLEET_MODE` / `PI_TAKEOVER_DIR` 环境变量（只用于测试）。
-- 重置恢复：grokbot-box `restore.d/60-pi-line.sh` + `/workspace/pi-fallback/restore/`。E2E：e2e-2026-10-23.md。
+- 重置恢复：grokbot-box `restore.d/60-pi-line.sh` + `/workspace/panoptes/pi/restore/`。E2E：e2e-2026-10-23.md。
 
 
 ## 10-23 晚 全链路修复（Praise 批准「全部修，今晚上线」）
 排查报告：Cindy 对话目录 documents/2026-10-23-Pi线全链路排查.md。改动全部进本地 git：
-`git --git-dir=/home/box/.pi-fallback.git log --oneline`（工作树 /workspace/pi-fallback，out/ 不入库；提交前自动编译检查）。
-回滚某一步：`git --git-dir=/home/box/.pi-fallback.git revert <sha>` 或 `checkout <sha> -- bin/<file>`。不要再新建 .bak。
+（10-24 起）改动走 PraiseZhu/panoptes 的 PR（`pi/`，CI 跑 `pi/bin/selftest.sh`）；回滚某一步 = 对那次合并开一个 revert PR。不要再新建 .bak。
+10-24 之前的历史在 `git --git-dir=/home/box/.pi-fallback.git log --oneline`（只读存档：它的 pre-commit 拒绝一切提交）。
 
 | 部件 | 做什么 | 频率 | 产出 / 状态 |
 |---|---|---|---|

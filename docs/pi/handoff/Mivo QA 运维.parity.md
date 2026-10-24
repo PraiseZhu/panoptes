@@ -1,3 +1,5 @@
+> 历史记录（写于 10-24 Pi 线并入 panoptes 之前）：文中的 `/workspace/pi-fallback/...` 是旧位置——代码现在在 `/workspace/panoptes/pi/`，状态在 `/workspace/mivo-qa/pi/`，对照见 `pi/README.md`「三类存放位置」。
+
 # Mivo QA 运维 · Grok ↔ Pi 机制对齐表（2026-10-23 14:40 北京时间）
 
 范围：只写文件。没开闸，没恢复或修改任何 Grok routine，没开 issue，没往 mivo-canvas-plugin 推任何东西，panoptes 只在本地分支上改（没推、没合）。

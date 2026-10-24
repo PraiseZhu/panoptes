@@ -5,10 +5,10 @@
 ## 职责 → 脚本
 | 职责（Praise-PR.md） | 脚本 | cron（已有，未改） | 产出 |
 |---|---|---|---|
-| 09:41 复盘 + P0–P2 覆盖核对 | `/workspace/pi-fallback/bin/prretro.py` | 09:45 | `out/praise-pr/<日>.retro.md` |
+| 09:41 复盘 + P0–P2 覆盖核对 | `/workspace/panoptes/pi/bin/prretro.py` | 09:45 | `out/praise-pr/<日>.retro.md` |
 | 草稿 → ready | prretro.py 第 2 节 | 同上 | `out/praise-pr/<日>.actions.json`（key `ready:<PR>`） |
 | 22:23 清理 | prretro.py 第 3 节，**只列不删** | 同上 | retro.md |
-| 修 P0/P1/判「修」的 P2 | `/workspace/pi-fallback/bin/prfix.py`（heavy） | 14:20 | `out/praise-pr/<日>-QA<N>-<fp>.patch/.md`，actions `fixpr:<N>:<fp>` |
+| 修 P0/P1/判「修」的 P2 | `/workspace/panoptes/pi/bin/prfix.py`（heavy） | 14:20 | `out/praise-pr/<日>-QA<N>-<fp>.patch/.md`，actions `fixpr:<N>:<fp>` |
 
 ## prretro.py
 - 覆盖：扫 `reports/merged/PR-*.json` 里所有 P0–P2 finding，按以下顺序找对应：PraiseZhu 的 PR 正文 `QA: #N`（任何状态）→ `praise-pr/notes/` 文件名带 N（文件名带 p1/p2 时级别要对上）→ QA 台账最新日的 fix_pr / concluded_reason（别人修的）。都没有就标 ❌。

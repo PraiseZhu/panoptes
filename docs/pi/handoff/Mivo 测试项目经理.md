@@ -13,10 +13,10 @@ cron 行没改（`/etc/cron.d/pi-fallback` 原有：pm @10 :35、pmnudge @10,12,
 | 交接仓验收、修复 PR 验收、前一天催办复查 | — | — | — | ❌ 没做（§5） |
 
 ## 2. 改动的文件（改前都留了 .bak）
-- `/workspace/pi-fallback/bin/pm.py`（备份 pm.py.bak-20261023-1304-pm）
-- `/workspace/pi-fallback/bin/pmnudge.py`（备份 pmnudge.py.bak-20261023-1304-pm）
-- `/workspace/pi-fallback/bin/p2.py`（备份 p2.py.bak-20261023-1304-pm）
-- `/workspace/pi-fallback/out/pm/2026-10-2{1,2}.{md,json}`：新 dry-run 结果（旧草稿留在 .md.bak-pre-pm-v2）
+- `/workspace/panoptes/pi/bin/pm.py`（备份 pm.py.bak-20261023-1304-pm）
+- `/workspace/panoptes/pi/bin/pmnudge.py`（备份 pmnudge.py.bak-20261023-1304-pm）
+- `/workspace/panoptes/pi/bin/p2.py`（备份 p2.py.bak-20261023-1304-pm）
+- `/workspace/mivo-qa/pi/out/pm/2026-10-2{1,2}.{md,json}`：新 dry-run 结果（旧草稿留在 .md.bak-pre-pm-v2）
 - 没动：lib.py、run.sh、cron、README.md、p2-rulings.md、fleet-standards/pm-daily/。
 
 口径要点：
@@ -49,7 +49,7 @@ Pi 结果：G1 25/25，G2a 5/8（#1124、#1156 超过 24h 没有修复 PR 或说
 ## 4. 催办渠道（Pi 线没有 Grok 群）· **待 Praise 定**
 | 方案 | 做法 | 优点 | 缺点 |
 |---|---|---|---|
-| A. 写进 Praise PR 的收件队列 | pmnudge 把催办写到 `/workspace/pi-fallback/out/praise-pr/inbox/<日>.jsonl`，Praise PR 的 Pi 作业（prretro/prfix）开跑时读取，并在自己的 .md 里回执 | 不外发，闸门关着也能用，零凭证；有幂等 key，好对账 | Praise PR 的 Pi 作业是定时跑的（09:45、14:20），催办最长会晚几小时；要 Praise PR 改脚本去读（不是我的文件） |
+| A. 写进 Praise PR 的收件队列 | pmnudge 把催办写到 `/workspace/mivo-qa/pi/out/praise-pr/inbox/<日>.jsonl`，Praise PR 的 Pi 作业（prretro/prfix）开跑时读取，并在自己的 .md 里回执 | 不外发，闸门关着也能用，零凭证；有幂等 key，好对账 | Praise PR 的 Pi 作业是定时跑的（09:45、14:20），催办最长会晚几小时；要 Praise PR 改脚本去读（不是我的文件） |
 | B. 走任务书现有的 actions.json + outbound.py，发到 Slack #mivo-canvas-qa（C0CAH3W61N2）的线程 | 已经写好 actions（type=nudge）；开闸后由 outbound.py 发出 | 人能看到，Praise 也能看到；有现成的 bot token 和幂等台账 | 要 Praise 批开闸并接执行器；会把 bot 之间的催办发进人看的群，可能刷屏 |
 | C. 只写文件，由 Jasper 每天 09:05 的 jasper.py 简报汇总 | 20 点 chief.md 和催办节被 Jasper 读进简报 | 最安全，不加新通道 | 不是实时，Praise PR 不会马上看到，等于降级成日报 |
 

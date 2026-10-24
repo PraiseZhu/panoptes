@@ -1,3 +1,5 @@
+> 历史记录（写于 10-24 Pi 线并入 panoptes 之前）：文中的 `/workspace/pi-fallback/...` 是旧位置——代码现在在 `/workspace/panoptes/pi/`，状态在 `/workspace/mivo-qa/pi/`，对照见 `pi/README.md`「三类存放位置」。
+
 # Pi 线完整迁移 · 舰队任务书（2026-10-23 12:25 北京时间，Jasper 代 Praise 下发）
 
 ## 目标（Praise 原话要点）

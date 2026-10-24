@@ -835,7 +835,8 @@ def context_text(c):
 RULES = ("Rules: no git commit/push/stash/reset/checkout, no network, edit only inside cwd; never modify /workspace/panoptes (the live "
          "checkout), /workspace/mivo-qa (reading the evidence files above is fine), /etc, crontabs or any secrets file; never run "
          "run-nightly.sh or bootstrap-box.sh for real; never kill processes; run only targeted `bash run-tests.sh tests/<file>` "
-         "from argus/ (no watch mode).")
+         "from argus/ (no watch mode). A change under pi/ (the bot's own code) drops the ticket. "
+         "Your cwd is the bot's own throw-away worktree under /workspace/pi-work (not a person's checkout); the rest of the machine is read-only, /tmp is private to this call, and the bot removes the worktree itself when the ticket ends -- no cleanup needed. Never touch other worktrees or the bot's own code (pi/ in panoptes).")
 
 def fix_one(c, A, d):
     """-> (outcome, res). outcome status: pr_action_written | dry_ok | norepro | failed (kind transient|deterministic)."""
