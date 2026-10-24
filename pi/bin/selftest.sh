@@ -13,6 +13,6 @@ for f in "$B"/bin/*.sh "$B"/bin/run.sh; do bash -n "$f" || { echo "FAIL parse $(
 CLEAN=(env -i "PATH=$PATH" "HOME=$HOME" "USER=${USER:-$(id -un)}" "LOGNAME=${LOGNAME:-$(id -un)}" "LANG=C.UTF-8" "LC_ALL=C.UTF-8"
        "TZ=Asia/Shanghai" "TMPDIR=${TMPDIR:-/tmp}")
 for t in "$B"/test/test_*.py; do
-  out=$(cd "$B/bin" && "${CLEAN[@]}" PYTHONPYCACHEPREFIX=$tmp timeout 300 python3 "$t" 2>&1) || { echo "FAIL $(basename "$t")"; echo "$out" | tail -5; rc=1; }
+  out=$(cd "$B/bin" && "${CLEAN[@]}" PYTHONPYCACHEPREFIX=$tmp timeout 300 python3 "$t" 2>&1) || { echo "FAIL $(basename "$t")"; echo "$out" | tail -"${PI_SELFTEST_TAIL:-5}"; rc=1; }
 done
 rm -rf "$tmp"; [ $rc = 0 ] && echo "selftest ok"; exit $rc

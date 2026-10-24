@@ -60,6 +60,8 @@ jobs:
       # Pi line (pi/, merged in 10-24): every script compiles, every shell script parses, every pi/test/test_*.py passes
       # (no network, no model; tests that need the box's own data skip themselves)
       - name: Pi line selftest
+        env:
+          PI_SELFTEST_TAIL: '120'
         run: bash pi/bin/selftest.sh
 
       # infrafix (fix/infra-* branches) fixes panoptes itself and must never change the Pi line that runs it
