@@ -58,9 +58,9 @@ class TestCleanup(unittest.TestCase):
         mk(f"{T}/logs1/prwatch-{edge:%Y-%m-%d}.log", 0)                 # exactly 7 days ago: still in the window
         mk(f"{T}/logs1/control.log", 1); mk(f"{T}/logs1/tmp-sweep.log", 9)   # no date: mtime decides
         mk(f"{T}/logs2/mem.log.{old:%Y%m%d}-022110.gz", 0); mk(f"{T}/logs2/mem.log.2.gz", 3); mk(f"{T}/logs2/box-ops-mem.logrotate.bak.{old:%Y%m%d}", 30)
-        mk(f"{T}/logs2/severity-pin.json", 30)
+        mk(f"{T}/logs2/severity-pin.json", 30); mk(f"{T}/logs1/catch-up-guard-{old:%Y%m%d}T013236.out", 0)   # 10-24 acceptance nit: .out too
         c = self.paths()
-        for gone in (f"logs1/nightly-{old:%Y%m%d}T010101.log", "logs1/tmp-sweep.log", f"logs2/mem.log.{old:%Y%m%d}-022110.gz"): self.assertIn(f"{T}/{gone}", c, gone)
+        for gone in (f"logs1/nightly-{old:%Y%m%d}T010101.log", "logs1/tmp-sweep.log", f"logs2/mem.log.{old:%Y%m%d}-022110.gz", f"logs1/catch-up-guard-{old:%Y%m%d}T013236.out"): self.assertIn(f"{T}/{gone}", c, gone)
         for kept in (f"logs1/prwatch-{edge:%Y-%m-%d}.log", "logs1/control.log", "logs2/mem.log.2.gz", f"logs2/box-ops-mem.logrotate.bak.{old:%Y%m%d}", "logs2/severity-pin.json"):
             self.assertNotIn(f"{T}/{kept}", c, kept)
         p = f"{T}/logs1/held-{old:%Y%m%d}.log"; mk(p, 9); h = open(p)

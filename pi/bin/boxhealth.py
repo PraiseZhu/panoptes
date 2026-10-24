@@ -56,7 +56,7 @@ LOG_MAX, LOG_KEEP = 200 << 20, 20 << 20
 BLACK = re.compile(r"(?i)cindy|keyring|restic|snapshot|box-restore|agent-data|^\.x11|^\.ice|^\.font|^tmux|^ssh-|^systemd|^sand|^xdg")
 LOG_DIRS = (os.environ.get("BOXHEALTH_LOG_DIRS") or "/workspace/mivo-qa/argus-root/logs:/workspace/mivo-qa/pi/out/logs:/workspace/box-ops:"
             "/workspace/grokbot-box-check").split(":")                 # env: tests only
-LOG_NAME = re.compile(r"\.log($|[.-])")                     # x.log, x.log.1, x.log.gz, mem.log.20261016-022110.gz
+LOG_NAME = re.compile(r"\.log($|[.-])|\.out$")              # x.log, x.log.1, x.log.gz, mem.log.20261016-022110.gz, catch-up-guard-*.out
 NAME_DAY = re.compile(r"(20\d\d)-?(\d\d)-?(\d\d)")
 def log_day(name):
     """the day a log file is about: the date in its name (nightly-20261016T..., prwatch-2026-10-16.log), None when it has none"""
