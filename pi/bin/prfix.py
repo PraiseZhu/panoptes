@@ -50,14 +50,17 @@ import sys, shutil, argparse, fcntl, time, contextlib, tempfile, hashlib
 from lib import *
 import lib
 import praise_notice as PN
+import workroot as W
 from finding_policy import notifiable, own_pr_ticket, no_fix_rulings
 os.environ["PATH"] = "/usr/local/bin:" + os.environ.get("PATH", "")
 
 _E = os.environ.get
-GIT = _E("PRFIX_GIT") or "/workspace/mivo-canvas-plugin"
-WT_ROOT = _E("PRFIX_WT_ROOT") or "/workspace/praise-pr"
+# 10-24 (plan §4.1): the bot's own clone and worktrees under PI_WORK -- a person's /workspace/mivo-canvas-plugin and
+# /workspace/praise-pr are no longer touched; every worktree carries .pi-owned.json (janitor reaps only marked ones)
+GIT = _E("PRFIX_GIT") or W.clone_dir("mivo")
+WT_ROOT = _E("PRFIX_WT_ROOT") or W.wt_root("mivo")
 NOTES = _E("PRFIX_NOTES") or "/workspace/praise-pr/notes"
-TMPROOT = _E("PRFIX_TMP") or "/tmp/pi-prfix"
+TMPROOT = _E("PRFIX_TMP") or W.wt_root("mivo-dry")
 OUT = _E("PRFIX_OUT") or f"{BASE}/out/praise-pr"
 GATES = _E("PRFIX_GATES") or f"{PI_CODE}/conf/gates.json"
 QA_LOCK = _E("PRFIX_QA_LOCK") or f"{QA}/argus-root/nightly.lock"   # the flock panoptes run-nightly.sh takes (exec 9>)
@@ -216,7 +219,10 @@ def _write(p, data, mode="w"):
     with open(p, mode) as f: f.write(data)
 def _rjson(p): return json.loads(_read(p))
 def tail(s, n=60): return "\n".join((s or "").rstrip().splitlines()[-n:])
-def git(*a, cwd=None, t=600): return run(["git", *a], cwd=cwd or GIT, t=t)
+def git(*a, cwd=None, t=600):
+    if cwd is None and not os.path.exists(GIT) and os.path.abspath(GIT) == W.clone_dir("mivo"):
+        W.ensure_clone("mivo")      # 10-24: the bot clone, made on first use (a test pointing GIT elsewhere never gets here)
+    return run(["git", *a], cwd=cwd or GIT, t=t)
 def fp8(fp): return (fp or "")[4:12]
 def iso(t): return t.astimezone(CST).isoformat(timespec="seconds") if t else None
 def ts(s):
@@ -245,6 +251,10 @@ def unlock(f):
 def repo_lock():
     """10-24 parallel runs: serialise what changes the shared clone's metadata (fetch, worktree add/remove/prune, branch -D).
     Edits, tests, commit and pre-push inside a ticket's own worktree run in parallel."""
+    if os.path.abspath(GIT) == W.clone_dir("mivo"):           # the bot clone: the same lock janitor / opsfix take
+        W.ensure_clone("mivo")                                 # made once, before the lock (cloning takes that lock itself)
+        with W.repo_lock("mivo"): yield
+        return
     os.makedirs(OUT, exist_ok=True)
     f = open(f"{OUT}/git.lock", "a"); fcntl.flock(f, fcntl.LOCK_EX)
     try: yield
@@ -793,8 +803,8 @@ def drop_worktree(wd, branch=None):
     if not ours_dir(wd): raise ValueError(f"refuse to remove {wd}: not a prfix worktree directory")
     reg = {w["path"] for w in worktrees()}
     if wd in reg:
-        if os.path.isdir(wd):
-            rc, o = git("worktree", "remove", "--force", "--force", wd); msg.append(f"worktree remove rc={rc}{'' if rc == 0 else ' ' + tail(o, 2)}")
+        if os.path.isdir(wd):   # 10-24: rename into the trash (instant), rm -rf in the background, then drop the registration
+            W.trash(wd); rc, o = git("worktree", "prune"); msg.append(f"worktree -> trash, prune rc={rc}{'' if rc == 0 else ' ' + tail(o, 2)}")
         else:
             git("worktree", "prune"); msg.append("worktree prune (目录已不在)")
     mine = os.path.dirname(wd) == os.path.abspath(TMPROOT) or re.fullmatch(r"pi-wt-\d+-[0-9a-f]{8}", os.path.basename(wd))
@@ -1285,6 +1295,8 @@ def fix_one(c, A, d):
             rc, o = git("worktree", "add", "-q", *(["--detach", wd, base] if A.dry_run else ["-b", branch, wd, base]))
             if rc: raise Transient(f"worktree add 失败：{tail(o, 3)}")
             created = True
+            W.mark(wd, "dry" if A.dry_run else "prfix", repo="mivo", clone=os.path.abspath(GIT), ticket=tag, branch=res["branch"], base_sha=base,
+                   lock=f"{OUT}/locks/{n}-{fp8(fp)}.lock", tickets=f"{OUT}/tickets.json", ticket_key=f"{n}:{fp}")
         junk = set()   # untracked files the pre-push run left (build output): never part of the fix
         chg = lambda: changed(wd, base, junk)
         rc, o = npm_ci(wd); step("npm ci", rc == 0, f"rc={rc}\n{o}")
@@ -1571,7 +1583,8 @@ def fix_one(c, A, d):
                 write_atomic(ev + ".patch", diff)
             write_atomic(ev + ".md", evidence_md(c, res, out, wd))
         except Exception as e: log("evidence write failed", e)
-        if created and (A.dry_run or out["status"] != "pr_action_written"):
+        # success too once janitor enforces (10-24 plan S1): outbound works from its own clone + the saved patch, not from here
+        if created and (A.dry_run or out["status"] != "pr_action_written" or W.enforce()):
             try:
                 with repo_lock(): log("cleanup", drop_worktree(wd, None if A.dry_run else branch))
             except Exception as e: log("cleanup failed", e)
@@ -1893,6 +1906,8 @@ def revise_merge(A, d, n, qa, fp, p, red):
             main = git("rev-parse", "origin/main")[1].strip(); res["base"] = main
             old_base = git("merge-base", main, head)[1].strip()
             rc, o = git("worktree", "add", "-q", "--detach", wd, head)
+            if rc == 0: W.mark(wd, "dry" if A.dry_run else "revise", repo="mivo", clone=os.path.abspath(GIT), ticket=tag, base_sha=head,
+                               lock=f"{OUT}/locks/rev-{n}.lock", tickets=f"{OUT}/tickets.json", ticket_key=f"rev:{n}")
             if rc: raise Transient(f"worktree add 失败：{tail(o, 3)}")
             created = True
         _, o = git("diff", "--name-only", old_base, head, cwd=wd)
@@ -1993,6 +2008,8 @@ def revise_one(A, d, n, qa, fp, p, red):
             if git("rev-parse", f"refs/remotes/origin/{br}")[1].strip() != head: raise Transient("PR 的 head 在这期间变了")
             base = git("merge-base", "origin/main", head)[1].strip(); res["base"] = base
             rc, o = git("worktree", "add", "-q", "--detach", wd, head)
+            if rc == 0: W.mark(wd, "dry" if A.dry_run else "revise", repo="mivo", clone=os.path.abspath(GIT), ticket=tag, base_sha=head,
+                               lock=f"{OUT}/locks/rev-{n}.lock", tickets=f"{OUT}/tickets.json", ticket_key=f"rev:{n}")
             if rc: raise Transient(f"worktree add 失败：{tail(o, 3)}")
             created = True
         junk = set(); chg = lambda: changed(wd, base, junk)

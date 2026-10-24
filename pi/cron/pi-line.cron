@@ -23,6 +23,9 @@ R=/workspace/panoptes/pi/bin/run.sh
 # panoptes deploy between the opsenv runs (10-24): the same guarded fast-forward every 10 min, so a merged test-system fix does not
 # wait an hour behind a running merge test (quiet when there is nothing to deploy)
 3-59/10 * * * * box $R opsdeploy
+# janitor (10-24 plan §4.4): PI_WORK reconcile -- finished / killed jobs' worktrees, scratch, caches, old evidence + step-results,
+# remote branches of closed bot PRs. conf/janitor.json enforce=false: decisions only (24 h rehearsal). Zero-model, light
+7-59/10 * * * * box $R janitor
 45 * * * * box $R boxcheck
 # --- daily, minute :HH gated by Beijing hour ---
 5  * * * * box $R handoff @00

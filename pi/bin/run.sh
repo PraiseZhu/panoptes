@@ -20,7 +20,7 @@ export PI_MEM_AVAIL_MB=$avail
 # and avail < 2048MB -> run cindy.py in its read-only dry-run (check only, never starts Cindy), alert, retry next */5.
 # 10-23: zero-model jobs are light and must not lose a slot to the platform's snapshot-time memory reclaim (1-3 min dips);
 # model/heavy jobs wait up to 10 min for memory instead of giving the slot up at once.
-LIGHT=" daily handoff ledger pm pmnudge opsenv opsdeploy prretro merger boxcheck compare outbound credcheck roster followup watchdog prwatch "
+LIGHT=" daily handoff ledger pm pmnudge opsenv opsdeploy prretro merger boxcheck compare outbound credcheck roster followup watchdog prwatch janitor "
 case $JOB in
   boxhealth) [ "$avail" -lt 3072 ] && echo "lowmem: ${avail}MB < 3072MB, boxhealth exempt -> run" ;;
   cindy)

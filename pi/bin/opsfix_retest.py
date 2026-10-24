@@ -7,8 +7,11 @@ after the ledger write-back, handoff issue close/reopen become outbound actions 
 import json, os, re, glob, shutil, subprocess, fcntl, hashlib, time, datetime as dt
 from lib import QA, RPT, BASE, REPO, CST, now_cst, write_atomic, merged_prs, pi, log, gh, record_actions, model_env
 
-MIVO = "/workspace/mivo-canvas-plugin"          # partial clone used only as object store for worktrees
-WORK = "/tmp/opsfix-retest"
+import workroot as W
+# 10-24 (plan §4.1): the bot's own mivo clone (shared with prfix, same repo lock) as object store; worktrees marked under
+# PI_WORK/wt/opsfix, node_modules by lock hash in PI_WORK/cache/nm (janitor keeps the newest two and every linked one)
+MIVO = W.clone_dir("mivo")
+WORK = W.wt_root("opsfix")
 QA_LOCK = f"{QA}/argus-root/nightly.lock"         # same flock panoptes run-nightly.sh takes (exec 9>)
 STATE = f"{BASE}/out/ops/retest-state.json"       # watermark + done/retry fix PRs (see select_fix_prs / settle)
 ROUTES = "/workspace/panoptes/report/handoff-routes.json"
@@ -139,33 +142,35 @@ def sh(cmd, cwd=None, timeout=1800, env=None):
     r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env)
     return r.returncode, r.stdout, r.stderr
 
-GIT_LOCK = f"{BASE}/out/praise-pr/git.lock"   # 10-24: same clone as the (now parallel) prfix runs -> same metadata lock
-def clone_locked():
-    os.makedirs(os.path.dirname(GIT_LOCK), exist_ok=True)
-    f = open(GIT_LOCK, "a"); fcntl.flock(f, fcntl.LOCK_EX); return f
+RUN_LOCK = "/tmp/pi-fallback-opsfix.lock"      # run.sh's job lock: held for the whole opsfix run (the marker names it)
+def clone_locked():   # same clone as the parallel prfix runs -> the same metadata lock (workroot.repo_lock("mivo"))
+    os.makedirs(os.path.dirname(W.lock_file("mivo.repo.lock")), exist_ok=True)
+    f = open(W.lock_file("mivo.repo.lock"), "a"); fcntl.flock(f, fcntl.LOCK_EX); return f
 
 def worktree(sha):
     d = f"{WORK}/wt-{sha[:12]}"
-    if os.path.isdir(f"{d}/.git") or os.path.isfile(f"{d}/.git"): return d
-    os.makedirs(WORK, exist_ok=True)
+    W.ensure_clone("mivo")
     lk = clone_locked()
     try:
+        if os.path.isdir(f"{d}/.git") or os.path.isfile(f"{d}/.git"):
+            W.retake(d); return d                         # kept from an earlier run: this run's now (janitor leaves it alone)
+        os.makedirs(WORK, exist_ok=True)
         sh(["git", "fetch", "-q", "origin", sha], cwd=MIVO, timeout=600)
         rc, o, e = sh(["git", "worktree", "add", "--detach", "-f", d, sha], cwd=MIVO, timeout=900)
+        if rc == 0: W.mark(d, "opsfix", repo="mivo", clone=MIVO, ticket=sha[:12], base_sha=sha, lock=RUN_LOCK)
     finally: lk.close()
     if rc: raise RuntimeError(f"worktree {sha[:10]}: {e[-300:]}")
     return d
 
 def drop_worktree(d):
     lk = clone_locked()
-    try: sh(["git", "worktree", "remove", "--force", d], cwd=MIVO)
+    try: W.trash(d); sh(["git", "worktree", "prune"], cwd=MIVO)    # rename into the trash (instant), rm -rf in the background
     finally: lk.close()
-    shutil.rmtree(d, ignore_errors=True)
 
 def ensure_node_modules(wt):
     lock = f"{wt}/package-lock.json"
     h = hashlib.sha256(open(lock, "rb").read()).hexdigest()[:16]
-    cache = f"{WORK}/nm-{h}"
+    cache = W.nm_cache(h)
     if not os.path.isdir(f"{cache}/node_modules"):
         os.makedirs(cache, exist_ok=True)
         for f in ("package.json", "package-lock.json", ".npmrc"):

@@ -441,6 +441,10 @@ def check_drafts(st):
     prs = gh(["pr", "list", "-R", REPO, "--author", "PraiseZhu", "--draft", "--state", "open", "--limit", "50",
               "--json", "number,headRefOid,headRefName,body,statusCheckRollup,mergeStateStatus"])
     done = st.setdefault("draft_seen", {}); ub = st.setdefault("update_branch_day", {}); day = today()
+    # 10-24 (plan S2): a bot draft that left this list was merged / closed / readied -> janitor right away (branches, worktrees)
+    ours = sorted(p["number"] for p in prs if PILINE in (p.get("body") or "") and (p.get("headRefName") or "").startswith("qa-fix/"))
+    gone = sorted(set(st.get("bot_drafts") or []) - set(ours)); st["bot_drafts"] = ours
+    if gone: kick_janitor(",".join(f"mivo#{n}" for n in gone))
     for p in prs:
         # 10-24: only the fix PRs the Pi line opened. Session / human drafts with "QA: #N" (#1166) are not ours to ready or fix, and a
         # PR the Mac mini watcher turned back into a draft while it fixes it must not be readied mid-fix.
@@ -551,6 +555,16 @@ def dispatch_infra(st):
         subprocess.Popen([f"{PI_CODE}/bin/run.sh", "infrafix", "--next"], stdin=subprocess.DEVNULL, stdout=lf, stderr=subprocess.STDOUT,
                          start_new_session=True)
     qlog(f"launched infrafix --next (top {top.get('sig8')} {top.get('cat')}/{top.get('stage')}, {len(todo)} pending)")
+
+
+def kick_janitor(prs):
+    """one janitor run now (run.sh holds its job lock: when the */10 run is on, this one just skips)"""
+    if DRY: qlog(f"DRY: would kick janitor (pr-closed {prs})"); return
+    os.makedirs(f"{BASE}/out/logs", exist_ok=True)
+    with open(f"{BASE}/out/logs/prwatch-launches.log", "a") as lf:
+        subprocess.Popen([f"{PI_CODE}/bin/run.sh", "janitor", "run", "--event", "pr-closed", "--pr", prs], stdin=subprocess.DEVNULL, stdout=lf,
+                         stderr=subprocess.STDOUT, start_new_session=True)
+    qlog(f"bot draft(s) {prs} left the open-draft list -> janitor")
 
 
 def cleanup(st):

@@ -1,0 +1,9 @@
+{
+  "_doc": "pi/bin/janitor.py (plan 2026-10-24 §4.4). enforce=false: every decision goes to out/janitor/last.json and the log, nothing is deleted (24 h rehearsal; .trash/ entries a job already threw away are purged either way). Defaults for every other key live in janitor.py DEFAULTS.",
+  "enforce": false,
+  "tmp_hours": 6,
+  "nm_keep": 2,
+  "free_gb_low": 15,
+  "evidence": {"dir": "/workspace/mivo-qa/argus-root/app/evidence/nightly", "keep_days": 7, "cap_gb": 3, "keep_newest": 2},
+  "step_results": {"dir": "/workspace/mivo-qa/argus-root/cache/step-results", "keep_days": 14}
+}

@@ -10,6 +10,7 @@ from lib import *
 import merger
 import dm_compat, jsonrec
 import praise_notice as PN
+import workroot as W
 QA_SLACK = f"{QA}/report/slack"
 SLACK_CHANNEL = "C0CAH3W61N2"           # Mivo QA channel; the only channel send-slack-report.mjs allows
 PRAISE_SLACK = "U01D851JXL7"
@@ -307,7 +308,7 @@ def h_fixpr(a):
     def do():
         why = fixpr_gate_reason(a)                                                  # (1) gate, re-read right before pushing
         if why: raise RuntimeError(f"refused: gated ({why})")
-        d = tempfile.mkdtemp(prefix="pi-fixpr-")
+        d = W.mkdtemp("pi-fixpr-")   # PI_WORK/tmp: janitor removes what a killed run leaves
         try:
             run(["gh", "repo", "clone", REPO, d, "--", "--depth", "50", "-q"])
             br = "qa-fix/" + a["key"].replace(":", "-")[:60]
@@ -359,7 +360,7 @@ def h_push_fix(a):
         if not (f and os.path.exists(f)): raise RuntimeError(f"{'bundle' if merge else 'patch'} missing")
         return f"#{n} {br}@{head[:9]} + {os.path.getsize(f)}B{' merge ' + str(a.get('new_head'))[:9] if merge else ''}"
     def do():
-        d = tempfile.mkdtemp(prefix="pi-pushfix-")
+        d = W.mkdtemp("pi-pushfix-")   # PI_WORK/tmp: janitor removes what a killed run leaves
         try:
             run(["gh", "repo", "clone", REPO, d, "--", "--depth", "30", "--branch", br, "-q"])
             run(["git", "-C", d, "config", "user.name", GIT_NAME]); run(["git", "-C", d, "config", "user.email", GIT_EMAIL])
@@ -446,7 +447,7 @@ def h_fixpr_docs(a):
         if p["headRefName"] != br: raise RuntimeError(f"head branch is {p['headRefName']}, action says {br}")
         return f"#{n} {p['state']} head {br}: rename {pred_dir} -> docs/pr/{n}"
     def do():
-        d = tempfile.mkdtemp(prefix="pi-fixpr-docs-")
+        d = W.mkdtemp("pi-fixpr-docs-")   # PI_WORK/tmp: janitor removes what a killed run leaves
         try:
             run(["gh", "repo", "clone", REPO, d, "--", "--depth", "20", "--branch", br, "-q"])
             run(["git", "-C", d, "config", "user.name", GIT_NAME]); run(["git", "-C", d, "config", "user.email", GIT_EMAIL])
