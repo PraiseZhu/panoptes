@@ -429,6 +429,16 @@ class TestRunTicket(Tmp):
         self.assertIn("--allow-sensitive", dm[0]["text"])
         for bad in ("SHADOW", "NOT SENT", "<!--"): self.assertNotIn(bad, dm[0]["text"])
 
+    def test_sensitive_files_flagged_in_pr_body(self):   # 10-25: sensitive files no longer stop the bot; the PR says so instead
+        c = {"qa": 1274, "sev": "P2", "fp": A, "title": "t", "finding": {"file": "a.ts", "line": 1}}
+        pf = {"steps": [], "passed": 1, "total": 1, "seconds": 60}
+        res = {"sensitive": prfix.sensitive_files([".github/workflows/x.yml", "src/a.ts", "CODEOWNERS"])}
+        self.assertEqual(res["sensitive"], [".github/workflows/x.yml", "CODEOWNERS"])
+        body = prfix.pr_body(c, res, ["a.test.ts"], ["src/a.ts"], pf, True, None, [])
+        self.assertIn("⚠️ 本 PR 改了 CI 配置", body); self.assertIn("`.github/workflows/x.yml`", body)
+        self.assertNotIn("⚠️ 本 PR 改了 CI 配置", prfix.pr_body(c, {}, ["a.test.ts"], ["src/a.ts"], pf, True, None, []))
+        src = open(prfix.__file__).read(); self.assertNotIn('raise PraiseNeeded(f"修复要改 CI', src); self.assertNotIn('raise PraiseNeeded(f"CI 修正要改 CI', src)
+
     def test_norepro_note_and_dm(self):   # 10-24 evening: contested -> parked, no note, no DM; agreed -> note, closed, no DM
         self.fake_fix({"status": "norepro", "kind": "norepro", "error": "模型判不可复现（NOREPRO）"})
         rc, out, r = self.main("--next")
