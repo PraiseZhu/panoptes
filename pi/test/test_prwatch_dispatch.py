@@ -275,6 +275,23 @@ class TestDraftCI(T):
         self.assertEqual([x["type"] for x in self.tick(st)], ["gh.run.rerun-failed"])          # only gates (verify adds nothing)
         self.draft("b" * 40, [("pr-ci-freshness", "FAILURE"), ("verify", "FAILURE"), ("lifeline spec (TLA+)", "FAILURE")])
         self.assertEqual(self.tick(st)[0][1:], ["prfix", "--revise", "1301"])
+    def test_still_red_after_the_ruled_rerun_never_spins(self):   # 10-25 #1271: prwatch relaunched a revise that only skipped, 14 h
+        led = f"{prwatch.BASE}/out/outbound/ledger.json"; os.makedirs(os.path.dirname(led), exist_ok=True)
+        wf(led, json.dumps({"rerun-ruled:1301:" + "a" * 12: {"status": "done"}}))
+        self.tickets(**{"rev:1301": {"status": "pushed", "last_head": "a" * 40, "rerun_only": True, "action_key": "rerun-ruled:1301:" + "a" * 12}})
+        red = [("Linux unit tests", "FAILURE"), ("pr-ci-freshness", "FAILURE")]
+        saved = prwatch.behind_main
+        try:
+            prwatch.behind_main = lambda h: 7; st = {}; self.draft("a" * 40, red)
+            got = self.tick(st); self.assertEqual([x["type"] for x in got], ["gh.pr.update-branch"])   # behind main: fresh CI on main
+            self.assertEqual(self.tick(st), [])                                                       # once per head, no revise launch
+            prwatch.behind_main = lambda h: 0; st = {}
+            self.assertEqual(self.tick(st), [])                                                       # not behind: wait ...
+            st["race_wait"]["1301:" + "a" * 12] -= 3 * 3600 + 1
+            got = self.tick(st); self.assertEqual([x["type"] for x in got], ["gh.run.rerun-failed"])  # ... re-run every 3 h
+            self.assertTrue(got[0]["ruled"]); self.assertIn("Linux unit tests", got[0]["names"])
+            self.assertFalse([x for x in self.acts if x.get("type") == "slack.dm"])
+        finally: prwatch.behind_main = saved
     def test_update_branch_daily_cap(self):
         st, race = {}, [("pr-format-gate", "FAILURE")]
         for i in range(prwatch.UB_PER_DAY): self.draft(str(i) * 40, race, behind=True); self.tick(st)

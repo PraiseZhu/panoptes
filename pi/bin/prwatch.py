@@ -400,7 +400,7 @@ def resolved(st):
     st["resolved_sent"] = (sent + done_keys)[-500:]; qlog(f"resolved -> DM {key}: {done_keys}")
 
 
-def revise_or_wait(st, done, n, head, tag, seen, rv, cnt_key, cap, what):
+def revise_or_wait(st, done, n, head, tag, seen, rv, cnt_key, cap, what, red=()):
     """hand this head to prfix --revise (CI fix or main merge). -> True when it is in hand (launched / running / waiting), False when
     the switch is off, the rounds are used up or prfix stopped at this head (the caller then DMs)."""
     # 10-24 evening (Praise: 自主推进别来问我): prfix --revise never stops for a human any more -- it pauses (parked) and tries again
@@ -411,7 +411,11 @@ def revise_or_wait(st, done, n, head, tag, seen, rv, cnt_key, cap, what):
     dead = rv.get("status") == "running" and not pid_alive(rv.get("pid"))   # prfix --revise records it as a transient failure when it starts
     if rv.get("status") == "pushed" and rv.get("last_head") == head and rv.get("rerun_only") \
             and (jload(f"{BASE}/out/outbound/ledger.json", {}).get(rv.get("action_key")) or {}).get("status") == "done":
-        pass   # the ruled re-run of this head happened and the checks are red again: not in hand any more (another round / a human)
+        # the ruled re-run of this head happened and the checks are red again. prfix --revise would only skip this head ("已经修过、
+        # 等推送"), so launching it is a no-op loop (10-25: #1271 spun 14 h). The judge said the PR is not the cause: give CI a fresh
+        # run instead -- main merged in when the PR is behind (update-branch, daily budget), else the failed jobs re-run every 3 h.
+        # A new head is a new question for prfix; nothing here asks Praise.
+        return ruled_red_again(st, done, n, head, tag, seen, red)
     elif (rv.get("status") == "running" and not dead) or (rv.get("status") == "pushed" and rv.get("last_head") == head): return True   # in hand
     if rv.get("status") == "failed" and rv.get("head") == head and (rv.get("next_retry_at") or "") > now_cst().isoformat(): return True
     lt = st.setdefault("revise_launched", {})
@@ -423,6 +427,26 @@ def revise_or_wait(st, done, n, head, tag, seen, rv, cnt_key, cap, what):
     if r == "launched": done[tag] = "revise"; lt[tag] = time.time(); st["revise_launched"] = dict(list(lt.items())[-100:])
     elif r == "wait" and st.get("revise_wait") != tag: st["revise_wait"] = tag; qlog(f"#{n} {what} -> revise waits for memory")
     return True
+
+
+def behind_main(head):
+    """commits main is ahead of this head; None when unknown (mergeStateStatus says BLOCKED, not BEHIND, once a required check is red)"""
+    try: return int((gh(["api", f"repos/{REPO}/compare/main...{head}"]) or {}).get("behind_by") or 0)
+    except Exception: return None
+
+
+def ruled_red_again(st, done, n, head, tag, seen, red):
+    ub = st.setdefault("update_branch_day", {}); day = today()
+    cnt = ub.get(str(n)) if (ub.get(str(n)) or {}).get("day") == day else {"day": day, "n": 0}
+    if seen != "ub-ruled" and cnt["n"] < UB_PER_DAY and (behind_main(head) or 0) > 0:
+        act("praise-pr", {"key": f"update-branch-ruled:{tag}", "type": "gh.pr.update-branch", "pr": n, "head": head})
+        cnt["n"] += 1; ub[str(n)] = cnt; done[tag] = "ub-ruled"
+        qlog(f"#{n} still red after the ruled rerun, behind main -> update-branch ({cnt['n']}/{UB_PER_DAY} today)"); return True
+    rw = st.setdefault("race_wait", {})
+    if time.time() - rw.setdefault(tag, time.time()) >= 3 * 3600:
+        act("praise-pr", {"key": f"rerun:{tag}:{now_cst():%m%d%H}", "type": "gh.run.rerun-failed", "pr": n, "head": head, "names": list(red), "ruled": True})
+        rw[tag] = time.time(); qlog(f"#{n} still red after the ruled rerun -> rerun again (every 3 h)")
+    st["race_wait"] = dict(list(rw.items())[-100:]); return True
 
 
 def red_dm(st, n, qa, tag, red, how):
@@ -503,7 +527,7 @@ def check_drafts(st):
         rv = revise_ticket(n)
         dead = rv.get("status") == "running" and not pid_alive(rv.get("pid"))   # prfix --revise records it as a transient failure when it starts
         real = [nm for nm in red if not nm.startswith(RACE_PRONE)]
-        if real and revise_or_wait(st, done, n, head, tag, seen, rv, "revisions", MAX_REVISIONS, f"CI red {red[:4]}"): continue
+        if real and revise_or_wait(st, done, n, head, tag, seen, rv, "revisions", MAX_REVISIONS, f"CI red {red[:4]}", red): continue
         if rv.get("status") == "needs_praise" and rv.get("head") == head:
             done[tag] = "red"; alert(st, n); continue    # kind 5: prfix --revise asked him
         how = "自动修 CI 的开关关着（takeover/prfix-revise），所以直接告诉你。"   # the only way here since 10-24 evening
