@@ -175,7 +175,10 @@ def mechanical_ruling(kind, c, wd, base, failure_text="", changed_files=(), fail
             if not near: return "REJECT", f"改了跟这次修复无关的旧测试 {t}（不在被改源码的目录里，也没引用它）"
     return None, None
 SENSITIVE_RE = re.compile(r"^\.github/|(^|/)CODEOWNERS$|(^|/)\.env(\.|$)|secret|credential|\.pem$|\.key$|(^|/)rulesets?/", re.I)
-A_ALLOW = {"sensitive": False}   # --allow-sensitive (Praise said yes to one kind-5 fix)
+A_ALLOW = {"sensitive": False}   # --allow-sensitive: kept for old commands / DMs; since 10-25 sensitive files no longer stop the bot
+# 10-25 (Praise: 「全放行，交给审查机把关」「保证 pr bot 能顺利推进所有 pr」): a fix that touches CI config / repo rules / secrets
+# files is no longer a kind-5 stop. The files are listed at the top of the PR's risk section so the reviewer (审查机) and the merge
+# gate (humanOnlyPaths) see them; nothing here waits for Praise any more.
 def sensitive_files(files): return sorted(f for f in files if SENSITIVE_RE.search(f))
 def gated_ruling(kind, c, wd, base, question, tag, step, **facts):
     """G2 + G3 around ruling(): -> (verdict | None, text, judged) ; judged False = decided without asking the judge now."""
@@ -1258,7 +1261,8 @@ def pr_body(c, res, tests, src, pf, docs_ok, issue_url, plat):
          f"结果：{pf.get('passed')}/{pf.get('total')} 通过，用时 {max(1, round((pf.get('seconds') or 0) / 60))} 分钟", "```", "",
          "### 实际任务验证", "", "不涉及（缺陷由回归单测复现并验证）", "",
          "### 未执行的验证", "", "- Cindy / Windows 实机手测（Windows 以本 PR 当前 HEAD 的 CI Windows unit 分片为准）", "",
-         "## 风险", ""] + (plat or []) + [
+         "## 风险", ""] + ([f"> ⚠️ 本 PR 改了 CI 配置 / 仓库规则 / 密钥相关的文件：{fm(res['sensitive'])}。修 PR bot 按规则直接放行，请审查重点看这几处。", ""]
+                         if res.get("sensitive") else []) + (plat or []) + [
          "### 需要特别留意", "", "- [ ] 无已知风险", "- [ ] 生成结果或模型行为发生变化", "- [ ] 可能产生额外任务或费用",
          "- [ ] 影响已有参数、默认值或调用方", "- [ ] 影响任务提交、轮询或失败重试", "- [ ] 影响素材、产物、下载或数据留存",
          "- [ ] 涉及用户数据、凭证或第三方服务", "- [x] 其他：自动生成的最小修复，没有实机验证；请核对根因与改动范围"]
@@ -1472,8 +1476,8 @@ def fix_one(c, A, d):
             files = chg()
             return files, [f for f in files if is_test(f)], [f for f in files if not is_test(f) and not f.startswith(ddir)]
         files, tests, src = split_files()
-        sens = [] if A_ALLOW["sensitive"] else sensitive_files(files)
-        if sens: raise PraiseNeeded(f"修复要改 CI 配置 / 仓库规则 / 密钥相关的文件：{', '.join(sens[:4])}")
+        res["sensitive"] = sensitive_files(files)
+        if res["sensitive"]: step(f"修复改了 CI 配置 / 仓库规则 / 密钥相关的文件（放行，PR 里标出交审查机把关）：{', '.join(res['sensitive'][:4])}", True)
         ptype = "docs" if src and all(f.endswith(".md") or f.startswith("docs/") for f in src) else "fix"
         sc = scope_of(src or tests); title = f"{ptype}{'(' + sc + ')' if sc else ''}: {(c.get('title') or '')[:60]} (QA #{n})"
         res["title"] = title
@@ -2100,8 +2104,8 @@ def revise_one(A, d, n, qa, fp, p, red):
         if not files: raise Deterministic("改完后相对 PR 当前 head 没有任何改动")
         stray = sorted(set(files) - touched)
         if stray: raise Deterministic(f"相对 PR head 改动了模型没碰过的文件，拒绝推送：{stray[:5]}")
-        sens = [] if A_ALLOW["sensitive"] else sensitive_files(files)
-        if sens: raise PraiseNeeded(f"CI 修正要改 CI 配置 / 仓库规则 / 密钥相关的文件：{', '.join(sens[:4])}")
+        sens = sensitive_files(files)   # 10-25: no longer a stop (see A_ALLOW); the commit message names them for the reviewer
+        if sens: step(f"CI 修正改了 CI 配置 / 仓库规则 / 密钥相关的文件（放行，交审查机把关）：{', '.join(sens[:4])}", True)
         title = f"fix: CI 没过的修正（{', '.join(names[:3])}）"[:120]
         if A.dry_run:
             out = {"status": "dry_ok", "kind": None, "error": None, "action_key": None}
@@ -2111,14 +2115,15 @@ def revise_one(A, d, n, qa, fp, p, red):
             _, staged = git("diff", "--cached", "--no-renames", "--name-only", "-z", head, cwd=wd)
             extra = sorted(set(f for f in staged.split("\0") if f) - set(files) - {"package-lock.json"})
             if extra: raise Deterministic(f"提交里混进了模型没改的文件，拒绝推送：{extra[:5]}")
-            rc, o = git(*GIT_ID, "commit", "-q", "-m", title, "-m", f"QA: #{qa}\nFingerprint: {fp}\nPi-Revise: {akey}", cwd=wd)
+            msg = f"QA: #{qa}\nFingerprint: {fp}\nPi-Revise: {akey}" + (f"\nSensitive-Files: {', '.join(sens[:8])}" if sens else "")
+            rc, o = git(*GIT_ID, "commit", "-q", "-m", title, "-m", msg, cwd=wd)
             step("本地提交（作者 Praise）", rc == 0, o)
             if rc: raise Deterministic(f"本地提交失败：{tail(o, 3)}")
             _, pdiff2 = git("diff", "--binary", head, "HEAD", "--", ".", ":(exclude)package-lock.json", cwd=wd)
             pfile = f"{OUT}/{d}-{tag}.push.patch"; write_atomic(pfile, pdiff2)
             write_atomic(pfile[:-6] + ".md", f"{title}\n\n" + (texts[-1] if texts else ""))
             record_actions("praise-pr", d, [{"key": akey, "type": "gh.pr.push-fix", "pr": n, "branch": br, "head": head, "patch": pfile,
-                "title": title, "message": f"QA: #{qa}\nFingerprint: {fp}\nPi-Revise: {akey}", "qa": qa, "fingerprint": fp, "checks": names,
+                "title": title, "message": msg, "qa": qa, "fingerprint": fp, "checks": names,
                 "preflight": f"{pf['passed']}/{pf['total']} ok in {pf['seconds']}s",
                 "note": "outbound: clone the PR branch, require HEAD == head, git apply, commit, plain push (no force); draft only"}])
             out = {"status": "pr_action_written", "kind": None, "error": None, "action_key": akey}
@@ -2159,7 +2164,7 @@ def main(argv=None):
     ap.add_argument("--cleanup-stale", action="store_true"); ap.add_argument("--yes", action="store_true")
     ap.add_argument("--dry-run", action="store_true"); ap.add_argument("--base")
     ap.add_argument("--revise", type=int, help="our own draft fix PR N went red on GitHub CI: fix it (prwatch launches this)")
-    ap.add_argument("--allow-sensitive", action="store_true", help="Praise said yes: this fix may touch CI config / repo rules / secrets files")
+    ap.add_argument("--allow-sensitive", action="store_true", help="no-op since 10-25 (sensitive files no longer stop the bot); kept so old commands still run")
     A = ap.parse_args(argv); A_ALLOW["sensitive"] = bool(A.allow_sensitive) and bool(A.qa or A.revise)
     if A.fp and not A.qa: ap.error("--fp needs --qa")
     if A.cleanup_stale: return cleanup_stale(A.yes)
