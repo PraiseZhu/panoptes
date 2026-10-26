@@ -27,7 +27,7 @@ import { ALL_DIRS } from './paths.mjs'
 import { OUTCOMES } from './decide.mjs'
 import { runNightly } from './nightly.mjs'
 import { assembleFiles } from './assemble.mjs'
-import { catchUp, runNightlyFor, catchUpDir } from './catchup.mjs'
+import { catchUp, runNightlyFor, catchUpDir, docsOnlyOf } from './catchup.mjs'
 import { LOGS_DIR } from './paths.mjs'
 import { openSync, closeSync } from 'node:fs'
 import { join } from 'node:path'
@@ -92,7 +92,7 @@ async function main() {
         process.stdout.write(`[catch-up] PR #${pr.number} (${pr.day}, ${pr.gap.reason}) …\n`)
         return runNightlyFor(pr, { waitLock, log: logFd, createIssues, trigger })
       }
-      const r = catchUp({ repo, runOne })
+      const r = catchUp({ repo, runOne, docsOnly: docsOnlyOf(repo) })
       if (r.status === 'ran') { r.trigger = trigger; r.create_issues = createIssues }
       if (logFd != null) closeSync(logFd)
       if (r.status === 'nothing-to-do') return // 安静退出
