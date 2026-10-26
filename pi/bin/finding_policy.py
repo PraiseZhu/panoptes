@@ -125,3 +125,10 @@ def no_fix_rulings(text):
         if len(c) >= 4 and re.fullmatch(r"#?\d+", c[1] or "") and c[3] in NOFIX_RULINGS: s.add(int(c[1].lstrip("#")))
     return s
 
+def is_p0_alert(pr):
+    """合并官 P0 告警：已定级 P0（severity == "P0"），或任一检查 / finding 带 p0_candidate: true（已合并、最新主干仍失败，等级仍是 P1）。
+    p0_candidate 只是候选：Jasper 补证据后交 Praise 24 小时内确认或驳回；没人确认保持 P1，不自动升 P0。"""
+    if not isinstance(pr, dict): return False
+    if pr.get("severity") == "P0" or pr.get("p0_candidate") is True: return True
+    return any(isinstance(x, dict) and (x.get("severity") == "P0" or x.get("p0_candidate") is True)
+               for k in ("findings", "failed_checks") for x in (pr.get(k) or []))
