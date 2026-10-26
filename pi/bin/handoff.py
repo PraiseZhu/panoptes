@@ -238,12 +238,19 @@ def scan(ro, pr_receipts=pr_comment_receipts):
         for x in due:
             if x.get("receipt"): continue
             acts.append({"key": f"overdue:{rt['repo']}#{x['issue']['number']}", "type": "feishu.dm+group", "issue": x["url"],
-                         "age_days": (now_cst() - x["since"]).days, "owner": rt["owner"], "cc": rt.get("cc", {}), "dedupe_against": f"{QA}/followup/state.json"})
+                         "age_days": (now_cst() - x["since"]).days, "owner": rt["owner"],
+                         "text": overdue_text(rt, x), "cc": rt.get("cc", {}), "dedupe_against": f"{QA}/followup/state.json"})
         L.append(f"- {rt['repo']}: {len(iss)} 个 issue，带格式回执 {rc} 个，满 3 天无回执 {sum(1 for a in acts if rt['repo'] in a['key'])} 个")
     p = f"{BASE}/out/handoff/{d}{'.render' if ro else ''}.md"
     old = open(p).read() if os.path.exists(p) and not ro else f"# 交接仓回执扫描 {d}（Pi line，不写交接仓）\n"
     write_atomic(p, old + "\n" + "\n".join(L) + "\n")
     if not ro and now_cst().hour == 15: record_actions("handoff", d, acts)
+
+def overdue_text(rt, x):
+    """relay body for an overdue handoff issue (10-26: the action had no text -> outbound skipped it as「relay: empty body」)"""
+    days = (now_cst() - x["since"]).days
+    return (f"交接 issue {rt['repo']}#{x['issue']['number']}（原 PR #{x['n']}{'：' + x['title'] if x.get('title') else ''}）"
+            f"开了 {days} 天还没有回执，负责人 {x.get('author') or rt['owner']}。\n{x['url']}")
 
 def main():
     a = [x for x in sys.argv[1:] if not x.startswith("--")]; fl = set(sys.argv[1:]) - set(a)
