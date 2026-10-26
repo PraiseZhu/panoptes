@@ -4,7 +4,12 @@ fleet-mode == pi AND $PI_STATE/outbound-enabled exists (PI_FLEET_MODE env may ov
 for simulation; the flag file has no override). Idempotent: out/outbound/ledger.json done-ledger + each handler
 checks the target's real state before acting. Never prints secrets.
 Usage: outbound.py [--dry-run] [--days N (default 2)] [--job JOB] [--key KEY]
-  --dry-run: print what would go to whom; validate every target with read-only calls only."""
+       outbound.py [--dry-run] --resend-key KEY [--date YYYY-MM-DD]
+  --dry-run: print what would go to whom; validate every target with read-only calls only.
+  --resend-key: one-shot 补发 of exactly that key (10-26): ignores the --days window (--date picks the actions day when the key
+    is in more than one) and the relay staleness TTL, and the Slack channel-history check for a 【补发】 daily body. Still refuses
+    a key the ledger has as done/sending/uncertain/gave_up, or skipped for any reason but staleness; records done after the send,
+    so a second run is a no-op."""
 import argparse, urllib.request, urllib.parse, tempfile, shutil
 from lib import *
 import merger
@@ -24,6 +29,14 @@ RELAY_TYPES = {"SendToAgent": "原发 Grok agent", "grokbot.chat-to-Praise": "�
                "grok.chat.praise": "原发 Grok 私聊"}
 URGENT_RELAY = {"grok.chat.praise"}   # Cindy keep-alive / sign-out alerts
 RELAY_TTL_H = 6
+RESEND_PREFIX = "【补发】"
+DAILY_HEAD_RE = re.compile(r"^(?:【补发】)?Mivo 播报 \d+ 月 \d+ 日（北京时间）：")
+def resend_blocker(e):
+    """--resend-key: why the ledger entry e forbids a 补发 (None = may send). Only a stale-relay skip is overridable."""
+    st = (e or {}).get("status")
+    if not st or st == "failed": return None
+    if st == "skipped" and str(e.get("reason", "")).startswith("stale relay"): return None
+    return f"ledger has it as {st}" + (f" ({e.get('reason')})" if e.get("reason") else "") + "; not resent"
 FAIL_GIVE_UP = 5                      # failures (with backoff) before an action is given up and Praise is told once
 GATES = f"{PI_CODE}/conf/gates.json"     # {"no_fix_pr": {"923": "reason"}} -- shared with prfix.py
 GROK_SENT = f"{QA}/report/sent"          # Grok 日报 line per-day send records: slack-sent.json, run-notes.txt, created.tsv
@@ -179,12 +192,15 @@ def h_slack_post(a):
         if a["key"] in jload(f"{QA_SLACK}/sent.json", {}): return "done"
         if is_daily and day:
             if grok_day(day)["slack"]: return "done"
+            # --resend-key with a 【补发】 body: main() checked the key is not done in the ledger; an older message for the same day
+            # in the channel is exactly what is being re-sent, so the history check must not swallow it (sent.json still applies)
+            if a.get("_resend") and open(body_of(a)).read().lstrip().startswith(RESEND_PREFIX): return "pending"
             if ch.startswith("C") and slack_history_has(ch, day): return "done"
         return "pending"
     def payload():
         f = clean_body(body_of(a))
-        if is_daily and not re.match(r"^Mivo 播报 \d+ 月 \d+ 日（北京时间）：", open(f).read()):
-            raise RuntimeError("refused: daily body does not start like the Grok report ('Mivo 播报 M 月 D 日（北京时间）：')")
+        if is_daily and not DAILY_HEAD_RE.match(open(f).read()):
+            raise RuntimeError("refused: daily body does not start like the Grok report ('[【补发】]Mivo 播报 M 月 D 日（北京时间）：')")
         return f
     def validate():
         payload()
@@ -595,7 +611,13 @@ def handler(a):
 
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--dry-run", action="store_true"); ap.add_argument("--days", type=int, default=2)
-    ap.add_argument("--job"); ap.add_argument("--key"); o = ap.parse_args()
+    ap.add_argument("--job"); ap.add_argument("--key")
+    ap.add_argument("--resend-key", help="one-shot 补发 of this dedupe key (bypasses the day window and the stale-relay TTL)")
+    ap.add_argument("--date", help="with --resend-key: the YYYY-MM-DD actions file to take the key from")
+    o = ap.parse_args()
+    if o.date and not o.resend_key: ap.error("--date needs --resend-key")
+    if o.resend_key and o.key: ap.error("--resend-key and --key are exclusive")
+    if o.date and not re.fullmatch(r"\d{4}-\d\d-\d\d", o.date): ap.error("--date must be YYYY-MM-DD")
     secret_env()
     gate = mode() == "pi" and os.path.exists(OUTBOUND_FLAG)
     log(f"mode={mode()} flag={os.path.exists(OUTBOUND_FLAG)} gate={'OPEN' if gate else 'closed'} dry_run={o.dry_run}")
@@ -613,6 +635,18 @@ def main():
     if ledger is None:
         if os.path.exists(LEDGER): log(f"FATAL {LEDGER} unreadable -> abort (never treat a broken ledger as empty)"); return 1
         ledger = {}
+    resend = o.resend_key
+    if resend:   # exactly one action with that key, from --date or from whichever day holds it
+        hits = [(f, a) for f in sorted(glob.glob(f"{BASE}/out/*/*.actions.json"))
+                if (not o.date or os.path.basename(f)[:10] == o.date) and (not o.job or f.split("/")[-2] == o.job)
+                for a in jload(f, {}).get("actions", []) if a.get("key") == resend]
+        if not hits: log(f"resend: no action with key {resend}" + (f" on {o.date}" if o.date else "")); return 1
+        if len({os.path.basename(f)[:10] for f, _ in hits}) > 1:
+            log(f"resend: {resend} is in several days {sorted({os.path.basename(f)[:10] for f, _ in hits})} -> pass --date"); return 1
+        why = resend_blocker(ledger.get(resend))
+        if why:
+            print(f"# outbound resend {resend}: {why}"); return 0
+        days = {os.path.basename(hits[0][0])[:10]}
     rows = []; fails = 0; unsupported = 0; merged_run = 0; changes = {}; relays = []; notices = []
     def persist():   # 10-23: every job, right after each change; merge into the file as it is now (keeps manual edits)
         if o.dry_run: return
@@ -626,7 +660,10 @@ def main():
         for a in jload(f, {}).get("actions", []):
             k, t = a["key"], a.get("type", "")
             if o.key and k != o.key: continue
-            if ledger.get(k, {}).get("status") in TERMINAL or a.get("status") == "done":
+            if resend:
+                if k != resend: continue
+                a = {**a, "_resend": True}
+            if ledger.get(k, {}).get("status") in TERMINAL and not (resend and not resend_blocker(ledger.get(k))) or a.get("status") == "done":
                 rows.append((job, k, t, "-", f"{ledger.get(k, {}).get('status', 'done')}(ledger)", ledger.get(k, {}).get("reason", ""))); continue
             is_merge = t.startswith("gh.pr.merge"); prev = ledger.get(k, {})
             if prev.get("status") == "sending":   # the previous run died mid-send (crash or VM snapshot fork)
@@ -658,7 +695,7 @@ def main():
                     rows.append((job, k, t, "-", "skipped(gated)", gates()[qa])); continue
             if t in RELAY_TYPES:   # Praise 10-23: deliver to his Slack DM (urgent: own DM now; others: one digest per run)
                 age = action_age_h(a, f)
-                if age > RELAY_TTL_H:
+                if age > RELAY_TTL_H and not resend:
                     if not o.dry_run: setk(k, {"status": "skipped", "reason": f"stale relay ({age:.0f}h old; relay enabled 10-23)", "at": now_cst().isoformat(timespec="seconds")})
                     rows.append((job, k, t, "Praise", "skipped(stale)", f"{age:.0f}h old")); continue
                 if job == "pm" and k.startswith("pm-chief:") and re.search(r"共催 0 次", relay_text(a)):   # 10-24：什么都没发生的催办汇总不转（Praise：看不懂的私信别发）
@@ -689,7 +726,7 @@ def main():
             try:
                 if is_merge: merged_run += 1   # count the attempt, success or not: at most 1 merge call per round
                 setk(k, {**prev, "status": "sending", "at": now_cst().isoformat(timespec="seconds")})   # on disk BEFORE the side effect
-                res = do(); setk(k, {"status": "done", "at": now_cst().isoformat(timespec="seconds"), "by": "pi-line", "result": res[-200:]})
+                res = do(); setk(k, {"status": "done", "at": now_cst().isoformat(timespec="seconds"), "by": "resend" if resend else "pi-line", "result": res[-200:]})
                 rows.append((job, k, t, who, "SENT", res[-120:]))
             except GiveUp as e:   # the producer re-plans (prfix: a fix PR whose patch no longer applies is fixed again on main)
                 setk(k, {**prev, "status": "gave_up", "last_error": str(e)[:200], "at": now_cst().isoformat(timespec="seconds")})
@@ -707,7 +744,7 @@ def main():
         for kk in keys: setk(kk, {**ledger.get(kk, {}), **st})
         try:
             r = h_slack_dm({"key": key, "type": "slack.dm", "to": "Praise", "text": text})[3]()
-            for kk in keys: setk(kk, {"status": "done", "at": now_cst().isoformat(timespec="seconds"), "by": "relay-dm", "result": key})
+            for kk in keys: setk(kk, {"status": "done", "at": now_cst().isoformat(timespec="seconds"), "by": "resend" if resend else "relay-dm", "result": key})
             rows.append(("relay", key, "slack.dm", "Praise", "SENT", r[-80:]))
         except Exception as e:
             nonlocal_fail.append(1)
@@ -717,9 +754,9 @@ def main():
             rows.append(("relay", key, "slack.dm", "Praise", "FAILED", str(e)[:120]))
     nonlocal_fail = []
     stamp = now_cst().strftime("%Y-%m-%d:%H%M")
-    for job, k, t, a, txt in [r for r in relays if r[2] in URGENT_RELAY]:
+    for job, k, t, a, txt in [r for r in relays if r[2] in URGENT_RELAY or resend]:   # a 补发 relay goes alone, now
         dm(f"relay:{k}", txt, [k])
-    batch = [r for r in relays if r[2] not in URGENT_RELAY]
+    batch = [r for r in relays if r[2] not in URGENT_RELAY and not resend]
     if batch or notices:
         # 2026-10-24：一条私信 = 「要你处理」的在前，其余在后；不再加「Pi 线转发（原来发到 Grok 的消息…）」抬头
         parts = [PN.render(n) for n in sorted(notices, key=lambda n: PN.ORDER.index(n["kind"]))] + [txt for *_, txt in batch]
@@ -733,7 +770,8 @@ def main():
     out = [f"# outbound {'dry-run' if o.dry_run else 'run'} {now_cst().isoformat(timespec='seconds')} gate={'OPEN' if gate else 'closed'}", "",
            "| job | key | type | to | result | detail |", "|---|---|---|---|---|---|"] + [f"| {' | '.join(str(x).replace('|','/') for x in r)} |" for r in rows]
     print("\n".join(out))
-    write_atomic(f"{BASE}/out/outbound/{today()}{'.dry-run' if o.dry_run else ''}.md", "\n".join(out) + "\n")
+    tag = f".resend-{re.sub(r'[^A-Za-z0-9_.-]+', '_', resend)}" if resend else ""   # never overwrite the cron run's report
+    write_atomic(f"{BASE}/out/outbound/{today()}{tag}{'.dry-run' if o.dry_run else ''}.md", "\n".join(out) + "\n")
     if unsupported: log(f"{unsupported} action(s) have no executor yet (listed above; not a failure)")
     return 1 if fails and not o.dry_run else 0
 if __name__ == "__main__": sys.exit(main())
