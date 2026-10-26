@@ -1451,7 +1451,9 @@ export const FINDING_SOURCES = ['check', 'code-review', 'stated-acceptance', 'co
 export const TEST_BACKED_STATUSES = ['introduced', 'pre-existing', 'fixed-later']
 // （很早的旧报告里失败检查没有 status：沿用当时的口径，算测试佐证）
 export const checkIsTestBacked = (c) => c?.flaky !== true && (c?.status == null || TEST_BACKED_STATUSES.includes(c.status))
-export const isTestBacked = (f) => (typeof f?.test_backed === 'boolean' ? f.test_backed : f?.source === 'check' && checkIsTestBacked(f))
+// 失败检查（source check）每次按状态重算，不信存下来的布尔值：10-26 实测 6 条 status=unverified 的检查发现带着 test_backed=true
+// （先按初始状态标 true，之后状态改成 unverified 没回写）。其他来源沿用存下来的值（没有就是 false）。
+export const isTestBacked = (f) => ((f?.source ?? 'check') === 'check' ? checkIsTestBacked(f) && f?.test_backed !== false : f?.test_backed === true)
 export function annotateTestBacked(prs) {
   for (const pr of prs) {
     pr.findings = (pr.findings ?? []).map((f) => { const g = { ...f, source: f.source ?? 'check' }; return { ...g, test_backed: isTestBacked(g) } })
