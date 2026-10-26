@@ -21,7 +21,8 @@
 | G3 | 日报原文：Grok `report/sent/<日>/group-content.txt`，没有就读 Pi `out/daily/<日>.md`；发送时间取 `report/slack/sent.json` | 已修（本 PR：10-24 「日报合并 None 个」是只读 Grok 路径，pi 模式下文本为空） |
 | G3 日报没发 | 无发送记录且次日 `out/logs/daily-<次日>.log` 以 rc≠0 结束 → 记「daily 崩溃」缺口 | 已修（本 PR） |
 | G4 / G5 | audit.log bot 合并数；最终提交 review-pr | 一致 |
-| 第三轮未上报、交接逾期未提醒 | pm_extra §12「第三轮未报出」、§11「超 72h 未见逾期提醒」进遗漏清单 | 一致（10-24 已报出 #966 #1077、aj0928-handoff#2）；但只进 pm 遗漏清单和 pm-cos 转发，不进 `chief.md`（chief.md 只有 pmnudge 写） |
+| 第三轮未上报、交接逾期未提醒 | pm_extra §12「第三轮未报出」、§11「超 72h 未见逾期提醒」进遗漏清单 | 一致（10-24 已报出 #966 #1077、aj0928-handoff#2）；20 点 `chief.md` 也列（`chief_missed.py`，按此刻台账 / gh 复核，已修且复测通过的不列，如 #1077） |
+| chief.md 漏项（Praise 10-26） | `pmnudge` 20 点追加 `chief_missed.sections()`：「系统漏跑」（看门狗当天 missed:/failed: + daily 崩溃）、「工作逾期」（pm 遗漏清单的第三轮未报出、交接超 72h）；只列已核实 + 负责人 + 期限 + 证据，待核实来源不列，日报已写的不重复；数据日 pm 没跑就用最近一份 | 已修（本 PR） |
 | 判断性内容 | Pi 零模型，只给数字和清单 | 不一致：有意设计 |
 
 ## 3. 切换
@@ -33,5 +34,5 @@
 1. 整机/看门狗停摆监控（哨兵 + GitHub Actions 心跳）：已提出，未批准。
 2. P2 模型提议能否不经 Praise PR 会签直接入表。
 3. 日检是否加一次模型调用补判断性内容。
-4. 第三轮/逾期遗漏是否也写进给 Jasper 的 `chief.md`（目前只走 pm-cos 转发）。
+4. ~~第三轮/逾期遗漏是否也写进 `chief.md`~~：Praise 10-26 已定，见上表「chief.md 漏项」。
 5. 停机错过的 pm（如数据日 10-25）是否允许带外发补跑。
