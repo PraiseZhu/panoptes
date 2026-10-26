@@ -185,6 +185,7 @@ export function isTrialTimeout(step, r, test, { status, rerun, idle } = {}) {
 }
 // 重跑前等机器空闲（最多 maxWaitMs、不超时间预算）；返回最后一次负载快照和等了多久。idleHooks 供测试替换
 export const idleHooks = { sample: machineLoad, wait: sleep }
+export const needsIdleBeforeBase = (stepIds, profile) => stepIds.some((id) => profile?.steps?.find((x) => x.id === id)?.trialOnly)
 export async function waitForIdle({ maxWaitMs = 10 * 60_000, everyMs = 15_000, sample = idleHooks.sample, wait = idleHooks.wait } = {}) {
   const t0 = Date.now()
   let m = sample()
@@ -393,6 +394,8 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     const still = failed.filter((id) => failedIds(rerun).includes(id))
     // 首跑失败、重跑通过（不稳定）的步骤也在合并前版本（base）上跑一次，记下基线结果；
     // 和真失败的步骤同一轮 'b' 执行，不影响 outcome 判定（判定只看重跑仍失败的项）
+    // 2026-10-26：base 上单跑一次的失败里 10/48 是试运行检查（bench）在重跑刚结束、机器还忙时跑的 → base 前也先等机器空闲
+    if (failed.length && baseSha && needsIdleBeforeBase(failed, profile)) { out.base_idle_wait = await waitForIdle(); if (overBudget()) return budgetPartial() }
     if (failed.length && baseSha) base = await executeOnSha({ ...common, label: 'b', sha: baseSha, stepIds: failed })
     if (merged) {
       const prelim = decideOutcome({ first, rerun, base, latest: null, baseKnown: Boolean(baseSha), latestIsSame: true })
