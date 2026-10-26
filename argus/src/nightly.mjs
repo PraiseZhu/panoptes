@@ -334,7 +334,9 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   const par = wantCov ? parallelDecision() : null
   // 覆盖率轮次跑所有计划内带 coverage 的步骤（单测 vitest + node --test 等 V8 步骤）
   const covIds = profile.steps.filter((x) => x.coverage && plan.stepIds.includes(x.id)).map((x) => x.id)
-  const startCov = () => ensureMirror(repo, sha, { extraRefspecs }).then(() => executeOnSha({ ...common, label: 'cov', sha, stepIds: covIds })).catch((err) => ({ error: err }))
+  // 覆盖率轮次是单独一轮（不参与判定），带 --coverage 比首轮慢、并行时还和首轮抢 CPU：超时放宽（10-25 #1166 单测覆盖率被 120 分钟超时杀掉 → 覆盖率「未测」）
+  const covProfile = (parallel) => ({ ...profile, steps: profile.steps.map((x) => covIds.includes(x.id) ? { ...x, timeoutMin: coverageTimeoutMin(x, parallel) } : x) })
+  const startCov = () => ensureMirror(repo, sha, { extraRefspecs }).then(() => executeOnSha({ ...common, profile: covProfile(Boolean(par?.parallel)), label: 'cov', sha, stepIds: covIds })).catch((err) => ({ error: err }))
   if (par) out.run_mode = { coverage_parallel: par.parallel, reason: par.reason }
   let covRun = wantCov && par.parallel ? startCov() : Promise.resolve(null)
   // afterCoverage 的步骤（bench：对机器负载敏感）等并行的覆盖率轮次（单测分片）跑完再开始
@@ -1790,4 +1792,12 @@ export function writePerPrReports(report, { opts, outFile, kind }) {
     try { writeReport(doc, file); written.push({ pr: pr.number, file }) } catch (err) { report.system_health.qa_tool_failures.push({ pr: pr.number, stage: `write-${kind}-report`, message: redact(err.message).slice(0, 300) }) }
   }
   return written
+}
+
+// 覆盖率轮次的超时：步骤的 timeoutMin × 系数（并行 2、串行 1.5；ARGUS_COVERAGE_TIMEOUT_FACTOR 可覆盖），上限 ARGUS_COVERAGE_TIMEOUT_MAX_MIN（默认 300）
+export function coverageTimeoutMin(step, parallel, env = process.env) {
+  const base = step.timeoutMin ?? 20
+  const f = Number(env.ARGUS_COVERAGE_TIMEOUT_FACTOR) > 0 ? Number(env.ARGUS_COVERAGE_TIMEOUT_FACTOR) : (parallel ? 2 : 1.5)
+  const cap = Number(env.ARGUS_COVERAGE_TIMEOUT_MAX_MIN) > 0 ? Number(env.ARGUS_COVERAGE_TIMEOUT_MAX_MIN) : 300
+  return Math.max(base, Math.min(cap, Math.round(base * f)))
 }
