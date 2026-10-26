@@ -9,6 +9,7 @@ export const PENDING_KINDS = Object.freeze({
   'review-incomplete': 'AI 代码审查缺触发条件、错误行为、实际影响、证据或行号',
   'review-unknown-level': 'AI 代码审查给了不认识的等级',
   'review-p1-unconfirmed': 'AI 代码审查单独发现的 P1，复核触发路径没能证实',
+  'review-p0-unconfirmed': 'AI 代码审查报的 P0，Opus 复核 + head 上的复现测试还没齐（不降级，仍按 P0 待核实）',
   'review-ruled': '和合并前已裁定的同一问题对得上（不成立 / P3 / 有意设计），代码没变',
   'check-qa': '检查失败但不是作者的问题（unverified / setup-failed / timeout / flaky）',
   'ai-test': 'AI 补测在当前代码上失败（未确认，不算测试佐证）',
