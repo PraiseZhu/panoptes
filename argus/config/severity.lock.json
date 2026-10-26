@@ -2,7 +2,7 @@
   "_doc": "测试侧 P0–P3 分级以审查机统一分级为准（Praise 2026-10-23）。config/severity.md 是下面这份文件的只读副本，按 sha256 钉住；不要手改副本。上游变了：scripts/check-severity-pin.mjs 每天比一次并在运维日志里报警，由人核对后改这里的 ref / sha256 并换副本。",
   "source_repo": "PraiseZhu/Review-PR",
   "path": "mivo/config/severity.md",
-  "ref": "7afb7c2d0d3903045f670189fa40b256bcf0560c",
+  "ref": "651265ffb5baacef7866e6ad20b77eed30cfd791",
   "ref_source": "xindong/mivo-canvas-plugin 仓库变量 MIVO_REVIEW_SKILL_SHA",
   "sha256": "eced0deeeaa83fa8b3324d2a1a86436c21f4b33d4f2f4fa099b5f18ed0f328c5",
   "pinned_at": "2026-10-23"

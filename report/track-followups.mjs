@@ -334,7 +334,7 @@ if (GROUP_OVERDUE) {
     const R = `https://github.com/${REPO}/pull/`
     const t = s => ({ tag: 'text', text: s })
     const short = (s) => oneLine(s || '').replace(/^\w+(\([^)]*\))?!?:\s*/, '').slice(0, 40)
-    const lvl = { P0: 'P0 阻断', P1: 'P1 严重', P2: 'P2 一般' }
+    const lvl = { P0: 'P0 紧急', P1: 'P1 严重', P2: 'P2 一般' }
     const lines = [[t(`以下 ${ov.notices.length} 个 PR 的问题已通知作者超过 3 天，还没看到回应（原 PR 下首行「结论：…」的留言，或写了「QA #原PR号」的修复 PR）。QA 结论和发版打包挂钩，这几条没有结论会卡在待确认状态。`)], [t(' ')]]
     for (const x of ov.notices) {
       const head = [{ tag: 'a', text: `#${x.pr}`, href: R + x.pr }, t(` ${short(x.title)} — `)]

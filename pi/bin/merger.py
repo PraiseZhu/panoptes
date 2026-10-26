@@ -402,9 +402,16 @@ def main():
     p0 = []
     for p in merged_prs(d):
         f, r = load_report(p["number"])
-        if r and r.get("pr") and r["pr"].get("severity") == "P0": p0.append(p["number"])
+        if r and r.get("pr") and is_p0_alert(r["pr"]): p0.append(p["number"])
         if not r: p0.append(f"{p['number']}(报告未出)")
-    L.append(f"- 巡检：今日合并中 P0/缺报告：{p0 or '无'}")
+    L.append(f"- 巡检：今日合并中 P0 紧急（含 p0_candidate，Praise 24 小时内确认）/缺报告：{p0 or '无'}")
     old = open(out).read() if os.path.exists(out) else f"# 合并官判定 {d}（Pi line）\n"
     write_atomic(out, old + "\n".join(L) + "\n")
+def is_p0_alert(pr):
+    """合并官 P0 告警：已定级 P0（severity == "P0"），或任一检查 / finding 带 p0_candidate: true（已合并、最新主干仍失败，等级仍是 P1）。
+    p0_candidate 只是候选：Jasper 补证据后交 Praise 24 小时内确认或驳回；没人确认保持 P1，不自动升 P0。"""
+    if not isinstance(pr, dict): return False
+    if pr.get("severity") == "P0" or pr.get("p0_candidate") is True: return True
+    return any(isinstance(x, dict) and (x.get("severity") == "P0" or x.get("p0_candidate") is True)
+               for k in ("findings", "failed_checks") for x in (pr.get(k) or []))
 if __name__ == "__main__": main()

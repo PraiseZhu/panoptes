@@ -142,7 +142,7 @@ def render(day, items, fault, carry, cal, resend=False):
     health = "测试系统运行正常。" if not fault and not sick else \
         (f"测试系统有故障：{len(fault)} 个 PR 没有合格的 QA 报告（{' '.join('#%d' % n for n in fault)}）" if fault else "测试系统有异常") + \
         (f"{'；另外' if fault else '：'}{len(sick)} 个 PR 测试过程有异常（{sick_s}），这些 PR 的级别只反映跑通的检查。" if sick else "。")
-    L.append(("【补发】" if resend else "") + f"Mivo 播报 {mo} 月 {dd} 日（北京时间）：合了 {len(items)} 个 PR，" + ("没有 P0" if not P0 else f"P0 {len(P0)} 个要先修") +
+    L.append(("【补发】" if resend else "") + f"Mivo 播报 {mo} 月 {dd} 日（北京时间）：合了 {len(items)} 个 PR，" + ("没有 P0" if not P0 else f"P0 紧急 {len(P0)} 个要先修") +
              (f"，P1 {len(P1)} 个请作者修复" if P1 else "") + (f"，{p2s}" if P2 else "") + (f"，P3 {len(P3)} 个无需处理" if P3 else "") +
              (f"，待核实 {len(pend)} 条 QA 自查中" if pend else "") + f"。{health}\n")
     def entry(i, k):

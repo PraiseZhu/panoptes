@@ -234,6 +234,7 @@ export const NEW_CODE_METHOD = 'ming-qa newCode = line coverage of new code. Cha
   + 'files with no data at all count their code-like added lines as uncovered, except plain .js/.mjs/.cjs files (node entry scripts / host entry), which are listed as not_measurable and left out of pct. '
   + 'pct = covered / executable changed lines; null (not evaluated) when the diff has no executable source lines.'
 
+// blocking: false / level: 'info'（2026-10-26）：status 名不改（下游兼容），但覆盖率永不阻断、不进台账。
 // 结论：新代码覆盖率低于参考线 → status fail（只是信息，不出 finding）；拿不到覆盖率 → unavailable（不判 fail，单独说明）
 // 只拿新代码覆盖率和参考线比。全仓 lines / branches / functions 只作基线趋势数据：
 // 记在 baseline 里（附参考线 BASELINE_REFERENCE），results 里标 'baseline'，永远不让门禁失败、不产生 finding。
@@ -242,7 +243,7 @@ export const BASELINE_METRICS = Object.freeze(['lines', 'branches', 'functions']
 export function coverageGate({ coverage, added, thresholds = COVERAGE_THRESHOLDS, stepId = 'unit', diffError = null }) {
   const gated = Object.fromEntries(GATED_METRICS.map((k) => [k, thresholds[k]]))
   const reference = Object.fromEntries(BASELINE_METRICS.map((k) => [k, thresholds[k]]))
-  const gate = { step: stepId, provider: 'v8 (vitest --coverage)', thresholds_source: COVERAGE_SOURCE, thresholds: gated, gated_metrics: [...GATED_METRICS], baseline: null, values: null, results: null, status: 'unavailable', pass: null, new_code: null, new_code_method: NEW_CODE_METHOD, reason: null }
+  const gate = { step: stepId, provider: 'v8 (vitest --coverage)', thresholds_source: COVERAGE_SOURCE, thresholds: gated, gated_metrics: [...GATED_METRICS], baseline: null, values: null, results: null, status: 'unavailable', pass: null, new_code: null, new_code_method: NEW_CODE_METHOD, reason: null, blocking: false, level: 'info' }
   if (!coverage || coverage.status !== 'ok') { gate.reason = coverage?.reason ?? 'unit step did not run with coverage'; return gate }
   const nc = diffError || !coverage.files ? null : newCodeCoverage(added, coverage.files)
   gate.new_code = nc ?? { pct: null, reason: diffError ?? 'per-line coverage unavailable' }
