@@ -23,3 +23,10 @@ assert "；1 个缺合格报告，算测试系统故障；#2 代码审查调用�
 t = D.render("2026-10-22", [ok, {**base, "n": 3, "sev": "fault"}], [3], [], {})[0]
 assert t.splitlines()[0].endswith("测试系统有故障：1 个 PR 没有合格的 QA 报告（#3）。")      # unchanged wording for the old case
 print("ok test_daily_health")
+# 10-26: a report whose coverage_gate.results / values / handoff.cases / findings are null must not crash classify()
+r = {"doc": {}, "pr": {"findings": None, "coverage_gate": {"results": None, "values": None, "baseline": None}, "handoff": {"cases": None, "manual": None}}}
+c = D.classify(1166, r, {})
+assert c["newcode"] is None and c["base_fn"] is None and c["manual"] == 0 and c["sev"] == "P3", c
+r["pr"]["coverage_gate"] = {"results": {"new_code": "fail"}, "values": {"new_code": 42}}
+assert D.classify(1166, r, {})["newcode"] == 42
+print("ok test_daily_health null fields")
