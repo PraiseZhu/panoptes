@@ -31,6 +31,8 @@
 #                 daily report file). Relative: reports/… is under $QA_HOME, anything else under the calling directory. On-merge trigger: --pr N --out $QA_HOME/reports/merged/PR-N.json
 #   --no-reuse    re-test merged PRs even if reports/merged/PR-N.json exists for the same merge commit
 #   --no-step-cache  run every step even if a passing result for identical inputs (tree hashes + lockfile) is cached
+#   --priority    fresh-merge run (mergewatch): jumps ahead of the sequential queue and takes the single QA slot as
+#                 soon as it is free, or while the slot holder is parked between PRs (scripts/qa-slot.sh)
 #   --wait-lock [SECONDS]  queue behind a running instance (default 14400 = 4h) instead of exit 75
 #   --pr-timeout MIN  per-PR time budget; a PR that exceeds it is stopped and reported as not-tested (P2)
 #                 (env ARGUS_PR_TIMEOUT_MIN; default: no limit)
@@ -67,7 +69,8 @@
 #
 # Output: $QA_HOME/reports/YYYY-MM-DD.json  (logs: $QA_HOME/argus-root/logs)
 # Exit codes: 0 ok/degraded, 3 pipeline failed or QA environment broken (see system_health), 1 usage/config error,
-#             75 another run active. Low memory (MemAvailable < PANOPTES_MIN_MEM_GB, default 3) delays the run up to
+#             75 another run active. Low memory (MemAvailable < PANOPTES_MIN_MEM_GB, default 8, or SwapFree <
+#             PANOPTES_MIN_SWAP_GB, default 4) delays the run up to
 #             30 min, then runs it single-shard; it never skips.
 set -euo pipefail
 
@@ -99,6 +102,7 @@ resolve_out() {
 # Consumed here; --out is made absolute (resolve_out); everything else is passed to the Node CLI unchanged.
 WAIT_LOCK=""
 CATCH_UP=""
+PRIORITY=""
 TRIGGER=""
 ARGS=()
 while (( $# )); do
@@ -106,6 +110,7 @@ while (( $# )); do
     -h|--help)
       sed -n '2,/^set -euo/{/^set -euo/d;s/^# \{0,1\}//;p}' "${BASH_SOURCE[0]}"; exit 0 ;;
     --catch-up) CATCH_UP=1 ;;
+    --priority) PRIORITY=1 ;;
     --trigger)
       [[ -n "${2:-}" ]] || { echo "--trigger needs event, catch-up or manual" >&2; exit 1; }
       TRIGGER="$2"; shift ;;
@@ -283,13 +288,21 @@ if [[ -n "$CATCH_UP" ]]; then
   exec node --disable-warning=ExperimentalWarning src/cli.mjs catch-up --wait-lock "${WAIT_LOCK:-14400}" --trigger "$TRIGGER" ${CU_ARGS[@]+"${CU_ARGS[@]}"}
 fi
 
-# One run at a time
+# One QA slot (scripts/qa-slot.sh): nightly.lock; --priority (fresh merge, from mergewatch) jumps the queue.
+# shellcheck source=scripts/qa-slot.sh
+source "$PANOPTES_DIR/scripts/qa-slot.sh"
 exec 9>"$ARGUS_ROOT/nightly.lock"
-if [[ -n "$WAIT_LOCK" ]]; then
+if [[ -n "$PRIORITY" ]]; then
+  exec 7>"$ARGUS_ROOT/priority.lock"
+  echo "[panoptes] priority run: taking the QA slot as soon as it is free…" >&2
+  slot_acquire_priority 9 7 "${WAIT_LOCK:-14400}" || { echo "gave up waiting for the QA slot" >&2; exit 75; }
+  export PANOPTES_PRIORITY=1
+  ctl "run-nightly priority slot" "\"mode\":\"$SLOT_MODE\""
+elif [[ -n "$WAIT_LOCK" ]]; then
   echo "[panoptes] waiting up to ${WAIT_LOCK}s for the run lock…" >&2
-  flock -w "$WAIT_LOCK" 9 || { echo "gave up waiting for the run lock after ${WAIT_LOCK}s" >&2; exit 75; }
+  slot_acquire_normal 9 "$WAIT_LOCK" || { echo "gave up waiting for the run lock after ${WAIT_LOCK}s" >&2; exit 75; }
 else
-  flock -n 9 || { echo "another run is active (use --wait-lock to queue)" >&2; exit 75; }
+  slot_acquire_normal 9 "" || { echo "another run is active (use --wait-lock to queue)" >&2; exit 75; }
 fi
 
 # Per-run temp dir: everything this run (and its node / git / test children) puts under TMPDIR lands in
@@ -298,27 +311,27 @@ RUN_TMP="$(mktemp -d "${TMPDIR:-/tmp}/argus-run-XXXXXX")"
 export TMPDIR="$RUN_TMP"
 # Single quotes on purpose: expanded later by eval in the EXIT trap.
 # shellcheck disable=SC2016
-EXTRA_EXIT_CLEANUP='rm -f "$BOOT_STATUS"; rm -rf --one-file-system "$RUN_TMP"'
+EXTRA_EXIT_CLEANUP='slot_release_priority; rm -f "$BOOT_STATUS"; rm -rf --one-file-system "$RUN_TMP"'
 
 cd "$PANOPTES_DIR/argus"
 LOG="$ARGUS_ROOT/logs/nightly-$(date +%Y%m%dT%H%M%S).log"
 
-# Memory gate (box: 15 GB, no swap, shared by several bots; 2026-10-14 froze from memory exhaustion).
-# Never skips a PR: while MemAvailable < PANOPTES_MIN_MEM_GB (default 3) wait, rechecking every 60 s for up to
+# Memory gate (box: 15 GB + 8 GB swap, shared by several bots; 2026-10-14 froze from memory exhaustion).
+# 电脑运维 safe values (10-26): MemAvailable >= 8 GB AND SwapFree >= 4 GB (PANOPTES_MIN_MEM_GB / PANOPTES_MIN_SWAP_GB).
+# Never skips a PR: while below the gate (slot_mem_ok) wait, rechecking every 60 s for up to
 # PANOPTES_MEM_WAIT_S (default 1800 = 30 min); still low → run anyway with ARGUS_UNIT_SHARDS=1 (one vitest process,
 # slower but smaller). A run that then dies or times out writes no passing report, so catch-up retests the PR.
-MIN_MEM_KB=$(( ${PANOPTES_MIN_MEM_GB:-3} * 1024 * 1024 ))
 mem_avail_kb() { awk '/^MemAvailable:/{print $2}' /proc/meminfo; }
 mem_waited=0
-while (( $(mem_avail_kb) < MIN_MEM_KB )); do
+while ! slot_mem_ok; do
   if (( mem_waited >= ${PANOPTES_MEM_WAIT_S:-1800} )); then
-    msg="MemAvailable $(( $(mem_avail_kb) / 1024 )) MiB still < ${PANOPTES_MIN_MEM_GB:-3} GiB after ${mem_waited}s: running with ARGUS_UNIT_SHARDS=1"
+    msg="MemAvailable $(( $(mem_avail_kb) / 1024 )) MiB still < ${PANOPTES_MIN_MEM_GB:-8} GiB (or SwapFree < ${PANOPTES_MIN_SWAP_GB:-4} GiB) after ${mem_waited}s: running with ARGUS_UNIT_SHARDS=1"
     export ARGUS_UNIT_SHARDS=1
     echo "[panoptes] $msg" | tee -a "$LOG" >&2
     ctl "run-nightly low memory, single shard" "\"reason\":\"$msg\""
     break
   fi
-  msg="MemAvailable $(( $(mem_avail_kb) / 1024 )) MiB < ${PANOPTES_MIN_MEM_GB:-3} GiB, waiting 60s (${mem_waited}s so far)"
+  msg="MemAvailable $(( $(mem_avail_kb) / 1024 )) MiB < ${PANOPTES_MIN_MEM_GB:-8} GiB (or SwapFree < ${PANOPTES_MIN_SWAP_GB:-4} GiB), waiting 60s (${mem_waited}s so far)"
   echo "[panoptes] $msg" | tee -a "$LOG" >&2
   (( mem_waited % 300 == 0 )) && ctl "run-nightly waiting for memory" "\"reason\":\"$msg\""
   sleep 60; mem_waited=$(( mem_waited + 60 ))
