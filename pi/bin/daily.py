@@ -55,7 +55,7 @@ def pending_label(f):
 
 def classify(n, r, cal):
     d, pr = r["doc"], r["pr"]
-    fs = pr.get("findings", [])
+    fs = pr.get("findings") or []
     # 统一分级：作者的问题 = finding_policy（new_notice）；其余 P0–P2 和 pending_verification 都是待核实，不 @、不私信、不开 issue
     real = author_findings(pr, new_notice=True)
     leads = [f for f in pending_items(pr, new_notice=True) if pending_label(f)]   # 只差覆盖率的旧 P2 不算待核实，只在「测试覆盖情况」当信息
@@ -63,9 +63,9 @@ def classify(n, r, cal):
     sev = real[0]["severity"] if real else ("untested" if pr.get("verdict") in ("qa-error", "not-tested") or pr.get("severity") == "untested" else "P3")
     lead_only = False
     cg = pr.get("coverage_gate") or {}
-    nc = (cg.get("values") or {}).get("new_code") if cg.get("results", {}).get("new_code") == "fail" else None
+    nc = (cg.get("values") or {}).get("new_code") if (cg.get("results") or {}).get("new_code") == "fail" else None
     base = (cg.get("baseline") or {}).get("functions")
-    cases = (pr.get("handoff") or {}).get("cases", []); man = (pr.get("handoff") or {}).get("manual", [])
+    cases = (pr.get("handoff") or {}).get("cases") or []; man = (pr.get("handoff") or {}).get("manual") or []
     hc = {s: sum(1 for c in cases if c.get("qa_status") == s) for s in ("verified", "failed", "capped", "not-run")}
     return dict(sev=sev, real=real, leads=leads, lead_only=lead_only, newcode=nc, base_fn=base, hc=hc, manual=len(man),
                 stated=[f for f in real if f.get("source") == "stated-acceptance"],

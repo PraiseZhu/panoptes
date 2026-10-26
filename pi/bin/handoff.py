@@ -143,9 +143,9 @@ def plan(day, ro, diff):
         f, r = load_report(n)
         if not r or not r.get("pr"): continue
         pr = r["pr"]
-        for x in pr.get("pending_verification", []):
+        for x in pr.get("pending_verification") or []:
             pend.append((n, x.get("check_id") or x.get("fingerprint"), f"待核实（{x.get('kind_zh') or x.get('pending_kind')}），不开 issue"))
-        for x in pr.get("findings", []):
+        for x in pr.get("findings") or []:
             if x.get("severity") not in ("P0", "P1", "P2"): continue
             if not notifiable(x, new_notice=True): pend.append((n, x.get("check_id") or x.get("fingerprint"), "统一分级下不算作者的问题（待核实 / 线索 / 只差覆盖率等），不开 issue")); continue
             k = x.get("pr_fingerprint") or f"{x.get('fingerprint')}-pr{n}"
@@ -153,7 +153,7 @@ def plan(day, ro, diff):
             rows.append((n, x["severity"], k, rt["repo"], st, x.get("title")))
             if k not in keys: acts.append({"key": f"handoff:{n}:{x.get('fingerprint')}", "type": "gh.issue.create", "repo": rt["repo"], "pr": n,
                                            "level": x["severity"], "title": f"[{x['severity']}] #{n} {x.get('title')}", "dedupe_against": "issues.json ∪ sent/*/created.tsv ∪ gh marker"})
-        for c in (pr.get("handoff") or {}).get("cases", []):
+        for c in (pr.get("handoff") or {}).get("cases") or []:
             if c.get("qa_status") == "failed" and c.get("confirmed") is not True:
                 pend.append((n, c.get("key") or f"handoff:{n}:{c.get('id')}", "作者用例自动测试没过、未确认 -> 待确认，不开 issue"))
     L = [f"# 交接 issue 计划 数据日 {day}（Pi line，只写文件）", "", "| PR | 级别 | key | 仓 | 状态 | 标题 |", "|---|---|---|---|---|---|"]
@@ -209,7 +209,7 @@ def scan(ro, pr_receipts=pr_comment_receipts):
                 continue
             n = int(mk.group(2)); f, r = load_report(n)
             fp = mk.group(1)[:-len(f"-pr{n}")] if mk.group(1).endswith(f"-pr{n}") else mk.group(1)
-            files = [x.get("file") for x in ((r or {}).get("pr") or {}).get("findings", []) if x.get("fingerprint") == fp and x.get("file")]
+            files = [x.get("file") for x in (((r or {}).get("pr") or {}).get("findings") or []) if x.get("fingerprint") == fp and x.get("file")]
             if not rec and i["state"] == "OPEN":   # 统一格式：写了「QA #原PR号」的修复 PR 合并了 → 已修，issue 收起（不计逾期）
                 fixes = merged_fix_prs(n, files)
                 if fixes: rec = [f"已修 #{fixes[0]['number']}（修复 PR 写了 QA #{n}，已合并）"]
