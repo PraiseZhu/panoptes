@@ -150,7 +150,10 @@ def relay_text(a):
         if f:
             p = f if os.path.isabs(f) else os.path.join(BASE, f)
             if os.path.exists(p): return open(p).read()
-    return a.get("text") or a.get("summary") or ""
+    if a.get("text") or a.get("summary"): return a.get("text") or a.get("summary")
+    if str(a.get("key", "")).startswith("overdue:") and a.get("issue"):   # actions recorded before handoff.py wrote "text"
+        return f"交接 issue {a['key'][len('overdue:'):]} 开了 {a.get('age_days', '?')} 天还没有回执，负责人 {a.get('owner') or '?'}。\n{a['issue']}"
+    return ""
 # 原来发给 Grok / 别的 bot / 群的消息转给 Praise 时的标题（2026-10-24 Praise：私信看不懂 —— 不再用「【job · 原发 Grok 私聊 → X】」这种内部抬头）
 # 先按 key 前缀（同一个 out/<job>/ 目录里有几种），再按 job（= out/ 下的目录名，pmnudge 也写在 out/pm/）
 RELAY_KEY_TITLES = {"pm-chief:": "白天催办汇总", "nudge:": "白天催办", "pm-cos:": "测试项目经理的核对汇总", "pm-retro:": "测试项目经理的核对汇总"}
