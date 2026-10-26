@@ -870,7 +870,7 @@ export async function verifyReviewP1s({ entries, out, repo, pr, sha, profile, se
     const key = verifyCacheKey({ sha, finding: e, model, std, contextHash: ctxHash })
     let result = opts.freshReview || process.env.ARGUS_REVIEW_CACHE === '0' ? null : lookupVerification(key)
     if (result) result = { ...result, reused: true }
-    else if (n >= VERIFY_MAX_PER_PR) result = { status: 'not-run', status_reason: `more than ${VERIFY_MAX_PER_PR} AI-only P1 in this PR; the rest wait for a human` }
+    else if (n >= VERIFY_MAX_PER_PR) result = { status: 'not-run', status_reason: `more than ${VERIFY_MAX_PER_PR} AI-only P0/P1 in this PR; the rest wait for a human` }
     else if (!quota.check('ai-verify').ok) { result = { status: 'not-run', status_reason: 'ai-verify daily cap reached', capped: true }; out.quota_capped.push(quota.markCapped('ai-verify', { pr: number })) }
     else {
       n++
@@ -884,6 +884,14 @@ export async function verifyReviewP1s({ entries, out, repo, pr, sha, profile, se
     const repro = (deps.repro ?? reproOnHead)(out, e, sha)
     if (repro) verification.repro = repro
     verification.opus_status = result.status
+    if (e.severity === 'P0') {
+      const ok = result.status === 'confirmed' && repro
+      if (ok) out.findings.push({ ...e, test_backed: true, verification: { ...verification, method: 'opus+repro-test', confirmed_by: ['opus', 'repro-test'] } })
+      else out.pending_verification.push(toPending('review-p0-unconfirmed', { ...e, verification }, { extra: { p0_unconfirmed: true },
+        reason: `AI P0 needs both the Opus repo-wide review (${result.status}) and a repro test failing on head (${repro ? 'present' : 'missing'}); kept at P0, not downgraded`,
+        reasonZh: `AI 审查报的 P0：需要 Opus 整仓复核证实（${VERIFY_STATUS_ZH[result.status] ?? result.status}）+ 复现测试在 head 上失败（${repro ? '有' : '没有'}），两样齐了才定 P0；不降成 P1，先待核实` }))
+      continue
+    }
     if (result.status === 'confirmed') out.findings.push({ ...e, verification: { ...verification, confirmed_by: repro ? ['opus', 'repro-test'] : ['opus'] } })
     else if (repro) out.findings.push({ ...e, test_backed: true, verification: { ...verification, status: 'confirmed', method: 'repro-test', confirmed_by: ['repro-test'] } })
     else out.pending_verification.push(toPending('review-p1-unconfirmed', { ...e, verification }, { reason: `AI-only P1: no repro test failing on head and the Opus repo-wide review did not confirm it (${result.status}${result.status_reason ? `: ${result.status_reason}` : ''})`, reasonZh: `AI 审查单独报的 P1：没有在 head 上失败的复现测试，Opus 整仓复核也没能证实（${VERIFY_STATUS_ZH[result.status] ?? result.status}），先不发作者` }))
@@ -944,8 +952,9 @@ export async function runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha
   const toVerify = []
   for (const f of cr.doc.findings) {
     if (f.verdict === 'REJECTED') continue
-    // LLM 单独给出的结论最高记 P1：P0 需要真实执行的失败作证（原始等级保留在 llm_severity）
-    const severity = f.severity === 'P0' ? 'P1' : f.severity
+    // 2026-10-26（Praise）：AI 报的 P0 不再静默降成 P1：P0 要 Opus 整仓复核证实 + 复现测试在 head 上失败，两样都有才是 P0；
+    // 缺一样 → 待核实 review-p0-unconfirmed（severity_if_confirmed 仍是 P0），见 verifyReviewP1s
+    const severity = f.severity
     const fp = codeReviewFingerprint(repo, f)
     const entry = {
       source: 'code-review', test_backed: false, check_id: 'code-review', dimension: 'white-box', severity, llm_severity: f.severity, verdict: f.verdict,
@@ -961,7 +970,7 @@ export async function runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha
         extra: { ruling: { kind: ruled.kind, verdict: ruled.verdict, key: ruled.key ?? null, url: ruled.url, by: ruled.by, at: ruled.at, reason: ruled.reason, similarity: ruled.similarity } } }))
       continue
     }
-    if (severity === 'P1') toVerify.push(entry)
+    if (severity === 'P1' || severity === 'P0') toVerify.push(entry)
     else out.findings.push(entry)
   }
   for (const u of unverified) {
@@ -972,6 +981,7 @@ export async function runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha
       evidence: { evidence: u.evidence ?? null, trigger: u.trigger ?? null, behavior: u.behavior ?? null, impact: u.impact ?? null, recommendation: u.recommendation ?? null, reviewed_sha: out.reviewed_sha, unverified_kind: u.kind, missing: u.missing ?? null } },
       { reason: u.reason ?? null, reasonZh: UNVERIFIED_REASON_ZH[u.kind] ?? null }))
   }
+  toVerify.sort((x, y) => (x.severity === 'P0' ? 0 : 1) - (y.severity === 'P0' ? 0 : 1))   // P0 先核（每 PR 有上限）
   await verifyReviewP1s({ entries: toVerify, out, repo, pr, sha: out.reviewed_sha ?? sha, profile, secrets, health, number, quota, opts, prDiff, handoffRaw, rulingsText, deps })
   settleCodeReviewStatus(out)
 }
