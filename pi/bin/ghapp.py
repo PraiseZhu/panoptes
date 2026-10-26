@@ -4,13 +4,15 @@
 需要：私钥 ~/.config/gh-app/praiseautomation.pem（已有），以及 App ID 和安装 ID：
   环境变量 PI_GH_APP_ID / PI_GH_APP_INSTALLATION_ID，或 ~/.config/gh-app/praiseautomation.json {"app_id": .., "installation_id": ..}
 任一缺失 → token() 返回 (None, 原因)，调用方退回原来的匿名 / gh 凭证路径。
-只读保护：安装令牌返回的 permissions 里只要有一项是 write/admin，就拒用（返回 None）。"""
+只读保护：申请令牌时只要 WANT = {contents, pull_requests, metadata: read}（GitHub 按此收窄令牌）；
+返回的 permissions 只要超出 WANT（多了别的权限，或任一项不是 read），就拒用（返回 None）。只调读接口，不改 App 设置。"""
 import base64, json, os, subprocess, time, urllib.request
 
 DIR = os.path.expanduser(os.environ.get("PI_GH_APP_DIR") or "~/.config/gh-app")
 KEY = os.path.join(DIR, "praiseautomation.pem")
 CONF = os.path.join(DIR, "praiseautomation.json")
 API = "https://api.github.com"
+WANT = {"contents": "read", "pull_requests": "read", "metadata": "read"}
 
 
 def ids():
@@ -31,8 +33,13 @@ def jwt(app_id, key=KEY, now=None):
     return f"{head}.{body}.{b64(sig.stdout)}"
 
 
+def within(perms, want=WANT):
+    """返回超出 want 的权限 {名: 级别}；空 dict = 没超出。"""
+    return {k: v for k, v in (perms or {}).items() if want.get(k) != "read" or v != "read"}
+
+
 def read_only(perms):
-    return all(v == "read" for v in (perms or {}).values())
+    return not within(perms)
 
 
 def token(post=None):
@@ -42,14 +49,15 @@ def token(post=None):
     if missing: return None, "缺 " + "、".join(missing)
     try:
         if post is None:
-            def post(url, hdr):
-                req = urllib.request.Request(url, method="POST", headers=hdr)
+            def post(url, hdr, body):
+                req = urllib.request.Request(url, method="POST", headers={**hdr, "Content-Type": "application/json"}, data=json.dumps(body).encode())
                 with urllib.request.urlopen(req, timeout=15) as r: return json.load(r)
-        d = post(f"{API}/app/installations/{inst}/access_tokens", {"Authorization": f"Bearer {jwt(app_id)}", "Accept": "application/vnd.github+json"})
+        d = post(f"{API}/app/installations/{inst}/access_tokens", {"Authorization": f"Bearer {jwt(app_id)}", "Accept": "application/vnd.github+json"}, {"permissions": WANT})
     except Exception as e:
         return None, f"换安装令牌失败（{type(e).__name__}）"
-    if not read_only(d.get("permissions")):
-        return None, "App 有写权限，按规定拒用：" + ",".join(f"{k}={v}" for k, v in sorted((d.get("permissions") or {}).items()) if v != "read")
+    extra = within(d.get("permissions"))
+    if extra or not d.get("permissions"):
+        return None, "令牌权限超出 contents/pull_requests/metadata:read，按规定拒用：" + (",".join(f"{k}={v}" for k, v in sorted(extra.items())) or "permissions 缺失")
     return d.get("token"), "ok"
 
 
