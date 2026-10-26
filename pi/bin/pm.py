@@ -6,13 +6,17 @@
 口径（与 fleet-standards/daily-runbook.md §3、Mivo 测试项目经理.md 一致）：
  G1 首份报告（含 reports/merged/history 旧版）生成时间 - mergedAt <= 2h / 合并数
  G2a 数据日新报 P0/P1（当前报告 ∪ 日报原文「P1/P0」节，按发出时的级别）24h 内有 QA: #N 修复 PR 或 praise-pr/notes 不可复现说明 / 新报 P0/P1 数
- G2b 数据日 P0/P1 + p2-rulings.md 判「修」的 P2：有修复 PR 或结论 / 同集合（P2 新规则 2026-10-22，Praise 本人未确认）
+ 统一分级（Praise 2026-10-23）：只算按审查机统一分级成立的 P0–P2（finding_policy.author_findings），报告 pending_verification（待核实）
+   和政策不算的旧格式条目一律不进分母；p2-rulings.md 判「不修」= 不成立，剔除。
+ G2b 数据日成立的 P0/P1/P2：有修复 PR 或结论 / 同集合
  G3 日报 9:00 前发出（Grok 实发记录 report/sent/<日>/slack-sent.json 与 slack/sent.json 取最早，非 SHADOW）且 PR 数与合并数一致 / 1
+    日报原文：Grok 线 report/sent/<日>/group-content.txt；fleet-mode=pi 起 Grok 线不再写它，退到 Pi daily 的 out/daily/<日>.md
  G4 误合 = 合并官（bot）合并且报告有 P0 或必需检查未过的 PR；分母 = bot 合并数（audit.log）
  G5 最终提交 headRefOid 上 review-pr=success / 合并数
 """
 import sys, json, re, os
 from lib import *
+from finding_policy import author_findings, pending_items
 
 NOTES = "/workspace/praise-pr/notes"
 RULINGS = "/workspace/fleet-standards/p2-rulings.md"
@@ -41,8 +45,18 @@ def ruled(verdict):
     return s
 
 def daily_text(day):
-    f = f"{QA}/report/sent/{day}/group-content.txt"
-    return (f, open(f).read()) if os.path.exists(f) else (f, "")
+    """日报原文。10-24 bug：Pi 线接管后 report/sent/<日>/ 不再产生，只读它 → 文本为空 → 「日报合并 None 个」、P1/P0 全空。"""
+    for f in (f"{QA}/report/sent/{day}/group-content.txt", f"{BASE}/out/daily/{day}.md"):
+        if os.path.exists(f): return f, open(f).read()
+    return f"{QA}/report/sent/{day}/group-content.txt", ""
+
+def daily_crash(day):
+    """日报那次运行（数据日次日 08:35）的 Pi 日志以 rc!=0 结束 → 返回日志路径。"""
+    nxt = (dt.date.fromisoformat(day) + dt.timedelta(days=1)).isoformat()
+    lg = f"{BASE}/out/logs/daily-{nxt}.log"
+    if not os.path.exists(lg): return None
+    ends = re.findall(r"end daily rc=(\d+)", open(lg).read())
+    return lg if ends and all(e != "0" for e in ends) else None
 
 def reported_levels(txt):
     """PR numbers listed per level in the daily as sent ('P1 严重｜…' sections)."""
@@ -75,7 +89,7 @@ def main():
     L += [f"## 1. 合并 {N} 个", "- " + " ".join(f"#{n}" for n in sorted(nums)), f"- mergedBy：{by}", ""]
 
     # ---------- G1 + G5 + findings
-    g1 = 0; g1bad = []; g5 = 0; g5bad = []; nrep = 0; p01 = {}; p2s = []; manual = []
+    g1 = 0; g1bad = []; g5 = 0; g5bad = []; nrep = 0; p01 = {}; p2s = []; manual = []; npend = 0
     for p in prs:
         n = p["number"]; m = parse_ts(p["mergedAt"]); vs = all_versions(n)
         ts = [v for v in vs if v["t"]]
@@ -88,10 +102,12 @@ def main():
             g1bad.append((n, mins, first["trigger"] if first else None)); miss.append(f"G1 #{n} " + (f"首份报告 {mins} 分钟（trigger={first['trigger']}）" if first else "无报告"))
         if cur and cur["trigger"] == "manual": manual.append(n)
         for v in vs:
-            for x in ((v["pr"] or {}).get("findings") or []):
+            for x in author_findings(v["pr"] or {}):   # 统一分级：只取成立的；pending_verification 不进
                 if x.get("severity") in ("P0", "P1"): p01.setdefault(n, (x["severity"], x.get("title", ""), first["t"] if first else m))
-        for x in (((cur or {}).get("pr") or {}).get("findings") or []):
+        cpr = (cur or {}).get("pr") or {}
+        for x in author_findings(cpr):
             if x.get("severity") == "P2": p2s.append((n, x.get("title", "")))
+        npend += len(pending_items(cpr))
         try:
             cr = gh(["api", f"repos/{REPO}/commits/{p['headRefOid']}/check-runs?per_page=100"])
             rv = sorted([c for c in cr.get("check_runs", []) if c["name"] == "review-pr"], key=lambda c: c.get("completed_at") or "", reverse=True)
@@ -150,14 +166,14 @@ def main():
         op = [c for c in claimers(n) if c["state"] == "OPEN"]
         return False, ("修复 PR 未合并 " + ",".join("#"+str(c["number"]) for c in op)) if op else (rs[0]["status_zh"] if rs else "无修复 PR、无结论")
     b01 = [(n, p01[n][0]) + g2b_state(n) for n in sorted(p01)]
-    b2 = [(n, "P2") + g2b_state(n) for n in p2prs if n in fixset and n not in p01]
+    b2 = [(n, "P2") + g2b_state(n) for n in p2prs if n not in nofix and n not in p01]   # 成立的 P2 全算（判「不修」= 不成立）
     g2b = sum(x[2] for x in b01 + b2)
     allp2 = p2prs; led_f = led_f or "-"
     L += [f"## 2. G2 P0/P1 认领与 P0–P2 修复", f"G2a 24h 内认领：**{g2a}/{len(p01)}**（新报 P0/P1；级别取报告各版本 ∪ 日报原文 {dtf}）", "",
           "| 报告 PR | 级别 | 问题 | 修复 PR(24h 内建) | 不可复现说明 | 达标 |", "|---|---|---|---|---|---|"] + rows + ["",
-          f"G2b 有修复 PR 或结论：**{g2b}/{len(b01)+len(b2)}**（状态取 ≥数据日的台账 + gh 修复 PR + praise-pr/notes；P0/P1 {sum(x[2] for x in b01)}/{len(b01)}，P2 仅「修」{sum(x[2] for x in b2)}/{len(b2)}）",
+          f"G2b 有修复 PR 或结论：**{g2b}/{len(b01)+len(b2)}**（状态取 ≥数据日的台账 + gh 修复 PR + praise-pr/notes；P0/P1 {sum(x[2] for x in b01)}/{len(b01)}，P2 {sum(x[2] for x in b2)}/{len(b2)}）",
           f"- 数据日有 P2 的报告 PR {len(allp2)} 个（当前报告）；p2-rulings.md 判「修」{len(fixset & set(allp2))} 个、判「不修」{len(nofix & set(allp2))} 个；未裁决 {len(set(allp2) - fixset - nofix)} 个（见 out/p2 提议）。",
-          "- ⚠ P2 只算「修」是 2026-10-22 Jasper 转述的新规则，**Praise 本人未确认**。",
+          f"- 口径：2026-10-23 统一分级，只算成立的 P0–P2；待核实（pending_verification 等）{npend} 条不进分母；判「不修」的 P2 剔除。",
           "- 明细：" + ("；".join(f"#{n} {lv_}{'✓' if ok else '✗'}（{why}）" for n, lv_, ok, why in b01 + b2) or "无"), ""]
     for n, lv_, ok, why in b01 + b2:
         if not ok: miss.append(f"G2b #{n} {lv_} {why}")
@@ -188,7 +204,9 @@ def main():
           f"- 飞书私信记录：{QA}/feishu-sent.json（数据日 dm-*.txt {len(glob.glob(f'{QA}/report/sent/{day}/dm-*.txt'))} 份）", ""]
     if len(sends) > 1 and abs((sends[1][0] - sends[0][0]).total_seconds()) > 600:
         miss.append(f"G3 同一数据日有 2 条发送记录（{sends[0][0].astimezone(CST).strftime('%m-%d %H:%M')} 与 {sends[1][0].astimezone(CST).strftime('%m-%d %H:%M')}），疑似重复发送，需对账")
-    if not g3: miss.append("G3 日报 " + ("未发" if not sends else ("超时" if not on_time else ("PR 数不一致" if not match else "带 SHADOW 标记"))))
+    crash = None if sends else daily_crash(day)
+    if crash: L.insert(len(L) - 1, f"- ❌ 日报没发出：daily 运行崩溃（{crash}）")
+    if not g3: miss.append("G3 日报 " + (f"未发（daily 崩溃，见 {crash}）" if crash else "未发" if not sends else ("超时" if not on_time else ("PR 数不一致" if not match else "带 SHADOW 标记"))))
 
     # ---------- G4
     au = [l for l in open(AUDIT) if a <= l[:20] < b] if os.path.exists(AUDIT) else []
@@ -215,7 +233,7 @@ def main():
 
     L += ["## 7. 目标表", "| 目标 | 数字/分母 |", "|---|---|",
           f"| G1 2h 内 QA 报告 | {g1}/{N} |", f"| G2a P0/P1 24h 认领 | {g2a}/{len(p01)} |",
-          f"| G2b P0/P1 + 判「修」P2 有修复或结论 | {g2b}/{len(b01)+len(b2)} |",
+          f"| G2b 成立的 P0–P2 有修复或结论 | {g2b}/{len(b01)+len(b2)} |",
           f"| G3 日报 9:00 前且对得上 | {g3}/1 |", f"| G4 误合 | 0/{botm}（bot 合并） |", f"| G5 review-pr 通过 | {g5}/{N} |", ""]
     import pm_extra
     for blk, args in ((pm_extra.handoff, (day, prs, p01, p2s, miss, unv)), (pm_extra.retest, (day, prs, miss))):
