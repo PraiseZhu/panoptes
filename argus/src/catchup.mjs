@@ -13,6 +13,8 @@ import { join, dirname } from 'node:path'
 import { REPORTS_DIR } from './paths.mjs'
 import { toShanghaiDay, toShanghaiIso } from './util.mjs'
 import { shanghaiDayWindow } from './github.mjs'
+import { classifyChange } from './classify.mjs'
+import { loadRegistry } from './config.mjs'
 
 export const MAX_ATTEMPTS = 3
 export const LOCK_TIMEOUT_EXIT = 75
@@ -107,7 +109,7 @@ function saveState(file, state) {
 }
 
 // 主流程。runOne(pr) 返回子进程退出码；gh / 时钟 / 目录都可注入，便于测试。
-export function catchUp({ repo, now = new Date(), reportsDir = REPORTS_DIR, mergedDir = join(reportsDir, 'merged'), list = (r, d) => listMergedPrs(r, d), runOne, maxAttempts = MAX_ATTEMPTS, active = () => activeRunPrs() }) {
+export function catchUp({ repo, now = new Date(), reportsDir = REPORTS_DIR, mergedDir = join(reportsDir, 'merged'), list = (r, d) => listMergedPrs(r, d), runOne, maxAttempts = MAX_ATTEMPTS, active = () => activeRunPrs(), docsOnly = () => false }) {
   const days = catchUpDays(now)
   const merged = list(repo, days)
   const sFile = statePath(reportsDir)
@@ -128,9 +130,12 @@ export function catchUp({ repo, now = new Date(), reportsDir = REPORTS_DIR, merg
     if (running.has(pr.number)) { inProgress.push(pr.number); continue }
     gaps.push({ ...pr, gap })
   }
+  // 先看 diff 再排队（10-26 #1298 纯文档等了 40 分钟）：纯文档的缺口插到最前面，几秒就出报告，不排在长测试后面
+  for (const g of gaps) { try { g.docs_only = !!docsOnly(g) } catch { g.docs_only = false } }
+  gaps.sort((a, b) => Number(b.docs_only) - Number(a.docs_only))
   if (!gaps.length) { if (existsSync(sFile)) saveState(sFile, state); return { status: 'nothing-to-do', days, gaps: [], in_progress: inProgress } }
 
-  const result = { schema: 'mivo-qa-catch-up/v1', repo, days, started_at: toShanghaiIso(now), gaps: gaps.map((g) => ({ number: g.number, day: g.day, merge_sha: g.merge_sha, reason: g.gap.reason })), in_progress: inProgress, runs: [],
+  const result = { schema: 'mivo-qa-catch-up/v1', repo, days, started_at: toShanghaiIso(now), gaps: gaps.map((g) => ({ number: g.number, day: g.day, merge_sha: g.merge_sha, reason: g.gap.reason, docs_only: g.docs_only })), in_progress: inProgress, runs: [],
     system_health: { status: 'ok', gave_up: [], qa_tool_failures: [] } }
   for (const g of gaps) {
     const key = String(g.number)
@@ -179,4 +184,16 @@ export function runNightlyFor(pr, { script = process.env.PANOPTES_RUN_NIGHTLY, w
   if (!createIssues) delete env.ARGUS_ALLOW_ISSUES
   const r = spawnSync('bash', args, { stdio: ['ignore', log ?? 'inherit', log ?? 'inherit'], env })
   return r.status ?? 1
+}
+
+// 默认的「纯文档」判断：gh 读 PR 改动文件（只读），用和夜间测试同一个 classifyChange + 项目 profile；拿不到就当不是纯文档（照常排队）
+export function docsOnlyOf(repo, { gh = process.env.ARGUS_GH_BIN ?? 'gh', run = spawnSync, profile = null } = {}) {
+  let prof = profile
+  return (pr) => {
+    if (!prof) { try { const p = loadRegistry().projects.find((x) => x.repo === repo); prof = p?.profileData ?? {} } catch { prof = {} } }
+    const r = run(gh, ['api', '--paginate', `repos/${repo}/pulls/${pr.number}/files`, '--jq', '.[] | {filename, status, additions, deletions, patch}'], { encoding: 'utf8', timeout: 30_000 })
+    if (r.status !== 0 || !r.stdout) return false
+    const files = r.stdout.trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    return files.length > 0 && classifyChange(files, prof).riskClass === 'A'
+  }
 }

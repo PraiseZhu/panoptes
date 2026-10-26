@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { isTestPath, isTestsOnly } from '../src/classify.mjs'
 import { fileKind, aiTestTier } from '../src/aitests.mjs'
 import { isCoverageSource } from '../src/coverage.mjs'
-import { catchUp, prsInArgv, activeRunPrs } from '../src/catchup.mjs'
+import { catchUp, prsInArgv, activeRunPrs, docsOnlyOf } from '../src/catchup.mjs'
 
 const HELPERS = ['scripts/ops/company-cli-test-fixture.mjs', 'scripts/ops/company-validation-fixture.mjs', 'scripts/ci/design-ratchet-fixture.mjs', 'src/canvas/canvasHarness.ts', 'src/x/render-harness.tsx', 'src/x/nodeFixtures.ts', 'src/x/scene_fixture.js']
 const PRODUCT = ['src/lib/fixtureLoader.ts', 'src/fixture.ts', 'src/model/FixtureNode.ts', 'src/harnessConfig.ts', 'src/lib/harness.ts', 'scripts/ops/company-cli.mjs']
@@ -62,4 +62,25 @@ test('catchUp skips PRs with an on-merge run in progress / queued (not missing, 
   const r2 = catchUp({ repo: 'o/r', now, reportsDir, list: () => prs.slice(0, 1), active: () => new Set([1161]), runOne: () => { throw new Error('must not run') } })
   assert.equal(r2.status, 'nothing-to-do')
   assert.deepEqual(r2.in_progress, [1161])
+})
+
+test('catchUp checks the diff first: docs-only gaps jump the queue (10-26 #1298 waited 40 min behind a long run)', () => {
+  const reportsDir = mkdtempSync(join(tmpdir(), 'argus-cu-docs-'))
+  const now = new Date('2026-10-26T10:10:00Z')
+  const prs = [1296, 1297, 1298].map((n, i) => ({ number: n, merged_at: `2026-10-26T09:5${i}:00Z`, merge_sha: String(i).repeat(40), day: '2026-10-26' }))
+  const ran = []
+  const r = catchUp({ repo: 'o/r', now, reportsDir, list: () => prs, active: () => new Set(), docsOnly: (p) => p.number === 1298, runOne: (p) => { ran.push(p.number); return 1 } })
+  assert.deepEqual(ran, [1298, 1296, 1297])
+  assert.equal(r.gaps.find((g) => g.number === 1298).docs_only, true)
+  // classifier errors never block: treated as not docs-only, merge order kept
+  const ran2 = []
+  catchUp({ repo: 'o/r', now, reportsDir: mkdtempSync(join(tmpdir(), 'argus-cu-docs2-')), list: () => prs, active: () => new Set(), docsOnly: () => { throw new Error('gh down') }, runOne: (p) => { ran2.push(p.number); return 1 } })
+  assert.deepEqual(ran2, [1296, 1297, 1298])
+})
+
+test('docsOnlyOf: same classifyChange as nightly; gh failure → not docs-only', () => {
+  const mk = (files, status = 0) => () => ({ status, stdout: files.map((f) => JSON.stringify({ filename: f, additions: 1, deletions: 0 })).join('\n') })
+  assert.equal(docsOnlyOf('o/r', { run: mk(['docs/guide.md', 'README.md']), profile: {} })({ number: 1 }), true)
+  assert.equal(docsOnlyOf('o/r', { run: mk(['docs/guide.md', 'src/a.ts']), profile: {} })({ number: 1 }), false)
+  assert.equal(docsOnlyOf('o/r', { run: mk(['docs/guide.md'], 1), profile: {} })({ number: 1 }), false)
 })
