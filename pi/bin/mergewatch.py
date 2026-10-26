@@ -13,7 +13,7 @@ catch-up is running keeps dirty and is picked up on the first tick after that ca
 panoptes-catch-up cron stays as the safety net (box down, network out).
 
 Queue-jump (10-26, goal merge→test-start p95 <= 2 min): when main moved and the praiseautomation read-only App token is
-available, list recently closed PRs (REST, pull_requests:read) and launch one detached
+available (GITHUB_TOKEN, original credentials), list recently closed PRs (REST, read only) and launch one detached
   run-nightly.sh --priority --pr N --date <merge day> --write-merged --trigger event ...
 per fresh merge without a report (not already running). It does not wait for catch-up.lock or the sequential queue: it
 takes the single QA slot as soon as it is free, or while the slot holder is parked between PRs (scripts/qa-slot.sh).
@@ -86,19 +86,22 @@ def catchup_running():
         os.close(fd)
 
 
-def app_auth():
-    """praiseautomation 只读 App（ghapp.py）：有 App ID + 安装 ID + 私钥且权限全是 read 才用；否则 ({}, 原因) 退回原路径。"""
+def gh_token():
+    """原凭证：GITHUB_TOKEN（环境变量，或 ~/.config/mivo-qa/secrets.env）；只用来读 PR 列表。不打印。"""
+    t = os.environ.get('GITHUB_TOKEN')
+    if t:
+        return t
     try:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        import ghapp
-        tok, why = ghapp.token()
-        return (ghapp.git_env(tok), 'ok', tok) if tok else ({}, why, None)
-    except Exception as e:
-        return {}, f'error {type(e).__name__}', None
+        for line in open(os.path.expanduser('~/.config/mivo-qa/secrets.env')):
+            if line.startswith('GITHUB_TOKEN='):
+                return line.split('=', 1)[1].strip().strip('"\'') or None
+    except OSError:
+        pass
+    return None
 
 
 def fetch_pulls(tok):
-    """只读：最近更新的 30 个已关闭 PR（App 令牌 pull_requests:read）。"""
+    """只读：最近更新的 30 个已关闭 PR（原 GITHUB_TOKEN，只读接口）。"""
     req = urllib.request.Request(API_PULLS, headers={'Authorization': f'Bearer {tok}', 'Accept': 'application/vnd.github+json'})
     with urllib.request.urlopen(req, timeout=15) as r:
         return json.load(r)
@@ -187,17 +190,13 @@ def main():
         return 0
 
     st = load()
-    tok = None
     st['last_check'] = now()
     if outage_w and outage_w['kind'] == 'pause':
         st['dirty'] = True   # 停机期间的合并也要补测：catch-up 会测所有还没报告的合并 PR
     try:
-        auth_env, why, tok = app_auth()
-        if st.get('auth') != why:
-            log(f'auth: praiseautomation {why}' + ('' if why == 'ok' else '; falling back to default git credentials'))
-            st['auth'] = why
+        st.pop('auth', None)   # 10-26: praiseautomation App removed (belongs to another account); default git credentials only
         out = subprocess.run(['git', 'ls-remote', REPO_URL, 'refs/heads/main'], capture_output=True, text=True,
-                             timeout=25, env={**os.environ, 'GIT_TERMINAL_PROMPT': '0', **auth_env})
+                             timeout=25, env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'})
         sha = out.stdout.split()[0] if out.returncode == 0 and out.stdout.strip() else ''
     except subprocess.TimeoutExpired:
         sha = ''
@@ -220,6 +219,7 @@ def main():
         st['main_moved_at'] = now()
         st['dirty'] = True
 
+    tok = gh_token() if st.get('dirty') else None
     if st.get('dirty') and tok:
         # 合并即测插队：每个新合并的 PR 单独起一个 --priority 运行（不等 catch-up.lock / 顺序队列，槽位上限 1，见 scripts/qa-slot.sh）
         since = st.get('merged_seen') or (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=2)).isoformat()

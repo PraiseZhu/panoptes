@@ -24,4 +24,6 @@ open(f"{pd}/43/cmdline", "wb").write(b"python3\0x.py\0--pr\0" + b"99\0")
 assert M.running_prs(pd) == {13}
 src = open(f"{B}/mergewatch.py").read()
 assert "fresh_merges(pulls, since)" in src and "if n in busy" in src
+os.environ["GITHUB_TOKEN"] = "t_env"; assert M.gh_token() == "t_env"   # 原凭证，不用 App
+assert "ghapp" not in src and "praiseautomation.json" not in src
 print("ok test_mergewatch_priority")
