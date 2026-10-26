@@ -1,7 +1,8 @@
 """python3 test/test_overdue_relay_body.py — 10-26: overdue:aj0928/aj0928-handoff#6 was skipped by outbound with
 「relay: empty body」 because handoff.py recorded the feishu.dm+group action with no text. No network, no sends."""
-import sys, os, datetime as dt
+import sys, os, types, datetime as dt
 B = os.environ.get("PI_BIN") or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin"); sys.path.insert(0, B)
+sys.modules["merger"] = types.SimpleNamespace(FIELDS="number", blockers=lambda p: [])   # reads a box-only policy file; not under test
 import outbound, handoff
 # the action exactly as recorded on 10-26 (no text/summary/body_file)
 old = {"key": "overdue:aj0928/aj0928-handoff#6", "type": "feishu.dm+group", "issue": "https://github.com/aj0928/aj0928-handoff/issues/6",
