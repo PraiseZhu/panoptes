@@ -129,6 +129,36 @@ def job_checks(now, probs, since):
         if rs and rs[-1][3] and "syntax-error" in rs[-1][3]: probs[f"syntax:{job}"] = job_item(job, "它的程序被改坏了，启动不起来", f"的程序 {job}.py 编译失败（{rs[-1][3][:80]}）")
 
 
+SLA_P95_MIN = 2   # 合并 → 开测 p95 ≤ 2 分钟（Praise 10-26）
+SLA_MIN_N = 5
+
+
+def merge_sla(reports, now, hours=24):
+    """reports: [(merged_at_iso, test_started_at_iso)]；返回 (样本数, p95 分钟) —— 只看最近 hours 小时合并的"""
+    ds = []
+    for m, s in reports:
+        try:
+            mt = dt.datetime.fromisoformat(m.replace("Z", "+00:00")); st = dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except Exception: continue
+        if (now - mt).total_seconds() <= hours * 3600: ds.append(max(0.0, (st - mt).total_seconds() / 60))
+    if not ds: return 0, None
+    ds.sort(); return len(ds), ds[min(len(ds) - 1, int(round(0.95 * (len(ds) - 1))))]
+
+
+def merge_sla_check(now, probs, rdir=f"{QA}/reports/merged"):
+    rows = []
+    for f in glob.glob(f"{rdir}/PR-*.json"):
+        if (time.time() - os.path.getmtime(f)) > 3 * 86400: continue
+        try: pr = (json.load(open(f)).get("prs") or [{}])[0]
+        except Exception: continue
+        if pr.get("merged_at") and pr.get("test_started_at"): rows.append((pr["merged_at"], pr["test_started_at"]))
+    n, p95 = merge_sla(rows, now)
+    if n >= SLA_MIN_N and p95 > SLA_P95_MIN:
+        probs["sla:merge-to-test"] = PN.item("fyi", "合并到开测变慢了", f"最近 24 小时 {n} 个合并 PR，合并到开始测试的 p95 是 {p95:.0f} 分钟（目标 ≤ {SLA_P95_MIN} 分钟）。",
+                                             "测试结果和问题通知会跟着晚。", todo=PN.ask_session(f"合并即测 SLA 超标（p95 {p95:.0f} 分钟），查 mergewatch / catch-up 排队"))
+    return n, p95
+
+
 def mergewatch_check(now, probs):
     st = jload(f"{BASE}/out/mergewatch/state.json", {})
     try: last = dt.datetime.strptime(st["last_check"][:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=CST)
@@ -471,7 +501,7 @@ def main():
     except BlockingIOError: return 0
     now = now_cst(); st = jload(STATE, {}); probs = {}
     since = dt.datetime.fromisoformat(st.setdefault("installed_at", now.isoformat(timespec="seconds")))
-    for fn in (lambda: job_checks(now, probs, since), lambda: mergewatch_check(now, probs), lambda: merge_report_check(now, probs, st),
+    for fn in (lambda: job_checks(now, probs, since), lambda: mergewatch_check(now, probs), lambda: merge_sla_check(now, probs), lambda: merge_report_check(now, probs, st),
                lambda: backup_check(now, probs), lambda: backup_rules_check(now, probs), lambda: panoptes_check(now, probs, st),
                lambda: infra_check(now, probs), lambda: prfix_check(now, probs), lambda: vigil_check(now, probs, st),
                lambda: outbound_health_check(now, probs), lambda: janitor_check(now, probs)):
