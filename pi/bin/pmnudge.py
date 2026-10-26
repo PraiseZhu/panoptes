@@ -5,7 +5,7 @@
  (b) 除 review-pr 外全绿（无 pending）仍是 draft。
 不催：ready PR（归 Mac mini 盯梢）；review-pr 本身红；keel/lifeline 叠加链；只关联 p2-rulings.md 判「不修」的 P2。
 输出：追加到 out/pm/<当天>.md 的「## 白天催办 HH:MM」节；动作写 out/pm/<当天>.nudges.actions.json；
-20 点那轮另写 out/pm/<当天>.chief.md（给 Chief=Jasper 的汇总草稿，未发送）。
+20 点那轮另写 out/pm/<当天>.chief.md（给 Chief=Jasper 的汇总草稿，未发送），末尾附 chief_missed.py 的「系统漏跑」「工作逾期」两节。
 用法：pmnudge.py [--dry-run]（--dry-run 只打印，不写任何文件）
 """
 import sys
@@ -87,6 +87,9 @@ def main():
         chief = (f"# 给 Chief（Jasper）的白天催办汇总 {d}\n\n今天 {len(rounds)} 轮（{' '.join(rounds)}），"
                  f"共催 {n_n} 次，涉及 {' '.join(prs_n) or '无'}。20:00 时 QA 修复 PR {len(qa)} 个，draft {sum(p['isDraft'] for p in qa)} 个，"
                  f"本轮需催 {len(acts)} 个。明细见 {pth}「白天催办」。\n")
+        try:
+            import chief_missed; chief += chief_missed.sections(d)
+        except Exception as e: chief += f"\n## 漏项\n- 未核实：漏项汇总出错（{str(e)[:100]}）\n"
         acts.append({"key": f"pm-chief:{d}", "type": "SendToAgent", "to": "Jasper (Chief of Staff)", "priority": False,
                      "channel": "待 Praise 定", "text": chief})
     if dry:
