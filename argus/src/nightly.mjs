@@ -845,12 +845,20 @@ async function gitCodeState({ repo, number, sha, heads = [] }) {
 
 // AI 代码审查单独发现的 P1：发给作者之前先用整仓复核会话核实（review-verify.mjs）。每个 PR 最多核 VERIFY_MAX_PER_PR 条，
 // 额度（ai-verify）、模型、git 任何一环不行都是「没核实」→ 待核实，不发作者。结果按提交 + 问题缓存，重跑结论一致
+// 2026-10-26（Praise）：AI 单独报的 P1 只有两种情况才发作者 —— ① 复现测试在被测 head 上失败（本次运行里重跑仍失败的 AI 补测，
+// 测的正是这条问题所在的文件），或 ② Opus 整仓复核判证实。两样都没有 → 待核实（pending_verification），不发作者。
+// 复核模型默认 Opus（VERIFY_MODEL；ARGUS_VERIFY_MODEL 覆盖），不再沿用审查模型自己复核自己
+export const VERIFY_MODEL = 'anthropic/claude-opus-5-5'
+export function reproOnHead(out, finding, sha) {
+  const t = (out?.ai_tests?.tests ?? []).find((x) => x.result === 'fails-on-current' && x.reproduced === true && finding?.file && (x.mutation_file === finding.file || x.file === finding.file))
+  return t ? { status: 'failed-on-head', test_id: t.id, test_file: t.file, purpose: t.purpose ?? null, tested_sha: sha ?? null, log_tail: t.log_tail ?? null } : null
+}
 export async function verifyReviewP1s({ entries, out, repo, pr, sha, profile, secrets, health, number, quota, opts = {}, prDiff, handoffRaw, rulingsText, deps = {} }) {
   if (!entries.length) return
   let std
   try { std = loadSeverityStandard() } catch (err) { for (const e of entries) out.pending_verification.push(toPending('review-p1-unconfirmed', e, { reason: `not verified: ${err.message}`, reasonZh: '没核实：统一分级读不到' })); return }
   const reader = deps.reader ?? repoReaderFor(mirrorPath(repo), sha)
-  const model = process.env.ARGUS_VERIFY_MODEL ?? LLM_MODEL
+  const model = process.env.ARGUS_VERIFY_MODEL ?? VERIFY_MODEL
   const context = { pr: { number, title: pr.title, body: pr.body, merged_at: pr.merged_at, state: pr.state }, intent: profile.intentZh, handoff: handoffRaw, rulingsText }
   const ctxHash = createHash('sha256').update(JSON.stringify({ body: pr.body ?? '', handoff: handoffRaw ?? null, rulingsText })).digest('hex')
   let n = 0
@@ -870,8 +878,12 @@ export async function verifyReviewP1s({ entries, out, repo, pr, sha, profile, se
     }
     const verification = { status: result.status, method: 'repo-review', verdict: result.verdict ?? null, reason: result.status_reason ?? null, reasoning: result.reasoning ?? null, call_path: result.call_path ?? [], design_reference: result.design_reference ?? null,
       supported_scenario: result.supported_scenario ?? null, steps: result.steps?.length ?? 0, model: result.model ?? null, tokens: result.tokens ?? null, reused: Boolean(result.reused), status_zh: VERIFY_STATUS_ZH[result.status] ?? null }
-    if (result.status === 'confirmed') out.findings.push({ ...e, verification })
-    else out.pending_verification.push(toPending('review-p1-unconfirmed', { ...e, verification }, { reason: `AI-only P1 not confirmed by the repo-wide review (${result.status}${result.status_reason ? `: ${result.status_reason}` : ''})`, reasonZh: `AI 审查单独报的 P1，整仓复核没能证实（${VERIFY_STATUS_ZH[result.status] ?? result.status}），先不发作者` }))
+    const repro = (deps.repro ?? reproOnHead)(out, e, sha)
+    if (repro) verification.repro = repro
+    verification.opus_status = result.status
+    if (result.status === 'confirmed') out.findings.push({ ...e, verification: { ...verification, confirmed_by: repro ? ['opus', 'repro-test'] : ['opus'] } })
+    else if (repro) out.findings.push({ ...e, test_backed: true, verification: { ...verification, status: 'confirmed', method: 'repro-test', confirmed_by: ['repro-test'] } })
+    else out.pending_verification.push(toPending('review-p1-unconfirmed', { ...e, verification }, { reason: `AI-only P1: no repro test failing on head and the Opus repo-wide review did not confirm it (${result.status}${result.status_reason ? `: ${result.status_reason}` : ''})`, reasonZh: `AI 审查单独报的 P1：没有在 head 上失败的复现测试，Opus 整仓复核也没能证实（${VERIFY_STATUS_ZH[result.status] ?? result.status}），先不发作者` }))
   }
 }
 

@@ -764,7 +764,12 @@ not count as read); everything else — including a
 failed call, a used-up `ai-verify` quota (default 40 per day per pool) or more than `ARGUS_VERIFY_MAX_PER_PR` (3) P1s in
 one PR — becomes `pending_verification` `review-p1-unconfirmed` with the `verification` result. Results are cached per
 commit + finding (`$ARGUS_ROOT/cache/review-verifications/`; `not-run` is never cached, so a capped or failed
-verification runs again next time). `ARGUS_VERIFY_MODEL` overrides the model. A person who verified one by hand (e.g. a
+verification runs again next time). Since 2026-10-26 the verifier defaults to Opus (`anthropic/claude-opus-5-5`,
+`VERIFY_MODEL` in `nightly.mjs`; `ARGUS_VERIFY_MODEL` overrides the model), and an AI-only P1 also reaches the author when
+a **repro test fails on head**: an AI test in this run on the finding's file that failed on the tested commit and failed
+again on the rerun (`reproduced: true`) → `verification: { status: "confirmed", method: "repro-test", repro, opus_status,
+confirmed_by: ["repro-test"] }`, `test_backed: true`. Opus-confirmed ones carry `confirmed_by: ["opus"]` (plus
+`"repro-test"` when both). Neither → `pending_verification`. A person who verified one by hand (e.g. a
 failing reproduction test) moves it into `findings` with `scripts/verify-ai-lead.mjs --pr <N> --fingerprint <fp>`:
 `verification: { status: "confirmed", by: "manual", at, note }`, the pending marks are removed (kept in
 `promoted_from_pending`, `--unset` restores them).
