@@ -76,18 +76,6 @@ def catchup_running():
     finally:
         os.close(fd)
 
-
-def app_auth():
-    """praiseautomation 只读 App（ghapp.py）：有 App ID + 安装 ID + 私钥且权限全是 read 才用；否则 ({}, 原因) 退回原路径。"""
-    try:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        import ghapp
-        tok, why = ghapp.token()
-        return (ghapp.git_env(tok), 'ok') if tok else ({}, why)
-    except Exception as e:
-        return {}, f'error {type(e).__name__}'
-
-
 def heartbeat(mode):
     """outage.beat()：每分钟心跳；发现停机窗口就记日志，pause 且 pi 模式时后台补跑错过的日作业（rollback 只报告）。"""
     if DRY:
@@ -125,12 +113,9 @@ def main():
     if outage_w and outage_w['kind'] == 'pause':
         st['dirty'] = True   # 停机期间的合并也要补测：catch-up 会测所有还没报告的合并 PR
     try:
-        auth_env, why = app_auth()
-        if st.get('auth') != why:
-            log(f'auth: praiseautomation {why}' + ('' if why == 'ok' else '; falling back to default git credentials'))
-            st['auth'] = why
+        st.pop('auth', None)   # 10-26: praiseautomation App removed (belongs to another account); default git credentials only
         out = subprocess.run(['git', 'ls-remote', REPO_URL, 'refs/heads/main'], capture_output=True, text=True,
-                             timeout=25, env={**os.environ, 'GIT_TERMINAL_PROMPT': '0', **auth_env})
+                             timeout=25, env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'})
         sha = out.stdout.split()[0] if out.returncode == 0 and out.stdout.strip() else ''
     except subprocess.TimeoutExpired:
         sha = ''
