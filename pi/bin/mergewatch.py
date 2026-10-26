@@ -77,10 +77,29 @@ def catchup_running():
         os.close(fd)
 
 
+def heartbeat(mode):
+    """outage.beat()：每分钟心跳；发现停机窗口就记日志，pause 且 pi 模式时后台补跑错过的日作业（rollback 只报告）。"""
+    if DRY:
+        return None
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import outage
+        w = outage.beat()
+    except Exception as e:  # 心跳坏了不能挡合并即测
+        log(f'heartbeat error: {type(e).__name__}: {e}')
+        return None
+    if w:
+        log(f"outage {w['kind']} {w['start']} -> {w['end']} ({w['gap_min']} min; {', '.join(w['why'])})")
+        if w['kind'] == 'pause' and mode == 'pi':
+            log(f'replay spawned pid {outage.spawn_replay(w)}')
+    return w
+
+
 def main():
     os.environ['TZ'] = 'Asia/Shanghai'
     time.tzset()
     mode = os.environ.get('PI_FLEET_MODE') or open('/workspace/fleet-mode').read().strip()
+    outage_w = heartbeat(mode)
     if mode != 'pi':
         return 0
     # one tick at a time
@@ -92,6 +111,8 @@ def main():
 
     st = load()
     st['last_check'] = now()
+    if outage_w and outage_w['kind'] == 'pause':
+        st['dirty'] = True   # 停机期间的合并也要补测：catch-up 会测所有还没报告的合并 PR
     try:
         out = subprocess.run(['git', 'ls-remote', REPO_URL, 'refs/heads/main'], capture_output=True, text=True,
                              timeout=25, env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'})

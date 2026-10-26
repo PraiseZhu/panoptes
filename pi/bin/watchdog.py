@@ -24,6 +24,7 @@ Cron: */5, own quiet log out/logs/watchdog-<day>.log (only on change). --dry-run
 """
 import sys, time, glob, hashlib
 from lib import *
+import outage
 try:
     import praise_notice as PN
 except Exception as _pn_err:   # 10-24 复查：praise_notice 写坏了，看门狗（含绕过 outbound 的直发通道）不能跟着倒 —— 退回纯文本
@@ -100,6 +101,7 @@ def job_checks(now, probs, since):
             probs[f"stale:{job}"] = job_item(job, f"它本该每 {gap} 分钟内成功跑一次，现在已经 {ago}没有成功跑过", f"已 {ago}没有成功运行（最近一次：{(rs[-1][3] or 'rc=' + str(rs[-1][2])) if rs else '无'}）")
         tail = [r for r in rs if r[1]][-3:]
         if len(tail) == 3 and all(r[2] for r in tail): probs[f"failing:{job}"] = job_item(job, "它连续 3 次运行都失败了", f"连续 3 次失败（rc={tail[-1][2]}）")
+    wins = outage.windows(); miss_by_win = {}
     for job, slots in DAILY.items():
         if job in takeovers and not takeover(job): continue
         rs = runs(job)
@@ -108,9 +110,20 @@ def job_checks(now, probs, since):
             if slot > now: slot -= dt.timedelta(days=1)
             if (now - slot).total_seconds() / 60 < GRACE_MIN or slot < since: continue   # slots before install: not ours to judge
             after = [r for r in rs if r[0] >= slot - dt.timedelta(minutes=2)]
+            ow = outage.in_window(slot, wins) if not after else None
+            if ow:   # 同一停机窗口里错过的都并成一条（10-26：02:40–11:00 停摆一次报了一串 missed:*）
+                k = f"outage:{ow['start']}"; miss_by_win.setdefault(k, (ow, []))[1].append(f"{job} {h:02d}:{mi:02d}"); continue
             if not after: probs[f"missed:{job}:{h:02d}{mi:02d}"] = job_item(job, f"今天 {h:02d}:{mi:02d} 那一轮根本没启动（可能机器停过，或定时任务丢了）", f"{h:02d}:{mi:02d} 这一轮没启动")
             elif not any(ok_run(r) for r in after):
                 r = after[-1]; probs[f"failed:{job}:{h:02d}{mi:02d}"] = job_item(job, f"今天 {h:02d}:{mi:02d} 那一轮跑了但没成功", f"{h:02d}:{mi:02d} 这一轮没成功（{r[3] or 'rc=' + str(r[2])}）")
+    for k, (ow, missed) in miss_by_win.items():
+        a, b = ow["start"][5:16].replace("T", " "), ow["end"][5:16].replace("T", " ")
+        if ow["kind"] == "rollback":
+            probs[k] = PN.item("action", "机器疑似被回滚，停机期间的作业没跑", f"{a} 到 {b} 机器停了（判据：{'、'.join(ow['why'])}），错过 {len(missed)} 轮：{'、'.join(missed)}。",
+                               "回滚后不自动补跑（旧状态上补跑会重复外发）。", todo="按 docs/pi/README.md「疑似回滚时怎么恢复」处理，再决定要不要补跑")
+        else:
+            probs[k] = PN.item("fyi", "机器停过一段，错过的作业已自动补跑", f"{a} 到 {b} 机器暂停（心跳断了 {ow['gap_min']} 分钟），错过 {len(missed)} 轮：{'、'.join(missed)}。",
+                               "能补的日作业已按原数据日补跑一次（见 out/outage/replayed.json），过期的不补。", todo="不用处理")
     for job in sorted(set(CADENCE) | set(DAILY)):
         rs = runs(job, 1)
         if rs and rs[-1][3] and "syntax-error" in rs[-1][3]: probs[f"syntax:{job}"] = job_item(job, "它的程序被改坏了，启动不起来", f"的程序 {job}.py 编译失败（{rs[-1][3][:80]}）")
