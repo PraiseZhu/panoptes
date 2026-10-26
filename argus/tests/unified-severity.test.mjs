@@ -52,7 +52,7 @@ function fakeReader(files = {}) {
 const scripted = (acts) => { let i = 0; const seen = []; const fn = async ({ messages }) => { seen.push(messages); return { ok: true, json: acts[Math.min(i++, acts.length - 1)], tokens: 5, model: 'm' } }; fn.seen = seen; return fn }
 
 // ── 钉住副本 ─────────────────────────────────────────────
-test('统一分级：config/severity.md 与锁文件的 sha256 一致（= Review-PR 7afb7c2 的 eced0dee…），版本是 sha256 前 12 位', () => {
+test('统一分级：config/severity.md 与锁文件的 sha256 一致（= Review-PR 651265f 的 eced0dee…），版本是 sha256 前 12 位', () => {
   const std = S.loadSeverityStandard({ fresh: true })
   assert.equal(std.sha256, 'eced0deeeaa83fa8b3324d2a1a86436c21f4b33d4f2f4fa099b5f18ed0f328c5')
   assert.equal(std.version, 'eced0deeeaa8')
@@ -346,7 +346,7 @@ test('覆盖率目标识别：只认写成目标的说法，不认对现状的�
 
 test('报告：severity_standard 指向钉住的原文，severity_scale 只有等级名称', () => {
   const ref = S.severityStandardRef()
-  assert.deepEqual([ref.status, ref.sha256.slice(0, 12), ref.ref.slice(0, 7)], ['pinned', 'eced0deeeaa8', '7afb7c2'])
+  assert.deepEqual([ref.status, ref.sha256.slice(0, 12), ref.ref.slice(0, 7)], ['pinned', 'eced0deeeaa8', '651265f'])
   assert.equal(S.SEVERITY_LEVEL_NAMES.P1, 'P1 严重缺陷')
 })
 

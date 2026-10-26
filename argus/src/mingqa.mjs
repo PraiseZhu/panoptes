@@ -192,6 +192,25 @@ const REQUIRED = ['file', 'line', 'trigger', 'behavior', 'impact', 'evidence']
 const filled = (v) => v != null && String(v).trim() !== '' && !/^(n\/a|null|none|unknown|无|未知)$/i.test(String(v).trim())
 const UNVERIFIED_KINDS = ['needs-evidence', 'design-question', 'same-as-ruling']
 
+// 合并阻断口径（与项目仓库 xindong/mivo-canvas-plugin CONTRIBUTING.md 审查结论一致，Praise 2026-10-26）：
+//  · P0：一律阻断（转没转 issue 都算）；
+//  · P1：未转 issue 阻断；已转 issue 不阻断；
+//  · P2：未转 issue 按规则应阻断，但先只标 would_block、不阻断（report-only，一周后再收紧）；已转 issue 不阻断。
+export const P2_BLOCKING_ENFORCED = false
+const trackedIssueOf = (f) => {
+  const n = Number.parseInt(String(f?.tracked_issue ?? f?.issue ?? '').replace(/^#/, ''), 10)
+  return Number.isInteger(n) && n > 0 ? n : null
+}
+export function blockingGate(findings, { enforceP2 = P2_BLOCKING_ENFORCED } = {}) {
+  const blocking_ids = [], would_block = []
+  for (const f of findings ?? []) {
+    const tracked = trackedIssueOf(f) != null
+    if (f.severity === 'P0' || (f.severity === 'P1' && !tracked)) blocking_ids.push(f.id)
+    else if (f.severity === 'P2' && !tracked) (enforceP2 ? blocking_ids : would_block).push(f.id)
+  }
+  return { blocking: blocking_ids.length > 0, blocking_ids, would_block, policy: enforceP2 ? 'p0-always;p1p2-untracked' : 'p0-always;p1-untracked;p2-untracked-report-only' }
+}
+
 export function toCodeReviewDoc(raw, files, { standardVersion = null } = {}) {
   const findings = [], unverified = [], dropped = { p3: 0, rejected: 0 }
   for (const f of (Array.isArray(raw?.findings) ? raw.findings : []).slice(0, 30)) {
@@ -212,6 +231,8 @@ export function toCodeReviewDoc(raw, files, { standardVersion = null } = {}) {
       evidence: redact(String(f?.evidence ?? '')).slice(0, 1200),
       recommendation: redact(String(f?.recommendation ?? '')).slice(0, 600),
       verdict,
+      // 已转 issue 跟进（项目仓库 CONTRIBUTING「转 issue 跟进的审查问题」）：issue 号；没有就是 null
+      tracked_issue: trackedIssueOf(f),
     }
     if (!LEVELS.includes(sev)) { unverified.push({ ...base, severity_if_confirmed: null, raw_severity: redact(String(f?.severity ?? '')).slice(0, 40), kind: 'unknown-level', reason: `unknown severity '${String(f?.severity ?? '')}'` }); continue }
     if (verdict === 'PLAUSIBLE') { unverified.push({ ...base, severity_if_confirmed: sev, kind: 'plausible', reason: 'PLAUSIBLE: suspected, not excluded' }); continue }
@@ -226,9 +247,14 @@ export function toCodeReviewDoc(raw, files, { standardVersion = null } = {}) {
   }
   findings.forEach((f, i) => { f.id = `CR-${String(i + 1).padStart(3, '0')}` })
   unverified.forEach((u, i) => { u.id = `CU-${String(i + 1).padStart(3, '0')}` })
-  const blocking = findings.some((f) => ['P0', 'P1'].includes(f.severity))
+  const gate = blockingGate(findings)
   return {
-    status: blocking ? 'failed' : 'passed',
+    status: gate.blocking ? 'failed' : 'passed',
+    blocking: gate.blocking,
+    blocking_ids: gate.blocking_ids,
+    // P2 规则先只记录不阻断（Praise 2026-10-26，观察一周后再收紧）：未转 issue 的 P2 列在这里
+    would_block: gate.would_block,
+    blocking_policy: gate.policy,
     generatedAt: new Date().toISOString(),
     summary: redact(String(raw?.summary ?? '')).slice(0, 600),
     scope: { files: files.map((f) => f.filename).slice(0, 200), description: redact(String(raw?.scope?.description ?? 'PR diff review')).slice(0, 300) },

@@ -103,7 +103,7 @@ Reports written before 2026-10-11 (commit `78184f9`) do not have `tested_at`; fa
 | `run` | object | see below |
 | `dimensions` | object | `white-box` / `gray-box` / `black-box` → description |
 | **`severity_standard`** | object | since 2026-10-23: the grading standard every P level in this report follows — the reviewer's unified severity, **PraiseZhu/Review-PR `mivo/config/severity.md`**, pinned by sha256 (`{ status: "pinned", source_repo, path, ref, sha256, version }`; `version` = first 12 hex of sha256, the same as the reviewer's `SEVERITY_VERSION` and the watcher's `mivo-ruling std=`). panoptes no longer writes its own P0–P3 definitions; see *Unified severity* |
-| `severity_scale` | object | level names only (`P0 紧急严重事故`, `P1 严重缺陷`, `P2 一般缺陷`, `P3 改进建议（不报）`, `pending: 待核实（QA 自查）`); definitions are in `severity_standard`. Reports before 2026-10-23 carry panoptes' old hand-written descriptions here |
+| `severity_scale` | object | level names only (`P0 紧急` — `P0 紧急严重事故` in reports before 2026-10-26, `P1 严重缺陷`, `P2 一般缺陷`, `P3 改进建议（不报）`, `pending: 待核实（QA 自查）`); definitions are in `severity_standard`. Reports before 2026-10-23 carry panoptes' old hand-written descriptions here |
 | `summary` | object | see below |
 | `prs` | array | one entry per discovered PR; for `--pr` runs **only the requested PRs** (since 2026-10-11; older `--pr` reports also listed the day's other PRs as `not-tested` / `excluded-by-pr-filter`, e.g. the 10-11 PR-905/906/907 originals kept as `.v1.json`) |
 | `issues` | object | issue creation result (off by default) |
@@ -205,9 +205,22 @@ Severity rules (since 2026-10-23, unified severity — see *Unified severity*): 
 a ruling confirms it meets the severity.md P0 definition) · an introduced quality-guard failure P2 · trial checks at most
 P2 · `unverified` / `setup-failed` / `timeout` / `flaky` → no level, pending verification · pre-existing / fixed-later P3 ·
 code review: CONFIRMED P2 as is, AI-only P0 capped at P1, AI-only P1 only after verification, the rest pending ·
-`untested` not tested at all. Before 2026-10-23: P0 introduced failure on a merged PR that still fails on latest main ·
-P1 introduced reproducible product-check failure, or LLM review P0/P1 · P2 quality guard, unverified, timeout, setup
-failure, flaky, review P2, new-code coverage below gate, QA error · P3 pre-existing / fixed-later / nothing.
+`untested` not tested at all. P0 is displayed as **「P0 紧急」** everywhere (report, daily, follow-ups, merger); the merger
+alerts on `severity == "P0"` **and** on `p0_candidate: true`, and Praise confirms or rejects a P0 within 24 hours (Beijing
+time); unconfirmed stays P1. Code-review merge blocking (since 2026-10-26, same as the project repo CONTRIBUTING): P0
+always blocks; an untracked P1 blocks; an untracked P2 is listed in `code_review.would_block` but does **not** block yet
+(report-only, to be tightened); a P1/P2 already converted to an issue (`tracked_issue`) does not block. `coverage_gate`
+carries `blocking: false`, `level: "info"`: coverage below the reference line never blocks and never enters the ledger.
+
+> **Historical (superseded 2026-10-23, kept only to read old reports):** P0 introduced failure on a merged PR that still
+> fails on latest main · P1 introduced reproducible product-check failure, or LLM review P0/P1 · P2 quality guard,
+> unverified, timeout, setup failure, flaky, review P2, new-code coverage below gate, QA error · P3 pre-existing /
+> fixed-later / nothing. Do not apply this definition to new reports.
+
+**ming-qa under Mivo** (`ming-qa/` is the vendored upstream `mingdui/ming-qa` submodule and is not edited here): the
+P0/P1 in `references/quality-gates.md` (Completion Gate) are *business case priorities*; read them as **「优先级 高/中」**
+(and P2 as「优先级 低」), never as defect levels. Defect levels follow `argus/config/severity.md` only. G2 coverage is
+informational under Mivo: coverage below the reference line is not a G2 failure.
 
 ### Flaky (unstable) failures
 

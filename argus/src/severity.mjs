@@ -44,8 +44,8 @@ export function severityStandardRef() {
   } catch (err) { return { status: 'unavailable', error: String(err.message).slice(0, 300) } }
 }
 
-// 报告 severity_scale：只用 severity.md 表里的等级名称，不复述定义；定义看 severity_standard 指向的原文
-export const SEVERITY_LEVEL_NAMES = Object.freeze({ P0: 'P0 紧急严重事故', P1: 'P1 严重缺陷', P2: 'P2 一般缺陷', P3: 'P3 改进建议（不报）' })
+// 报告 severity_scale：等级显示名（2026-10-26 起 P0 统一显示「P0 紧急」；severity.md 正文的定义标题仍是「紧急严重事故」），不复述定义；定义看 severity_standard 指向的原文
+export const SEVERITY_LEVEL_NAMES = Object.freeze({ P0: 'P0 紧急', P1: 'P1 严重缺陷', P2: 'P2 一般缺陷', P3: 'P3 改进建议（不报）' })
 
 // 上游比对：pinned = 本地锁；upstream = Review-PR main（或指定 ref）上同一路径的原文。纯函数，取数由调用方注入
 export function compareUpstream({ lock, upstreamText }) {

@@ -91,8 +91,8 @@ def own_pr_ticket(x, n, fix2, unified=False, nofix=frozenset(), pending=False):
     test, which IS the verification; no repro -> NOREPRO note, no PR. P2: a confirmed P2 (in findings, not pending, review
     verdict not PLAUSIBLE) is a ticket unless the PR is in nofix (p2-rulings.md 不修 / 产品代码不修 / 误报 / P3 / 已修 —
     p2-rulings.md 10-23 header: confirmed P2 must be fixed, rulings only decide valid / which level); a pending or unconfirmed P2
-    is no ticket (the ledger keeps the row). Coverage-only (coverage-gate / own-tests) only as a P2 ruled 修 (coverage is a hint
-    under the unified severity). Excluded always: dismissed (误报 / REJECTED / pre-existing / flaky), qa-error (the test
+    is no ticket (the ledger keeps the row). Coverage-only (coverage-gate / own-tests) is never a ticket since 2026-10-26 (coverage
+    is info only: coverage_gate.blocking false; only a missed stated target, source stated-acceptance, is a P2). Excluded always: dismissed (误报 / REJECTED / pre-existing / flaky), qa-error (the test
     system's own failure -> infrafix lane), checks other than introduced. `unified` is kept for callers but no longer used.
     Returns the severity to work at, or None. Shared by prfix.py (own_sev) and mivo-qa/ledger/build-ledger.mjs (ownTicket, JS copy)."""
     sev = x.get("severity") or x.get("severity_if_confirmed")
@@ -101,7 +101,7 @@ def own_pr_ticket(x, n, fix2, unified=False, nofix=frozenset(), pending=False):
     if (x.get("calibration") or {}).get("to") == "误报" or DISMISSED_RE.search(str(x.get("verdict") or "")): return None
     src = x.get("source") or "check"
     if src == "qa-error": return None
-    if src in ("coverage-gate", "own-tests"): return sev if sev == "P2" and n in fix2 else None
+    if src in ("coverage-gate", "own-tests"): return None   # 2026-10-26: coverage is info only (coverage_gate.blocking false) -> never a ticket / ledger row
     if src == "check" and x.get("status") not in (None, "introduced"): return None
     if sev == "P2":
         unconfirmed = pending or bool(x.get("pending_kind")) or str(x.get("verdict") or "").upper() == "PLAUSIBLE"
@@ -125,3 +125,10 @@ def no_fix_rulings(text):
         if len(c) >= 4 and re.fullmatch(r"#?\d+", c[1] or "") and c[3] in NOFIX_RULINGS: s.add(int(c[1].lstrip("#")))
     return s
 
+def is_p0_alert(pr):
+    """合并官 P0 告警：已定级 P0（severity == "P0"），或任一检查 / finding 带 p0_candidate: true（已合并、最新主干仍失败，等级仍是 P1）。
+    p0_candidate 只是候选：Jasper 补证据后交 Praise 24 小时内确认或驳回；没人确认保持 P1，不自动升 P0。"""
+    if not isinstance(pr, dict): return False
+    if pr.get("severity") == "P0" or pr.get("p0_candidate") is True: return True
+    return any(isinstance(x, dict) and (x.get("severity") == "P0" or x.get("p0_candidate") is True)
+               for k in ("findings", "failed_checks") for x in (pr.get(k) or []))

@@ -7,6 +7,11 @@
 | 今日合并 P0/缺报告巡检 | bin/merger.py 末节 | 同上 | 同上 |
 | 与 Grok 判定回放 | bin/merger_replay.py（离线） | 手动 | out/merger/replay-2026-10-23.md |
 
+### P0 告警与确认（2026-10-26 起，统一严重度标准）
+- 末节巡检同时认 `severity == "P0"` 和 `p0_candidate: true`（报告 `pr`、`findings[]`、`failed_checks[]` 任一处），见 `is_p0_alert`。
+- `p0_candidate` 只是候选，等级仍是 P1：Jasper 初筛补证据（触发条件、影响面、main 复查、有无隔离或回退）后交 **Praise 在 24 小时内（北京时间）确认或驳回**；Praise 明确指定前，bot 不代确认。24 小时内没人确认的保持 P1、再提醒 Praise 一次，不自动升 P0。
+- 显示名统一为「P0 紧急」。
+
 ## 写了哪些文件
 - `/workspace/panoptes/pi/bin/merger.py` 重写（旧版留 `merger.py.bak-20261023-12xx`）。门：非草稿；有 review:merge-ready；base=main；MERGEABLE+CLEAN（BEHIND=WAIT）；8 项必需检查逐项 SUCCESS（取 head 上每个名字最新一次，不看总状态；清单读 policy.json）；讨论全解决；无 CHANGES_REQUESTED（reviewDecision）；conventional 标题；head 为 release/*、plugin/green、main 或改到 scripts/ops/、scripts/loops/automerge/、agent-use/（外加 policy.json humanOnlyPaths）→ HUMAN。判定：MERGE/WAIT/BLOCK/HUMAN。
 - PAUSED 在 → 只写 .md，不写任何动作。不在 → `merge:<PR>:<headSHA>`（每轮 ≤1，取号最小）+ BLOCK/HUMAN 的 `comment:<PR>:<reasonHash>`（中文，结尾 `<!-- mivo-merger -->`）。

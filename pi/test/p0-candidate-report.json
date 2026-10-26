@@ -1,0 +1,29 @@
+{
+  "prs": [
+    {
+      "number": 9001,
+      "merged": true,
+      "severity": "P1",
+      "failed_checks": [
+        {
+          "check_id": "unit",
+          "status": "introduced",
+          "severity": "P1",
+          "p0_candidate": true,
+          "p0_note": "merged PR, product check introduced by this PR; still failing on latest main (re-checked). P0 only if it meets the severity.md P0 definition, confirmed by a human or a ruling"
+        }
+      ],
+      "findings": [
+        {
+          "source": "check",
+          "test_backed": true,
+          "check_id": "unit",
+          "status": "introduced",
+          "severity": "P1",
+          "p0_candidate": true,
+          "p0_note": "merged PR, product check introduced by this PR; still failing on latest main (re-checked). P0 only if it meets the severity.md P0 definition, confirmed by a human or a ruling"
+        }
+      ]
+    }
+  ]
+}

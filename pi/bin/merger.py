@@ -12,6 +12,7 @@ comment) is recorded. Comments only for HUMAN, one per (PR, head, reason), like 
 from lib import *
 import hashlib, io, zipfile, time, subprocess, urllib.parse
 import gate_port as G
+from finding_policy import is_p0_alert   # P0 告警：severity == P0 或 p0_candidate（2026-10-26）
 CST = dt.timezone(dt.timedelta(hours=8))
 MM = "/workspace/mivo-merger"
 POLICY_PATH = f"{MM}/app/scripts/loops/automerge/policy.json"
@@ -402,9 +403,9 @@ def main():
     p0 = []
     for p in merged_prs(d):
         f, r = load_report(p["number"])
-        if r and r.get("pr") and r["pr"].get("severity") == "P0": p0.append(p["number"])
+        if r and r.get("pr") and is_p0_alert(r["pr"]): p0.append(p["number"])
         if not r: p0.append(f"{p['number']}(报告未出)")
-    L.append(f"- 巡检：今日合并中 P0/缺报告：{p0 or '无'}")
+    L.append(f"- 巡检：今日合并中 P0 紧急（含 p0_candidate，Praise 24 小时内确认）/缺报告：{p0 or '无'}")
     old = open(out).read() if os.path.exists(out) else f"# 合并官判定 {d}（Pi line）\n"
     write_atomic(out, old + "\n".join(L) + "\n")
 if __name__ == "__main__": main()

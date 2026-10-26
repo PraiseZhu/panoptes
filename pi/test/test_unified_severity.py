@@ -218,7 +218,7 @@ class OwnPrTicket(unittest.TestCase):
         self.assertIsNone(P.own_pr_ticket({"severity_if_confirmed": "P2", "pending_kind": "review-plausible", "source": "code-review"}, 1000, set()))
         self.assertEqual(P.own_pr_ticket({"severity_if_confirmed": "P1", "pending_kind": "review-plausible", "source": "code-review"}, 1000, set()), "P1", "pending P1 is still a ticket")
         self.assertIsNone(P.own_pr_ticket({"severity": "P2", "source": "coverage-gate"}, 1000, set()), "coverage only as a P2 ruled 修")
-        self.assertEqual(P.own_pr_ticket({"severity": "P2", "source": "coverage-gate"}, 1000, {1000}), "P2")
+        self.assertIsNone(P.own_pr_ticket({"severity": "P2", "source": "coverage-gate"}, 1000, {1000}), "2026-10-26: coverage is info only, even if ruled 修")
     def test_no_fix_rulings(self):
         t = "| 10-23 | #1216 | x | 不修 | y |\n| 10-23 | #434 | x | 产品代码不修 | y |\n| 10-23 | #948 | P2 | 已修 | #998 |\n| 10-23 | #1124 | x | 修 | y |\n| 10-24 | #1300 | x | 误报 | y |\n| 10-24 | #1301 | x | P3 | y |"
         self.assertEqual(P.no_fix_rulings(t), {1216, 434, 948, 1300, 1301})
