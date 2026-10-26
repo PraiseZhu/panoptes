@@ -6,7 +6,7 @@ it must run under low memory too and would otherwise write two log lines a minut
 
 Every tick: `git ls-remote` the main head of xindong/mivo-canvas-plugin (git protocol, no REST quota). When it moved,
 mark dirty; while dirty and no catch-up holds catch-up.lock, launch panoptes' own gap filler in event mode, detached:
-  run-nightly.sh --catch-up --trigger event --create-issues --wait-lock 14400
+  run-nightly.sh --catch-up --trigger event --wait-lock 14400
 It tests merged PRs without a matching reports/merged/PR-N.json, skips PRs already running / queued, retries 3x,
 so reports get run.trigger=event exactly as the old Grok on-merge routine wrote them. A merge that lands while a
 catch-up is running keeps dirty and is picked up on the first tick after that catch-up ends. The 2-hourly
@@ -142,7 +142,7 @@ def main():
         if catchup_running():
             st['waiting_since'] = st.get('waiting_since') or now()
         else:
-            cmd = [RUN_NIGHTLY, '--catch-up', '--trigger', 'event', '--create-issues', '--wait-lock', '14400']
+            cmd = [RUN_NIGHTLY, '--catch-up', '--trigger', 'event', '--wait-lock', '14400']
             if DRY:
                 log('DRY: would launch ' + ' '.join(cmd))
             else:
@@ -151,7 +151,7 @@ def main():
                     lf.flush()
                     p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=lf, stderr=subprocess.STDOUT,
                                          start_new_session=True, cwd='/workspace/panoptes',
-                                         env={**os.environ, 'ARGUS_ALLOW_ISSUES': '1', 'QA_HOME': QA_HOME,
+                                         env={**os.environ, 'QA_HOME': QA_HOME,
                                               'ARGUS_PR_TIMEOUT_MIN': os.environ.get('ARGUS_PR_TIMEOUT_MIN', '45'),  # one stuck PR must not block the queue for hours (longest real run 10-21..23: 32 min); catch-up retries a timed-out PR
                                               'PATH': '/usr/local/bin:/usr/bin:/bin'})
                 log(f'launched catch-up (event) pid {p.pid} for main {sha[:8]}')
