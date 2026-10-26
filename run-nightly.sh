@@ -289,7 +289,7 @@ if [[ -n "$CATCH_UP" ]]; then
 fi
 
 # One QA slot (scripts/qa-slot.sh): nightly.lock; --priority (fresh merge, from mergewatch) jumps the queue.
-# shellcheck source=scripts/qa-slot.sh
+# shellcheck disable=SC1091  # scripts/qa-slot.sh (tests: argus/tests/qa-slot.test.mjs)
 source "$PANOPTES_DIR/scripts/qa-slot.sh"
 exec 9>"$ARGUS_ROOT/nightly.lock"
 if [[ -n "$PRIORITY" ]]; then
