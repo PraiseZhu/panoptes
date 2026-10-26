@@ -1,6 +1,7 @@
 // 夜间 QA（Linux / Mivo QA）：发现前一天（上海时区）的 PR → 在隔离沙箱里跑项目检查 → 失败三重对照 →
 // ming-qa 代码审查 → 写 reports/YYYY-MM-DD.json。默认绝不写 GitHub；提 issue 只在 --create-issues 且
 // ARGUS_ALLOW_ISSUES=1 时才可能发生。
+import { yieldToPriority } from './priority.mjs'
 import { memAvailableGb, machineLoad, isIdle } from './memory.mjs'
 import { mkdirSync, writeFileSync, renameSync, existsSync, readFileSync, statfsSync, readdirSync } from 'node:fs'
 import { join, resolve, dirname, basename, posix } from 'node:path'
@@ -1566,6 +1567,10 @@ export async function processTargets(targets, { opts = {}, health, startedAt = n
       prs.push(e)
       health.qa_tool_failures.push({ pr: t.number, stage: cutCode, message: e.not_tested_reason })
       continue
+    }
+    if (opts.yieldToPriority !== false) {
+      const y = await (opts.yieldFn ?? yieldToPriority)({ onYield: () => process.stderr.write(`[panoptes] parked before PR #${t.number}: a fresh merge has the QA slot\n`) })
+      if (y.yielded) (health.notes ??= []).push(`parked ${Math.round(y.waitedMs / 1000)}s before #${t.number} for a fresh-merge run`)
     }
     log('info', 'nightly pr start', { pr: t.number })
     process.stderr.write(`[panoptes] PR #${t.number} (${t.reason}) …\n`)
