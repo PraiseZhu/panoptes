@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Mivo QA 日报 draft (REPORT-STYLE layout, no model). Files only; never sends.
-usage: daily.py [数据日] [--render-only] [--diff-sent]
+usage: daily.py [数据日] [--render-only] [--diff-sent] [--resend]
+  --resend      : 补发：日报第一行以「【补发】」开头；外发 key 不变（mivo-daily-report:<日>），已发过的照样不重发
   --render-only : no gh calls if out/daily/<day>.json has the PR list; writes nothing but <day>.render.md (+ .diff)
   --diff-sent   : diff the render against Grok's sent text (report/sent/<day>/group-content.txt)
 Rules: data day = previous Beijing day by merged_at; missing/invalid/non-1.0 report = QA system fault; a valid report whose
@@ -67,7 +68,9 @@ def classify(n, r, cal):
     base = (cg.get("baseline") or {}).get("functions")
     cases = (pr.get("handoff") or {}).get("cases") or []; man = (pr.get("handoff") or {}).get("manual") or []
     hc = {s: sum(1 for c in cases if c.get("qa_status") == s) for s in ("verified", "failed", "capped", "not-run")}
-    return dict(sev=sev, real=real, leads=leads, lead_only=lead_only, newcode=nc, base_fn=base, hc=hc, manual=len(man),
+    # 覆盖率没拿到（results/values 为空或 status=unavailable）= 「未测」：记部分核实，不当通过
+    cov_untested = bool(pr.get("coverage_gate") is not None and (not cg.get("results") or cg.get("status") == "unavailable"))
+    return dict(sev=sev, cov_untested=cov_untested, verify="partial" if cov_untested else "full", real=real, leads=leads, lead_only=lead_only, newcode=nc, base_fn=base, hc=hc, manual=len(man),
                 stated=[f for f in real if f.get("source") == "stated-acceptance"],
                 docs=pr.get("outcome") == "docs_only", failed_checks=pr.get("failed_checks") or [],
                 code_review_p3=[f for f in fs if f.get("source") == "code-review" and f.get("severity") == "P3"])
@@ -115,10 +118,15 @@ def build(day, prs, flags):
               "merged": p["mergedAt"]}
         if not r or "_error" in r or not r.get("pr") or r["doc"].get("schema_version") != "1.0":
             fault.append(n); it["sev"] = "fault"; items.append(it); continue
-        it.update(classify(n, r, cal)); it["health"] = health_issue(r["doc"]); items.append(it)
+        try:   # 一个 PR 的报告坏了不拖垮整份日报：这个 PR 记成故障，其余照出
+            it.update(classify(n, r, cal)); it["health"] = health_issue(r["doc"])
+        except Exception as e:
+            log(f"classify #{n} failed: {type(e).__name__}: {e}")
+            fault.append(n); it["sev"] = "fault"; it["error"] = f"{type(e).__name__}"
+        items.append(it)
     return items, fault, carry, cal
 
-def render(day, items, fault, carry, cal):
+def render(day, items, fault, carry, cal, resend=False):
     by = lambda s: [i for i in items if i.get("sev") == s]
     P0, P1, P2, P3 = by("P0"), by("P1"), by("P2"), by("P3")
     owner_last = lambda xs: sorted([i for i in xs if i["login"] != OWNER], key=lambda i: i["merged"]) + \
@@ -134,7 +142,7 @@ def render(day, items, fault, carry, cal):
     health = "测试系统运行正常。" if not fault and not sick else \
         (f"测试系统有故障：{len(fault)} 个 PR 没有合格的 QA 报告（{' '.join('#%d' % n for n in fault)}）" if fault else "测试系统有异常") + \
         (f"{'；另外' if fault else '：'}{len(sick)} 个 PR 测试过程有异常（{sick_s}），这些 PR 的级别只反映跑通的检查。" if sick else "。")
-    L.append(f"Mivo 播报 {mo} 月 {dd} 日（北京时间）：合了 {len(items)} 个 PR，" + ("没有 P0" if not P0 else f"P0 {len(P0)} 个要先修") +
+    L.append(("【补发】" if resend else "") + f"Mivo 播报 {mo} 月 {dd} 日（北京时间）：合了 {len(items)} 个 PR，" + ("没有 P0" if not P0 else f"P0 {len(P0)} 个要先修") +
              (f"，P1 {len(P1)} 个请作者修复" if P1 else "") + (f"，{p2s}" if P2 else "") + (f"，P3 {len(P3)} 个无需处理" if P3 else "") +
              (f"，待核实 {len(pend)} 条 QA 自查中" if pend else "") + f"。{health}\n")
     def entry(i, k):
@@ -196,6 +204,8 @@ def render(day, items, fault, carry, cal):
     if bf: L.append(f"· 整个仓库大约 {round(max(bf))}% 的函数有单元测试覆盖，" + ("过了 80% 的门槛，不用处理。" if max(bf) >= 80 else "低于 80% 的门槛。"))
     low = [i for i in items if i.get("newcode") is not None]
     L.append("· 新写的代码有多少被测试跑到（参考线 90%，只是信息，不算问题）：" + ("；".join(f"#{i['n']} {round(i['newcode'])}%" for i in low) + "，不用处理。其余 PR 要么在 90% 以上，要么这次没改到要算覆盖率的代码。" if low else "这次都在 90% 以上或没改到要算覆盖率的代码。"))
+    unt = [i for i in items if i.get("cov_untested")]
+    if unt: L.append("· 覆盖率未测（没拿到覆盖率数据，算部分核实，不算通过）：" + "、".join(f"#{i['n']}" for i in unt) + "。")
     L.append("")
     docs = [i for i in items if i.get("docs")]
     L.append("系统状态")
@@ -214,7 +224,7 @@ def main():
     else: prs = merged_prs(day)
     log(f"data day {day}: {len(prs)} merged PRs in window {utc_window(day)}")
     items, fault, carry, cal = build(day, prs, fl)
-    txt, P0, P1, P2, P3, dms = render(day, items, fault, carry, cal)
+    txt, P0, P1, P2, P3, dms = render(day, items, fault, carry, cal, resend="--resend" in fl)
     out = f"{BASE}/out/daily/{day}.render.md" if ro else f"{BASE}/out/daily/{day}.md"
     write_atomic(out, txt)
     if "--diff-sent" in fl and os.path.exists(GROUP_OF(day)):
@@ -247,6 +257,7 @@ def main():
     record_actions("daily", day, acts)
     meta = {"day": day, "window_utc": utc_window(day), "merged": [p["number"] for p in prs], "merged_prs": prs,
             "reported": [i["n"] for i in items], "carry_over": carry, "fault": fault, "health": sick,
+            "partially_verified": [{"pr": i["n"], "why": "coverage 未测"} for i in items if i.get("verify") == "partial"],
             "counts": {"P0": len(P0), "P1": len(P1), "P2": len(P2), "P3": len(P3)}}
     write_atomic(f"{BASE}/out/daily/{day}.json", json.dumps(meta, ensure_ascii=False, indent=1))
 
