@@ -616,7 +616,7 @@ def handler(a):
     if t.startswith("gh.pr.comment"): return h_comment(a)
     if t.startswith("gh.infra."):   # 10-23 infrafix line: panoptes PR / guarded merge / pr-qa-agent-deploy issue (bin/infra_outbound.py)
         import infra_outbound, infrafix
-        return infra_outbound.handler(a, gh, lambda text, key: h_slack_dm({"key": key, "type": "slack.dm", "to": "Praise", "text": text})[3](),
+        return infra_outbound.handler(a, gh, lambda text, key: record_muted("outbound", key, text) if praise_dm_blocked(key) else h_slack_dm({"key": key, "type": "slack.dm", "to": "Praise", "text": text})[3](),
                                       sensitive=(infrafix.files_from_diff, infrafix.sensitive))
     return None
 
@@ -710,6 +710,12 @@ def main():
                 if qa in gates():
                     if not o.dry_run: setk(k, {"status": "skipped", "reason": f"gated: {gates()[qa]}", "at": now_cst().isoformat(timespec="seconds")})
                     rows.append((job, k, t, "-", "skipped(gated)", gates()[qa])); continue
+            if (t in RELAY_TYPES or (t == "slack.dm" and (a.get("to") == "Praise" or a.get("user") == PRAISE_SLACK))) and praise_dm_blocked(k):
+                if not o.dry_run:
+                    setk(k, {"status": "skipped", "reason": "praise-dm-mute", "at": now_cst().isoformat(timespec="seconds")})
+                    try: record_muted("outbound", k, relay_text(a) if t in RELAY_TYPES else (a.get("text") or ""))
+                    except Exception: pass
+                rows.append((job, k, t, "Praise", "skipped(muted)", "praise-dm-mute")); continue
             if t in RELAY_TYPES:   # Praise 10-23: deliver to his Slack DM (urgent: own DM now; others: one digest per run)
                 age = action_age_h(a, f)
                 if age > RELAY_TTL_H and not resend:
@@ -755,6 +761,9 @@ def main():
                 rows.append((job, k, t, who, "FAILED", str(e)[:160])); fails += 1
     # ---- relays + notices -> Praise's Slack DM (urgent ones alone, the rest as one digest) ----
     def dm(key, text, keys):
+        if (all(praise_dm_blocked(kk) for kk in keys) if keys else praise_dm_blocked(key)):   # muted: file only
+            if not o.dry_run: record_muted("outbound", key, text)
+            rows.append(("relay", key, "slack.dm", "Praise", "muted", f"{len(keys)} item(s) -> out/outbound/muted-*.md")); return
         st = {"status": "sending", "at": now_cst().isoformat(timespec="seconds")}
         if o.dry_run or not gate:
             rows.append(("relay", key, "slack.dm", "Praise", "would-do", f"{len(keys)} item(s), {len(text)} chars")); return
@@ -774,6 +783,9 @@ def main():
     for job, k, t, a, txt in [r for r in relays if r[2] in URGENT_RELAY or resend]:   # a 补发 relay goes alone, now
         dm(f"relay:{k}", txt, [k])
     batch = [r for r in relays if r[2] not in URGENT_RELAY and not resend]
+    if notices and praise_dm_blocked(f"notice:{stamp}"):   # outbound's own notices (gave_up/uncertain…) -> file only while muted
+        if not o.dry_run: record_muted("outbound", f"notice:{stamp}", "\n\n".join(PN.render(n) for n in notices))
+        rows.append(("relay", f"notice:{stamp}", "slack.dm", "Praise", "muted", f"{len(notices)} notice(s)")); notices = []
     if batch or notices:
         # 2026-10-24：一条私信 = 「要你处理」的在前，其余在后；不再加「Pi 线转发（原来发到 Grok 的消息…）」抬头
         parts = [PN.render(n) for n in sorted(notices, key=lambda n: PN.ORDER.index(n["kind"]))] + [txt for *_, txt in batch]
