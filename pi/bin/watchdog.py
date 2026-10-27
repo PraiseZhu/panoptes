@@ -122,8 +122,10 @@ def job_checks(now, probs, since):
             probs[k] = PN.item("action", "机器疑似被回滚，停机期间的作业没跑", f"{a} 到 {b} 机器停了（判据：{'、'.join(ow['why'])}），错过 {len(missed)} 轮：{'、'.join(missed)}。",
                                "回滚后不自动补跑（旧状态上补跑会重复外发）。", todo="按 docs/pi/README.md「疑似回滚时怎么恢复」处理，再决定要不要补跑")
         else:
-            probs[k] = PN.item("fyi", "机器停过一段，错过的作业已自动补跑", f"{a} 到 {b} 机器暂停（心跳断了 {ow['gap_min']} 分钟），错过 {len(missed)} 轮：{'、'.join(missed)}。",
-                               "能补的日作业已按原数据日补跑一次（见 out/outage/replayed.json），过期的不补。", todo="不用处理")
+            done = {(kk.split(":")[0], (v.get("slot") or "")[11:16]) for kk, v in outage.jl(outage.REPLAYED(), {}).items() if isinstance(v, dict)}
+            rep = [m for m in missed if tuple(m.split(" ", 1)) in done]
+            probs[k] = PN.item("fyi", f"机器停过一段，已补跑：{'、'.join(rep)}" if rep else "机器停过一段，没有作业被补跑", f"{a} 到 {b} 机器暂停（心跳断了 {ow['gap_min']} 分钟），错过 {len(missed)} 轮：{'、'.join(missed)}。",
+                               (f"已按原数据日补跑：{'、'.join(rep)}（见 out/outage/replayed.json）" if rep else "没有作业被补跑") + "；不在补跑名单或已过期的不补。", todo="不用处理")
     for job in sorted(set(CADENCE) | set(DAILY)):
         rs = runs(job, 1)
         if rs and rs[-1][3] and "syntax-error" in rs[-1][3]: probs[f"syntax:{job}"] = job_item(job, "它的程序被改坏了，启动不起来", f"的程序 {job}.py 编译失败（{rs[-1][3][:80]}）")

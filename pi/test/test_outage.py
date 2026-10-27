@@ -39,6 +39,10 @@ probs = {}; W.job_checks(T(12, 0), probs, T(0, 0, 20))
 missed = [k for k in probs if k.startswith("missed:")]; out = [k for k in probs if k.startswith("outage:")]
 assert out == [f"outage:{w['start']}", f"outage:{r['start']}"], (out, list(probs))
 assert "回滚" in json.dumps(probs[out[1]], ensure_ascii=False) and "补跑" in json.dumps(probs[out[0]], ensure_ascii=False)
+fyi = json.dumps(probs[out[0]], ensure_ascii=False)   # 10-27：只列真补跑了的（REPLAYED 里有的），不说"错过的已自动补跑"
+assert "已补跑：credcheck 07:01、daily 08:35、dailyretro 09:56、pm 10:35" in fyi and "错过的作业已自动补跑" not in fyi, fyi
+os.rename(O.REPLAYED(), O.REPLAYED() + ".bak"); p2 = {}; W.job_checks(T(12, 0), p2, T(0, 0, 20)); os.rename(O.REPLAYED() + ".bak", O.REPLAYED())
+assert "没有作业被补跑" in json.dumps(p2[out[0]], ensure_ascii=False)
 assert not any(k in missed for k in ("missed:daily:0835", "missed:pm:1035", "missed:credcheck:0701")), missed
 # 5) mergewatch 接了心跳，停机后置 dirty
 mw = open(f"{B}/mergewatch.py").read(); assert "outage.beat()" in mw and "st['dirty'] = True" in mw
