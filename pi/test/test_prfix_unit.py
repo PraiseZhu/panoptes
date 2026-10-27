@@ -216,17 +216,21 @@ class TestClaims(unittest.TestCase):
         self.assertIn(f"1125:{B}", verdicts(ctx(reports=rep, fix2=set())), "no ruling at all: a confirmed P2 is a ticket")
         self.assertEqual(prfix.fix_rulings("| 10-23 | #1124 | x | 修 | y |\n| 10-23 | #948 | P2 | 已修 | z |\n| 10-23 | #434 | p | 产品代码不修 | w |"), {1124})
 
-    def test_docs_finding_is_a_hard_stop(self):
+    def test_docs_finding_is_a_manual_order(self):
         rep = {1124: report(1124, "x", [finding(A, "P2", file="docs/ops/bff-deployment.md")])}
         v = verdicts(ctx(reports=rep, fix2={1124}))[f"1124:{A}"]
-        self.assertEqual(v["state"], "skip"); self.assertTrue(v["hard_stop"]); self.assertIn("文档类", v["reason"])
+        # 10-27: a must-fix P2 Pi cannot auto-fix is a manual order for the PR bot, never a Pi-made 「不修/转人工」 park
+        self.assertEqual(v["state"], "manual"); self.assertIsNone(v["hard_stop"]); self.assertIsNone(v["needs_human"])
+        self.assertIn("文档类", v["reason"]); self.assertIn("待派单", v["manual"])
+        row = prfix.pending([v])[0]
+        self.assertEqual(row["manual_order"], "待派单"); self.assertTrue(row["reason_if_skipped"])   # not dispatched to --next
         v = verdicts(ctx(reports=rep, fix2={1124}, prs=[pr(1225, "x", body="QA: #1124", state="MERGED")]))[f"1124:{A}"]
         self.assertEqual(v["state"], "claimed"); self.assertIsNone(v["hard_stop"])        # claimed first: no stop, no DM
 
     def test_history_only_docs_finding_gets_no_qa_hint(self):
         rep = {1124: report(1124, "x", [finding(B, "P2")], hist=[(T0 - dt.timedelta(minutes=13), [finding(A, file="docs/ops/bff-deployment.md")])])}
         v = verdicts(ctx(reports=rep))[f"1124:{A}"]
-        self.assertEqual(v["state"], "skip"); self.assertNotIn("--qa", v["reason"]); self.assertTrue(v["hard_stop"])
+        self.assertEqual(v["state"], "skip"); self.assertNotIn("--qa", v["reason"]); self.assertIsNone(v["manual"])
 
     def test_ledger_only_row_gets_context_from_acceptance_review(self):
         led = {(943, A): {"pr": 943, "fingerprint": A, "level": "P1", "status": "open", "author": "lubinyu-lab", "summary": "s", "fix_prs": []}}
@@ -473,6 +477,19 @@ class TestRunTicket(Tmp):
         self.assertFalse([a for a in self.acts if a["type"] == "slack.dm"])
         rc, out, r = self.main("--qa", "1178", "--fp", A)                          # --qa cannot start a 3rd round either
         self.assertEqual((rc, r["status"]), (1, "stopped"))
+
+    def test_manual_orders_queue_atomic_and_deduped(self):
+        rep = {1245: report(1245, "x", [finding(A, "P2", file="docs/a.md")])}
+        c = ctx(reports=rep, fix2={1245}); vs = prfix.evaluate_all(c, NOW)
+        o = prfix.write_manual_orders(vs, c, NOW)
+        self.assertEqual(list(o), [f"1245:{A}"]); x = o[f"1245:{A}"]
+        self.assertEqual((x["qa"], x["fp"], x["sev"], x["state"]), (1245, A, "P2", "待派单")); self.assertIn("文档类", x["why_not_auto"])
+        doc = json.load(open(prfix.manual_orders_path())); doc["orders"][f"1245:{A}"]["state"] = "已派单"
+        prfix.write_atomic(prfix.manual_orders_path(), json.dumps(doc))
+        o = prfix.write_manual_orders(vs, c, NOW)
+        self.assertEqual(len(o), 1); self.assertEqual(o[f"1245:{A}"]["state"], "已派单")     # dedupe keeps the PR bot's state
+        prfix.bookkeeping(c, vs, NOW, "d")
+        self.assertNotIn(f"1245:{A}", prfix.load_tickets()["tickets"])                   # not parked as 「规则上不自动修」
 
     def test_pending_json_is_pure_json_on_stdout(self):
         rc, out, _ = self.main("--pending-json")

@@ -684,9 +684,10 @@ def evaluate(c, ctx, now=None):
     elif st == "norepro" and tk.get("confirmed"): claims.append(f"两个模型都判不可复现，已结案（{tk.get('updated_at')}）")
     # policy stops (only matter when nobody holds it)
     floc = (c.get("finding") or {}).get("file") or ""
+    manual = None   # 10-27 (owner): 修不修只看统一分级 argus/config/severity.md；P0-P2 必修，Pi 自己修不了的转 Praise PR bot 人工工单，不自判「不修/转人工」
     if not claims and re.search(r"\.(?:md|mdx|txt)$", floc):
-        limit = f"文档类问题（{floc}）没法用失败的回归测试证明，不走自动修复，转人工"; nh = nh or limit
-    if not claims and not limit:
+        manual = f"文档类问题（{floc}）没法用失败的回归测试证明，Pi 不能自动修；按统一分级 {c['sev']} 必修，转 Praise PR bot 人工工单（待派单）"
+    if not claims and not limit and not manual:
         if rounds >= MAX_ROUNDS: limit = f"已用 {rounds} 轮修复 PR（{fmt_prs(round_prs) or '台账 fix_round'}），第三轮转人工"; nh = nh or limit
         elif round_prs and not reopened and all(p.get("state") == "CLOSED" for p in round_prs):
             # 10-24: a fix PR somebody closed without merging used to freeze the finding silently (a round, never retried, no DM)
@@ -694,7 +695,7 @@ def evaluate(c, ctx, now=None):
         elif rounds >= 1 and not reopened: skips.append(f"已有 {rounds} 轮修复 PR（{fmt_prs(round_prs) or '台账 fix_round'}），台账未标复测重开，不开第二轮")
     if c["source"] == "history":
         skips.append("仅见于历史报告版本（当前报告已无此条，台账也没有），待人工确认"
-                     + ("" if limit else f"；要自动修就跑 prfix.py --qa {n} --fp {fp}"))
+                     + ("" if (limit or manual) else f"；要自动修就跑 prfix.py --qa {n} --fp {fp}"))
     au_repo = ctx["repo_of"].get(au)
     if au_repo and au_repo in ctx.get("unread_repos", []): skips.append(f"交接仓 {au_repo} 回执没读到（gh 读取失败），先不做")
     # a ticket that stopped under an older harness is tried again once with the current one (10-24: #1188 / #1198 each needed a manual
@@ -707,8 +708,10 @@ def evaluate(c, ctx, now=None):
         skips.append(f"退避中，{cst(tk['next_retry_at'])} 北京后重试（已失败 {tk.get('transient_failures', 0)} 次：{(tk.get('last_error') or '')[:80]}）")
     if st == "running" and pid_alive(tk.get("pid")): skips.append(f"运行中（pid {tk.get('pid')}，{tk.get('started_at')} 开始）")
     fs, dl, _ = times(c, ctx["reports"])
-    state = "claimed" if claims else ("skip" if skips else "todo")
-    return {"key": f"{n}:{fp}", "c": c, "state": state, "reason": (claims or skips or [None])[0], "claims": claims, "skips": skips,
+    if manual and c["source"] != "history" and not gate: skips.insert(0, manual)
+    else: manual = None
+    state = "claimed" if claims else ("manual" if manual else ("skip" if skips else "todo"))
+    return {"key": f"{n}:{fp}", "c": c, "state": state, "reason": (claims or skips or [None])[0], "manual": manual if not claims else None, "claims": claims, "skips": skips,
             "rounds": rounds, "round": rounds + 1, "needs_human": nh if not claims else None, "hard_stop": limit if not claims else None,
             "first_seen": fs, "deadline": dl,
             "gated": bool(gate)}
@@ -727,8 +730,42 @@ def next_ticket(vs): return next((v for v in vs if v["state"] == "todo"), None)
 def pending(vs):
     """--pending-json rows: every candidate nobody has claimed; reason_if_skipped null = there is work for --next."""
     return [{"qa": v["c"]["qa"], "fp": v["c"]["fp"], "sev": v["c"]["sev"], "first_seen": iso(v["first_seen"]), "deadline": iso(v["deadline"]),
-             "reason_if_skipped": None if v["state"] == "todo" else v["reason"], "title": v["c"]["title"][:80], "source": v["c"]["source"]}
+             "reason_if_skipped": None if v["state"] == "todo" else v["reason"], "title": v["c"]["title"][:80], "source": v["c"]["source"],
+             **({"manual_order": "待派单"} if v["state"] == "manual" else {})}
             for v in vs if v["state"] != "claimed"]
+
+def manual_orders_path(): return f"{OUT}/manual-orders.json"
+def manual_order_rows(vs, ctx):
+    rows = []
+    for v in vs:
+        if v["state"] != "manual": continue
+        c = v["c"]; r = ctx["reports"].get(c["qa"]) or {}
+        ver = r.get("cur") or (r.get("hist") or [None])[0]
+        f = c.get("finding") or {}
+        rows.append({"qa": c["qa"], "fp": c["fp"], "sev": c["sev"], "title": (c.get("title") or "")[:120],
+                     "evidence": ver[2] if ver else None, "file": f.get("file"), "line": f.get("line"),
+                     "why_not_auto": v["manual"], "assignee": "praise-pr-bot", "state": "待派单"})
+    return rows
+
+def write_manual_orders(vs, ctx, now=None):
+    """Queue for the Praise PR bot (no message sent): out/praise-pr/manual-orders.json, keyed qa:fp, flock + atomic write.
+    Existing entries keep their state / created_at (the PR bot moves them on); new ones start 「待派单」."""
+    now = (now or now_cst()).isoformat(timespec="seconds"); rows = manual_order_rows(vs, ctx); MANUAL_ORDERS = manual_orders_path()
+    os.makedirs(OUT, exist_ok=True)
+    with open(f"{MANUAL_ORDERS}.lock", "a") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        try: doc = json.loads(_read(MANUAL_ORDERS)) if os.path.exists(MANUAL_ORDERS) else {}
+        except Exception: doc = {}
+        orders = doc.get("orders") or {}; changed = False
+        for x in rows:
+            k = f"{x['qa']}:{x['fp']}"; old = orders.get(k)
+            if old:
+                upd = {**old, **{a: b for a, b in x.items() if a != "state"}}
+                if upd != old: orders[k] = {**upd, "updated_at": now}; changed = True
+            else: orders[k] = {**x, "created_at": now, "updated_at": now}; changed = True
+        if changed or not os.path.exists(MANUAL_ORDERS):
+            write_atomic(MANUAL_ORDERS, json.dumps({"orders": orders, "updated_at": now}, ensure_ascii=False, indent=1))
+    return orders
 
 # ---------------------------------------------------------------- tickets (pure state machine)
 def new_ticket(c):
@@ -1646,7 +1683,7 @@ def write_norepro_note(c, res, why, ev):
 
 # ---------------------------------------------------------------- reporting
 def print_list(vs, ctx):
-    todo = [v for v in vs if v["state"] == "todo"]; skip = [v for v in vs if v["state"] == "skip"]; cl = [v for v in vs if v["state"] == "claimed"]
+    todo = [v for v in vs if v["state"] == "todo"]; skip = [v for v in vs if v["state"] in ("skip", "manual")]; cl = [v for v in vs if v["state"] == "claimed"]
     print(f"# prfix 候选 {now_cst():%Y-%m-%d %H:%M} 北京（只读）：{len(vs)} 条；可做 {len(todo)}，跳过 {len(skip)}，已认领 {len(cl)}")
     print(f"- 台账 {os.path.basename(ctx['ledger_file'] or '无')}；P2 判「修」{sorted(ctx['fix2'])}；闸 {ctx['gates']}{'；' + ctx['gate_warn'] if ctx['gate_warn'] else ''}"
           + (f"；交接仓没读到 {ctx['unread_repos']}" if ctx.get("unread_repos") else ""))
@@ -2183,6 +2220,8 @@ def main(argv=None):
         if ctx["gate_warn"]: log("warn:", ctx["gate_warn"])
         vs = evaluate_all(ctx)
         if A.list: print_list(vs, ctx); return 0
+        try: write_manual_orders(vs, ctx)
+        except Exception as e: log("manual-orders write failed", e)
         if A.pending_json: print(json.dumps(pending(vs), ensure_ascii=False, indent=1), file=real_out); return 0
         log("mode", mode(), "dry" if A.dry_run else "real", f"candidates {len(vs)} todo {sum(v['state'] == 'todo' for v in vs)}")
         try: return run_ticket(A, ctx, vs)
