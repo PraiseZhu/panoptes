@@ -95,7 +95,7 @@ async function main() {
       const r = catchUp({ repo, runOne, docsOnly: docsOnlyOf(repo) })
       if (r.status === 'ran') { r.trigger = trigger; r.create_issues = createIssues }
       if (logFd != null) closeSync(logFd)
-      if (r.status === 'nothing-to-do') return // 安静退出
+      if (r.status === 'nothing-to-do') { process.stdout.write(`[catch-up] ${shIso()} trigger=${trigger}: nothing to do (days ${(r.days || []).join(',')}${r.in_progress?.length ? `, in progress #${r.in_progress.join(' #')}` : ''})\n`); return } // 一行心跳：看得出 cron 还活着（10-27）
       const file = writeReport(r, join(catchUpDir(), `run-${shIso().slice(0, 19).replace(/[-:]/g, '')}.json`))
       for (const run of r.runs) process.stdout.write(`[catch-up] PR #${run.number} attempt ${run.attempt}: exit ${run.exit_code}, ${run.filled ? 'filled' : `still missing (${run.remaining_gap})`}\n`)
       for (const g of r.system_health.gave_up) process.stdout.write(`[catch-up] gave up on PR #${g.pr} after ${g.attempts} attempts\n`)

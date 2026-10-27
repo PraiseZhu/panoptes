@@ -191,8 +191,8 @@ def main():
 
     st = load()
     st['last_check'] = now()
-    if outage_w and outage_w['kind'] == 'pause':
-        st['dirty'] = True   # 停机期间的合并也要补测：catch-up 会测所有还没报告的合并 PR
+    # 10-27：停机恢复不再单独置 dirty（同一个 main sha 每次恢复都重起一次 catch-up，10-27 03:46–09:18 起了 6 次、都无事可做）。
+    # 停机期间有合并 → main sha 变了 → 下面照样置 dirty；失败/漏测的由 2 小时一次的 catch-up cron 兜底。
     try:
         st.pop('auth', None)   # 10-26: praiseautomation App removed (belongs to another account); default git credentials only
         out = subprocess.run(['git', 'ls-remote', REPO_URL, 'refs/heads/main'], capture_output=True, text=True,

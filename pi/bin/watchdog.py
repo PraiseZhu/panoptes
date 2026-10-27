@@ -122,8 +122,21 @@ def job_checks(now, probs, since):
             probs[k] = PN.item("action", "机器疑似被回滚，停机期间的作业没跑", f"{a} 到 {b} 机器停了（判据：{'、'.join(ow['why'])}），错过 {len(missed)} 轮：{'、'.join(missed)}。",
                                "回滚后不自动补跑（旧状态上补跑会重复外发）。", todo="按 docs/pi/README.md「疑似回滚时怎么恢复」处理，再决定要不要补跑")
         else:
-            probs[k] = PN.item("fyi", "机器停过一段，错过的作业已自动补跑", f"{a} 到 {b} 机器暂停（心跳断了 {ow['gap_min']} 分钟），错过 {len(missed)} 轮：{'、'.join(missed)}。",
-                               "能补的日作业已按原数据日补跑一次（见 out/outage/replayed.json），过期的不补。", todo="不用处理")
+            st = {}   # (job, HH:MM) -> 补跑状态；只认槽位（含日期）落在本次停机窗口里的记录，旧窗口的 done 不算（10-27 review）
+            ws, we = dt.datetime.fromisoformat(ow["start"]), dt.datetime.fromisoformat(ow["end"])
+            for kk, v in outage.jl(outage.REPLAYED(), {}).items():
+                try: sl = dt.datetime.fromisoformat(v["slot"])
+                except Exception: continue
+                if ws < sl <= we: st[(kk.split(":")[0], sl.strftime("%H:%M"))] = v.get("status")
+            rep = [m for m in missed if st.get(tuple(m.split(" ", 1))) == "done"]
+            running = [m for m in missed if st.get(tuple(m.split(" ", 1))) == "running"]
+            skip = [f"{m}（{outage.NO_REPLAY_BY_DESIGN[m.split()[0]]}）" for m in missed if m not in rep + running and m.split()[0] in outage.NO_REPLAY_BY_DESIGN]
+            manual = [m for m in missed if m not in rep + running and m.split()[0] not in outage.NO_REPLAY_BY_DESIGN]
+            groups = f"已补跑：{'、'.join(rep) or '无'}；" + (f"正在补跑：{'、'.join(running)}；" if running else "") + f"按设计不补：{'、'.join(skip) or '无'}；需要手动处理：{'、'.join(manual) or '无'}。"
+            probs[k] = PN.item("action" if manual else "fyi", "机器停过一段，" + (f"有 {len(manual)} 轮需要手动处理" if manual else "错过的都已补跑或按设计不补"),
+                               f"{a} 到 {b} 机器暂停（心跳断了 {ow['gap_min']} 分钟），错过 {len(missed)} 轮。{groups}",
+                               "补跑按原数据日各一次（见 out/outage/replayed.json），过期的不补。",
+                               todo=(f"看看这些要不要手动补：{'、'.join(manual)}" if manual else "不用处理"))
     for job in sorted(set(CADENCE) | set(DAILY)):
         rs = runs(job, 1)
         if rs and rs[-1][3] and "syntax-error" in rs[-1][3]: probs[f"syntax:{job}"] = job_item(job, "它的程序被改坏了，启动不起来", f"的程序 {job}.py 编译失败（{rs[-1][3][:80]}）")

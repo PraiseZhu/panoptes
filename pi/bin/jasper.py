@@ -9,7 +9,8 @@ def jload_(f, dflt):
     try: return json.load(open(f))
     except Exception: return dflt
 def main():
-    d = today(); y = (now_cst().date() - dt.timedelta(days=1)).isoformat()
+    d = sys.argv[1] if len(sys.argv) > 1 else today(); y = (dt.date.fromisoformat(d) - dt.timedelta(days=1)).isoformat()
+    backfill = d != today()   # 补过去的日子：只写文件，不记外发（不发 DM）
     sj = json.load(open(f"{QA}/report/slack/sent.json"))
     facts = {
       "Mivo QA 日报": {"slack_sent_for_yesterday": (sj.get(f"mivo-daily-report:{y}") or {}).get("sent_at"),
@@ -53,5 +54,6 @@ Format: 一句话总览；然后每个 bot 一行：状态 ✓/⚠ + 证据路�
 Never guess; if a fact is missing say 未核实. {RULE} Today {d}, data day {y} (Beijing time).""", f"pi-line-jasper-{d}", timeout=400)
     except Exception as e: txt, tid = f"brief 生成失败：{e}", "?"
     write_atomic(f"{BASE}/out/jasper/{d}.md", f"<!-- Pi line brief, task {tid}, tier work; Slack/邮件/日历部分无法覆盖（需连接器） -->\n{txt.strip()}\n")
+    if backfill: return
     record_actions("jasper", d, [{"key": f"brief:{d}", "type": "grokbot.chat-to-Praise", "body_file": f"{BASE}/out/jasper/{d}.md"}])
 if __name__ == "__main__": main()

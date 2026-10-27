@@ -31,6 +31,9 @@ GAP_MIN = 5
 EXPIRE_H = 30
 # 作业 -> [(北京时, 分)]，和 cron/pi-line.cron、watchdog.DAILY 一致；只列幂等、接受数据日参数的作业（credcheck 不带参数）
 REPLAY = {"credcheck": [(7, 1)], "daily": [(8, 35)], "dailyretro": [(9, 56)], "pm": [(10, 35)], "opsreview": [(11, 15)], "compare": [(12, 50)]}
+# 故意不补的作业和原因（10-27）：watchdog 的停机告警按「已补跑 / 按设计不补（附原因）/ 需要手动处理」三组列出
+NO_REPLAY_BY_DESIGN = {"handoff": "下一次 handoff 运行会覆盖", "followup": "下一次 followup 运行会覆盖", "opsenv": "下一轮运行自行恢复",
+                       "merger": "下一轮运行自行恢复", "jasper": "单独处理（补发要 Praise 批准，不自动补）"}
 ORDER = ["credcheck", "daily"]
 NO_DAY = {"credcheck"}
 
