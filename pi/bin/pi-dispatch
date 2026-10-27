@@ -1,0 +1,3 @@
+#!/bin/bash
+# fleet entry point: see pi_dispatch.py
+exec python3 "$(dirname "$(readlink -f "$0")")/pi_dispatch.py" "$@"

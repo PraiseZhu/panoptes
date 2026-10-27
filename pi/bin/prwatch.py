@@ -188,6 +188,14 @@ def prfix_runs(t):
     return pys, [w for w in t if is_wrap(w) and not set(tree(t, w)) & set(pys)]
 
 
+TASK_PEAK_MB = int(os.environ.get("PI_DISPATCH_PEAK_MB") or 1536)   # one pi_dispatch.py task (pi agent + whatever it runs; 10-27 guess)
+
+
+def dispatch_runs(t):
+    """pi_dispatch.py --run-one processes: Pi tasks any bot launched through bin/pi-dispatch (10-27, fleet-wide)"""
+    return [p for p in t if (lambda v: len(v) > 2 and v[1].endswith(b"bin/pi_dispatch.py") and v[2] == b"--run-one")(t[p][2].split(b"\0"))]
+
+
 def panoptes_procs(t):
     """every process under any run-nightly.sh (nested runs: catch-up -> node -> run-nightly --pr N), each counted once"""
     pan = set()
@@ -221,9 +229,11 @@ def headroom_mb(t, mem=None, st=None):
     run_pk, pan_pk = learned(st, "fix", RUN_PEAK_MB), learned(st, "panoptes", PANOPTES_PEAK_MB)
     pys, waiting = prfix_runs(t)
     grow = sum(max(0, run_pk - sum(t[q][1] for q in tree(t, p))) for p in pys) + run_pk * len(waiting)
+    disp = dispatch_runs(t)   # fleet Pi tasks share the same RAM: count them up to their peak too
+    grow += sum(max(0, TASK_PEAK_MB - sum(t[q][1] for q in tree(t, p))) for p in disp)
     pan = panoptes_procs(t)
     if pan: grow += max(0, pan_pk - sum(t[p][1] for p in pan))
-    elif pys or waiting: grow += pan_pk
+    elif pys or waiting or disp: grow += pan_pk
     return (mem_mb() if mem is None else mem) - grow
 
 

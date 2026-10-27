@@ -94,7 +94,27 @@ bot 建的、用完就扔的东西只放在 `/workspace/pi-work/`（`bin/workroo
 
 **目标仓 CI 规则简报**：`conf/ci-rules/<仓库名>.md`（现有 `mivo-canvas-plugin.md`、`cindy.md`）。prfix 每一轮发给模型的提示词（repro、fix、推送前检查返工、docs、CI 红后的 revise、合 main 解冲突）都在 `[step …]` 后先带上目标仓的这份简报；文件缺了照常跑，日志记一行`ci rules brief missing`。每份 60 行以内，文件头注释写了来源文件（目标仓的 workflow / pre-push / PR 模板，以及 Mac mini 盯梢的分诊表 `PraiseZhu/vigil` `watchers/*/bin/*-ci-triage.mjs`），目标仓规则变了照着同步；注释不进提示词。
 
-公共模块（不单独跑）：`lib`、`jsonrec`、`gate_diff`、`gate_port`、`praise_notice`、`finding_policy`、`dm_compat`、`infra_outbound`、`run.sh`、`switch.sh`、`selftest.sh`、`pi-noskills.sh`。
+公共模块（不单独跑）：`lib`、`jsonrec`、`gate_diff`、`gate_port`、`praise_notice`、`finding_policy`、`dm_compat`、`infra_outbound`、`run.sh`、`switch.sh`、`selftest.sh`、`pi-noskills.sh`、`pstack_sync.py`。
+
+## 调用 Pi：全机器人并行派任务（10-27）
+
+任何 bot 随时都能派一个或多个 Pi 任务，入口 `bin/pi-dispatch`（`pi_dispatch.py`）。每个任务是单独的后台进程，走 `lib.pi`（沙箱、环境白名单、按档位选模型），带 pstack。
+**内存门**：每启动一个之前都等 `prwatch.headroom_mb()` ≥ `ADMIT_FREE_MB` + 这个任务的峰值（自由任务按 `PI_DISPATCH_PEAK_MB`，默认 1536；工单按学到的修复峰值）；prwatch 派修复时也把这些任务算进去。不设固定上限。`--max-wait`（默认 7200 秒）内一直没放行的就不启动，返回码 3。
+
+```bash
+P=/workspace/panoptes/pi/bin/pi-dispatch
+$P --caller <你的bot名> --prompt "任务说明" --repo /workspace/<仓库> [--ref origin/main] [--tier work]   # 新工作树 + 新分支 dispatch/<caller>-<id>
+$P --caller <你的bot名> --prompt "只读问题" --cwd /workspace/<目录> --tier quick                        # 只读，不建工作树
+$P --caller <你的bot名> --tasks tasks.jsonl   # 每行 {"prompt","cwd"|"repo","ref","name","tier","write","web","timeout"}，多个并行
+$P --caller praise-pr qa:1188 qa:1190:abcd1234 revise:1257                                            # 工单模式：转给 run.sh prfix
+$P --status [--caller <名>]
+```
+
+结果：`$PI_STATE/out/dispatch/<caller>/<id>.json`（status、text、cwd、branch）；日志 `out/logs/pi-dispatch-<caller>-<日期>.log`、每个任务 `out/logs/pi-dispatch/<caller>-<id>.log`。
+工作树在 `/workspace/pi-work/wt/dispatch/` 下，带 `.pi-owned.json`，任务结束后由 janitor 回收；要留的改动让模型提交到它的分支上（分支在原仓库里）。
+
+**pstack**：Pi 线每次调用都加载 pstack（poteto 的技能包，来源 github.com/cursor/plugins 的 `pstack/skills`）。`bin/pstack_sync.py [--ref <提交>]` 把它装到 `~/.pi/agent/skills/pstack`（Pi 的全局技能目录，手动跑 `pi` 也能看到），
+原版留在 `~/.pi/vendor/cursor-plugins`；装的那份只去掉 frontmatter 里的 `disable-model-invocation: true`（不然 Pi 不把技能列给模型）。`bin/pi-noskills.sh` 用 `--no-skills --skill <pstack>`：不带 `~/.claude/skills`，只带 pstack（约 13 KB 描述）。版本记在 `~/.pi/agent/skills/pstack/.pstack-source.json`。
 
 ## 模型的隔离环境
 
