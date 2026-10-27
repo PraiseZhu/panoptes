@@ -167,7 +167,12 @@ def merge_sla_check(now, probs, rdir=f"{QA}/reports/merged"):
         if pr.get("merged_at") and pr.get("test_started_at"): rows.append((pr["merged_at"], pr["test_started_at"], pr.get("gate_wait_s") or 0))
     n, p95 = merge_sla([r[:2] for r in rows], now)
     # 10-27：test_started_at 在内存门之后；减掉 gate_wait_s 就是不含等内存的排队时间，两段分开看
-    _, q95 = merge_sla([(m, (dt.datetime.fromisoformat(st.replace("Z", "+00:00")) - dt.timedelta(seconds=g)).isoformat()) for m, st, g in rows], now)
+    adj = []
+    for m, st, g in rows:   # 坏行（时间格式不对 / gate_wait_s 不是数字）跳过，不让整个检查崩
+        try: adj.append((m, (dt.datetime.fromisoformat(str(st).replace("Z", "+00:00")) - dt.timedelta(seconds=float(g))).isoformat()))
+        except (TypeError, ValueError, OverflowError): continue
+    _, q95 = merge_sla(adj, now)
+    if p95 is None: return n, p95   # 没有样本
     if n >= SLA_MIN_N and p95 > SLA_P95_MIN:
         gate = (f"其中等内存门以外的排队 p95 是 {q95:.0f} 分钟，其余是在等内存。" if q95 is not None and q95 < p95 else "")
         probs["sla:merge-to-test"] = PN.item("fyi", "合并到开测变慢了", f"最近 24 小时 {n} 个合并 PR，合并到开始测试的 p95 是 {p95:.0f} 分钟（目标 ≤ {SLA_P95_MIN} 分钟）。{gate}",
