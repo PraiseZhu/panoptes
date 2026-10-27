@@ -41,10 +41,18 @@ assert out == [f"outage:{w['start']}", f"outage:{r['start']}"], (out, list(probs
 assert "回滚" in json.dumps(probs[out[1]], ensure_ascii=False) and "补跑" in json.dumps(probs[out[0]], ensure_ascii=False)
 fyi = json.dumps(probs[out[0]], ensure_ascii=False)   # 10-27：只列真补跑了的（REPLAYED 里有的），不说"错过的已自动补跑"
 assert "已补跑：credcheck 07:01、daily 08:35、dailyretro 09:56、pm 10:35；" in fyi and "错过的作业已自动补跑" not in fyi, fyi
-assert "jasper 09:05（单独处理" in fyi and "handoff 06:20（下一轮（15:20）会覆盖）" in fyi, fyi            # 按设计不补，附原因
+assert "jasper 09:05（单独处理" in fyi and "handoff 06:20（下一次 handoff 运行会覆盖）" in fyi, fyi            # 按设计不补，附原因
 assert "需要手动处理：opsfix 09:30、prretro 09:45" in fyi and probs[out[0]]["kind"] == "action", fyi  # 不在两张名单里的才要手动
 os.rename(O.REPLAYED(), O.REPLAYED() + ".bak"); p2 = {}; W.job_checks(T(12, 0), p2, T(0, 0, 20)); os.rename(O.REPLAYED() + ".bak", O.REPLAYED())
 assert "已补跑：无；" in json.dumps(p2[out[0]], ensure_ascii=False)
+# 10-27 review：只认本窗口（含日期）的补跑记录。旧日子的 done 不能把本窗口 rc=1 的算成已补跑；running = 正在补，不算需人工
+RJ = json.load(open(O.REPLAYED()))
+json.dump({"daily:2026-10-19": {"slot": "2026-10-20T08:35+08:00", "status": "done"}, "daily:2026-10-25": {"slot": "2026-10-26T08:35+08:00", "status": "rc=1"},
+           "pm:2026-10-25": {"slot": "2026-10-26T10:35+08:00", "status": "running"}}, open(O.REPLAYED(), "w"))
+p3 = {}; W.job_checks(T(12, 0), p3, T(0, 0, 20)); t3 = json.dumps(p3[out[0]], ensure_ascii=False)
+assert "已补跑：无；" in t3 and "daily 08:35" in t3.split("需要手动处理：")[1] and p3[out[0]]["kind"] == "action", t3
+assert "正在补跑：pm 10:35" in t3 and "pm 10:35" not in t3.split("需要手动处理：")[1], t3
+json.dump(RJ, open(O.REPLAYED(), "w"))
 assert not any(k in missed for k in ("missed:daily:0835", "missed:pm:1035", "missed:credcheck:0701")), missed
 # 5) mergewatch 接了心跳；停机恢复本身不置 dirty（main sha 变了才置，见 test_mergewatch_resume.py）
 mw = open(f"{B}/mergewatch.py").read(); assert "outage.beat()" in mw and "st['dirty'] = True" in mw
