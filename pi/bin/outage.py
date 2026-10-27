@@ -30,12 +30,14 @@ RUN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run.sh")
 GAP_MIN = 5
 EXPIRE_H = 30
 # 作业 -> [(北京时, 分)]，和 cron/pi-line.cron、watchdog.DAILY 一致；只列幂等、接受数据日参数的作业（credcheck 不带参数）
-REPLAY = {"credcheck": [(7, 1)], "daily": [(8, 35)], "dailyretro": [(9, 56)], "pm": [(10, 35)], "opsreview": [(11, 15)], "compare": [(12, 50)]}
+REPLAY = {"credcheck": [(7, 1)], "daily": [(8, 35)], "dailyretro": [(9, 56)], "pm": [(10, 35)], "opsreview": [(11, 15)], "compare": [(12, 50)],
+          "jasper": [(9, 5)]}   # 10-27 Praise 批准：只在 brief 日期 = 今天时外发，账本已有 brief:<日> 不再发；过去的日子只写文件（jasper.py 把关）
 # 故意不补的作业和原因（10-27）：watchdog 的停机告警按「已补跑 / 按设计不补（附原因）/ 需要手动处理」三组列出
 NO_REPLAY_BY_DESIGN = {"handoff": "下一次 handoff 运行会覆盖", "followup": "下一次 followup 运行会覆盖", "opsenv": "下一轮运行自行恢复",
-                       "merger": "下一轮运行自行恢复", "jasper": "单独处理（补发要 Praise 批准，不自动补）"}
+                       "merger": "下一轮运行自行恢复"}
 ORDER = ["credcheck", "daily"]
 NO_DAY = {"credcheck"}
+BRIEF_DAY = {"jasper"}   # 参数是 brief 日期（槽位当天 = 数据日 + 1），不是数据日
 
 
 def jl(p, d):
@@ -127,7 +129,8 @@ def replay(items, runner=None):
         key = f"{job}:{day}"
         if key in replayed: continue
         replayed[key] = {"slot": slot, "at": dt.datetime.now(CST).isoformat(timespec="seconds"), "status": "running"}; jw(REPLAYED(), replayed)
-        cmd = [RUN, job] + ([] if job in NO_DAY else [day])
+        arg = (dt.date.fromisoformat(day) + dt.timedelta(days=1)).isoformat() if job in BRIEF_DAY else day
+        cmd = [RUN, job] + ([] if job in NO_DAY else [arg])
         rc = (runner or (lambda c: subprocess.run(c, stdin=subprocess.DEVNULL).returncode))(cmd)
         replayed[key]["status"] = "done" if rc == 0 else f"rc={rc}"; jw(REPLAYED(), replayed)
     return replayed

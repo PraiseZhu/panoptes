@@ -19,16 +19,16 @@ assert O.classify({"ts": T(10, 59).isoformat(), "seq": 3}, T(11), 9, False)["kin
 assert O.classify({"ts": T(10, 58).isoformat(), "seq": 9}, T(11), 9, False) is None
 # 3) 补跑计划：原数据日、credcheck→daily→其余、过期不补、去重
 p = O.plan(w, T(11, 1), {})
-assert [x[0] for x in p] == ["credcheck", "daily", "dailyretro", "pm"], p      # 10:35 pm 在窗口里；11:15 opsreview 不在
+assert [x[0] for x in p] == ["credcheck", "daily", "jasper", "dailyretro", "pm"], p      # 10:35 pm 在窗口里；11:15 opsreview 不在
 assert all(x[1] == "2026-10-25" for x in p), p
 assert O.plan(w, T(18, 0, d=27), {}) == []                                     # 30 小时后都过期
-assert [x[0] for x in O.plan(w, T(11, 1), {"credcheck:2026-10-25": {}, "daily:2026-10-25": {}})] == ["dailyretro", "pm"]
+assert [x[0] for x in O.plan(w, T(11, 1), {"credcheck:2026-10-25": {}, "daily:2026-10-25": {}})] == ["jasper", "dailyretro", "pm"]
 long = {"kind": "pause", "start": T(6, 0, 25).isoformat(), "end": T(9, 0).isoformat(), "gap_min": 1, "why": []}
 assert [(x[0], x[1]) for x in O.plan(long, T(9, 1))] == [("credcheck", "2026-10-25"), ("daily", "2026-10-24"), ("daily", "2026-10-25"),
-    ("dailyretro", "2026-10-24"), ("pm", "2026-10-24"), ("opsreview", "2026-10-24"), ("compare", "2026-10-24")], O.plan(long, T(9, 1))
+    ("jasper", "2026-10-24"), ("dailyretro", "2026-10-24"), ("pm", "2026-10-24"), ("opsreview", "2026-10-24"), ("compare", "2026-10-24")], O.plan(long, T(9, 1))
 calls = []
 O.replay(p, runner=lambda c: calls.append(c) or 0)
-assert [c[1:] for c in calls] == [["credcheck"], ["daily", "2026-10-25"], ["dailyretro", "2026-10-25"], ["pm", "2026-10-25"]], calls
+assert [c[1:] for c in calls] == [["credcheck"], ["daily", "2026-10-25"], ["jasper", "2026-10-26"], ["dailyretro", "2026-10-25"], ["pm", "2026-10-25"]], calls
 calls.clear(); O.replay(p, runner=lambda c: calls.append(c) or 0); assert calls == []   # 同一 作业+数据日 只补一次
 assert O.plan(w, T(11, 2)) == []
 # 4) watchdog：同一窗口里的 missed:* 并成一条
@@ -40,8 +40,8 @@ missed = [k for k in probs if k.startswith("missed:")]; out = [k for k in probs 
 assert out == [f"outage:{w['start']}", f"outage:{r['start']}"], (out, list(probs))
 assert "回滚" in json.dumps(probs[out[1]], ensure_ascii=False) and "补跑" in json.dumps(probs[out[0]], ensure_ascii=False)
 fyi = json.dumps(probs[out[0]], ensure_ascii=False)   # 10-27：只列真补跑了的（REPLAYED 里有的），不说"错过的已自动补跑"
-assert "已补跑：credcheck 07:01、daily 08:35、dailyretro 09:56、pm 10:35；" in fyi and "错过的作业已自动补跑" not in fyi, fyi
-assert "jasper 09:05（单独处理" in fyi and "handoff 06:20（下一次 handoff 运行会覆盖）" in fyi, fyi            # 按设计不补，附原因
+assert "已补跑：credcheck 07:01、daily 08:35、jasper 09:05、dailyretro 09:56、pm 10:35；" in fyi and "错过的作业已自动补跑" not in fyi, fyi
+assert "jasper 09:05（" not in fyi and "handoff 06:20（下一次 handoff 运行会覆盖）" in fyi, fyi            # 按设计不补，附原因
 assert "需要手动处理：opsfix 09:30、prretro 09:45" in fyi and probs[out[0]]["kind"] == "action", fyi  # 不在两张名单里的才要手动
 os.rename(O.REPLAYED(), O.REPLAYED() + ".bak"); p2 = {}; W.job_checks(T(12, 0), p2, T(0, 0, 20)); os.rename(O.REPLAYED() + ".bak", O.REPLAYED())
 assert "已补跑：无；" in json.dumps(p2[out[0]], ensure_ascii=False)
