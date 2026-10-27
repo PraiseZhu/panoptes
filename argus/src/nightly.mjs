@@ -240,7 +240,9 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     checks: [], failed_checks: [], code_review: null, findings: [], pending_verification: [], ai_summary: null, coverage: null, coverage_gate: null,
     evidence_dir: null, duration_s: null,
     // tested_at：这个 PR 得出结论的时间（上海时区 ISO 8601，带 +08:00）；test_started_at：开始处理的时间
-    test_started_at: toShanghaiIso(new Date(startedAt)), tested_at: null, reviewed_sha: null, review_base_sha: null,
+    test_started_at: toShanghaiIso(new Date(startedAt)), tested_at: null,
+    // gate_wait_s：开测前在 run-nightly.sh 内存门等了多少秒（10-27：SLA 把排队/等内存和流水线分开算）
+    gate_wait_s: Number(process.env.PANOPTES_GATE_WAIT_S) || 0, reviewed_sha: null, review_base_sha: null,
     // 因每日模型额度用尽而没做的事（Jev 分诊 / AI 补测 / 代码审查 / 摘要），每项 { kind, pool, cap, used, dimensions, message }
     quota_capped: [],
   }

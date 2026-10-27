@@ -343,7 +343,7 @@ def scan_logs(since, tail_bytes=8 << 20):
         except ValueError: continue
         at = ts(j.get("t"))
         if not at or at < since: continue
-        if j.get("msg") == "run-nightly exit" and j.get("exitCode") not in (0, 75, None):
+        if j.get("msg") == "run-nightly exit" and j.get("exitCode") not in (0, 75, 76, None):
             out.append(mk("log", "run-nightly", f"run-nightly.sh exited with code {j.get('exitCode')}", at, "log", p, None, f"exit:{j.get('pid')}:{j.get('t')}",
                           {"exitCode": j.get("exitCode"), "pid": j.get("pid")}))
         elif j.get("level") in ("error", "fatal"):

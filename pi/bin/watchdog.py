@@ -164,11 +164,19 @@ def merge_sla_check(now, probs, rdir=f"{QA}/reports/merged"):
         if (time.time() - os.path.getmtime(f)) > 3 * 86400: continue
         try: pr = (json.load(open(f)).get("prs") or [{}])[0]
         except Exception: continue
-        if pr.get("merged_at") and pr.get("test_started_at"): rows.append((pr["merged_at"], pr["test_started_at"]))
-    n, p95 = merge_sla(rows, now)
+        if pr.get("merged_at") and pr.get("test_started_at"): rows.append((pr["merged_at"], pr["test_started_at"], pr.get("gate_wait_s") or 0))
+    n, p95 = merge_sla([r[:2] for r in rows], now)
+    # 10-27：test_started_at 在内存门之后；减掉 gate_wait_s 就是不含等内存的排队时间，两段分开看
+    adj = []
+    for m, st, g in rows:   # 坏行（时间格式不对 / gate_wait_s 不是数字）跳过，不让整个检查崩
+        try: adj.append((m, (dt.datetime.fromisoformat(str(st).replace("Z", "+00:00")) - dt.timedelta(seconds=float(g))).isoformat()))
+        except (TypeError, ValueError, OverflowError): continue
+    _, q95 = merge_sla(adj, now)
+    if p95 is None: return n, p95   # 没有样本
     if n >= SLA_MIN_N and p95 > SLA_P95_MIN:
-        probs["sla:merge-to-test"] = PN.item("fyi", "合并到开测变慢了", f"最近 24 小时 {n} 个合并 PR，合并到开始测试的 p95 是 {p95:.0f} 分钟（目标 ≤ {SLA_P95_MIN} 分钟）。",
-                                             "测试结果和问题通知会跟着晚。", todo=PN.ask_session(f"合并即测 SLA 超标（p95 {p95:.0f} 分钟），查 mergewatch / catch-up 排队"))
+        gate = (f"其中等内存门以外的排队 p95 是 {q95:.0f} 分钟，其余是在等内存。" if q95 is not None and q95 < p95 else "")
+        probs["sla:merge-to-test"] = PN.item("fyi", "合并到开测变慢了", f"最近 24 小时 {n} 个合并 PR，合并到开始测试的 p95 是 {p95:.0f} 分钟（目标 ≤ {SLA_P95_MIN} 分钟）。{gate}",
+                                             "测试结果和问题通知会跟着晚。", todo=PN.ask_session(f"合并即测 SLA 超标（p95 {p95:.0f} 分钟，不含等内存 {q95:.0f} 分钟），查 mergewatch / catch-up 排队和内存门"))
     return n, p95
 
 

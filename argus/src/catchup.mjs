@@ -18,6 +18,8 @@ import { loadRegistry } from './config.mjs'
 
 export const MAX_ATTEMPTS = 3
 export const LOCK_TIMEOUT_EXIT = 75
+// run-nightly.sh 内存门跳过（10-27）：没开测，不算尝试次数、不放弃，下次再试
+export const MEM_SKIP_EXIT = 76
 export const catchUpDir = (reportsDir = REPORTS_DIR) => join(reportsDir, 'catch-up')
 export const statePath = (reportsDir = REPORTS_DIR) => join(catchUpDir(reportsDir), 'state.json')
 
@@ -143,6 +145,11 @@ export function catchUp({ repo, now = new Date(), reportsDir = REPORTS_DIR, merg
     st.attempts++
     const t0 = Date.now()
     const code = runOne(g)
+    if (code === MEM_SKIP_EXIT) {   // 内存不足没开测：撤回这次计数，不放弃；剩下的也会被跳过，停到下次
+      st.attempts--; st.last_reason = 'memory-skip'; st.history.push({ at: toShanghaiIso(), exit_code: code, filled: false, memory_skip: true })
+      result.runs.push({ number: g.number, attempt: st.attempts, exit_code: code, duration_s: Math.round((Date.now() - t0) / 1000), filled: false, remaining_gap: g.gap.reason, memory_skip: true })
+      result.stopped = 'memory-skip'; break
+    }
     const still = gapOf(g, mergedDir)
     const run = { number: g.number, attempt: st.attempts, exit_code: code, duration_s: Math.round((Date.now() - t0) / 1000), filled: !still, remaining_gap: still?.reason ?? null }
     result.runs.push(run)
@@ -159,7 +166,7 @@ export function catchUp({ repo, now = new Date(), reportsDir = REPORTS_DIR, merg
     if (code === LOCK_TIMEOUT_EXIT) { result.stopped = 'lock-timeout'; break }
   }
   result.finished_at = toShanghaiIso()
-  result.system_health.status = result.system_health.gave_up.length ? 'degraded' : result.runs.every((r) => r.filled) ? 'ok' : 'degraded'
+  result.system_health.status = result.system_health.gave_up.length ? 'degraded' : result.runs.every((r) => r.filled || r.memory_skip) ? 'ok' : 'degraded'
   saveState(sFile, state)
   return { status: 'ran', ...result }
 }

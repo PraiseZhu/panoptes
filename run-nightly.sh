@@ -69,9 +69,8 @@
 #
 # Output: $QA_HOME/reports/YYYY-MM-DD.json  (logs: $QA_HOME/argus-root/logs)
 # Exit codes: 0 ok/degraded, 3 pipeline failed or QA environment broken (see system_health), 1 usage/config error,
-#             75 another run active. Low memory (MemAvailable < PANOPTES_MIN_MEM_GB, default 8, or SwapFree <
-#             PANOPTES_MIN_SWAP_GB, default 4) delays the run up to
-#             30 min, then runs it single-shard; it never skips.
+#             75 another run active / lock wait timed out, 76 skipped for low memory (memory gate below: still < 8 GB after
+#             30 min and below the 5 GB / 4 GB swap degraded floor; nothing ran, catch-up retries it without counting an attempt).
 set -euo pipefail
 
 PANOPTES_DIR="${PANOPTES_DIR:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)}"
@@ -317,25 +316,32 @@ cd "$PANOPTES_DIR/argus"
 LOG="$ARGUS_ROOT/logs/nightly-$(date +%Y%m%dT%H%M%S).log"
 
 # Memory gate (box: 15 GB + 8 GB swap, shared by several bots; 2026-10-14 froze from memory exhaustion).
-# 电脑运维 safe values (10-26): MemAvailable >= 8 GB AND SwapFree >= 4 GB (PANOPTES_MIN_MEM_GB / PANOPTES_MIN_SWAP_GB).
-# Never skips a PR: while below the gate (slot_mem_ok) wait, rechecking every 60 s for up to
-# PANOPTES_MEM_WAIT_S (default 1800 = 30 min); still low → run anyway with ARGUS_UNIT_SHARDS=1 (one vitest process,
-# slower but smaller). A run that then dies or times out writes no passing report, so catch-up retests the PR.
-mem_avail_kb() { awk '/^MemAvailable:/{print $2}' /proc/meminfo; }
-mem_waited=0
-while ! slot_mem_ok; do
-  if (( mem_waited >= ${PANOPTES_MEM_WAIT_S:-1800} )); then
-    msg="MemAvailable $(( $(mem_avail_kb) / 1024 )) MiB still < ${PANOPTES_MIN_MEM_GB:-8} GiB (or SwapFree < ${PANOPTES_MIN_SWAP_GB:-4} GiB) after ${mem_waited}s: running with ARGUS_UNIT_SHARDS=1"
-    export ARGUS_UNIT_SHARDS=1
-    echo "[panoptes] $msg" | tee -a "$LOG" >&2
-    ctl "run-nightly low memory, single shard" "\"reason\":\"$msg\""
-    break
-  fi
-  msg="MemAvailable $(( $(mem_avail_kb) / 1024 )) MiB < ${PANOPTES_MIN_MEM_GB:-8} GiB (or SwapFree < ${PANOPTES_MIN_SWAP_GB:-4} GiB), waiting 60s (${mem_waited}s so far)"
-  echo "[panoptes] $msg" | tee -a "$LOG" >&2
-  (( mem_waited % 300 == 0 )) && ctl "run-nightly waiting for memory" "\"reason\":\"$msg\""
-  sleep 60; mem_waited=$(( mem_waited + 60 ))
-done
+# 电脑运维 rule (10-27), scripts/qa-slot.sh slot_mem_gate: start normally only at MemAvailable >= 8 GB AND SwapFree >= 4 GB,
+# waiting up to PANOPTES_MEM_WAIT_S (1800 s). Still low after that: >= 5 GB and swap >= 4 GB -> degraded (one unit shard,
+# coverage round after the first round, never in parallel); else skip: exit 76 without running (the slot lock is released
+# on exit) and the next catch-up retests the PR. A single docs-only PR (no tests run) does not wait (10-27, #1315 waited
+# 30 min while the host balloon held ~6 GB). The balloon is not subtracted: MemTotal stays 16 GB, inflated pages just look
+# used, and lowering the 8 GB threshold would weaken the rule; it is only logged (slot_balloon_mb).
+mem_avail_kb() { slot_mem_avail_kb; }
+GATE_PRS=(); prev=""; for a in "$@"; do [[ "$prev" == --pr ]] && GATE_PRS+=("$a"); [[ "$a" == --pr=* ]] && GATE_PRS+=("${a#--pr=}"); prev="$a"; done
+DOCS_CHECK=(); (( ${#GATE_PRS[@]} == 1 )) && DOCS_CHECK=(timeout 60 node --disable-warning=ExperimentalWarning src/cli.mjs docs-only --pr "${GATE_PRS[0]}")
+slot_mem_gate ${DOCS_CHECK[@]+"${DOCS_CHECK[@]}"}
+export PANOPTES_GATE_WAIT_S="$GATE_WAIT_S" PANOPTES_GATE_MODE="$GATE_MODE"   # nightly.mjs records gate_wait_s per PR (SLA: queue vs pipeline)
+mem_now="MemAvailable $(( $(mem_avail_kb) / 1024 )) MiB, SwapFree $(( $(slot_swap_free_kb) / 1024 )) MiB, balloon $(slot_balloon_mb) MiB"
+case "$GATE_MODE" in
+  docs-only) msg="$mem_now: below gate, PR #${GATE_PRS[0]} is docs-only (no tests), not waiting"
+    echo "[panoptes] $msg" | tee -a "$LOG" >&2; ctl "run-nightly memory gate skipped (docs-only)" "\"reason\":\"$msg\"" ;;
+  degraded) msg="$mem_now after ${GATE_WAIT_S}s: still < ${PANOPTES_MIN_MEM_GB:-8} GiB, >= ${PANOPTES_DEGRADED_MEM_GB:-5} GiB: degraded run (ARGUS_UNIT_SHARDS=1, ARGUS_MAX_PARALLEL=1)"
+    export ARGUS_UNIT_SHARDS=1 ARGUS_MAX_PARALLEL=1
+    echo "[panoptes] $msg" | tee -a "$LOG" >&2; ctl "run-nightly low memory, degraded" "\"reason\":\"$msg\"" ;;
+  skip) msg="$mem_now after ${GATE_WAIT_S}s: below the degraded floor (${PANOPTES_DEGRADED_MEM_GB:-5} GiB / swap ${PANOPTES_MIN_SWAP_GB:-4} GiB): not running, exit 76, next catch-up retries"
+    echo "[panoptes] SKIP $msg" | tee -a "$LOG" >&2; ctl "run-nightly low memory, skipped" "\"reason\":\"$msg\""
+    exit 76 ;;
+  *) (( GATE_WAIT_S > 0 )) && ctl "run-nightly memory gate passed" "\"gate_wait_s\":$GATE_WAIT_S" ;;
+esac
+[[ -n "${PANOPTES_GATE_DRYRUN:-}" && -z "${PANOPTES_TEST:-}" ]] && { echo "[panoptes] WARNING PANOPTES_GATE_DRYRUN=$PANOPTES_GATE_DRYRUN set outside tests (PANOPTES_TEST unset): ignored, running normally" | tee -a "$LOG" >&2; ctl "run-nightly gate dryrun ignored" "\"level\":\"warn\""; unset PANOPTES_GATE_DRYRUN; }
+# tests only (PANOPTES_TEST=1): stop right after the gate decision (normal / degraded print it; skip already exited 76)
+[[ "${PANOPTES_GATE_DRYRUN:-}" == 1 ]] && { echo "[panoptes] gate: mode=$GATE_MODE wait=${GATE_WAIT_S}s shards=${ARGUS_UNIT_SHARDS:-auto} max_parallel=${ARGUS_MAX_PARALLEL:-auto}"; exit 0; }
 echo "[panoptes] code: $PANOPTES_DIR ($(git -C "$PANOPTES_DIR" rev-parse --short HEAD 2>/dev/null || echo '?'))  data: $QA_HOME  log: $LOG" >&2
 # Lower priority so the box stays responsive
 nice -n 10 node --disable-warning=ExperimentalWarning src/cli.mjs nightly "$@" 2> >(tee -a "$LOG" >&2) | tee -a "$LOG"
