@@ -387,6 +387,9 @@ def janitor_check(now, probs):
 
 
 def send(text, key, bypass):
+    if praise_dm_blocked(key):   # Praise 10-27: file only, never a DM
+        if DRY: print("MUTED (would not send)", key, "\n" + text); return
+        record_muted("watchdog", key, text); log("praise-dm-mute: not sent", key); return
     if DRY: print("WOULD SEND", key, "\n" + text); return
     d = today()
     record_actions("watchdog", d, [{"key": key, "type": "slack.dm", "to": "Praise", "text": text}])

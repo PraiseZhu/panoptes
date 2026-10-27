@@ -88,6 +88,20 @@ def mode():
 def now_cst(): return dt.datetime.now(CST)
 def today(): return now_cst().date().isoformat()
 
+# Praise 10-27: ops/watchdog/relay DMs to him are noise. While PRAISE_DM_MUTE exists, no Slack DM goes to Praise unless its
+# dedupe key starts with a prefix listed in that file (one per line, '#' comments; e.g. "brief:" keeps jasper's 09:00 brief).
+# Alerts still land in files (watchdog log / out/outbound/muted-*.md) for bots. Delete the file to restore the old behaviour.
+PRAISE_DM_MUTE = f"{BASE}/praise-dm-mute"
+def praise_dm_blocked(key):
+    try: allow = [l.strip() for l in open(PRAISE_DM_MUTE) if l.strip() and not l.lstrip().startswith("#")]
+    except FileNotFoundError: return False
+    return not str(key).startswith(tuple(allow))
+def record_muted(job, key, text):
+    """Keep a muted Praise DM in a file so bots can still act on it."""
+    d = f"{BASE}/out/{job}"; os.makedirs(d, exist_ok=True)
+    with open(f"{d}/muted-{now_cst().strftime('%Y-%m-%d')}.md", "a") as f: f.write(f"## {now_cst().isoformat(timespec='seconds')} {key}\n{text}\n\n")
+
+
 def record_actions(job, day, actions):
     """Write the outbound actions this job WOULD take. Each action needs a stable 'key' (idempotency).
     Outbound is executed only if mode()=='pi' AND OUTBOUND_FLAG exists; executors are deliberately
