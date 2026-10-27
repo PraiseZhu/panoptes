@@ -42,6 +42,16 @@ def low_streak(limit=3072, n=30):
         if a >= limit: break
         k += 1
     return k
+def balloon_mb():
+    """Host virtio_balloon size: pages held by the host (inflate - deflate). With DEFLATE_ON_OOM negotiated the
+    kernel keeps these pages inside MemTotal and counts them as used, so they lower MemAvailable without any process RSS."""
+    try:
+        v = dict(l.split() for l in open("/proc/vmstat") if l.startswith("balloon_"))
+        return max(0, int(v.get("balloon_inflate", 0)) - int(v.get("balloon_deflate", 0))) * os.sysconf("SC_PAGE_SIZE") // 2**20
+    except Exception: return -1
+def mem_cause(bal, rss_top):
+    """cause=balloon: host holds >= 2G and the top-5 RSS is smaller than the balloon (processes don't explain the drop)"""
+    return "balloon" if bal >= 2048 and rss_top < bal else "process"
 def sh(c): return subprocess.run(c, shell=True, capture_output=True, text=True, timeout=300).stdout.strip()
 def fix(desc, cmd, fixed):
     if DRY: fixed.append("[dry] " + desc); return
@@ -145,6 +155,8 @@ def main():
     avail = int(sh("awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo") or 0)
     la = open("/proc/loadavg").read().split()[:3]; load = " ".join(la); ncpu = os.cpu_count() or 1
     disk = sh("df -h / | awk 'NR==2{print $5\" used, \"$4\" free\"}'")
+    bal = balloon_mb()
+    rss_top = int(sh("ps -eo rss --sort=-rss --no-headers | head -5 | awk '{s+=$1} END{print int(s/1024)}'") or 0)
     top = sh("ps -eo comm,rss --sort=-rss --no-headers | head -5 | awk '{printf \"%s:%dM \", $1, $2/1024}'")
     zl = zombies(); ours = [z for z in zl if not z["platform"]]; zomb = len(zl)
     st = jload(STATE, {}); hist = (st.get("zombie_hist") or [])[-5:] + [len(ours)]; st["zombie_hist"] = hist
@@ -152,7 +164,9 @@ def main():
     if len(hist) >= 2 and min(hist[-2:]) >= 10: alerts.append(("zombies", f"非平台僵尸进程连续 2 次 ≥10 个（现 {len(ours)} 个，父进程见 health.log）"))
     if float(la[2]) > ncpu: alerts.append(("load", f"15 分钟负载 {la[2]} > {ncpu} 核（持续高）"))
     low_min = low_streak()
-    if avail < 3072 and low_min >= 5: alerts.append(("mem", f"可用内存持续 {low_min} 分钟 < 3G（现 {avail}MB）"))
+    cause = mem_cause(bal, rss_top)
+    if avail < 3072 and low_min >= 5: alerts.append(("mem", f"可用内存持续 {low_min} 分钟 < 3G（现 {avail}MB，cause={cause}，balloon={bal}MB，top5 RSS={rss_top}MB"
+                                                     + ("；宿主机 balloon 占用，guest 内无法释放，需平台侧处理）" if cause == "balloon" else "）")))
     elif avail < 3072 or low_min: issues.append(f"可用内存瞬时低（现 {avail}MB，连续 {low_min} 分钟；多为平台快照回收，不告警）")
     swap_used = int(sh("free -m | awk '/^Swap:/{print $3}'") or 0)
     if swap_used > 4096: alerts.append(("swap", f"swap 已用 {swap_used}MB > 4G（真实内存压力）"))
@@ -184,7 +198,7 @@ def main():
     bad = [f for f in fixed if "失败" in f]
     if bad and not DRY: alerts.append(("fix-failed", "自动修复失败: " + "; ".join(bad)))
     if fixed and not DRY and len(bad) < len(fixed): events.append("已修复: " + "; ".join(f for f in fixed if f not in bad))
-    line = (f"{t.strftime('%F %T')} CST [pi-line{' dry' if DRY else ''}] avail={avail}MB low_streak={low_min}min load={load} disk={disk} zombies={zomb}(ours {len(ours)}) top={top.strip()} "
+    line = (f"{t.strftime('%F %T')} CST [pi-line{' dry' if DRY else ''}] avail={avail}MB balloon={bal}MB low_streak={low_min}min load={load} disk={disk} zombies={zomb}(ours {len(ours)}) top={top.strip()} "
             f"clean={'done freed=' + str(freed // 2**20) + 'MB' if clean else 'dry'} candidates={len(cand)}项/{cand_b // 2**20}M"
             f"{' (测试在跑: ' + ','.join(os.path.basename(l) for l in locks) + ' 被占；只清它没在用的)' if locks else ''} "
             f"janitor={janitor_summary()} "
