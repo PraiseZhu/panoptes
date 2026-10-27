@@ -7,8 +7,12 @@ for _k in [k for k in __import__("os").environ if k.startswith("GIT_")]: del __i
 import datetime as dt, json, os, shutil, sys, tempfile, types, unittest
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bin"))
 sys.modules.setdefault("merger", types.SimpleNamespace(FIELDS="number", blockers=lambda p: []))
+import hashlib  # noqa: E402
 import outbound as O  # noqa: E402
 import lib as L  # noqa: E402
+REAL_MUTED = f"/workspace/mivo-qa/pi/out/outbound/muted-{dt.datetime.now(O.CST).date().isoformat()}.md"   # box state: must stay untouched
+def fingerprint(p): return (os.path.getmtime(p), hashlib.sha256(open(p, "rb").read()).hexdigest()) if os.path.exists(p) else None
+REAL_BEFORE = fingerprint(REAL_MUTED)
 
 NOW = dt.datetime(2026, 10, 27, 0, 50, 2, tzinfo=O.CST)            # 09:50 PDT 10-26, when the relay was skipped
 DAILY, OVERDUE = "mivo-daily-report:2026-10-25", "overdue:aj0928/aj0928-handoff#6"
@@ -23,7 +27,8 @@ class T(unittest.TestCase):
         self.saved = {n: getattr(O, n) for n in names}
         # 10-27 #67: praise_dm_blocked() reads lib.PRAISE_DM_MUTE, fixed at import from the REAL state dir; on the box that file
         # exists (allowlist brief:) and muted every relay here. Point it into the scratch dir (absent = not muted).
-        self.saved_mute = L.PRAISE_DM_MUTE; L.PRAISE_DM_MUTE = f"{t}/praise-dm-mute"
+        # lib.record_muted writes under lib.BASE: point that at the scratch dir too (13ee91e wrote 44 fake entries to the real file)
+        self.saved_mute, self.saved_lbase = L.PRAISE_DM_MUTE, L.BASE; L.PRAISE_DM_MUTE, L.BASE = f"{t}/praise-dm-mute", t
         O.BASE, O.LEDGER, O.QA_SLACK = t, f"{t}/out/outbound/ledger.json", f"{t}/slack"
         O.OUTBOUND_FLAG, O.GROK_SENT, O.DISABLED_TYPES = f"{t}/outbound-enabled", f"{t}/sent", f"{t}/disabled"
         for d in ("out/outbound", "out/daily", "out/handoff", "slack"): os.makedirs(f"{t}/{d}")
@@ -47,7 +52,8 @@ class T(unittest.TestCase):
         self.actions("handoff", "2026-10-26", [{"key": OVERDUE, "type": "feishu.dm+group", "issue": "https://github.com/aj0928/aj0928-handoff/issues/6",
                                                "age_days": 3, "owner": "aj0928", "at": "2026-10-26T15:20:05+08:00"}])
     def tearDown(self):
-        L.PRAISE_DM_MUTE = self.saved_mute
+        L.PRAISE_DM_MUTE, L.BASE = self.saved_mute, self.saved_lbase
+        self.assertEqual(fingerprint(REAL_MUTED), REAL_BEFORE, f"test wrote to the real {REAL_MUTED}")
         for n, v in self.saved.items(): setattr(O, n, v)
         shutil.rmtree(self.tmp, ignore_errors=True)
     def mem(self, avail_mb, swap_mb):
@@ -100,6 +106,7 @@ class T(unittest.TestCase):
         self.assertTrue(L.praise_dm_blocked(OVERDUE)); self.assertFalse(L.praise_dm_blocked("brief:2026-10-27"))
         self.assertEqual(self.main("--resend-key", OVERDUE), 0)
         self.assertEqual(self.ledger()[OVERDUE]["reason"], "praise-dm-mute"); self.assertEqual(self.sends, [])
+        self.assertIn(OVERDUE, open(f"{self.tmp}/out/outbound/muted-{dt.datetime.now(O.CST).date().isoformat()}.md").read())   # file-only copy lands in scratch
 
     # ---- head check ----
     def test_daily_head_accepts_bufa_and_still_refuses_other_bodies(self):
