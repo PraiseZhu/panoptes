@@ -18,12 +18,13 @@ class T(unittest.TestCase):
     def setUp(self):
         self.tmp = t = tempfile.mkdtemp(prefix="outbound-resend-")
         names = ("BASE", "LEDGER", "QA_SLACK", "OUTBOUND_FLAG", "GROK_SENT", "DISABLED_TYPES", "mode", "secret_env", "now_cst",
-                 "today", "slack", "run")
+                 "today", "slack", "run", "MEMINFO")
         self.saved = {n: getattr(O, n) for n in names}
         O.BASE, O.LEDGER, O.QA_SLACK = t, f"{t}/out/outbound/ledger.json", f"{t}/slack"
         O.OUTBOUND_FLAG, O.GROK_SENT, O.DISABLED_TYPES = f"{t}/outbound-enabled", f"{t}/sent", f"{t}/disabled"
         for d in ("out/outbound", "out/daily", "out/handoff", "slack"): os.makedirs(f"{t}/{d}")
         open(O.OUTBOUND_FLAG, "w").close()
+        O.MEMINFO = f"{t}/meminfo"; self.mem(8192, 4096)
         O.mode, O.secret_env, O.now_cst, O.today = (lambda: "pi"), (lambda: None), (lambda: NOW), (lambda: NOW.date().isoformat())
         self.sends = []; self.history = ["Mivo 播报 10 月 25 日（北京时间）：原来那条"]   # the original 10-25 message is in the channel
         def slack(method, params=None, post=False):
@@ -44,6 +45,8 @@ class T(unittest.TestCase):
     def tearDown(self):
         for n, v in self.saved.items(): setattr(O, n, v)
         shutil.rmtree(self.tmp, ignore_errors=True)
+    def mem(self, avail_mb, swap_mb):
+        open(O.MEMINFO, "w").write(f"MemTotal: 16000000 kB\nMemAvailable: {avail_mb * 1024} kB\nSwapFree: {swap_mb * 1024} kB\n")
     def actions(self, job, day, acts):
         json.dump({"actions": acts}, open(f"{self.tmp}/out/{job}/{day}.actions.json", "w"), ensure_ascii=False)
     def daily(self, body, day="2026-10-25"):
@@ -64,6 +67,27 @@ class T(unittest.TestCase):
         self.daily("【补发】" + BODY.replace("10 月 25 日", "10 月 26 日"), "2026-10-26"); self.history = ["Mivo 播报 10 月 26 日（北京时间）：x"]
         self.main("--key", "mivo-daily-report:2026-10-26")
         self.assertEqual(self.ledger()["mivo-daily-report:2026-10-26"]["by"], "target-state"); self.assertEqual(self.sends, [])
+
+    # ---- 10-27 memory floor: MemAvailable < 1.5G or SwapFree < 2G -> send nothing, ledger untouched, alert; sent later ----
+    def test_lowmem_skips_sends_keeps_ledger_and_sends_after_recovery(self):
+        K = "mivo-daily-report:2026-10-26"; self.history = []
+        self.daily(BODY.replace("10 月 25 日", "10 月 26 日"), "2026-10-26"); self.ledger({"x": {"status": "done"}})
+        for avail, swap in ((1535, 4096), (8192, 2047)):
+            self.mem(avail, swap); self.assertEqual(self.main(), 0)
+            self.assertEqual(self.sends, []); self.assertEqual(self.ledger(), {"x": {"status": "done"}})
+            self.assertIn("MemAvailable", O.jload(O.LOWMEM(), {}).get("why", ""))
+        self.mem(1536, 2048); self.assertEqual(self.main(), 0)
+        self.assertEqual([k for k, _ in self.sends], [K]); self.assertEqual(self.ledger()[K]["status"], "done")
+        self.assertFalse(os.path.exists(O.LOWMEM()))
+        self.main(); self.assertEqual(len(self.sends), 1)   # dedup still by the ledger
+    def test_watchdog_alerts_on_lowmem_marker(self):
+        import watchdog as WD
+        saved = WD.LEDGER; WD.LEDGER = O.LEDGER
+        try:
+            p = {}; WD.outbound_health_check(NOW, p); self.assertNotIn("outbound:lowmem", p)
+            json.dump({"at": "2026-10-27T09:00:00+08:00", "why": "MemAvailable 1000MB"}, open(O.LOWMEM(), "w"))
+            p = {}; WD.outbound_health_check(NOW, p); self.assertEqual(p["outbound:lowmem"]["kind"], "action")
+        finally: WD.LEDGER = saved
 
     # ---- head check ----
     def test_daily_head_accepts_bufa_and_still_refuses_other_bodies(self):

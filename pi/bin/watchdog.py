@@ -475,6 +475,12 @@ def outbound_health_check(now, probs):
             f"发 Slack 和飞书要用的密钥缺了 {len(miss)} 个，所有私信、群消息、日报都发不出去。",
             "所有通知都发不出去；缺的是 Slack 的话，这条提醒本身也未必能到你手上。",
             todo=PN.ask_session(f"Pi 线外发密钥缺失：{', '.join(miss)}。补进 ~/.config/mivo-qa/secrets.env（权限 600），再跑 bin/run.sh credcheck 确认"))
+    lm = jload(os.path.join(os.path.dirname(LEDGER), "lowmem.json"), None)
+    if lm:
+        probs["outbound:lowmem"] = PN.item("action", "「消息外发」因内存不足暂停发送",
+            f"{lm.get('at')} 起内存低于外发下限（{lm.get('why')}），这一轮没有发任何消息。",
+            "没发的消息仍在账本里待发，内存恢复后的下一轮会自动发出，不会重复。",
+            todo="看看是谁占满了内存（bin/run.sh boxhealth），内存恢复后不用再处理")
     L = jload(LEDGER, {})
     bad = {k: v for k, v in L.items() if isinstance(v, dict) and v.get("status") == "failed"}
     cred = sorted(k for k, v in bad.items() if CRED_ERR.search(v.get("last_error") or ""))

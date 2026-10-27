@@ -16,7 +16,8 @@ echo "=== $(date '+%F %T %Z') start $JOB $* mode=${PI_FLEET_MODE:-$(cat /workspa
 avail=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
 [ -n "${PI_TEST_MEM_AVAIL_MB:-}" ] && { avail=$PI_TEST_MEM_AVAIL_MB; echo "TEST: MemAvailable overridden to ${avail}MB"; }
 export PI_MEM_AVAIL_MB=$avail
-# F4 (10-23): boxhealth + cindy are exempt from the 3G gate (Grok line has none). cindy relaunch guard: Cindy not running
+# F4 (10-23, updated 10-27): exempt from the 3G gate = boxhealth, cindy and every zero-model job in LIGHT below (they log
+# "lowmem ... exempt -> run" and run anyway); outbound has its own floor inside outbound.py. cindy relaunch guard: Cindy not running
 # and avail < 2048MB -> run cindy.py in its read-only dry-run (check only, never starts Cindy), alert, retry next */5.
 # 10-23: zero-model jobs are light and must not lose a slot to the platform's snapshot-time memory reclaim (1-3 min dips);
 # model/heavy jobs wait up to 10 min for memory instead of giving the slot up at once.

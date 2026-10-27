@@ -59,6 +59,17 @@ def merges_today(ledger):
 DRAFT_MARKERS = ("SHADOW", "NOT SENT", "<!--")
 SHADOW_RE = re.compile(r"<!--.*?-->\s*", re.S)
 
+MEMINFO = "/proc/meminfo"
+LOWMEM = lambda: os.path.join(os.path.dirname(LEDGER), "lowmem.json")   # present while sends are held back for low memory (watchdog alerts)
+MIN_MEM_MB, MIN_SWAP_MB = 1536, 2048            # 10-27 outbound floor: MemAvailable < 1.5G or SwapFree < 2G -> send nothing this run
+def mem_floor():
+    """None if memory is fine, else why. Unreadable meminfo -> None (do not block sends on a probe error)."""
+    try: m = {l.split(":")[0]: int(l.split()[1]) // 1024 for l in open(MEMINFO) if l.split(":")[0] in ("MemAvailable", "SwapFree")}
+    except Exception: return None
+    if m.get("MemAvailable", MIN_MEM_MB) < MIN_MEM_MB or m.get("SwapFree", MIN_SWAP_MB) < MIN_SWAP_MB:
+        return f"MemAvailable {m.get('MemAvailable')}MB (floor {MIN_MEM_MB}), SwapFree {m.get('SwapFree')}MB (floor {MIN_SWAP_MB})"
+    return None
+
 def disabled_types():
     try: return {l.strip() for l in open(DISABLED_TYPES) if l.strip() and not l.startswith("#")}
     except FileNotFoundError: return set()
@@ -623,6 +634,12 @@ def main():
     log(f"mode={mode()} flag={os.path.exists(OUTBOUND_FLAG)} gate={'OPEN' if gate else 'closed'} dry_run={o.dry_run}")
     for k in ("MIVO_SLACK_BOT_TOKEN", "MIVO_FEISHU_APP_ID", "MIVO_FEISHU_APP_SECRET"): log(f"cred {k}: {'set' if os.environ.get(k) else 'unset'}")
     if not gate and not o.dry_run: log("gate closed -> nothing to do"); return 0
+    if not o.dry_run:   # memory floor: send nothing, ledger untouched -> every pending action goes out on a later run
+        why = mem_floor()
+        if why:
+            log(f"ALERT lowmem: {why} -> outbound skipped this run, nothing sent, ledger unchanged")
+            write_atomic(LOWMEM(), json.dumps({"at": now_cst().isoformat(timespec="seconds"), "why": why}, ensure_ascii=False)); return 0
+        if os.path.exists(LOWMEM()): os.remove(LOWMEM())
     if not o.dry_run:   # one executor at a time even when called directly (run.sh's flock only covers cron runs)
         import fcntl, time as _t
         _lk = open("/tmp/pi-fallback-outbound.exec.lock", "w")
