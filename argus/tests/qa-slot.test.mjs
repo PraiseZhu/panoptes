@@ -86,3 +86,15 @@ test('processTargets parks between PRs (not mid-PR) and notes it', async () => {
   assert.deepEqual(order, ['yield', 1, 'yield', 2])
   assert.ok(health.notes.some((n) => /parked 3s before #2/.test(n)))
 })
+
+// 10-27 内存门（#1315 在内存门等满 30 分钟）：只有单个纯文档 PR 低内存时不等；其他照旧等满并记 GATE_WAIT_S
+test('slot_mem_gate: docs-only skips the wait only when memory is low; normal PRs still wait and record gate wait', () => {
+  const root = mkdtempSync(join(tmpdir(), 'argus-gate-'))
+  const mi = (avail, swap) => { const f = join(root, `mi-${avail}-${swap}`); writeFileSync(f, `MemTotal: 16386368 kB\nMemAvailable: ${avail * 1048576} kB\nSwapFree: ${swap * 1048576} kB\n`); return f }
+  const gate = (f, check, wait = '2') => sh(root, `slot_mem_gate ${check}; echo "$GATE_WAIT_S|$GATE_SKIP|$GATE_LOW"`, { PANOPTES_MEMINFO: f, PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: wait }).stdout.trim()
+  assert.equal(gate(mi(9, 5), 'false'), '0||')                       // 内存够：不问文档检查，直接开
+  assert.equal(gate(mi(6, 5), 'true'), '0|docs-only|')               // 低内存 + 纯文档：不等
+  const [w, skip, low] = gate(mi(6, 5), 'false').split('|')          // 低内存 + 普通 PR：等满，记等待秒数
+  assert.ok(Number(w) >= 2, w); assert.equal(skip, ''); assert.equal(low, '1')
+  assert.equal(gate(mi(9, 3), '').split('|')[2], '1')                 // swap 不足、没有文档检查（多 PR）：照样等
+})

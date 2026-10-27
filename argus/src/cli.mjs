@@ -78,6 +78,12 @@ async function main() {
       if (report.system_health.status === 'failed') process.exitCode = 3
       return
     }
+    case 'docs-only': {
+      // docs-only --pr N [--repo R]：退出 0 = 这个 PR 只改了文档（risk class A，不跑测试）；查不到或不是 → 1。run-nightly.sh 内存门用（10-27）
+      const n = Number(opt('pr')); if (!Number.isInteger(n) || n <= 0) throw new Error('--pr 需要正整数')
+      process.exitCode = docsOnlyOf(opt('repo', 'xindong/mivo-canvas-plugin'))({ number: n }) ? 0 : 1
+      return
+    }
     case 'catch-up': {
       const waitLock = Number(opt('wait-lock', 14400))
       if (!Number.isInteger(waitLock) || waitLock < 0) throw new Error('--wait-lock 需要整秒数')

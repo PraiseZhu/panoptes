@@ -68,3 +68,20 @@ slot_mem_ok() {
   avail=$(awk '/^MemAvailable:/{print $2}' "$mi"); swap=$(awk '/^SwapFree:/{print $2}' "$mi")
   (( ${avail:-0} >= ${PANOPTES_MIN_MEM_GB:-8} * 1024 * 1024 && ${swap:-0} >= ${PANOPTES_MIN_SWAP_GB:-4} * 1024 * 1024 ))
 }
+
+# Memory gate (10-27): wait until slot_mem_ok, rechecking every PANOPTES_MEM_POLL_S (60) s for up to PANOPTES_MEM_WAIT_S (1800) s.
+# Args (optional): a command that exits 0 when this run is docs-only. It is asked only when memory is low; a docs-only run
+# runs no tests (risk class A), so it skips the wait (GATE_SKIP=docs-only). Every other run keeps the >= 8G / >= 4G swap rule.
+# Sets GATE_WAIT_S (seconds spent waiting), GATE_SKIP (docs-only | ""), GATE_LOW (1 = still low after the full wait).
+slot_mem_gate() {
+  GATE_WAIT_S=0; GATE_SKIP=""; GATE_LOW=""
+  slot_mem_ok && return 0
+  if (( $# > 0 )) && "$@" >/dev/null 2>&1; then GATE_SKIP=docs-only; return 0; fi
+  local poll="${PANOPTES_MEM_POLL_S:-60}" start=$SECONDS
+  while ! slot_mem_ok; do
+    if (( SECONDS - start >= ${PANOPTES_MEM_WAIT_S:-1800} )); then GATE_LOW=1; break; fi
+    echo "[panoptes] memory below gate (>= ${PANOPTES_MIN_MEM_GB:-8} GiB available, >= ${PANOPTES_MIN_SWAP_GB:-4} GiB swap free), waiting (${GATE_WAIT_S}s so far)" >&2
+    sleep "$poll"; GATE_WAIT_S=$(( SECONDS - start ))
+  done
+  GATE_WAIT_S=$(( SECONDS - start )); return 0
+}

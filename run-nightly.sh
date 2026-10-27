@@ -322,20 +322,22 @@ LOG="$ARGUS_ROOT/logs/nightly-$(date +%Y%m%dT%H%M%S).log"
 # PANOPTES_MEM_WAIT_S (default 1800 = 30 min); still low → run anyway with ARGUS_UNIT_SHARDS=1 (one vitest process,
 # slower but smaller). A run that then dies or times out writes no passing report, so catch-up retests the PR.
 mem_avail_kb() { awk '/^MemAvailable:/{print $2}' /proc/meminfo; }
-mem_waited=0
-while ! slot_mem_ok; do
-  if (( mem_waited >= ${PANOPTES_MEM_WAIT_S:-1800} )); then
-    msg="MemAvailable $(( $(mem_avail_kb) / 1024 )) MiB still < ${PANOPTES_MIN_MEM_GB:-8} GiB (or SwapFree < ${PANOPTES_MIN_SWAP_GB:-4} GiB) after ${mem_waited}s: running with ARGUS_UNIT_SHARDS=1"
-    export ARGUS_UNIT_SHARDS=1
-    echo "[panoptes] $msg" | tee -a "$LOG" >&2
-    ctl "run-nightly low memory, single shard" "\"reason\":\"$msg\""
-    break
-  fi
-  msg="MemAvailable $(( $(mem_avail_kb) / 1024 )) MiB < ${PANOPTES_MIN_MEM_GB:-8} GiB (or SwapFree < ${PANOPTES_MIN_SWAP_GB:-4} GiB), waiting 60s (${mem_waited}s so far)"
-  echo "[panoptes] $msg" | tee -a "$LOG" >&2
-  (( mem_waited % 300 == 0 )) && ctl "run-nightly waiting for memory" "\"reason\":\"$msg\""
-  sleep 60; mem_waited=$(( mem_waited + 60 ))
-done
+# 10-27 (#1315 waited 30 min while the host balloon held ~6 GB): a single docs-only PR (no tests run) skips the wait.
+# The balloon cannot be subtracted reliably: MemTotal stays 16 GB, inflated pages just look used, and the only trace is the
+# cumulative /proc/vmstat balloon_inflate/deflate counters. Lowering the 8G threshold would also weaken 电脑运维's rule.
+GATE_PRS=(); prev=""; for a in "$@"; do [[ "$prev" == --pr ]] && GATE_PRS+=("$a"); prev="$a"; done
+DOCS_CHECK=(); (( ${#GATE_PRS[@]} == 1 )) && DOCS_CHECK=(timeout 60 node --disable-warning=ExperimentalWarning src/cli.mjs docs-only --pr "${GATE_PRS[0]}")
+slot_mem_gate ${DOCS_CHECK[@]+"${DOCS_CHECK[@]}"}
+export PANOPTES_GATE_WAIT_S="$GATE_WAIT_S" PANOPTES_GATE_SKIP="$GATE_SKIP"   # nightly.mjs records gate_wait_s per PR (SLA: queue vs pipeline)
+if [[ -n "$GATE_SKIP" ]]; then
+  msg="MemAvailable $(( $(mem_avail_kb) / 1024 )) MiB below gate, PR #${GATE_PRS[0]} is docs-only (no tests): not waiting"
+  echo "[panoptes] $msg" | tee -a "$LOG" >&2; ctl "run-nightly memory gate skipped" "\"reason\":\"$msg\""
+elif [[ -n "$GATE_LOW" ]]; then
+  msg="MemAvailable $(( $(mem_avail_kb) / 1024 )) MiB still < ${PANOPTES_MIN_MEM_GB:-8} GiB (or SwapFree < ${PANOPTES_MIN_SWAP_GB:-4} GiB) after ${GATE_WAIT_S}s: running with ARGUS_UNIT_SHARDS=1"
+  export ARGUS_UNIT_SHARDS=1
+  echo "[panoptes] $msg" | tee -a "$LOG" >&2; ctl "run-nightly low memory, single shard" "\"reason\":\"$msg\""
+elif (( GATE_WAIT_S > 0 )); then ctl "run-nightly memory gate passed" "\"gate_wait_s\":$GATE_WAIT_S"
+fi
 echo "[panoptes] code: $PANOPTES_DIR ($(git -C "$PANOPTES_DIR" rev-parse --short HEAD 2>/dev/null || echo '?'))  data: $QA_HOME  log: $LOG" >&2
 # Lower priority so the box stays responsive
 nice -n 10 node --disable-warning=ExperimentalWarning src/cli.mjs nightly "$@" 2> >(tee -a "$LOG" >&2) | tee -a "$LOG"
