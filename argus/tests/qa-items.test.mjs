@@ -576,3 +576,19 @@ test('补测子运行：--trigger catch-up；只有 createIssues 时才带 --cre
   const b = catchUpChildArgs(pr, { script: '/x/run-nightly.sh', reportsDir: '/r', createIssues: true })
   assert.ok(b.includes('--create-issues') && !b.includes('--no-issues'))
 })
+
+test('补测：内存门跳过（exit 76）连着 4 次也不算尝试、不放弃，原因记 memory-skip；内存回来后照常补上', () => {
+  const { reportsDir, write } = catchFixture()
+  write(1, { tested_sha: 'a'.repeat(40) }); write(2, { tested_sha: PRS.find((p) => p.number === 2).merge_sha })
+  let r
+  for (let i = 0; i < 4; i++) {
+    r = catchup.catchUp({ repo: 'o/r', now: NOW, reportsDir, list: () => PRS, runOne: () => catchup.MEM_SKIP_EXIT })
+    assert.equal(r.status, 'ran'); assert.equal(r.stopped, 'memory-skip'); assert.equal(r.system_health.gave_up.length, 0)
+    assert.equal(r.system_health.status, 'ok'); assert.equal(r.runs[0].memory_skip, true); assert.equal(r.runs[0].attempt, 0)
+  }
+  const st = JSON.parse(readFileSync(join(reportsDir, 'catch-up', 'state.json'), 'utf8')).prs['3']
+  assert.equal(st.attempts, 0); assert.equal(st.last_reason, 'memory-skip'); assert.equal(st.gave_up_at, undefined)
+  assert.equal(catchup.recentGiveUps({ reportsDir, now: Date.now() }).length, 0)
+  r = catchup.catchUp({ repo: 'o/r', now: NOW, reportsDir, list: () => PRS, runOne: (p) => { write(p.number, { tested_sha: p.merge_sha }); return 0 } })
+  assert.equal(r.runs[0].filled, true); assert.equal(r.runs[0].attempt, 1)
+})
