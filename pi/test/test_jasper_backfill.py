@@ -28,5 +28,11 @@ def reset(): [os.remove(f"{tmp}/out/{x}") for x in ("jasper/2026-10-27.actions.j
 reset(); run("2026-10-27"); assert len(acts) == 1                                  # (a) brief 日期 = 今天 → 外发
 sent = 1; run("2026-10-27"); sent += len(acts); assert sent == 1, acts           # 同一天补跑两次：只发一次
 reset(); json.dump({"brief:2026-10-27": {"status": "done"}}, open(f"{tmp}/out/outbound/ledger.json", "w"))
-run("2026-10-27"); assert acts == [] and "2026-10-27.md" in files, acts           # (b) 账本里已有 brief:<日> → 不发
+run("2026-10-27"); assert acts == [] and files == {} and prompts == [], (acts, files)   # (b) 账本里已有 brief:<日> → 不调模型、不写文件、不发
+# 用真 write_atomic 再验一次：已发过的 .md / .facts.json 内容不变
+J.write_atomic = lambda p, t: open(p, "w").write(t)
+for f, t in (("2026-10-27.md", "已发出的 brief\n"), ("2026-10-27.facts.json", "{}")): open(f"{tmp}/out/jasper/{f}", "w").write(t)
+run("2026-10-27"); assert open(f"{tmp}/out/jasper/2026-10-27.md").read() == "已发出的 brief\n" and open(f"{tmp}/out/jasper/2026-10-27.facts.json").read() == "{}" and prompts == []
+reset(); open(f"{tmp}/out/jasper/2026-10-27.actions.json", "w").write(json.dumps({"actions": [{"key": "brief:2026-10-27"}]}))
+run("2026-10-27"); assert open(f"{tmp}/out/jasper/2026-10-27.md").read() == "已发出的 brief\n" and prompts == [] and acts == []   # 待发清单里有也一样
 print("ok test_jasper_backfill")
