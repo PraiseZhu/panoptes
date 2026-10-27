@@ -44,6 +44,6 @@ assert "已补跑：credcheck 07:01、daily 08:35、dailyretro 09:56、pm 10:35"
 os.rename(O.REPLAYED(), O.REPLAYED() + ".bak"); p2 = {}; W.job_checks(T(12, 0), p2, T(0, 0, 20)); os.rename(O.REPLAYED() + ".bak", O.REPLAYED())
 assert "没有作业被补跑" in json.dumps(p2[out[0]], ensure_ascii=False)
 assert not any(k in missed for k in ("missed:daily:0835", "missed:pm:1035", "missed:credcheck:0701")), missed
-# 5) mergewatch 接了心跳，停机后置 dirty
+# 5) mergewatch 接了心跳；停机恢复本身不置 dirty（main sha 变了才置，见 test_mergewatch_resume.py）
 mw = open(f"{B}/mergewatch.py").read(); assert "outage.beat()" in mw and "st['dirty'] = True" in mw
 print("ok test_outage")
