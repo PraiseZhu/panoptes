@@ -10,7 +10,7 @@ Task kinds (positional SPECs or JSON):
   qa:N[:fp]   a Praise PR ticket -> `run.sh prfix --qa N [--fp fp]` (prfix owns its worktree, ticket lock and outbound)
   revise:N    `run.sh prfix --revise N`;  next: `run.sh prfix --next`
   free-form   --prompt TEXT (--cwd DIR | --repo GITDIR [--ref REF]) or --tasks FILE.jsonl / --task JSON with keys
-              prompt, cwd | repo (+ ref, default origin/main|HEAD), name, tier (quick|work|heavy|deep, default work),
+              prompt, cwd | repo (+ ref, default origin/main|HEAD), name, tier (quick|work|heavy|deep|review|judge, default work),
               write (default true with repo, else false), web (false), timeout (s, 1800).
               repo -> a fresh worktree PI_WORK/wt/dispatch/<caller>-<id> on new branch dispatch/<caller>-<id> (marked
               .pi-owned.json, so janitor reaps it after the task ends; commits stay on the branch in that repo).
@@ -48,7 +48,7 @@ def norm_task(d):
     if bool(d.get("cwd")) == bool(d.get("repo")): raise ValueError("task needs exactly one of cwd / repo")
     for k in ("cwd", "repo"):
         if d.get(k) and not os.path.isdir(d[k]): raise ValueError(f"{k} {d[k]} is not a directory")
-    if d.get("tier", "work") not in ("quick", "work", "heavy", "deep", "review"): raise ValueError(f"bad tier {d.get('tier')}")
+    if d.get("tier", "work") not in ("quick", "work", "heavy", "deep", "review", "judge"): raise ValueError(f"bad tier {d.get('tier')}")
     name = re.sub(r"[^A-Za-z0-9_.-]", "-", str(d.get("name") or "task"))[:40]
     return {"kind": "pi", "name": name, **{k: d[k] for k in ("prompt", "cwd", "repo", "ref", "tier", "write", "web", "timeout") if k in d}}
 
