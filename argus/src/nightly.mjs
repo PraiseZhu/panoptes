@@ -1145,7 +1145,7 @@ export function verdictOf(pr) {
 // otherwise Debian's launcher. Must match the profile's linux BD2_CHROME.
 const LINUX_CHROMIUM = existsSync('/usr/local/bin/chromium') ? '/usr/local/bin/chromium' : '/usr/bin/chromium'
 
-function envSnapshot() {
+export function envSnapshot() {
   const ver = (cmd, args) => { try { return execFileSync(cmd, args, { encoding: 'utf8', timeout: 15_000 }).trim().split('\n')[0] } catch { return null } }
   let free = null
   try { const s = statfsSync(CACHE_DIR); free = Math.round((s.bavail * s.bsize) / 1024 ** 3) } catch { /* ignore */ }
@@ -1163,6 +1163,9 @@ export function checkUmask(health) {
   const want = fmtUmask(PINNED_UMASK)
   const u = health.environment?.umask
   if (u !== want) health.env_problems.push({ message: `umask is ${u ?? 'unknown'} (expected ${want}): test fixture permissions will differ, permission checks such as RUNNER_OWNER_MISMATCH may fail falsely` })
+  // 固定后的值总是 0022：真正反映 QA 环境的是固定前继承到的值，不是 0022 也记一条（已被固定，但环境本身该修）
+  const inh = health.environment?.umask_inherited
+  if (inh != null && inh !== want) health.env_problems.push({ message: `inherited umask was ${inh} (expected ${want}); panoptes pinned it to ${want} for this run, but the QA environment should be fixed (umask 002 caused false RUNNER_OWNER_MISMATCH on mivo #1385)` })
 }
 
 

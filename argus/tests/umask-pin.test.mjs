@@ -30,6 +30,13 @@ test('checkUmask: 0022 is fine, anything else is an env_problem', async () => {
   const ok = { environment: { umask: '0022' }, env_problems: [] }
   checkUmask(ok)
   assert.deepEqual(ok.env_problems, [])
+  const inh = { environment: { umask: '0022', umask_inherited: '0002' }, env_problems: [] }
+  checkUmask(inh)
+  assert.equal(inh.env_problems.length, 1)
+  assert.match(inh.env_problems[0].message, /inherited umask was 0002 \(expected 0022\)/)
+  const inhOk = { environment: { umask: '0022', umask_inherited: '0022' }, env_problems: [] }
+  checkUmask(inhOk)
+  assert.deepEqual(inhOk.env_problems, [])
   for (const u of ['0002', null]) {
     const bad = { environment: { umask: u }, env_problems: [] }
     checkUmask(bad)
@@ -48,4 +55,15 @@ test('run-nightly.sh pins umask 022 before any node call and exports the inherit
   const head = s.slice(0, pin + '\numask 022\n'.length)
   const out = execFileSync('bash', ['-c', `umask 002; ${head.replace(/^#!.*\n/, '').replace('set -euo pipefail', 'set -eu')}\necho "$PANOPTES_INHERITED_UMASK $(umask)"`], { encoding: 'utf8', env: { ...process.env, QA_HOME: '/tmp/argus-umask-qahome' } })
   assert.equal(out.trim().split('\n').pop(), '0002 0022')
+})
+
+test('system_health.environment carries umask and umask_inherited (started under umask 002)', () => {
+  const out = execFileSync('bash', ['-c', 'umask 002; exec node --input-type=module -e "$0"',
+    `const m = await import(${JSON.stringify(NIGHTLY)}); const env = m.envSnapshot(); const h = { environment: env, env_problems: [] }; m.checkUmask(h); console.log(JSON.stringify({ umask: env.umask, umask_inherited: env.umask_inherited, problems: h.env_problems.map((p) => p.message) }))`],
+    { encoding: 'utf8', env: { ...process.env, PANOPTES_INHERITED_UMASK: '' } })
+  const r = JSON.parse(out.trim().split('\n').pop())
+  assert.equal(r.umask, '0022')
+  assert.equal(r.umask_inherited, '0002')
+  assert.equal(r.problems.length, 1)
+  assert.match(r.problems[0], /inherited umask was 0002/)
 })
