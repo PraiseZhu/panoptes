@@ -4,10 +4,11 @@
  (b) 同一 head 上 review-pr 已失败 → 不转；
  正常：review-pr 没跑 / 在跑，其余全绿 → 照常转。覆盖 prwatch.check_drafts、outbound.h_ready、prretro 用到的 block_reason。
 Local only: no network, no gh. Run: python3 test/test_ready_guard.py"""
-import json, os, shutil, sys, tempfile, unittest
+import json, os, shutil, sys, tempfile, types, unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 TMP = tempfile.mkdtemp(prefix="ready-guard-test-"); os.environ["PI_STATE"] = TMP
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bin"))
+sys.modules.setdefault("merger", types.SimpleNamespace(FIELDS="number", blockers=lambda p: []))   # CI 上没有 mivo-merger（同 test_outbound_resend）
 import ready_guard as RG, prwatch, outbound  # noqa: E402
 
 GREEN = [{"name": "verify", "status": "COMPLETED", "conclusion": "SUCCESS"}, {"name": "unit", "status": "COMPLETED", "conclusion": "SUCCESS"}]
