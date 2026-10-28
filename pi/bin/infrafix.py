@@ -777,7 +777,9 @@ def node_tests(wd, files, t=600):
     wait_mem()
     rel = [f[len("argus/"):] for f in files]
     rc, out = run(["timeout", "-k", "20", str(t), "bash", "run-tests.sh", *rel], cwd=f"{wd}/argus", t=t + 60, env=clean_env())
-    return rc, tail(out, 60)
+    # spec reporter prints the summary BEFORE the "failing tests" detail, so tail(60) can cut it off: keep it explicitly
+    summ = "\n".join(l for l in (out or "").splitlines() if re.match(r"^(?:ℹ|#) (?:tests|suites|pass|fail|cancelled|skipped|todo|duration_ms) ", l))
+    return rc, (summ + "\n" + tail(out, 60)) if summ else tail(out, 60)
 def node_verdict(rc, out):
     if rc == 124: raise Transient(f"测试超时：{tail(out, 3)}")
     if rc == 127: raise Transient(f"测试起不来：{tail(out, 3)}")
