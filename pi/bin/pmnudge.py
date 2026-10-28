@@ -7,7 +7,8 @@
 输出：追加到 out/pm/<当天>.md 的「## 白天催办 HH:MM」节；动作写 out/pm/<当天>.nudges.actions.json；
 20 点那轮另写 out/pm/<当天>.chief.md（给 Chief=Jasper 的汇总草稿，未发送），末尾附 chief_missed.py 的「系统漏跑」「工作逾期」两节。
 10-28 加 (c) 停滞：PraiseZhu 名下所有 open PR（不限 QA 修复 PR、不限 draft）超过 1h 无进展就催；
-进展 = 新 commit（head SHA 变）、CI check 状态变、新评论（评论数变）。指纹存 PI_STATE/out/pm/pmnudge-progress.json。
+进展 = 新 commit（head SHA 变）、CI check 状态变、新评论（评论数变）、新 review / review 评论（review 数变）。指纹存 PI_STATE/out/pm/pmnudge-progress.json；
+每段停滞只催一次（nudged 标记，跨小时、跨天都不重催），有进展后清零重新计时。
 用法：pmnudge.py [--dry-run]（--dry-run 只打印，不写任何文件）
 """
 import sys
@@ -56,28 +57,34 @@ STALL_H = 1.0
 PROGRESS = f"{BASE}/out/pm/pmnudge-progress.json"
 
 def progress_sig(p):
-    """进展指纹：head commit + 每个 check 的状态 + 评论数；任一变化即算有进展"""
+    """进展指纹：head commit + 每个 check 的状态 + 评论数 + review 数（行内 review 评论也会产生一条 review）；任一变化即算有进展"""
     cs = sorted(f"{c.get('name') or c.get('context') or '?'}={(c.get('conclusion') or c.get('state') or c.get('status') or '').upper()}"
                 for c in p.get("statusCheckRollup") or [])
-    return json.dumps([p.get("headRefOid") or "", cs, len(p.get("comments") or [])], ensure_ascii=False)
+    return json.dumps([p.get("headRefOid") or "", cs, len(p.get("comments") or []), len(p.get("reviews") or [])], ensure_ascii=False)
 
 def stalls(prs, state, now):
-    """返回 (停滞列表 [(pr, 小时数, since_iso)], 新 state)。新 PR / 指纹变了 -> 从 now 重新计时"""
+    """返回 (本轮要催的停滞列表 [(pr, 小时数, since_iso)], 新 state)。新 PR / 指纹变了 -> 从 now 重新计时、清 nudged；
+    同一段停滞已催过（nudged）-> 不再返回"""
     new, out = {}, []
     for p in prs:
         k, sig = str(p["number"]), progress_sig(p)
         old = state.get(k) or {}
-        since = old["since"] if old.get("sig") == sig and old.get("since") else now.isoformat()
-        new[k] = {"sig": sig, "since": since}
+        same = old.get("sig") == sig and old.get("since")
+        since = old["since"] if same else now.isoformat()
+        new[k] = {"sig": sig, "since": since, "nudged": bool(same and old.get("nudged"))}
         h = (now - parse_ts(since)).total_seconds() / 3600
-        if h > STALL_H: out.append((p, h, since))
+        if h > STALL_H and not new[k]["nudged"]:
+            out.append((p, h, since)); new[k]["nudged"] = True
     return out, new
 
 def main():
     dry = "--dry-run" in sys.argv
     d = today(); hh = now_cst().strftime("%H:%M")
-    prs = gh(["pr", "list", "-R", REPO, "--author", "PraiseZhu", "--state", "open", "--limit", "100",
-              "--json", "number,title,isDraft,createdAt,body,headRefName,headRefOid,comments,statusCheckRollup"])
+    try:
+        prs = gh(["pr", "list", "-R", REPO, "--author", "PraiseZhu", "--state", "open", "--limit", "100",
+                  "--json", "number,title,isDraft,createdAt,body,headRefName,headRefOid,comments,reviews,statusCheckRollup"])
+    except Exception as e:   # gh 挂了：不崩、不催、不动进展文件（下轮再看）
+        log("pmnudge: gh pr list 失败，本轮跳过：", str(e)[:200]); return
     nof, p01 = nofix_prs(), p01_prs()
     fixed = merged_refs()   # 10-28：QA 单号已被合并的修复 PR 修掉 -> 这个 draft 是重复 / 被取代的，不催（#1343 被 #1345 取代）
     qa, skip = [], []
@@ -117,9 +124,9 @@ def main():
     except Exception: pst = {}
     stl, pst_new = stalls(prs, pst, now_cst())
     for p, h, since in sorted(stl, key=lambda x: x[0]["number"]):
-        n = p["number"]; why = f"{h:.1f}h 无进展（无新 commit、CI 状态无变化、无新评论）"
+        n = p["number"]; why = f"{h:.1f}h 无进展（无新 commit、CI 状态无变化、无新评论 / review）"
         L.append(f"- 催 #{n}（停滞）{why}")
-        acts.append({"key": f"nudge:{d}:{n}:stall:{since}", "type": "nudge", "to": "Praise PR", "priority": True,
+        acts.append({"key": f"nudge:{n}:stall:{since}", "type": "nudge", "to": "Praise PR", "priority": True,
                      "channel": "待 Praise 定（见 handoff 渠道方案）", "text": f"#{n} {why}",
                      "dedupe": "同一段停滞（同 since）只催一次；有进展后重新计时"})
     if notyet: L.append("- 不催（未满 2h 或仍在跑）：" + "、".join(notyet))
