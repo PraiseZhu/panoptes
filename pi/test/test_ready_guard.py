@@ -43,6 +43,18 @@ class Unit(unittest.TestCase):
         self.assertEqual(RG.human_draft_events(1351, DRAFTED, {"draft:1352": {"at": "2026-10-28T18:31:00+08:00"}}), ["2026-10-28T10:30:00Z"])
         # 后来又 ready 过也一样：一次人工转草稿就永久不再转
         self.assertTrue(RG.human_draft_events(1351, DRAFTED + [{"event": "ready_for_review", "created_at": "2026-10-28T11:00:00Z"}], {}))
+    def test_naive_ledger_at_is_shanghai(self):
+        led = {"draft:1351:abc": {"status": "done", "at": "2026-10-28T18:31:00"}}          # 无时区 → 按北京时间 = 10:31Z
+        self.assertEqual(RG.human_draft_events(1351, DRAFTED, led), [])
+        self.assertIsNone(RG.block_reason(lambda a, js=True: DRAFTED, "r", 1351, GREEN, led))
+        led2 = {"draft:1351:abc": {"status": "done", "at": "2026-10-28T10:31:00"}}         # 北京 10:31 = 02:31Z，对不上 → 人工
+        self.assertEqual(RG.human_draft_events(1351, DRAFTED, led2), ["2026-10-28T10:30:00Z"])
+    def test_garbage_ledger_at_never_crashes_and_blocks(self):
+        for bad in ("garbage", 12345, None, {"x": 1}, "2026-13-99T99:99"):
+            led = {"draft:1351:abc": {"status": "done", "at": bad}, "draft:1351": "not-a-dict"}
+            self.assertEqual(RG.human_draft_events(1351, DRAFTED, led), ["2026-10-28T10:30:00Z"])
+            self.assertIn("converted back to draft", RG.block_reason(lambda a, js=True: DRAFTED, "r", 1351, GREEN, led))
+        self.assertIn("converted back to draft", RG.block_reason(lambda a, js=True: [{"event": "convert_to_draft", "created_at": "junk"}], "r", 1351, GREEN, {}))
     def test_timeline_unreadable_fails_closed(self):
         def bad(args, js=True): raise RuntimeError("HTTP 502")
         self.assertIn("timeline unreadable", RG.block_reason(bad, "r", 1, GREEN, {}))

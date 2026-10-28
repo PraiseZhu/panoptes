@@ -10,8 +10,13 @@ REVIEW = "review-pr"
 BAD = ("FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR", "FAIL", "CANCEL")
 PI_MATCH_SEC = 300
 
+CST = dt.timezone(dt.timedelta(hours=8))
+
 def _ts(s):
-    try: return dt.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    """ISO 时间 → 带时区的 datetime；没有时区的按 Asia/Shanghai；解析不了 → None。"""
+    try:
+        t = dt.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+        return t if t.tzinfo else t.replace(tzinfo=CST)
     except Exception: return None
 
 def _name(c): return c.get("name") or c.get("context") or ""
@@ -28,7 +33,7 @@ def pi_draft_times(n, ledger):
     out = []
     for k, v in (ledger or {}).items():
         if k == f"draft:{n}" or k.startswith(f"draft:{n}:"):
-            t = _ts((v or {}).get("at"))
+            t = _ts(v.get("at")) if isinstance(v, dict) else None
             if t: out.append(t)
     return out
 
@@ -39,7 +44,10 @@ def human_draft_events(n, events, ledger):
     for e in events or []:
         if e.get("event") != "convert_to_draft": continue
         t = _ts(e.get("created_at"))
-        if t and any(abs((t - m).total_seconds()) <= PI_MATCH_SEC for m in mine): continue
+        try:
+            if t and any(abs((t - m).total_seconds()) <= PI_MATCH_SEC for m in mine): continue
+        except Exception: pass          # 比较出错 → 不认作 Pi 的，按人工处理（不转 ready），绝不让 prwatch / outbound 崩
+
         hits.append(e.get("created_at"))
     return hits
 
@@ -62,6 +70,7 @@ def block_reason(gh, repo, n, rollup, ledger, events=None):
     if review_pr_failed(rollup): return "review-pr failed on this head"
     try: ev = _events(gh, repo, n) if events is None else events
     except Exception as e: return f"timeline unreadable ({str(e)[:80]}); not readying"
-    h = human_draft_events(n, ev, ledger)
+    try: h = human_draft_events(n, ev, ledger)
+    except Exception as e: return f"draft check failed ({str(e)[:80]}); not readying"
     if h: return f"converted back to draft by someone else at {h[-1]} (not in Pi's ledger); Pi never readies it again"
     return None
