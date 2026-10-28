@@ -127,11 +127,12 @@ def job_checks(now, probs, since):
             for kk, v in outage.jl(outage.REPLAYED(), {}).items():
                 try: sl = dt.datetime.fromisoformat(v["slot"])
                 except Exception: continue
-                if ws < sl <= we: st[(kk.split(":")[0], sl.strftime("%H:%M"))] = v.get("status")
+                if ws < sl <= we: st[(re.split(r"[:@]", kk)[0], sl.strftime("%H:%M"))] = v.get("status")
             rep = [m for m in missed if st.get(tuple(m.split(" ", 1))) == "done"]
             running = [m for m in missed if st.get(tuple(m.split(" ", 1))) == "running"]
-            skip = [f"{m}（{outage.NO_REPLAY_BY_DESIGN[m.split()[0]]}）" for m in missed if m not in rep + running and m.split()[0] in outage.NO_REPLAY_BY_DESIGN]
-            manual = [m for m in missed if m not in rep + running and m.split()[0] not in outage.NO_REPLAY_BY_DESIGN]
+            why = lambda m: (st.get(tuple(m.split(" ", 1))) or "")[8:] if (st.get(tuple(m.split(" ", 1))) or "").startswith("skipped:") else outage.NO_REPLAY_BY_DESIGN.get(m.split()[0])
+            skip = [f"{m}（{why(m)}）" for m in missed if m not in rep + running and why(m)]
+            manual = [m for m in missed if m not in rep + running and not why(m)]
             groups = f"已补跑：{'、'.join(rep) or '无'}；" + (f"正在补跑：{'、'.join(running)}；" if running else "") + f"按设计不补：{'、'.join(skip) or '无'}；需要手动处理：{'、'.join(manual) or '无'}。"
             probs[k] = PN.item("action" if manual else "fyi", "机器停过一段，" + (f"有 {len(manual)} 轮需要手动处理" if manual else "错过的都已补跑或按设计不补"),
                                f"{a} 到 {b} 机器暂停（心跳断了 {ow['gap_min']} 分钟），错过 {len(missed)} 轮。{groups}",

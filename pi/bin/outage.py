@@ -29,15 +29,47 @@ ROLLBACK_MARK = os.environ.get("PI_ROLLBACK_MARK") or "/workspace/box-ops/ROLLBA
 RUN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run.sh")
 GAP_MIN = 5
 EXPIRE_H = 30
-# 作业 -> [(北京时, 分)]，和 cron/pi-line.cron、watchdog.DAILY 一致；只列幂等、接受数据日参数的作业（credcheck 不带参数）
-REPLAY = {"credcheck": [(7, 1)], "daily": [(8, 35)], "dailyretro": [(9, 56)], "pm": [(10, 35)], "opsreview": [(11, 15)], "compare": [(12, 50)],
-          "jasper": [(9, 5)]}   # 10-27 Praise 批准：只在 brief 日期 = 今天时外发，账本已有 brief:<日> 不再发；过去的日子只写文件（jasper.py 把关）
-# 故意不补的作业和原因（10-27）：watchdog 的停机告警按「已补跑 / 按设计不补（附原因）/ 需要手动处理」三组列出
-NO_REPLAY_BY_DESIGN = {"handoff": "下一次 handoff 运行会覆盖", "followup": "下一次 followup 运行会覆盖", "opsenv": "下一轮运行自行恢复",
-                       "merger": "下一轮运行自行恢复"}
+CRON = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cron", "pi-line.cron")
+# 10-28：通用补跑。所有 cron/pi-line.cron 里带 @HH 的定时作业都在范围里（槽位从 cron 文件解析，不再手抄）。每个作业一条策略：
+#   day   = "data"（参数 = 槽位前一天）| "brief"（参数 = 槽位当天，jasper）| "slot"（参数 = 槽位当天，ledger）| None（不带日期）
+#   stale = 槽位过了几小时就不补（下一轮会覆盖 / 已经没意义）
+#   latest= True：同一窗口错过多轮只补最后一轮，前面的记 skipped:superseded
+# 作业自己的外发去重键 / sent 账本照旧把关（outbound 已发过的不重发）；opsfix 用自己的水位线，pmnudge 当天同 key 只催一次。
+# 不在下表里的 @HH 作业用 DEFAULT（不带日期、只补最后一轮、3 小时过期）。
+POLICY = {
+    "credcheck": dict(day=None, stale=EXPIRE_H, latest=True),
+    "daily": dict(day="data", stale=EXPIRE_H), "dailyretro": dict(day="data", stale=EXPIRE_H), "pm": dict(day="data", stale=EXPIRE_H),
+    "opsreview": dict(day="data", stale=EXPIRE_H), "compare": dict(day="data", stale=EXPIRE_H),
+    "jasper": dict(day="brief", stale=EXPIRE_H),   # 10-27 Praise 批准：只在 brief 日期 = 今天时外发（jasper.py 把关）
+    "ledger": dict(day="slot", stale=EXPIRE_H),
+    "handoff": dict(day=None, stale=6, latest=True), "followup": dict(day=None, stale=8, latest=True),
+    "prretro": dict(day=None, stale=12, latest=True), "p2": dict(day=None, stale=8, latest=True),
+    "pmnudge": dict(day=None, stale=1.5, latest=True), "roster": dict(day=None, stale=24, latest=True),
+    "opsfix": dict(day=None, stale=4, latest=True), "prfix": dict(day=None, stale=6, latest=True),
+    "catchup": dict(day=None, stale=4, latest=True),
+}
+DEFAULT = dict(day=None, stale=3, latest=True)
+# panoptes catch-up 不在 pi-line.cron 里（/etc/cron.d/panoptes-catch-up，7 */2）
+EXTRA = {"catchup": ([(h, 7) for h in range(0, 24, 2)], ["/workspace/panoptes/run-nightly.sh", "--catch-up", "--trigger", "catch-up", "--wait-lock", "14400"])}
+NO_REPLAY_BY_DESIGN = {}   # 10-28：都补了；保留给 watchdog（按设计不补 = replayed 里 skipped:* 的槽位）
 ORDER = ["credcheck", "daily"]
-NO_DAY = {"credcheck"}
-BRIEF_DAY = {"jasper"}   # 参数是 brief 日期（槽位当天 = 数据日 + 1），不是数据日
+
+
+def schedule(path=None):
+    """cron 文件 -> {job: {"slots": [(h, m)], "args": [...]}}，只取 run.sh JOB @HH[,HH] 的行"""
+    out = {}
+    try: lines = open(path or CRON).read().splitlines()
+    except OSError: lines = []
+    for ln in lines:
+        f = ln.split()
+        if len(f) < 9 or ln.lstrip().startswith("#") or f[6] != "$R" or not f[8].startswith("@") or not f[0].isdigit(): continue
+        job = f[7]; e = out.setdefault(job, {"slots": [], "args": f[9:]})
+        e["slots"] += [(int(h), int(f[0])) for h in f[8][1:].split(",")]
+    for j, (slots, cmd) in EXTRA.items(): out.setdefault(j, {"slots": slots, "cmd": cmd, "args": []})
+    return out
+
+
+REPLAY = {j: v["slots"] for j, v in schedule().items()}   # 兼容旧调用方
 
 
 def jl(p, d):
@@ -98,40 +130,73 @@ def in_window(t, wins, kinds=("pause", "rollback")):
     return None
 
 
-def plan(w, now, replayed=None):
-    """停机窗口 w 里错过的、该补的作业：[(job, data_day, slot_iso)]，已排好序。rollback 返回 []。"""
-    if not w or w["kind"] != "pause": return []
+def _arg_day(pol, slot):
+    d = slot.date()
+    return {"data": (d - dt.timedelta(days=1)).isoformat(), "brief": d.isoformat(), "slot": d.isoformat()}.get(pol["day"])
+
+
+def plan(w, now, replayed=None, sched=None):
+    """停机窗口 w 里错过的、该补的作业：[(job, key_day, slot_iso)]，已排好序。rollback 返回 []。
+    key_day = 数据日（day 作业，去重键 job:数据日）或槽位 ISO（不带日期的作业，去重键 job@槽位）。"""
+    return _plan(w, now, replayed, sched)[0]
+
+
+def _plan(w, now, replayed=None, sched=None):
+    if not w or w["kind"] != "pause": return [], []
     replayed = replayed if replayed is not None else jl(REPLAYED(), {})
+    sched = sched or schedule()
     a, b = dt.datetime.fromisoformat(w["start"]), dt.datetime.fromisoformat(w["end"])
-    out = []
-    for job, slots in REPLAY.items():
+    out, skipped = [], []
+    for job, sc in sched.items():
+        pol = {**DEFAULT, **POLICY.get(job, {})}
+        if pol["day"] and "latest" not in POLICY.get(job, {}): pol["latest"] = False   # 带日期的作业每个数据日各补一次
+        cand = []
         d = a.date()
         while d <= b.date():
-            for h, mi in slots:
+            for h, mi in sc["slots"]:
                 slot = dt.datetime(d.year, d.month, d.day, h, mi, tzinfo=CST)
-                if not (a < slot <= b): continue
-                if (now - slot).total_seconds() / 3600 > EXPIRE_H: continue   # 过期不补
-                day = (d - dt.timedelta(days=1)).isoformat()
-                key = f"{job}:{day}"
-                if key in replayed or any(x[0] == job and x[1] == day for x in out): continue
-                out.append((job, day, slot.isoformat(timespec="minutes")))
+                if a < slot <= b: cand.append(slot)
             d += dt.timedelta(days=1)
-    for j in NO_DAY:   # 不带数据日的作业（credcheck 只查当下）补最新一轮就够
-        xs = [x for x in out if x[0] == j]; out = [x for x in out if x[0] != j] + xs[-1:]
+        for slot in sorted(cand):
+            si = slot.isoformat(timespec="minutes")
+            day = _arg_day({"day": "data"} if pol["day"] == "brief" else pol, slot)   # 去重键 = 数据日（jasper 也是，和 10-27 的记录同口径）
+            key = f"{job}:{day}" if day else f"{job}@{si}"
+            if key in replayed or any(x[0] == job and x[1] == (day or si) for x in out): continue
+            if (now - slot).total_seconds() / 3600 > pol["stale"]: skipped.append((job, si, f"过期（超过 {pol['stale']} 小时）")); continue
+            out.append((job, day or si, si))
+        if pol.get("latest"):
+            xs = [x for x in out if x[0] == job]
+            for x in xs[:-1]: skipped.append((job, x[2], "被后一轮覆盖"))
+            out = [x for x in out if x[0] != job] + xs[-1:]
     rank = lambda j: ORDER.index(j) if j in ORDER else len(ORDER)
-    return sorted(out, key=lambda x: (rank(x[0]), x[2]))
+    return sorted(out, key=lambda x: (rank(x[0]), x[2])), skipped
 
 
-def replay(items, runner=None):
+def mark_skipped(skipped):
+    r = jl(REPLAYED(), {})
+    for job, si, why in skipped: r.setdefault(f"{job}@{si}", {"slot": si, "at": dt.datetime.now(CST).isoformat(timespec="seconds"), "status": f"skipped:{why}"})
+    jw(REPLAYED(), r)
+
+
+def command(job, kd, slot, sched=None):
+    sc = (sched or schedule()).get(job, {"args": []}); pol = {**DEFAULT, **POLICY.get(job, {})}
+    if sc.get("cmd"): return list(sc["cmd"])
+    args = list(sc.get("args") or [])
+    if job == "followup" and not args: args = ["scan" if dt.datetime.fromisoformat(slot).hour < 12 else "remind"]   # followup 按当前钟点选模式
+    if pol["day"]: args = [_arg_day(pol, dt.datetime.fromisoformat(slot))] + args
+    return [RUN, job] + args
+
+
+def replay(items, runner=None, sched=None):
     """按顺序同步跑，跑之前先落盘去重键（中途断了也不会重复补）。runner 测试用。"""
     replayed = jl(REPLAYED(), {})
-    for job, day, slot in items:
-        key = f"{job}:{day}"
+    for job, kd, slot in items:
+        key = f"{job}@{kd}" if kd == slot else f"{job}:{kd}"
         if key in replayed: continue
         replayed[key] = {"slot": slot, "at": dt.datetime.now(CST).isoformat(timespec="seconds"), "status": "running"}; jw(REPLAYED(), replayed)
-        arg = (dt.date.fromisoformat(day) + dt.timedelta(days=1)).isoformat() if job in BRIEF_DAY else day
-        cmd = [RUN, job] + ([] if job in NO_DAY else [arg])
-        rc = (runner or (lambda c: subprocess.run(c, stdin=subprocess.DEVNULL).returncode))(cmd)
+        cmd = command(job, kd, slot, sched)
+        env = dict(os.environ, QA_HOME="/workspace/mivo-qa") if job in EXTRA else None
+        rc = (runner or (lambda c: subprocess.run(c, stdin=subprocess.DEVNULL, env=env).returncode))(cmd)
         replayed[key]["status"] = "done" if rc == 0 else f"rc={rc}"; jw(REPLAYED(), replayed)
     return replayed
 
@@ -150,7 +215,9 @@ def main():
     now = dt.datetime.now(CST)
     if a[0] in ("replay", "replay-plan"):
         w = next((x for x in reversed(windows()) if len(a) < 2 or x["start"] == a[1]), None)
-        items = plan(w, now)
+        items, skipped = _plan(w, now)
+        if a[0] == "replay" and skipped: mark_skipped(skipped)
+        print(f"skipped={skipped}", flush=True)
         print(f"{now.isoformat(timespec='seconds')} window={w and (w['kind'], w['start'], w['end'])} plan={items}", flush=True)
         if a[0] == "replay" and items: print(json.dumps(replay(items), ensure_ascii=False), flush=True)
         return 0

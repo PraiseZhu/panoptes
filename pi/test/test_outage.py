@@ -17,19 +17,31 @@ assert r and r["kind"] == "rollback" and O.plan(r, T(11, 31)) == [], r
 assert O.classify({"ts": T(12).isoformat(), "seq": 5}, T(11), None, False)["why"] == ["clock-backwards"]
 assert O.classify({"ts": T(10, 59).isoformat(), "seq": 3}, T(11), 9, False)["kind"] == "rollback"
 assert O.classify({"ts": T(10, 58).isoformat(), "seq": 9}, T(11), 9, False) is None
-# 3) 补跑计划：原数据日、credcheck→daily→其余、过期不补、去重
-p = O.plan(w, T(11, 1), {})
-assert [x[0] for x in p] == ["credcheck", "daily", "jasper", "dailyretro", "pm"], p      # 10:35 pm 在窗口里；11:15 opsreview 不在
-assert all(x[1] == "2026-10-25" for x in p), p
+# 3) 补跑计划（10-28 通用）：cron 文件里所有 @HH 作业；原数据日、credcheck→daily→其余、按作业过期窗口、只补最后一轮、去重
+p, sk = O._plan(w, T(11, 1), {})
+assert [x[0] for x in p] == ["credcheck", "daily", "handoff", "followup", "roster", "jasper", "opsfix", "prretro", "dailyretro", "pmnudge", "catchup", "pm"], p
+assert dict((x[0], x[1]) for x in p)["daily"] == "2026-10-25" and dict((x[0], x[1]) for x in p)["handoff"] == "2026-10-26T06:20+08:00", p
+assert ("handoff", "2026-10-26T06:20+08:00") in [(x[0], x[1]) for x in p]                     # 00:05 不在窗口（02:40 起）
+assert ("catchup", "2026-10-26T04:07+08:00", "过期（超过 4 小时）") in sk and ("catchup", "2026-10-26T08:07+08:00", "被后一轮覆盖") in sk and ("catchup", "2026-10-26T10:07+08:00") in [(x[0], x[2]) for x in p], sk
 assert O.plan(w, T(18, 0, d=27), {}) == []                                     # 30 小时后都过期
-assert [x[0] for x in O.plan(w, T(11, 1), {"credcheck:2026-10-25": {}, "daily:2026-10-25": {}})] == ["jasper", "dailyretro", "pm"]
+p13 = O.plan(w, T(13, 0), {})                                                   # 13:00：pmnudge 10:05 已过 1.5h、catchup 10:07 过 4h 以内
+assert "pmnudge" not in [x[0] for x in p13] and "catchup" in [x[0] for x in p13], p13
+assert ("pmnudge", "2026-10-26T10:05+08:00", "过期（超过 1.5 小时）") in O._plan(w, T(13, 0), {})[1]
+assert "credcheck" not in [x[0] for x in O.plan(w, T(11, 1), {"credcheck@2026-10-26T07:01+08:00": {}})]
 long = {"kind": "pause", "start": T(6, 0, 25).isoformat(), "end": T(9, 0).isoformat(), "gap_min": 1, "why": []}
-assert [(x[0], x[1]) for x in O.plan(long, T(9, 1))] == [("credcheck", "2026-10-25"), ("daily", "2026-10-24"), ("daily", "2026-10-25"),
-    ("jasper", "2026-10-24"), ("dailyretro", "2026-10-24"), ("pm", "2026-10-24"), ("opsreview", "2026-10-24"), ("compare", "2026-10-24")], O.plan(long, T(9, 1))
+pl = O.plan(long, T(9, 1))
+assert [x[1] for x in pl if x[0] == "daily"] == ["2026-10-24", "2026-10-25"] and [x[2] for x in pl if x[0] == "pmnudge"] == [] and [x[1] for x in pl if x[0] == "ledger"] == ["2026-10-25"], pl
+assert [x[2] for x in pl if x[0] == "handoff"] == ["2026-10-26T06:20+08:00"], pl                # 只补最后一轮
+# 命令：原参数（opsfix retest --execute）、followup 按槽位钟点 scan/remind、catch-up 走 run-nightly
+S = O.schedule()
+assert O.command("opsfix", "x", "2026-10-26T09:30+08:00", S)[1:] == ["opsfix", "retest", "--execute"]
+assert O.command("followup", "x", "2026-10-26T06:27+08:00", S)[1:] == ["followup", "scan"]
+assert O.command("catchup", "x", "2026-10-26T10:07+08:00", S)[1] == "--catch-up"
 calls = []
-O.replay(p, runner=lambda c: calls.append(c) or 0)
-assert [c[1:] for c in calls] == [["credcheck"], ["daily", "2026-10-25"], ["jasper", "2026-10-26"], ["dailyretro", "2026-10-25"], ["pm", "2026-10-25"]], calls
-calls.clear(); O.replay(p, runner=lambda c: calls.append(c) or 0); assert calls == []   # 同一 作业+数据日 只补一次
+O.mark_skipped(sk); O.replay(p, runner=lambda c: calls.append(c) or 0)
+cs = [c[1:] for c in calls]
+assert cs[:2] == [["credcheck"], ["daily", "2026-10-25"]] and ["jasper", "2026-10-26"] in cs and ["pm", "2026-10-25"] in cs and ["followup", "scan"] in cs, cs
+calls.clear(); O.replay(p, runner=lambda c: calls.append(c) or 0); assert calls == []   # 同一键只补一次
 assert O.plan(w, T(11, 2)) == []
 # 4) watchdog：同一窗口里的 missed:* 并成一条
 W = load("watchdog")
@@ -40,9 +52,8 @@ missed = [k for k in probs if k.startswith("missed:")]; out = [k for k in probs 
 assert out == [f"outage:{w['start']}", f"outage:{r['start']}"], (out, list(probs))
 assert "回滚" in json.dumps(probs[out[1]], ensure_ascii=False) and "补跑" in json.dumps(probs[out[0]], ensure_ascii=False)
 fyi = json.dumps(probs[out[0]], ensure_ascii=False)   # 10-27：只列真补跑了的（REPLAYED 里有的），不说"错过的已自动补跑"
-assert "已补跑：credcheck 07:01、daily 08:35、jasper 09:05、dailyretro 09:56、pm 10:35；" in fyi and "错过的作业已自动补跑" not in fyi, fyi
-assert "jasper 09:05（" not in fyi and "handoff 06:20（下一次 handoff 运行会覆盖）" in fyi, fyi            # 按设计不补，附原因
-assert "需要手动处理：opsfix 09:30、prretro 09:45" in fyi and probs[out[0]]["kind"] == "action", fyi  # 不在两张名单里的才要手动
+assert "credcheck 07:01" in fyi and "handoff 06:20" in fyi.split("已补跑：")[1].split("；")[0] and "错过的作业已自动补跑" not in fyi, fyi
+assert "opsfix 09:30" in fyi.split("已补跑：")[1].split("；")[0] and "需要手动处理：无" in fyi and probs[out[0]]["kind"] == "fyi", fyi   # 10-28：都补了
 os.rename(O.REPLAYED(), O.REPLAYED() + ".bak"); p2 = {}; W.job_checks(T(12, 0), p2, T(0, 0, 20)); os.rename(O.REPLAYED() + ".bak", O.REPLAYED())
 assert "已补跑：无；" in json.dumps(p2[out[0]], ensure_ascii=False)
 # 10-27 review：只认本窗口（含日期）的补跑记录。旧日子的 done 不能把本窗口 rc=1 的算成已补跑；running = 正在补，不算需人工
