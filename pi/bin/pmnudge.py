@@ -29,6 +29,19 @@ def p01_prs():
             if r["level"] in ("P0", "P1"): s.add(r["pr"])
     return s
 
+def merged_refs():
+    """QA 单号 -> 修掉它的已合并 PraiseZhu PR 号（最近 100 个）"""
+    out = {}
+    try:
+        for p in gh(["pr", "list", "-R", REPO, "--author", "PraiseZhu", "--state", "merged", "--limit", "100", "--json", "number,body"]):
+            for r in re.findall(r"QA[:：]\s*#(\d+)", p.get("body") or ""): out.setdefault(int(r), p["number"])
+    except Exception: pass
+    return out
+
+def superseded(p, refs, fixed):
+    """open PR 的 QA 单号全都已被别的已合并 PR 修掉"""
+    return bool(refs) and all(r in fixed and fixed[r] != p["number"] for r in refs)
+
 def draft_since(n, created):
     try:
         ev = gh(["api", f"repos/{REPO}/issues/{n}/timeline?per_page=100", "--paginate"])
@@ -43,12 +56,14 @@ def main():
     prs = gh(["pr", "list", "-R", REPO, "--author", "PraiseZhu", "--state", "open", "--limit", "100",
               "--json", "number,title,isDraft,createdAt,body,headRefName,statusCheckRollup"])
     nof, p01 = nofix_prs(), p01_prs()
+    fixed = merged_refs()   # 10-28：QA 单号已被合并的修复 PR 修掉 -> 这个 draft 是重复 / 被取代的，不催（#1343 被 #1345 取代）
     qa, skip = [], []
     for p in prs:
         refs = [int(x) for x in re.findall(r"QA[:：]\s*#(\d+)", p.get("body") or "")]
         if not refs: continue
         if re.search(r"keel|lifeline", (p.get("headRefName") or "") + " " + p["title"], re.I): skip.append(f"#{p['number']} keel/lifeline 叠加链"); continue
         if all(r in nof and r not in p01 for r in refs): skip.append(f"#{p['number']} 只关联判「不修」的 P2（{refs}）"); continue
+        if superseded(p, refs, fixed): skip.append(f"#{p['number']} 被已合并的 {'、'.join(sorted(set('#' + str(fixed[r]) for r in refs)))} 取代"); continue
         p["refs"] = refs; qa.append(p)
     st = lambda c: (c.get("conclusion") or c.get("state") or c.get("status") or "").upper()
     nm = lambda c: c.get("name") or c.get("context") or "?"
