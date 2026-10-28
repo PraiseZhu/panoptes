@@ -78,6 +78,8 @@ process.exit(0)`
   writeFileSync(join(bin, 'gh'), fakeGh); chmodSync(join(bin, 'gh'), 0o755)
   const sender = (name, out) => { const p = join(root, name); writeFileSync(p, `const fs=require('fs');const a=process.argv.slice(2);const i=a.indexOf('--text-file')>=0?a.indexOf('--text-file'):a.indexOf('--content-file');fs.appendFileSync(${JSON.stringify(log)},'${name} '+a.join(' ')+'\\n'+(i>=0?fs.readFileSync(a[i+1],'utf8')+'\\n':''));console.log(${JSON.stringify(out)})`); return p }
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, QA_HOME: QA, MIVO_QA_HANDOFF_REPOS: '', MIVO_SLACK_BOT_TOKEN: '',
+    // pin the unified cutoff after the fixture's sentAt (now-100h): legacy receipts/reminders only apply to DMs sent before it; the fixed production cutoff would make this rot
+    MIVO_QA_UNIFIED_SINCE: new Date(Date.now() - 50 * HOURS).toISOString(),
     MIVO_QA_DM_SENDER: sender('dm.cjs', JSON.stringify({ ok: true })),
     MIVO_QA_GROUP_SENDER: sender('feishu.cjs', JSON.stringify({ ok: true })),
     MIVO_QA_SLACK_SENDER: sender('slack.cjs', 'ok ts=1.2 channel=C0CAH3W61N2 replies=0') }
