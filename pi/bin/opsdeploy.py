@@ -22,6 +22,10 @@ def main():
         import picall_sync; synced = picall_sync.sync()
         if synced: log("pi-call synced from repo:", ", ".join(synced))
     except Exception as e: log("pi-call sync failed:", str(e)[:200])
+    try:   # 10-28：/etc/cron.d/pi-fallback 以仓库 pi/cron/pi-line.cron 为准；部署后或每轮有漂移就校验→备份→安装，diff 写日志
+        import cron_sync; r = cron_sync.sync()
+        if r: log("pi-fallback cron:", r[1]); r[2] and log("pi-fallback cron diff:\n" + r[2][:4000])
+    except Exception as e: log("pi-fallback cron sync failed:", str(e)[:200])
     return 0
 
 
