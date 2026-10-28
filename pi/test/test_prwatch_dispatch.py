@@ -176,8 +176,10 @@ class TestDraftCI(T):
         na, nl = len(self.acts), len(self.launches); st["drafts_at"] = 0; prwatch.check_drafts(st)
         return self.acts[na:] + self.launches[nl:]
     def test_green_goes_ready(self):
-        self.draft("a" * 40, [("unit", "SUCCESS"), ("review-pr", "FAILURE")])
+        self.draft("a" * 40, [("unit", "SUCCESS")])                               # review-pr not run yet -> ready
         self.assertEqual([x["type"] for x in self.tick({})], ["gh.pr.ready"])
+        self.draft("b" * 40, [("unit", "SUCCESS"), ("review-pr", "FAILURE")])     # 10-29 ready_guard: review-pr red on this head -> no ready
+        self.assertEqual(self.tick({}), [])
     def test_only_bot_fix_prs(self):   # #1166: a session's draft with "QA: #N" is not ours
         self.draft("a" * 40, [("unit", "FAILURE")], body="QA: #1179")
         self.assertEqual(self.tick({}), [])

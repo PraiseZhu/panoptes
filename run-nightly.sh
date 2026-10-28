@@ -16,7 +16,7 @@
 #                 given up and recorded in system_health (reports/catch-up/run-*.json and the next daily report).
 #                 Only one catch-up at a time (catch-up.lock; a second one exits 0 with one '[catch-up] … skipped' line).
 #                 With --create-issues (and ARGUS_ALLOW_ISSUES=1 exported) the children get --create-issues instead.
-#                 Installed by scripts/bootstrap-box.sh as a cron job every 2 hours (scripts/catch-up.cron).
+#                 Installed by scripts/bootstrap-box.sh as an hourly cron job at :07 (scripts/catch-up.cron) that runs only on even Beijing hours (PANOPTES_CATCHUP_GATE=even).
 #   --trigger     who started this run, recorded as run.trigger: event (on-merge trigger) | catch-up | manual.
 #                 Default: manual; --catch-up defaults to catch-up (its children get --trigger catch-up).
 #   --date        Asia/Shanghai calendar day to report on (default: yesterday in Shanghai)
