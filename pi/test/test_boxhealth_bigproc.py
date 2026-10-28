@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""python3 test/test_boxhealth_bigproc.py -- 10-28: memory alert at < 8G, and the hourly long-lived big-process scan
+"""python3 test/test_boxhealth_bigproc.py -- 10-28: tiered memory alert (< 8G bots, < 3G + Praise), and the hourly long-lived big-process scan
 (elapsed > 30 min, RSS > 1G, not whitelisted; report only). Fake process table only; never reads the real ps."""
 import os, sys, tempfile
 T = tempfile.mkdtemp(prefix="boxhealth-bigproc-"); os.environ.update(PI_STATE=f"{T}/state", HOME=f"{T}/home")
@@ -34,4 +34,15 @@ def streak(avails):
 assert streak([9000] + [4600] * 6) == 6          # 4.6G (10-28) now counts as low
 assert streak([4600] * 3 + [8192] * 2) == 0      # >= 8G is fine
 assert streak([2000] * 4) == 4
+# 10-28 (PM): tiered memory alert
+assert B.MEM_CRIT == 3072
+assert B.mem_tier(5120, 6, 0) == "warn"            # 5G: bots only, no Praise DM
+assert B.mem_tier(2048, 6, 6) == "crit"            # 2G: bots + Praise DM
+assert B.mem_tier(5120, 4, 0) == "" and B.mem_tier(2048, 6, 4) == "warn" and B.mem_tier(9000, 0, 0) == ""
+st = {}
+assert B.mem_bots_due("warn", st, 1000) and not B.mem_bots_due("warn", st, 1060)   # dedupe within tier
+assert B.mem_bots_due("crit", st, 1120)                                             # escalation fires even after warn
+assert not B.mem_bots_due("warn", st, 1180) and not B.mem_bots_due("crit", st, 1240)
+assert B.mem_bots_due("crit", st, 1240 + 86401)                                     # 24h reminder
+assert not B.mem_bots_due("", st, 90000) and st["mem_tier"] == "" and B.mem_bots_due("warn", st, 90060)
 print("ok test_boxhealth_bigproc")
