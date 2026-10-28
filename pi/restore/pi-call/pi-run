@@ -4,4 +4,4 @@
 here="$(cd "$(dirname "$0")" && pwd)"
 export PATH=$HOME/.local/bin:$PATH
 dir="$1"; shift; prompt="$1"; shift
-exec "$here/pi-call.mjs" "$dir" deepseek/deepseek-flash "$prompt" --allow-write --thinking high "$@"
+exec "$here/pi-call.mjs" "$dir" tap/deepseek/deepseek-flash "$prompt" --allow-write --thinking high "$@"

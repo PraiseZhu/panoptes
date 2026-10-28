@@ -14,7 +14,7 @@ Task kinds (positional SPECs or JSON):
               write (default true with repo, else false), web (false), timeout (s, 1800).
               repo -> a fresh worktree PI_WORK/wt/dispatch/<caller>-<id> on new branch dispatch/<caller>-<id> (marked
               .pi-owned.json, so janitor reaps it after the task ends; commits stay on the branch in that repo).
-Results: PI_STATE/out/dispatch/<caller>/<id>.json (status, text, cwd, branch); logs out/logs/pi-dispatch-<caller>-<day>.log.
+Results: PI_STATE/out/dispatch/<caller>/<id>.json (status, text, cwd, branch); logs out/logs/pi-dispatch-<caller>-<day>.log (smoke/test callers: out/test-logs/).
   pi-dispatch --caller NAME [--max-wait S] [--dry-run] [SPEC ...] [--prompt ... | --task JSON | --tasks FILE]
   pi-dispatch --status [--caller NAME]"""
 import argparse, fcntl, json, os, re, subprocess, sys, time, uuid
@@ -26,9 +26,13 @@ LOCK = "/tmp/pi-dispatch.lock"   # admit + launch one at a time across callers: 
 POLL_S = 20
 TICKET = re.compile(r"^(?:qa:(\d+)(?::([0-9a-f]+))?|revise:(\d+)|next)$")
 
+def logdir(caller):
+    """10-28：smoke / test 调用方的日志不进生产日志目录（watchdog / 日报扫 out/logs），放 out/test-logs/"""
+    d = f"{BASE}/out/test-logs" if re.match(r"(smoke|test)(\b|[-_]|$)", caller or "") else f"{BASE}/out/logs"
+    os.makedirs(d, exist_ok=True); return d
+
 def logf(caller):
-    os.makedirs(f"{BASE}/out/logs", exist_ok=True)
-    return f"{BASE}/out/logs/pi-dispatch-{caller}-{now_cst():%Y-%m-%d}.log"
+    return f"{logdir(caller)}/pi-dispatch-{caller}-{now_cst():%Y-%m-%d}.log"
 
 def log(caller, msg):
     with open(logf(caller), "a") as f: f.write(f"{now_cst():%H:%M:%S} [{caller}] {msg}\n")
@@ -77,8 +81,8 @@ def launch(caller, task, dry=False):
     tid = f"{now_cst():%m%d-%H%M%S}-{task['name']}-{uuid.uuid4().hex[:4]}"
     argv = argv_for(task, caller, tid)
     if dry: log(caller, f"DRY would launch {tid}: {argv[:4]}"); return tid
-    os.makedirs(f"{BASE}/out/logs/pi-dispatch", exist_ok=True)
-    with open(f"{BASE}/out/logs/pi-dispatch/{caller}-{tid}.log", "a") as lf:
+    os.makedirs(f"{logdir(caller)}/pi-dispatch", exist_ok=True)
+    with open(f"{logdir(caller)}/pi-dispatch/{caller}-{tid}.log", "a") as lf:
         p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=lf, stderr=subprocess.STDOUT, start_new_session=True,
                              cwd=f"{PI_CODE}/bin", env=dict(os.environ, PI_DISPATCH_CALLER=caller, PRFIX_DISPATCHED="1"))
     log(caller, f"launched {tid} pid={p.pid} ({task['kind']})"); return tid

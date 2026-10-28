@@ -24,7 +24,7 @@ const SESSION_DIR =
   process.env.PI_TASK_SESSION_DIR || join(homedir(), ".pi", "agent", "sessions", "tasks");
 const PI_BIN = process.env.PI_BIN || "pi";
 
-const DEFAULT_MODEL = "deepseek/deepseek-flash";
+const DEFAULT_MODEL = "tap/deepseek/deepseek-flash";   // 10-28: only the tap provider exists in ~/.pi/agent/models.json
 const DEFAULT_THINKING = "high";
 const DEFAULT_TIMEOUT = 300; // seconds, same default as pi-call.mjs
 const EVENT_TEXT_MAX = 500;

@@ -18,6 +18,10 @@ def main():
         os.makedirs(os.path.dirname(f), exist_ok=True)
         with open(f, "a") as fh: fh.write(f"\n## {now_cst().strftime('%H:%M')} 部署（opsdeploy，每 10 分钟）\n{L[-1]}\n")
     if err: log("deploy:", err)
+    try:   # 10-28：线上 Pi 启动器以仓库为准，有漂移就同步（boxcheck 报漂移）
+        import picall_sync; synced = picall_sync.sync()
+        if synced: log("pi-call synced from repo:", ", ".join(synced))
+    except Exception as e: log("pi-call sync failed:", str(e)[:200])
     return 0
 
 
