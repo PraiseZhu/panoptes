@@ -34,7 +34,8 @@ R=/workspace/panoptes/pi/bin/run.sh
 5  * * * * box $R handoff @00
 20 * * * * box $R handoff @06,15
 35 * * * * box $R handoff @18
-35 * * * * box $R daily @08
+# 10-28: 日报 08:35 -> 07:35（box 暂停曾把日报推过 09:00）；写完动作立即调 outbound 只发日报自己的 key；08:35 为重试，台账去重
+35 * * * * box $R daily @07,08
 5  * * * * box $R jasper @09
 45 * * * * box $R prretro @09
 # 10-28: pmnudge 改为北京 09–22 点每小时（加 >1h 无进展停滞催办）

@@ -3,7 +3,7 @@
 fleet-mode == pi AND $PI_STATE/outbound-enabled exists (PI_FLEET_MODE env may override the mode
 for simulation; the flag file has no override). Idempotent: out/outbound/ledger.json done-ledger + each handler
 checks the target's real state before acting. Never prints secrets.
-Usage: outbound.py [--dry-run] [--days N (default 2)] [--job JOB] [--key KEY]
+Usage: outbound.py [--dry-run] [--days N (default 2)] [--job JOB] [--key KEY ...] (--key repeatable: only those keys)
        outbound.py [--dry-run] --resend-key KEY [--date YYYY-MM-DD]
   --dry-run: print what would go to whom; validate every target with read-only calls only.
   --resend-key: one-shot 补发 of exactly that key (10-26): ignores the --days window (--date picks the actions day when the key
@@ -622,7 +622,7 @@ def handler(a):
 
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--dry-run", action="store_true"); ap.add_argument("--days", type=int, default=2)
-    ap.add_argument("--job"); ap.add_argument("--key")
+    ap.add_argument("--job"); ap.add_argument("--key", action="append")
     ap.add_argument("--resend-key", help="one-shot 补发 of this dedupe key (bypasses the day window and the stale-relay TTL)")
     ap.add_argument("--date", help="with --resend-key: the YYYY-MM-DD actions file to take the key from")
     o = ap.parse_args()
@@ -676,7 +676,7 @@ def main():
         if day not in days or (o.job and job != o.job): continue
         for a in jload(f, {}).get("actions", []):
             k, t = a["key"], a.get("type", "")
-            if o.key and k != o.key: continue
+            if o.key and k not in o.key: continue
             if resend:
                 if k != resend: continue
                 a = {**a, "_resend": True}
