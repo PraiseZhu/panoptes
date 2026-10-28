@@ -32,7 +32,39 @@ def zombies():
         except OSError: pc = "?"
         out.append({"pid": int(f[0]), "ppid": int(f[1]), "age_s": int(f[3]), "comm": f[4], "parent": pc, "platform": bool(PLATFORM.search(pc))})
     return out
-def low_streak(limit=3072, n=30):
+MEM_LIMIT = 8192   # 10-28: 3G -> 8G, aligned with the QA full-run gate (an orphan grep held 4.8G for 4h, avail 4.6G, no alert)
+MEM_TO = ["Mivo 测试项目经理", "Mivo QA 运维"]          # names, routed by outbound's SendToAgent relay
+# 10-28 hourly long-lived big-process scan: report only, never kill. Whitelist by a process's OWN argv (first two words) or by
+# ancestry from a QA root; a child of sand-* is NOT whitelisted (the 10-28 grep's parent was sand-exit-watch).
+BIG_RSS_MB, BIG_AGE_S = 1024, 1800
+QA_ROOT = re.compile(r"panoptes|nightly|catch-up")
+SELF_WL = re.compile(r"panoptes|nightly|catch-up|/usr/lib/cindy|exec-daemon|earlyoom|^sand-|/sand-|/opt/sand/")
+def _head(p): return " ".join(p["args"].split()[:2])
+def big_procs(rows):
+    """rows: [{pid, ppid, rss_mb, etimes, comm, args}] -> the ones to report (elapsed > 30 min, RSS > 1G, not whitelisted)"""
+    by = {r["pid"]: r for r in rows}
+    def wl(r):
+        h = _head(r)
+        if SELF_WL.search(h) or r["comm"].startswith("sand-") or PLATFORM.search(r["args"]): return True
+        seen = set(); q = by.get(r["ppid"])
+        while q and q["pid"] not in seen and q["pid"] > 1:
+            if QA_ROOT.search(_head(q)): return True
+            seen.add(q["pid"]); q = by.get(q["ppid"])
+        return False
+    out = []
+    for r in rows:
+        if r["etimes"] > BIG_AGE_S and r["rss_mb"] > BIG_RSS_MB and not wl(r):
+            pr = by.get(r["ppid"], {})
+            out.append({**r, "args": r["args"][:120], "parent": f'{r["ppid"]}:{pr.get("comm", "?")}'})
+    return out
+def ps_rows():
+    rows = []
+    for line in subprocess.run(["ps", "-eo", "pid=,ppid=,rss=,etimes=,comm=,args="], capture_output=True, text=True).stdout.splitlines():
+        f = line.split(None, 5)
+        if len(f) >= 5 and f[0].isdigit():
+            rows.append({"pid": int(f[0]), "ppid": int(f[1]), "rss_mb": int(f[2]) // 1024, "etimes": int(f[3]), "comm": f[4], "args": f[5] if len(f) > 5 else f[4]})
+    return rows
+def low_streak(limit=MEM_LIMIT, n=30):
     """consecutive most-recent minutes in box-ops mem.log with MemAvailable < limit (one sample per minute)"""
     try: lines = subprocess.run(["tail", "-n", str(n * 10), "/workspace/box-ops/mem.log"], capture_output=True, text=True).stdout.splitlines()
     except Exception: return 0
@@ -165,9 +197,9 @@ def main():
     if float(la[2]) > ncpu: alerts.append(("load", f"15 分钟负载 {la[2]} > {ncpu} 核（持续高）"))
     low_min = low_streak()
     cause = mem_cause(bal, rss_top)
-    if avail < 3072 and low_min >= 5: alerts.append(("mem", f"可用内存持续 {low_min} 分钟 < 3G（现 {avail}MB，cause={cause}，balloon={bal}MB，top5 RSS={rss_top}MB"
+    if avail < MEM_LIMIT and low_min >= 5: alerts.append(("mem", f"可用内存持续 {low_min} 分钟 < 8G（现 {avail}MB，cause={cause}，balloon={bal}MB，top5 RSS={rss_top}MB"
                                                      + ("；宿主机 balloon 占用，guest 内无法释放，需平台侧处理）" if cause == "balloon" else "）")))
-    elif avail < 3072 or low_min: issues.append(f"可用内存瞬时低（现 {avail}MB，连续 {low_min} 分钟；多为平台快照回收，不告警）")
+    elif avail < MEM_LIMIT or low_min: issues.append(f"可用内存瞬时低（现 {avail}MB，连续 {low_min} 分钟；多为平台快照回收，不告警）")
     swap_used = int(sh("free -m | awk '/^Swap:/{print $3}'") or 0)
     if swap_used > 4096: alerts.append(("swap", f"swap 已用 {swap_used}MB > 4G（真实内存压力）"))
     for pkg in ("cron", "earlyoom", "logrotate"):   # after a reset: reinstall is in grokbot-box restore.d/10-packages (apt https)
@@ -190,6 +222,10 @@ def main():
         issues.append(f"根目录有 /node_modules（{', '.join(sorted(os.listdir('/node_modules')))[:120]}）")
         fix(f"sudo mv /node_modules {dst}（未删除；需通知 Praise PR bot）", f"sudo -n mv /node_modules {dst}", fixed)
         events.append(f"/node_modules 已改名 {dst}，请转告 Praise PR bot" if not DRY else "/node_modules 待改名")
+    big = big_procs(ps_rows()); seen = st.get("bigproc_seen") or {}
+    keyof = lambda b: f'{b["pid"]}@{int(time.time() - b["etimes"]) // 60}'      # pid + start minute: pid reuse is a new process
+    new_big = [b for b in big if keyof(b) not in seen]; st["bigproc_seen"] = {keyof(b): 1 for b in big}
+    if big: issues.append("长驻大进程 " + ", ".join(f'{b["pid"]}({b["rss_mb"]}M,{b["etimes"] // 60}min)' for b in big[:5]))
     cand, locks = cleanup_candidates(); cand_b = du([p for p, k in cand if k != "trunc"]) if cand else 0
     clean = not DRY; freed = 0
     if clean and cand:
@@ -212,7 +248,7 @@ def main():
     # Old rule (alerts + issues, new key every hour) DM'd platform noise hourly: Xvfb zombies, snapshot-time memory reclaim.
     # 2026-10-24（Praise：私信看不懂）：按 praise_notice 的骨架写；恢复只告诉他之前要他动手的（自动修复失败）；释放磁盘这类不发
     def alert_item(code, raw):
-        if code == "mem": return PN.item("auto", "机器内存一直不够", f"可用内存已经连续 {low_min} 分钟低于 3G（现在 {avail}MB）。",
+        if code == "mem": return PN.item("auto", "机器内存一直不够", f"可用内存已经连续 {low_min} 分钟低于 8G（现在 {avail}MB，cause={cause}）。",
             "测试和修 PR 会排队等内存，变慢；内存太低时系统可能杀掉占内存最多的进程。", auto="重任务自动排队等内存；24 小时内还没好会再提醒你")
         if code == "swap": return PN.item("auto", "机器内存压力很大", f"机器已经把 {raw.split('已用 ')[-1].split('MB')[0]}MB 内容挪到硬盘上的交换区（超过 4G），说明内存真的不够用了。",
             "所有任务都会变慢。", auto="重任务自动排队等内存；24 小时内还没好会再提醒你")
@@ -237,8 +273,16 @@ def main():
         elif "/node_modules" in e and "改名" in e: items.append(PN.item("fyi", "机器根目录多出来的 node_modules 被挪开了",
             f"机器根目录（/）下出现了一个 node_modules 文件夹，会干扰测试，已经改名挪开（没删）：{e.split('已改名 ')[-1].split('，')[0]}。",
             "如果修 PR bot 正好在用它，可能要重装依赖。", todo="告诉修测试的会话一声，让修 PR bot 那边知道这件事"))
-    msg = PN.text(*items)
+    msg = PN.text(*items); acts = []
+    mem_raw = next((x for c, x in alerts if c == "mem"), None)
+    if mem_raw and items and "mem" in sig.split(","):
+        acts += [{"key": f"boxhealth-mem:{d}:{t.strftime('%H%M')}:{n}", "type": "SendToAgent", "to": n, "priority": True, "text": mem_raw} for n in MEM_TO]
+    if new_big:
+        acts.append({"key": f"boxhealth-bigproc:{d}:{t.strftime('%H%M')}", "type": "SendToAgent", "to": MEM_TO[0], "priority": False,
+                     "text": "长驻大进程（>30 分钟且 RSS>1G，非白名单；只报告，未杀）：\n" + "\n".join(
+                         f'pid={b["pid"]} parent={b["parent"]} rss={b["rss_mb"]}MB elapsed={b["etimes"] // 60}min cmd={b["args"]}' for b in new_big)})
     if not DRY: write_atomic(STATE, json.dumps(st, ensure_ascii=False, indent=1))
-    if DRY: print("would send:", msg)
-    elif msg: record_actions("box", d, [{"key": f"boxhealth:{d}:{t.strftime('%H%M')}", "type": "slack.dm", "to": "Praise", "text": msg}])
+    if msg: acts.insert(0, {"key": f"boxhealth:{d}:{t.strftime('%H%M')}", "type": "slack.dm", "to": "Praise", "text": msg})
+    if DRY: print("would send:", *(f'{a["to"]}: {a["text"]}' for a in acts), sep="\n  ")
+    elif acts: record_actions("box", d, acts)
 if __name__ == "__main__": sys.exit(main())
