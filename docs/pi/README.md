@@ -14,7 +14,7 @@
 ## 覆盖表
 | Bot | 职责 | Pi line 脚本 | 时间（北京） | tier | 影子产出 | 对比方法 | 状态 |
 |---|---|---|---|---|---|---|---|
-| Mivo QA 日报 | 日报草稿 + 私信/交接 issue 动作 | daily.py | 08:35 | 无模型 | out/daily/<数据日>.md/.json/.actions.json | compare：PR 集合、各级计数、逐 PR 级别 vs report/sent/<日>/*.txt | ✅ 已跑 |
+| Mivo QA 日报 | 日报草稿 + 私信/交接 issue 动作 | daily.py | 07:35（08:35 重试；写完即调 outbound 发自己的 key） | 无模型 | out/daily/<数据日>.md/.json/.actions.json | compare：PR 集合、各级计数、逐 PR 级别 vs report/sent/<日>/*.txt | ✅ 已跑 |
 | | 交接仓回执扫描 / 15:20 逾期提醒 | handoff.py | 00:05、06:20、15:20、18:35 | 无 | out/handoff/<日>.md、.actions.json | vs 交接仓 daily/…/receipts.md | ✅ |
 | | 23:30 重建台账 | ledger.py（build-ledger.mjs --dry-run） | 23:40 | 无 | out/ledger/<日>.json/.md | summary 对比 ledger/daily | ✅ |
 | | 09:56 日报复盘 | dailyretro.py | 09:56 | 有（work 档） | out/dailyretro/<日>.md（只写文件，不发群、不私信；发不发、发到哪等 Praise 定） | takeover/dailyretro | ✅ 只写文件 |

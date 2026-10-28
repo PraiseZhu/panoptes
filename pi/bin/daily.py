@@ -14,7 +14,7 @@ qa-error / unconfirmed failed handoff cases = 待核实（QA 自查）: listed i
 DM = notify_via_feishu true, not PraiseZhu, not bots, key dm:<day>:<pr> once.
 Reconciliation: when Grok already published the day (sent/<day>/group-content.txt), PRs absent from that text are
 held (carry_over), never re-sent; calibrations in conf/daily-calibrations.json."""
-import sys, json, re, difflib
+import sys, json, re, difflib, subprocess
 from lib import *
 import praise_notice as PN
 from finding_policy import author_findings, pending_items, effective_severity
@@ -216,6 +216,17 @@ def render(day, items, fault, carry, cal, resend=False):
     L.append("分级说明（以审查机统一分级为准）：P0 正在发生的大范围事故；P1 受支持的使用场景里确实能碰到、会让核心功能失效或出严重数据 / 安全问题；P2 本 PR 改动里已证实的一般问题，也需要修，可排在 P1 之后；P3 不报。待核实的先由 QA 自己查清，不找作者。")
     return "\n".join(L) + "\n", P0, P1, P2, P3, dms
 
+def send_own(day, keys, run=subprocess.run):
+    """10-28: send daily's own keys right after recording them, through the normal outbound entry point (same gates: fleet-mode +
+    outbound-enabled, memory floor, done-ledger, praise-dm-mute, exec lock). --job daily + one --key per own key: nothing else goes
+    out. A failure never fails daily; the */10 outbound run picks up whatever is still pending."""
+    if not keys: return None
+    cmd = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "outbound.py"), "--job", "daily", "--days", "2"]
+    for k in keys: cmd += ["--key", k]
+    try:
+        r = run(cmd, timeout=900); log(f"outbound (own keys {len(keys)}) rc={r.returncode}"); return r.returncode
+    except Exception as e: log(f"outbound (own keys) failed: {type(e).__name__} -> left to the */10 run"); return None
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]; fl = {a for a in sys.argv[1:] if a.startswith("--")}
     day = args[0] if args else data_day([0]); ro = "--render-only" in fl
@@ -255,6 +266,7 @@ def main():
                          "这些 PR 在日报里是「没测 / 测得不完整」，作者收不到它们的问题。",
                          todo=PN.ask_session(f"Mivo QA 日报（数据日 {day}）测试系统有问题：{'、'.join('#%d' % n for n in fault) or '见 out/daily/' + day + '.json 的 health'}，查原因，能补测就补测")))})
     record_actions("daily", day, acts)
+    if "--no-send" not in fl: send_own(day, [a["key"] for a in acts])
     meta = {"day": day, "window_utc": utc_window(day), "merged": [p["number"] for p in prs], "merged_prs": prs,
             "reported": [i["n"] for i in items], "carry_over": carry, "fault": fault, "health": sick,
             "partially_verified": [{"pr": i["n"], "why": "coverage 未测"} for i in items if i.get("verify") == "partial"],

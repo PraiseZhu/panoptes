@@ -45,7 +45,7 @@ CADENCE = {  # job: max minutes between clean runs (hourly jobs: one missed slot
     "cindy": 20, "outbound": 40, "merger": 75, "boxhealth": 150, "boxcheck": 150, "opsenv": 150, "opsdeploy": 40, "janitor": 40,
 }
 DAILY = {  # job: [(Beijing hour, minute)] -- mirrors pi-fallback.cron
-    "credcheck": [(7, 1)], "daily": [(8, 35)], "jasper": [(9, 5)], "opsfix": [(9, 30)],
+    "credcheck": [(7, 1)], "daily": [(7, 35), (8, 35)], "jasper": [(9, 5)], "opsfix": [(9, 30)],
     "prretro": [(9, 45)], "dailyretro": [(9, 56)], "pm": [(10, 35)], "opsreview": [(11, 15)], "p2": [(12, 20), (18, 20)],
     "compare": [(12, 50)], "handoff": [(0, 5), (6, 20), (15, 20), (18, 35)], "ledger": [(23, 40)], "followup": [(6, 27), (15, 27)],
 }

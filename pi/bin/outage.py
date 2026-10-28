@@ -161,7 +161,9 @@ def _plan(w, now, replayed=None, sched=None):
             si = slot.isoformat(timespec="minutes")
             day = _arg_day({"day": "data"} if pol["day"] == "brief" else pol, slot)   # 去重键 = 数据日（jasper 也是，和 10-27 的记录同口径）
             key = f"{job}:{day}" if day else f"{job}@{si}"
-            if key in replayed or any(x[0] == job and x[1] == (day or si) for x in out): continue
+            if key in replayed: continue
+            if any(x[0] == job and x[1] == (day or si) for x in out):   # 10-28: daily @07,08 -- the 08:35 retry has the same data day
+                skipped.append((job, si, "同数据日已补跑")); continue
             if (now - slot).total_seconds() / 3600 > pol["stale"]: skipped.append((job, si, f"过期（超过 {pol['stale']} 小时）")); continue
             out.append((job, day or si, si))
         if pol.get("latest"):
