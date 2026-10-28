@@ -3,6 +3,11 @@
 # list PRs merged yesterday + today (Asia/Shanghai), test only those without a matching reports/merged/PR-N.json
 # (through the run lock), exit 0 within seconds when nothing is missing. run-nightly.sh also sweeps stale /tmp/argus-*
 # dirs (scripts/sweep-tmp.sh, > 24 h, not in use) at every start, i.e. on every cron tick.
+# CRON_TZ=Asia/Shanghai (10-29): the schedule is meant in Beijing time -- "7 */2" = :07 on even Beijing hours (00:07, 02:07 …
+# 10:07 …), which is what the pi line plans around ("10:07 catch-up", "避开偶数点 :07"). Times unchanged by this line: logs of
+# 10-28 show 14:07 / 16:07 +08:00 firings with the box on Asia/Taipei (= UTC+8). Debian cron 3.0pl1 does not implement CRON_TZ
+# (it only passes it to the job's environment), so on that daemon the hours still follow the box zone; cronie honours it.
+CRON_TZ=Asia/Shanghai
 SHELL=/bin/bash
 PATH=/usr/local/bin:/usr/bin:/bin
 7 */2 * * * @USER@ QA_HOME=@QA_HOME@ @PANOPTES_DIR@/run-nightly.sh --catch-up --trigger catch-up --wait-lock 14400 >>@QA_HOME@/argus-root/logs/catch-up-cron.log 2>&1

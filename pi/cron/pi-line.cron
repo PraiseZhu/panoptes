@@ -5,6 +5,10 @@
 # nothing here depends on it: entries fire hourly at a fixed minute and run.sh gates on the Beijing hour (@HH[,HH]).
 # panoptes catch-up's own "7 */2" therefore lands on odd OR even Beijing hours; heavy work coordinates through
 # /workspace/mivo-qa/argus-root/nightly.lock instead of clock slots.
+# CRON_TZ=Asia/Shanghai (10-29): declares that every time in this file is Beijing time. No firing time changes: all entries
+# have hour field "*" (only the minute is fixed), and the Beijing hour is still gated by run.sh @HH -- needed anyway because
+# Debian cron 3.0pl1 does not implement CRON_TZ (it only exports it to the jobs).
+CRON_TZ=Asia/Shanghai
 SHELL=/bin/bash
 PATH=/usr/local/bin:/usr/bin:/bin
 R=/workspace/panoptes/pi/bin/run.sh

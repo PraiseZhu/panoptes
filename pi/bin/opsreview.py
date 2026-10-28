@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """运维 daily review (Grok: 10:57; Pi cron 11:15 CST, clear of even-hour :07 catch-up) daily review: run read-only collector into out/, then 'review' tier (gpt-6-luna, same as panoptes)
-re-checks the data day's P1 code-review findings against code (calibration candidates). Cap 4 calls."""
+re-checks the data day's P1 code-review findings against code (calibration candidates). Cap 4 calls.
+--dry-run (or PI_OPSREVIEW_DRYRUN=1): nothing leaves the box -- the read-only collector still runs, but no model (pi) calls and
+no outbound action is recorded; output goes to review-<day>.dryrun.md / .dryrun.post.md so the real files are untouched.
+Usage: opsreview.py [YYYY-MM-DD] [--dry-run]"""
 import sys
 from lib import *
 from p2 import src_tree
-def main():
-    day = data_day(sys.argv); out = f"{BASE}/out/ops/review-{day}.md"
+def main(argv=None):
+    argv = list(sys.argv if argv is None else argv)
+    dry = "--dry-run" in argv or os.environ.get("PI_OPSREVIEW_DRYRUN") == "1"
+    argv = [a for a in argv if a != "--dry-run"]
+    sfx = ".dryrun" if dry else ""
+    day = data_day(argv); out = f"{BASE}/out/ops/review-{day}{sfx}.md"
     r = subprocess.run(["python3", "/workspace/review-ops/bin/daily_review.py", "--date", day, "--out", out],
                        capture_output=True, text=True, timeout=900)
     log("collector rc", r.returncode, r.stderr[-200:])
@@ -18,6 +25,8 @@ def main():
               ("P1" in (x.get("severity"), x.get("llm_severity")) or "P0" in (x.get("severity"), x.get("llm_severity")))]
         if not fs or n >= int(os.environ.get("OPS_CAP", "4")): continue
         n += 1
+        if dry:
+            cal.append(f"### #{p['number']}（{f}）[dry-run] 将校准 {len(fs)} 条 P1/P0，未调用模型"); continue
         try:
             cwd = src_tree(rr["pr"].get("tested_sha") or rr["pr"]["merge_sha"])
             q = "\n".join(f"- {x.get('title')} @ {x.get('file')}:{x.get('line')} evidence={json.dumps(x.get('evidence'),ensure_ascii=False)[:1200]}" for x in fs)
@@ -34,7 +43,9 @@ Findings:
     body = open(out).read(); head = next((l for l in body.splitlines() if l.startswith("合并 PR")), "")
     post = (f"【运维复盘 {day}（Pi line）】{head}\n" f"产出对齐/准确度/修复跟进见 {out}\n"
             f"P1 校准提议 {n} 条（未落盘，待人工核实）。正式版仍写 /workspace/review-ops/daily/{day}.md（主持人）。")
-    pp = f"{BASE}/out/ops/review-{day}.post.md"; write_atomic(pp, post + "\n")
+    pp = f"{BASE}/out/ops/review-{day}{sfx}.post.md"; write_atomic(pp, post + "\n")
+    if dry:
+        log("dry-run: no outbound action recorded", pp); print(f"[dry-run] {out}\n[dry-run] would post (not recorded):\n{post}"); return
     record_actions("ops", day, [{"key": f"ops-review:{day}", "type": "grok.group", "to": "MivoCanvas QA",
         "text_file": pp, "dedupe_basis": f"/workspace/review-ops/daily/{day}.md exists => Grok line already reviewed; Grok group has no API (not executable)"}])
 if __name__ == "__main__": main()
