@@ -20,6 +20,10 @@ def main():
     h = age_min("/workspace/box-ops/health.log"); L.append(f"- 电脑运维: health.log（Pi 线 boxhealth.py :17；Grok box-health 已暂停）{h} 分钟前更新")
     c = sh("pgrep -af '^(/usr/bin/cindy|/usr/lib/cindy/Cindy)( |$)' | grep -v -- --type= | head -1 | cut -c1-80")   # was '[c]indy': matched nudge-loop/earlyoom -> always ✓
     L.append(f"- Cindy: 进程 {'在 ✓' if c else '不在 ⚠'}；保活由 Pi 线 cindy.py（*/5，takeover/cindy）调 ensure-cindy.sh；boxcheck 只查不重启")
+    try:
+        import picall_sync; dr = picall_sync.drift()
+        L.append(f"- Pi 启动器: ~/tools/pi-call 与仓库 pi/restore/pi-call {'一致 ✓' if not dr else '⚠ 漂移：' + '、'.join(dr) + '（opsdeploy 下一轮自动按仓库同步）'}")
+    except Exception as e: L.append(f"- Pi 启动器: 漂移检查出错 ⚠ {str(e)[:80]}")
     p = f"{BASE}/out/box/{d}.md"; old = open(p).read() if os.path.exists(p) else f"# 机器类 bot 核查 {d}（Pi line，只查）\n"
     write_atomic(p, old + "\n".join(L) + "\n")
 if __name__ == "__main__": main()
