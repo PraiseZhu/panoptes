@@ -14,6 +14,20 @@ import { vitestCoverageArgs, readCoverageDir, readV8Dir, mergeCoverageFiles } fr
 import { stepCacheEnabled, stepCacheKey, lookupStepResult, storeStepResult, reusedResult } from './stepcache.mjs'
 import { shardPlan, reserveShards, shardArgs, mergeVitestJson, mergeCoverageFinal, coverageSummaryOf, readJsonOrNull } from './shard.mjs'
 
+// 文件权限掩码固定为 022：QA 曾在 umask 002 下跑，测试夹具目录变成 0775，触发 RUNNER_OWNER_MISMATCH 假失败（mivo #1385）。
+// 模块加载时就固定，之后 spawn 的所有子进程都继承 022；固定前继承到的值留给 system_health 记录
+export const PINNED_UMASK = 0o022
+export const fmtUmask = (n) => (n == null ? null : n.toString(8).padStart(4, '0'))
+// 读本进程当前真实的 umask（/proc/self/status 的 Umask 行），读不到返回 null
+export function currentUmask() {
+  try { const m = /^Umask:\s*([0-7]+)/m.exec(readFileSync('/proc/self/status', 'utf8')); return m ? m[1].padStart(4, '0') : null } catch { return null }
+}
+export function pinUmask() {
+  const prev = process.umask(PINNED_UMASK)
+  return fmtUmask(prev)
+}
+export const INHERITED_UMASK = pinUmask()
+
 const PROBE_SCRIPT = fileURLToPath(new URL('./probe-run.mjs', import.meta.url))
 const AI_TEST_SCRIPT = fileURLToPath(new URL('./ai-test-run.mjs', import.meta.url))
 const NODE_TEST_REPORTER = fileURLToPath(new URL('./node-test-reporter.mjs', import.meta.url))

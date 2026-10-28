@@ -72,6 +72,10 @@
 #             75 another run active / lock wait timed out, 76 skipped for low memory (memory gate below: still < 8 GB after
 #             30 min and below the 5 GB / 4 GB swap degraded floor; nothing ran, catch-up retries it without counting an attempt).
 set -euo pipefail
+# Pin umask to 022 (QA once ran under 002: fixture dirs became 0775 → false RUNNER_OWNER_MISMATCH on mivo #1385).
+# The inherited value is passed on so system_health can record it; the Node side checks the actual umask.
+PANOPTES_INHERITED_UMASK="$(umask)"; export PANOPTES_INHERITED_UMASK
+umask 022
 
 PANOPTES_DIR="${PANOPTES_DIR:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)}"
 QA_HOME="${QA_HOME:-/workspace/mivo-qa}"
