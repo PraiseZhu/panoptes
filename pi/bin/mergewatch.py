@@ -153,7 +153,7 @@ def launch(cmd, sha):
         return subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=lf, stderr=subprocess.STDOUT,
                                 start_new_session=True, cwd='/workspace/panoptes',
                                 env={**os.environ, 'QA_HOME': QA_HOME,
-                                     'ARGUS_PR_TIMEOUT_MIN': os.environ.get('ARGUS_PR_TIMEOUT_MIN', '45'),  # one stuck PR must not block the queue for hours (longest real run 10-21..23: 32 min); catch-up retries a timed-out PR
+                                     'ARGUS_PR_TIMEOUT_MIN': os.environ.get('ARGUS_PR_TIMEOUT_MIN', '90'),  # one stuck PR must not block the queue for hours; 10-28 Praise raised 45 -> 90 because low-memory degraded runs (#1340, #1385) exceed 45 min; catch-up retries a timed-out PR
                                      'PATH': '/usr/local/bin:/usr/bin:/bin'})
 
 
