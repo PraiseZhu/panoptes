@@ -42,7 +42,9 @@ R=/workspace/panoptes/pi/bin/run.sh
 35 * * * * box $R pm @10
 20 * * * * box $R p2 @12,18
 50 * * * * box $R compare @12
-20 * * * * box $R prfix @14
+# 10-28: prfix 兜底 14:20 -> 11:20。memguard obs（10-27/28）balloon 峰在 14、19、22-23 点（今天 14:21-14:28 达 9.3G）；
+# 11 点是奇数小时，避开偶数点 :07 catch-up，09:00 日报链不动
+20 * * * * box $R prfix @11
 40 * * * * box $R ledger @23
 # 10-23 QA 闭环：Grok mivo-qa-followup-scan 06:17 / mivo-qa-followup 15:17（06 点 = scan 只查回复，15 点 = remind）。:17 是 boxhealth，改 :27；
 # pi 模式 + 外发闸开 + feishu.dm 未禁 时真实更新 followup/state.json，私信经 outbound（:30 那一轮）发出

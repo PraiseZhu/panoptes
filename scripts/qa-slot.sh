@@ -78,7 +78,7 @@ slot_acquire_onmerge() {
   while :; do
     if flock -n "$fd"; then SLOT_MODE=lock; return 0; fi
     if (( $(slot_live yield) > 0 )); then SLOT_MODE=borrowed; return 0; fi
-    if slot_mem_ok && (( $(slot_live conc) < ${PANOPTES_ONMERGE_MAX_CONC:-2} )); then
+    if slot_mem_ok && slot_balloon_ok && (( $(slot_live conc) < ${PANOPTES_ONMERGE_MAX_CONC:-2} )); then
       SLOT_CONC="$(slot_dir)/conc-$$"; : >"$SLOT_CONC"; SLOT_MODE=concurrent; return 0
     fi
     (( SECONDS - start < wait )) || { rm -f "$SLOT_REQ"; return 1; }
@@ -95,6 +95,14 @@ slot_mem_avail_kb() {
 slot_swap_free_kb() { awk '/^SwapFree:/{print $2}' "${PANOPTES_MEMINFO:-/proc/meminfo}"; }
 # host virtio balloon in MB: (balloon_inflate - balloon_deflate) pages from /proc/vmstat (cumulative counters; log only)
 slot_balloon_mb() { awk -v pg="$(getconf PAGESIZE 2>/dev/null || echo 4096)" '/^balloon_inflate /{i=$2} /^balloon_deflate /{d=$2} END{v=(i-d)*pg/1048576; print (v>0?int(v):0)}' "${PANOPTES_VMSTAT:-/proc/vmstat}" 2>/dev/null || echo 0; }
+# 10-28: host balloon took up to 9.3G (14:21-14:28 BJT, MemAvailable 2.5G). A second concurrent run is admitted only while
+# balloon <= PANOPTES_MAX_BALLOON_CONC_MB (default 2048). Single runs are unaffected (8G + 4G rule and degraded fallback as before).
+slot_balloon_ok() {
+  local b; b=$(slot_balloon_mb)
+  if (( ${b:-0} > ${PANOPTES_MAX_BALLOON_CONC_MB:-2048} )); then
+    echo "[panoptes] balloon ${b} MiB > ${PANOPTES_MAX_BALLOON_CONC_MB:-2048} MiB: no second concurrent run, waiting for the slot" >&2; return 1
+  fi
+}
 slot_mem_ok() {
   local avail swap
   avail=$(slot_mem_avail_kb); swap=$(slot_swap_free_kb)

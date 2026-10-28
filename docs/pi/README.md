@@ -25,7 +25,7 @@
 | | 每小时环境自检（只查） | opsenv.py | 每小时 :25 | 无 | out/ops/env-<日>.md | vs Grok env-guard（无盘上记录→人工） | ✅ |
 | | 10:57 复盘 + P1 校准 | opsreview.py（review-ops collector --out + review tier） | 11:15（排在 10:07 catch-up 之后） | review | out/ops/review-<数据日>.md | vs review-ops/daily/<日>.md 校准条目 | ✅ |
 | Praise PR | 09:41 复盘（含“将转 ready”） | prretro.py | 09:45 | 无 | out/praise-pr/<日>.retro.md、.actions.json | 人工 | ✅ |
-| | 修自己 PR 上测出的问题（规则见文末 10-23 晚 / 10-24） | prfix.py（prwatch 按内存并发派活，一单一个进程；Pi agent + deepseek-v4.1-flash，thinking max） | prwatch 每分钟；14:20 兜底 | deep | out/praise-pr/tickets.json、<日>-<tag>.pr.patch/.md | — | ✅ |
+| | 修自己 PR 上测出的问题（规则见文末 10-23 晚 / 10-24） | prfix.py（prwatch 按内存并发派活，一单一个进程；Pi agent + deepseek-v4.1-flash，thinking max） | prwatch 每分钟；11:20 兜底（10-28 由 14:20 挪开 balloon 峰） | deep | out/praise-pr/tickets.json、<日>-<tag>.pr.patch/.md | — | ✅ |
 | | 22:23 清理 | prretro.py 末节（只列） | 09:45 | 无 | 同上 | — | ✅ 只列不删 |
 | Mivo 合并官 | 判定哪些 PR 可合 + 巡检 P0 | merger.py（零模型，8 项必需检查等） | 每小时 :13/:43（不做 5 分钟轮询：Praise 10-22 叫停轮询） | 无 | out/merger/<日>.md、.actions.json | vs audit.log | ✅ |
 | 备份管家 | grokbot-box 每小时推送 | 已是 cron；boxcheck.py 核日志新鲜度、本地=远端 | 每小时 :45 | 无 | out/box/<日>.md | — | ✅ 不需 Grok |
@@ -76,7 +76,7 @@ panoptes catch-up 每 2 小时 :07 + 每次合并（mergewatch）起跑；修 PR
 | ledger.py / build-ledger.mjs | pi 模式**真实**重建 ledger/daily/<日>.json（写前备份、写后核对，坏了隔离为 .bad-*）；认 `dm:` 私信 key；直接收 PraiseZhu 本人的 P0–P2；复测「fail 优先」 | 23:40 | ledger/daily/ |
 | opsfix.py retest | 范围 = 上次成功复测后合并的 `QA: #N` 修复 PR（out/ops/retest-state.json 水位线）；锁/内存不够 rc 75 下个时段补（09/12/16/20 :30）；回写后生成交接 issue close/reopen 动作 | 09/12/16/20 :30 | 台账、out/opsfix/ |
 | followup.py | 跟进作者回应（感谢/提醒/7 次升级），真实推进 followup/state.json；私信经 outbound（拒发无正文无 PR 号的私信） | 06/15 :27 | followup/state.json |
-| prfix.py（重写） | 一个进程一单（`--next`；10-24 起可并发，见文末）；指纹级认领（含作者自己的修复 PR、交接回执）；真实 vitest/npm 返回码；失败 finally 清理 worktree+分支；NOREPRO 写 notes + 私信；退避 15m/1h/4h→转人工；推送前跑仓库 .githooks/pre-push；PR 正文按模板；docs/pr 真实号（outbound 改名）；有合并测试排队就让出 nightly.lock；闸名单 conf/gates.json | prwatch 触发 + 14:20 兜底 | out/praise-pr/tickets.json、last-result.json |
+| prfix.py（重写） | 一个进程一单（`--next`；10-24 起可并发，见文末）；指纹级认领（含作者自己的修复 PR、交接回执）；真实 vitest/npm 返回码；失败 finally 清理 worktree+分支；NOREPRO 写 notes + 私信；退避 15m/1h/4h→转人工；推送前跑仓库 .githooks/pre-push；PR 正文按模板；docs/pr 真实号（outbound 改名）；有合并测试排队就让出 nightly.lock；闸名单 conf/gates.json | prwatch 触发 + 11:20 兜底 | out/praise-pr/tickets.json、last-result.json |
 
 ## 10-23 晚 22:30–23:18 的规则（原写于 23:18，随主机回滚丢失，10-24 补回）
 - **只修自己的 PR**：prfix 只接 PraiseZhu 的 PR（`PRFIX_OWNERS`）。别人的问题照旧由日报开到他们的交接仓，由他们自己的 bot 修；prwatch 也只为你自己的 PR 私信新问题。
