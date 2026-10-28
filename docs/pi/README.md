@@ -19,7 +19,7 @@
 | | 23:30 重建台账 | ledger.py（build-ledger.mjs --dry-run） | 23:40 | 无 | out/ledger/<日>.json/.md | summary 对比 ledger/daily | ✅ |
 | | 09:56 日报复盘 | dailyretro.py | 09:56 | 有（work 档） | out/dailyretro/<日>.md（只写文件，不发群、不私信；发不发、发到哪等 Praise 定） | takeover/dailyretro | ✅ 只写文件 |
 | Mivo 测试项目经理 | 10:30 G1–G5 核对 | pm.py | 10:35 | 无 | out/pm/<数据日>.md | vs fleet-standards/pm-daily/<日>.md 目标表 | ✅ |
-| | 白天催办（只看 QA: #N 修复 PR） | pmnudge.py | 10/12/14/16/18/20 :05 | 无 | 追加到 out/pm/<当天>.md「## 白天催办 HH:MM」节；动作 out/pm/<当天>.nudges.actions.json；20 点 out/pm/<当天>.chief.md | pm-daily「白天催办」节 | ✅ |
+| | 白天催办（只看 QA: #N 修复 PR） | pmnudge.py | 09–22 每小时 :05（另：所有 open PraiseZhu PR >1h 无进展即催） | 无 | 追加到 out/pm/<当天>.md「## 白天催办 HH:MM」节；动作 out/pm/<当天>.nudges.actions.json；20 点 out/pm/<当天>.chief.md | pm-daily「白天催办」节 | ✅ |
 | | P2 裁决提议 | p2.py | 12:20、18:20（每次≤6 调用） | judge | out/p2/<日>.md、state.json | vs p2-rulings.md 同题裁决 | ✅（不写 p2-rulings） |
 | Mivo QA 运维 | 合并即测 / catch-up | **mergewatch.py（每分钟 git ls-remote，main 一动就以 event 模式调起 panoptes catch-up）**；panoptes-catch-up cron（每 2 小时）兜底 | 每分钟 | 无 | reports/merged（trigger=event） | watchdog：合并 >90 分钟无报告即告警 | ✅ 10-23 21:13 起；替代 Grok on-merge（原 catch-up 兜底实测 52–173 分钟） |
 | | 每小时环境自检（只查） | opsenv.py | 每小时 :25 | 无 | out/ops/env-<日>.md | vs Grok env-guard（无盘上记录→人工） | ✅ |

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Mivo 测试项目经理 · 白天催办（cron :05，北京 10/12/14/16/18/20）。零模型、只读 gh、只写文件。
+"""Mivo 测试项目经理 · 白天催办（cron :05，北京 09–22 点每小时）。零模型、只读 gh、只写文件。
 范围（Mivo 测试项目经理.md「白天催办」10-21/10-22）：PraiseZhu 名下、正文含「QA: #N」的 open PR，只催 draft：
  (a) draft 超过 2h（从最后一次转 draft 起算，没有则从创建起算）且除 review-pr 外有红；
  (b) 除 review-pr 外全绿（无 pending）仍是 draft。
 不催：ready PR（归 Mac mini 盯梢）；review-pr 本身红；keel/lifeline 叠加链；只关联 p2-rulings.md 判「不修」的 P2。
 输出：追加到 out/pm/<当天>.md 的「## 白天催办 HH:MM」节；动作写 out/pm/<当天>.nudges.actions.json；
 20 点那轮另写 out/pm/<当天>.chief.md（给 Chief=Jasper 的汇总草稿，未发送），末尾附 chief_missed.py 的「系统漏跑」「工作逾期」两节。
+10-28 加 (c) 停滞：PraiseZhu 名下所有 open PR（不限 QA 修复 PR、不限 draft）超过 1h 无进展就催；
+进展 = 新 commit（head SHA 变）、CI check 状态变、新评论（评论数变）。指纹存 PI_STATE/out/pm/pmnudge-progress.json。
 用法：pmnudge.py [--dry-run]（--dry-run 只打印，不写任何文件）
 """
 import sys
@@ -50,11 +52,32 @@ def draft_since(n, created):
     except Exception: pass
     return parse_ts(created), "创建"
 
+STALL_H = 1.0
+PROGRESS = f"{BASE}/out/pm/pmnudge-progress.json"
+
+def progress_sig(p):
+    """进展指纹：head commit + 每个 check 的状态 + 评论数；任一变化即算有进展"""
+    cs = sorted(f"{c.get('name') or c.get('context') or '?'}={(c.get('conclusion') or c.get('state') or c.get('status') or '').upper()}"
+                for c in p.get("statusCheckRollup") or [])
+    return json.dumps([p.get("headRefOid") or "", cs, len(p.get("comments") or [])], ensure_ascii=False)
+
+def stalls(prs, state, now):
+    """返回 (停滞列表 [(pr, 小时数, since_iso)], 新 state)。新 PR / 指纹变了 -> 从 now 重新计时"""
+    new, out = {}, []
+    for p in prs:
+        k, sig = str(p["number"]), progress_sig(p)
+        old = state.get(k) or {}
+        since = old["since"] if old.get("sig") == sig and old.get("since") else now.isoformat()
+        new[k] = {"sig": sig, "since": since}
+        h = (now - parse_ts(since)).total_seconds() / 3600
+        if h > STALL_H: out.append((p, h, since))
+    return out, new
+
 def main():
     dry = "--dry-run" in sys.argv
     d = today(); hh = now_cst().strftime("%H:%M")
     prs = gh(["pr", "list", "-R", REPO, "--author", "PraiseZhu", "--state", "open", "--limit", "100",
-              "--json", "number,title,isDraft,createdAt,body,headRefName,statusCheckRollup"])
+              "--json", "number,title,isDraft,createdAt,body,headRefName,headRefOid,comments,statusCheckRollup"])
     nof, p01 = nofix_prs(), p01_prs()
     fixed = merged_refs()   # 10-28：QA 单号已被合并的修复 PR 修掉 -> 这个 draft 是重复 / 被取代的，不催（#1343 被 #1345 取代）
     qa, skip = [], []
@@ -89,6 +112,16 @@ def main():
                          "text": f"#{n} {why}", "dedupe": "同 key 当天只催一次；Grok 线 pm-daily/<日>.md 白天催办节已催过则跳过"})
         else:
             notyet.append(f"#{n}（draft {age:.1f}h，红 {len(red)}，跑中 {len(pend)}）")
+    # (c) 停滞：所有 open PraiseZhu PR，>1h 无新 commit / check 状态变化 / 新评论
+    try: pst = json.load(open(PROGRESS))
+    except Exception: pst = {}
+    stl, pst_new = stalls(prs, pst, now_cst())
+    for p, h, since in sorted(stl, key=lambda x: x[0]["number"]):
+        n = p["number"]; why = f"{h:.1f}h 无进展（无新 commit、CI 状态无变化、无新评论）"
+        L.append(f"- 催 #{n}（停滞）{why}")
+        acts.append({"key": f"nudge:{d}:{n}:stall:{since}", "type": "nudge", "to": "Praise PR", "priority": True,
+                     "channel": "待 Praise 定（见 handoff 渠道方案）", "text": f"#{n} {why}",
+                     "dedupe": "同一段停滞（同 since）只催一次；有进展后重新计时"})
     if notyet: L.append("- 不催（未满 2h 或仍在跑）：" + "、".join(notyet))
     if ready: L.append("- 已 ready，归 Mac mini 盯梢，不催：" + " ".join(ready))
     if skip: L.append("- 范围外：" + "；".join(skip))
@@ -115,5 +148,6 @@ def main():
         canon = f"/workspace/fleet-standards/pm-daily/{d}.md"; oc = open(canon).read() if os.path.exists(canon) else ""
         write_atomic(canon, oc + ("\n" if oc and not oc.endswith("\n\n") else "") + txt)
     if chief: write_atomic(f"{BASE}/out/pm/{d}.chief.md", chief)
+    write_atomic(PROGRESS, json.dumps(pst_new, ensure_ascii=False, indent=1))
     record_actions("pm", d + ".nudges", acts)
 if __name__ == "__main__": main()

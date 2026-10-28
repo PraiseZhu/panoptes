@@ -37,7 +37,8 @@ R=/workspace/panoptes/pi/bin/run.sh
 35 * * * * box $R daily @08
 5  * * * * box $R jasper @09
 45 * * * * box $R prretro @09
-5  * * * * box $R pmnudge @10,12,14,16,18,20
+# 10-28: pmnudge 改为北京 09–22 点每小时（加 >1h 无进展停滞催办）
+5  * * * * box $R pmnudge @09,10,11,12,13,14,15,16,17,18,19,20,21,22
 15 * * * * box $R opsreview @11
 35 * * * * box $R pm @10
 20 * * * * box $R p2 @12,18
