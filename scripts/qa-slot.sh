@@ -11,6 +11,7 @@
 #   3. take the slot as soon as it is free, or borrow it from a run that is holding it but parked between PRs
 #      (that run writes priority/yield-<pid> and waits until no live request is left; src/priority.mjs).
 # Normal runs never take the slot while a live priority request exists, so a merge goes to the front of the queue.
+# On-merge runs (10-28): per-PR lock + memory-admitted concurrency, see slot_acquire_onmerge.
 # Memory gate: MemAvailable >= PANOPTES_MIN_MEM_GB (default 8) AND SwapFree >= PANOPTES_MIN_SWAP_GB (default 4).
 
 SLOT_POLL_S="${PANOPTES_SLOT_POLL_S:-2}"
@@ -59,7 +60,31 @@ slot_acquire_priority() {
   done
 }
 
-slot_release_priority() { [[ -n "${SLOT_REQ:-}" ]] && rm -f "$SLOT_REQ"; return 0; }
+slot_release_priority() { [[ -n "${SLOT_REQ:-}" ]] && rm -f "$SLOT_REQ"; [[ -n "${SLOT_CONC:-}" ]] && rm -f "$SLOT_CONC"; return 0; }
+
+# 10-28 (merge-to-test SLA p95 <= 2 min; #1345 waited 21 min, #1315 31 min behind one lock):
+# slot_acquire_onmerge FD PR WAIT_S. On-merge runs lock per PR (priority/pr-<N>.lock: the same PR never runs twice) instead of
+# serializing on priority.lock. Order each poll: free slot -> SLOT_MODE=lock; holder parked -> borrowed; else, when memory
+# admission passes (slot_mem_ok: the 电脑运维 8 GB free + 4 GB swap rule, unchanged) and fewer than PANOPTES_ONMERGE_MAX_CONC
+# (default 2) concurrent runs are live -> SLOT_MODE=concurrent (priority/conc-<pid>, caller limits ARGUS_MAX_PARALLEL=1).
+# Not enough memory: keep waiting for the slot exactly as before (then run-nightly's own gate: normal / degraded / skip).
+slot_acquire_onmerge() {
+  local fd="$1" pr="$2" wait="${3:-14400}" start=$SECONDS
+  slot_check_cap || return 1
+  mkdir -p "$(slot_dir)"
+  exec {SLOT_PR_FD}>"$(slot_dir)/pr-$pr.lock"
+  flock -n "$SLOT_PR_FD" || { echo "[panoptes] on-merge run for PR #$pr already active" >&2; return 1; }
+  SLOT_REQ="$(slot_dir)/req-$$"; : >"$SLOT_REQ"
+  while :; do
+    if flock -n "$fd"; then SLOT_MODE=lock; return 0; fi
+    if (( $(slot_live yield) > 0 )); then SLOT_MODE=borrowed; return 0; fi
+    if slot_mem_ok && (( $(slot_live conc) < ${PANOPTES_ONMERGE_MAX_CONC:-2} )); then
+      SLOT_CONC="$(slot_dir)/conc-$$"; : >"$SLOT_CONC"; SLOT_MODE=concurrent; return 0
+    fi
+    (( SECONDS - start < wait )) || { rm -f "$SLOT_REQ"; return 1; }
+    sleep "$SLOT_POLL_S"
+  done
+}
 
 # 0 when memory is enough to start a run
 # MemAvailable in kB; PI_TEST_MEM_AVAIL_MB overrides it only with PANOPTES_TEST=1 (tests: simulate 9000 / 5500 / 4000 MB)

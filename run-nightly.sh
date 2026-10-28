@@ -291,7 +291,14 @@ fi
 # shellcheck disable=SC1091
 source "$PANOPTES_DIR/scripts/qa-slot.sh"
 exec 9>"$ARGUS_ROOT/nightly.lock"
-if [[ -n "$PRIORITY" ]]; then
+ONMERGE_PRS=(); prev=""; for a in "$@"; do [[ "$prev" == --pr ]] && ONMERGE_PRS+=("$a"); [[ "$a" == --pr=* ]] && ONMERGE_PRS+=("${a#--pr=}"); prev="$a"; done
+if [[ -n "$PRIORITY" && ${#ONMERGE_PRS[@]} -eq 1 && "${PANOPTES_ONMERGE_CONCURRENT:-1}" == 1 ]]; then
+  echo "[panoptes] on-merge run #${ONMERGE_PRS[0]}: per-PR lock, slot or memory-admitted concurrent run…" >&2
+  slot_acquire_onmerge 9 "${ONMERGE_PRS[0]}" "${WAIT_LOCK:-14400}" || { echo "gave up waiting for the QA slot" >&2; exit 75; }
+  export PANOPTES_PRIORITY=1
+  [[ "$SLOT_MODE" == concurrent ]] && export ARGUS_MAX_PARALLEL=1
+  ctl "run-nightly priority slot" "\"mode\":\"$SLOT_MODE\""
+elif [[ -n "$PRIORITY" ]]; then
   exec 7>"$ARGUS_ROOT/priority.lock"
   echo "[panoptes] priority run: taking the QA slot as soon as it is free…" >&2
   slot_acquire_priority 9 7 "${WAIT_LOCK:-14400}" || { echo "gave up waiting for the QA slot" >&2; exit 75; }

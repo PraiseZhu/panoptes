@@ -119,3 +119,29 @@ test('run-nightly.sh memory gate end to end: 9000 runs normally, 5500 degraded (
   // 退出后槽位已释放：马上能拿到 nightly.lock
   assert.equal(spawnSync('bash', ['-c', `exec 9>${join(root, 'qa-4000', 'argus-root', 'nightly.lock')}; flock -n 9 && echo free`], { encoding: 'utf8' }).stdout.trim(), 'free')
 })
+
+// 10-28 合并即测 SLA：按 PR 加锁，内存够（8G+4G 交换）就和占槽的运行并行，不够就照旧排队
+test('on-merge: slot busy + memory ok -> concurrent; memory low -> keeps waiting (gives up); same PR twice -> refused', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'argus-slot-')); mkdirSync(join(root, 'priority'))
+  const mi = (avail) => { const f = join(root, `mi-${avail}`); writeFileSync(f, `MemTotal: 16000000 kB\nMemAvailable: ${avail} kB\nSwapTotal: 8388604 kB\nSwapFree: ${5 * 1048576} kB\n`); return f }
+  const h = holder(root); await sleepMs(300)
+  try {
+    let r = sh(root, `exec 9>$ARGUS_ROOT/nightly.lock; slot_acquire_onmerge 9 101 5 && echo $SLOT_MODE; ls $ARGUS_ROOT/priority | grep -c conc; slot_release_priority; ls $ARGUS_ROOT/priority | grep -c 'conc\\|req'`, { PANOPTES_MEMINFO: mi(9 * 1048576) })
+    assert.deepEqual(r.stdout.trim().split('\n'), ['concurrent', '1', '0'])
+    r = sh(root, `exec 9>$ARGUS_ROOT/nightly.lock; slot_acquire_onmerge 9 102 1 && echo $SLOT_MODE || echo gave-up`, { PANOPTES_MEMINFO: mi(6 * 1048576) })
+    assert.equal(r.stdout.trim(), 'gave-up')
+    const same = spawn('bash', ['-c', `source ${SLOT}; exec {x}>${root}/priority/pr-103.lock; flock $x; sleep 30`], { stdio: 'ignore' }); await sleepMs(300)
+    try {
+      r = sh(root, `exec 9>$ARGUS_ROOT/nightly.lock; slot_acquire_onmerge 9 103 1 && echo $SLOT_MODE || echo refused`, { PANOPTES_MEMINFO: mi(9 * 1048576) })
+      assert.equal(r.stdout.trim(), 'refused')
+    } finally { same.kill() }
+    r = sh(root, `: >$ARGUS_ROOT/priority/conc-${h.pid}; exec 9>$ARGUS_ROOT/nightly.lock; slot_acquire_onmerge 9 104 1 && echo $SLOT_MODE || echo capped`, { PANOPTES_MEMINFO: mi(9 * 1048576), PANOPTES_ONMERGE_MAX_CONC: '1' })
+    assert.equal(r.stdout.trim(), 'capped')
+  } finally { h.kill() }
+})
+
+test('on-merge: free slot -> lock mode (unchanged)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'argus-slot-'))
+  const r = sh(root, `exec 9>$ARGUS_ROOT/nightly.lock; slot_acquire_onmerge 9 7 5 && echo $SLOT_MODE`)
+  assert.equal(r.stdout.trim(), 'lock')
+})
