@@ -65,6 +65,32 @@ assert "已补跑：无；" in t3 and "daily 08:35" in t3.split("需要手动处
 assert "正在补跑：pm 10:35" in t3 and "pm 10:35" not in t3.split("需要手动处理：")[1], t3
 json.dump(RJ, open(O.REPLAYED(), "w"))
 assert not any(k in missed for k in ("missed:daily:0835", "missed:pm:1035", "missed:credcheck:0701")), missed
+# 6) 10-28 18:08 重启、18:21 cron 才回来：out/outage/heartbeat.json 丢了，$PI_STATE 根上那份还在 → 照样判出停机
+O.jw(O.HB(), {"ts": T(17, 58, 28).isoformat(), "boot_id": "b1", "seq": 50}); O.jw(O.HB2(), {"ts": T(18, 7, 28).isoformat(), "boot_id": "b1", "seq": 51})
+os.remove(O.HB()); open(f"{tmp}/witness", "w").write("51")
+g = O.beat(T(18, 21, 28)); assert g and g["kind"] == "pause" and g["start"] == T(18, 7, 28).isoformat() and g["gap_min"] == 14, g
+assert O.jl(O.HB(), {}).get("seq") == 52 == O.jl(O.HB2(), {}).get("seq")          # 两份都写回
+# 心跳文件都在、只是进程重启（boot_id 变了），间隔 3 分钟 < GAP_MIN 也算；同一次开机连着跳 3 分钟不算
+hb = {"ts": T(18, 18, 28).isoformat(), "boot_id": "old", "seq": 9}
+assert O.classify(hb, T(18, 21, 28), None, False, "new")["why"] == ["reboot (boot_id changed)"]
+assert O.classify(hb, T(18, 21, 28), None, False, "old") is None and O.classify({**hb, "ts": T(18, 21, 28).isoformat()}, T(18, 21, 28), None, False, "new") is None
+# 平常每分钟一跳：不报停机
+O.jw(O.HB2(), {}); os.remove(O.HB())
+assert all(O.beat(T(19, i, 28)) is None for i in range(30))
+# 错过的槽位：10–18h 窗口里 pmnudge 每小时一槽，只补最后一轮（18:05），10–17 点记被覆盖；pm 10:35 按原数据日
+gw = {"kind": "pause", "start": T(9, 59, 28).isoformat(), "end": T(18, 21, 28).isoformat(), "gap_min": 1, "why": []}
+pp, ss = O._plan(gw, T(18, 22, 28), {})
+assert [x[2] for x in pp if x[0] == "pmnudge"] == ["2026-10-28T18:05+08:00"], pp
+assert sorted(x[1] for x in ss if x[0] == "pmnudge") == [f"2026-10-28T{h}:05+08:00" for h in range(10, 18)], ss
+assert [x[1] for x in pp if x[0] == "pm"] == ["2026-10-27"], pp                     # pm 10:35 原数据日
+# 外发型作业：outbound 账本已 done（或 actions 账本 done）→ 不补；没发过的照补
+O.jw(O.LEDGER(), {"pm-cos:2026-10-27": {"status": "done"}})
+pp, ss = O._plan(gw, T(18, 22, 28), {})
+assert "pm" not in [x[0] for x in pp] and ("pm", "2026-10-28T10:35+08:00", "已外发（pm-cos:2026-10-27）") in ss, ss
+O.jw(os.path.join(tmp, "out", "daily", "2026-10-27.actions.json"), {"actions": [{"key": "mivo-daily-report:2026-10-27", "status": "done"}]})
+calls.clear(); rr = O.replay([("daily", "2026-10-27", "2026-10-28T08:35+08:00"), ("opsreview", "2026-10-27", "2026-10-28T09:00+08:00")], runner=lambda c: calls.append(c) or 0)
+assert [c[1] for c in calls] == ["opsreview"] and rr["daily:2026-10-27"]["status"].startswith("skipped:已外发"), (calls, rr)
+os.remove(O.LEDGER())
 # 5) mergewatch 接了心跳；停机恢复本身不置 dirty（main sha 变了才置，见 test_mergewatch_resume.py）
 mw = open(f"{B}/mergewatch.py").read(); assert "outage.beat()" in mw and "st['dirty'] = True" in mw
 print("ok test_outage")
