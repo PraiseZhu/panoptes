@@ -17,6 +17,9 @@ R=/workspace/panoptes/pi/bin/run.sh
 # watchdog: notices when the automation itself stops (stale/failed/missed jobs, merge without report, backup, mergewatch,
 # panoptes deploy) and DMs Praise once per state change; bypasses outbound when outbound is the problem
 */5 * * * * box /usr/bin/python3 /workspace/panoptes/pi/bin/watchdog.py >>/workspace/mivo-qa/pi/out/logs/watchdog-cron.log 2>&1
+# memguard phase 1 (observe only, never signals): starts its 10 s daemon unless one holds the pidfile lock. Logs:
+# /workspace/mivo-qa/memguard/obs-YYYYMMDD.jsonl. Rollback: python3 /workspace/panoptes/pi/bin/memguard.py --rollback
+* * * * * box /usr/bin/python3 /workspace/panoptes/pi/bin/memguard.py >>/workspace/mivo-qa/pi/out/logs/memguard-cron.log 2>&1
 # --- every hour (zero-model) ---
 13,43 * * * * box $R merger
 25 * * * * box $R opsenv
