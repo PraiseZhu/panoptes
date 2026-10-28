@@ -19,6 +19,18 @@ POLICY_PATH = f"{MM}/app/scripts/loops/automerge/policy.json"
 P = json.load(open(POLICY_PATH))
 CFG = json.load(open(f"{MM}/config.json"))
 PAUSED = CFG.get("pausedPath", f"{MM}/PAUSED")
+
+
+def use_merger_token(cfg=CFG, env=os.environ):
+    """10-28 根因：合并官的读取一直走 box 默认 gh 登录（PraiseZhu，二十多个 scope），policy.json 要求 tokenLogin=PraiseZhu、
+    tokenScopes 恰好 ['repo']（合并官专用 token，config.json tokenPath），所以每轮全局门 STOP identity、从不判 PR。
+    现在本进程的 gh 调用用 tokenPath 那个 token（只读进 env，不打印、不写盘）；读不到就保持原样（照旧 STOP identity，不放宽）。
+    写入照旧被 PAUSED / can_write / outbound 闸挡住，影子判定不写。"""
+    tp = cfg.get("tokenPath")
+    try: tok = open(tp).read().strip() if tp else ""
+    except OSError: tok = ""
+    if not tok: return False
+    env["GH_TOKEN"] = tok; env.pop("GITHUB_TOKEN", None); return True
 REQ = P["expectedRequiredChecks"]; READY = P["readyLabel"]
 PI_DAY_CAP = 2
 STATE = f"{BASE}/out/merger/state.json"      # Pi copy of state.mjs prs[n] {head,fingerprint,threadsStableSince}
@@ -363,6 +375,7 @@ def jload_(f):
     except Exception: return {}
 
 def main():
+    use_merger_token()
     d = today(); t = now_cst(); out = f"{BASE}/out/merger/{d}.md"
     st = jload_(STATE); s = run_round(st); write_atomic(STATE, json.dumps(st, indent=1))
     g = s["g"]; paused = os.path.exists(PAUSED)
