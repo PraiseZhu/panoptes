@@ -19,7 +19,7 @@
 #   chromium launcher    /usr/local/bin/chromium  ←  scripts/chromium-linux.sh (see README "Why a wrapper")
 #   system Node         /opt/node (v24.22.0 from nodejs.org .tar.gz; box has no xz) + /usr/local/bin/{node,npm,npx,corepack}
 #                        symlinks — the box-wide default `node` (mivo engines >=22.6, CI uses lts). Independent of nvm above.
-#   catch-up timer       /etc/cron.d/panoptes-catch-up ← scripts/catch-up.cron (every 2 h) + a running cron daemon
+#   catch-up timer       /etc/cron.d/panoptes-catch-up ← scripts/catch-up.cron (hourly :07, runs on even Beijing hours only) + a running cron daemon
 #                        (the box has no systemd; PANOPTES_CATCHUP_TIMER=0 skips the timer)
 #
 # Exit codes: 0 everything present, 2 something is still missing after installing (details on stderr / stdout).

@@ -153,8 +153,8 @@ owned by the current user and not held by a live process (cwd / root / open fd);
 `scripts/sweep-tmp.sh --dry-run [--max-age-hours H]` previews.
 
 **Catch-up timer.** `scripts/bootstrap-box.sh` installs `/etc/cron.d/panoptes-catch-up` (from
-`scripts/catch-up.cron`; the box has no systemd, so it also installs and starts the `cron` daemon). Every 2 hours
-(minute 7 of even hours, box time) it runs, without any model call:
+`scripts/catch-up.cron`; the box has no systemd, so it also installs and starts the `cron` daemon). Hourly at minute 7 the cron fires and
+run-nightly.sh goes on only on even Beijing hours (PANOPTES_CATCHUP_GATE=even; odd hours log one line and exit 0); then it runs, without any model call:
 
 ```sh
 ARGUS_ALLOW_ISSUES=1 run-nightly.sh --catch-up --trigger catch-up --create-issues --wait-lock 14400

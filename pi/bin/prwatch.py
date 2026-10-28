@@ -30,6 +30,7 @@ Heartbeat: out/prwatch/state.json last_check (watchdog alerts when stale). Quiet
 import fcntl, hashlib, sys, time
 from lib import *
 import praise_notice as PN
+import ready_guard as RG
 
 DRY = "--dry-run" in sys.argv
 STATE = f"{BASE}/out/prwatch/state.json"
@@ -506,6 +507,14 @@ def check_drafts(st):
         red = [nm for v, s, nm in concl if v in BAD_CONCL]
         if seen in ("ready", "red", "dirty"): continue
         if not red and all(v in OK_CONCL for v, _, _ in concl):
+            # 10-29 ready_guard：(a) 有人转回过草稿（不在 Pi 台账里）→ 这个 PR 永不再转 ready（按 PR 记，换 head 也不转）；
+            # (b) 同一 head 上 review-pr 已失败 → 不转。review-pr 没跑 / 在跑照常转
+            nr = st.setdefault("no_ready", {})
+            if str(n) in nr: continue
+            why = RG.block_reason(gh, REPO, n, p.get("statusCheckRollup") or [], jload(f"{BASE}/out/outbound/ledger.json", {}))
+            if why:
+                if "converted back to draft" in why: nr[str(n)] = {"why": why, "at": now_cst().isoformat(timespec="seconds")}
+                qlog(f"#{n} not readied: {why}"); continue
             act("praise-pr", {"key": f"ready:{n}:{head[:12]}", "type": "gh.pr.ready", "pr": n, "head": head,
                               "cmd": f"gh pr ready {n} --repo {REPO}", "dedupe": "outbound re-checks isDraft, head and checks"})
             done[tag] = "ready"; qlog(f"#{n} all checks but review-pr green -> ready"); continue

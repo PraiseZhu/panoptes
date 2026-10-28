@@ -15,6 +15,7 @@ from lib import *
 import merger
 import dm_compat, jsonrec
 import praise_notice as PN
+import ready_guard as RG
 import workroot as W
 QA_SLACK = f"{QA}/report/slack"
 SLACK_CHANNEL = "C0CAH3W61N2"           # Mivo QA channel; the only channel send-slack-report.mjs allows
@@ -320,7 +321,10 @@ def h_ready(a):
         bad = [c.get("name") or c.get("context") for c in p.get("statusCheckRollup") or []
                if "review-pr" not in (c.get("name") or c.get("context") or "")
                and (c.get("conclusion") or c.get("state") or "") not in ("SUCCESS", "SKIPPED", "NEUTRAL")]
-        return f"stale:checks not green {bad[:3]}" if bad else "pending"
+        if bad: return f"stale:checks not green {bad[:3]}"
+        # 10-29 ready_guard：同一 head 上 review-pr 已失败，或有人转回过草稿（不在 Pi 台账里）→ 不转（执行时再查一次）
+        why = RG.block_reason(gh, REPO, n, p.get("statusCheckRollup") or [], jload(LEDGER, {}))
+        return f"stale:{why}" if why else "pending"
     def validate(): return f"#{n} " + json.dumps(gh(["pr", "view", str(n), "-R", REPO, "--json", "isDraft,state,statusCheckRollup"])["isDraft"] and "draft" or "ready")
     def do(): return gh(["pr", "ready", str(n), "-R", REPO], js=False).strip()
     return f"gh pr ready #{n}", state, validate, do

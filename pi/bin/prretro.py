@@ -3,12 +3,14 @@
  1. Coverage: every P0-P2 finding in reports/merged/PR-*.json -> fix PR (body 'QA: #N', author PraiseZhu)
     or a note in /workspace/praise-pr/notes/ (filename carries N); anything without either is flagged MISSING.
  2. Turn-ready: draft fix PRs by PraiseZhu whose checks except review-pr are all pass (none pending/failing)
-    -> action gh.pr.ready (key ready:<PR>). Ready PRs are never touched; review-pr is ignored.
+    -> action gh.pr.ready (key ready:<PR>). Ready PRs are never touched; review-pr pending/absent is ignored, but review-pr
+    already failed on the head, or a convert-to-draft not recorded by Pi (ready_guard), blocks it.
  3. Cleanup LIST ONLY: worktrees / local branches of merged fix PRs whose tip is an ancestor of the merged
     head and whose worktree is clean. Nothing is deleted.
 Usage: prretro.py [--dry-run]   (--dry-run prints the report + actions to stdout, writes nothing)"""
 import sys
 from lib import *
+import ready_guard as RG
 AUTHOR = "PraiseZhu"; NOTES = "/workspace/praise-pr/notes"; GIT = "/workspace/mivo-canvas-plugin"
 DRY = "--dry-run" in sys.argv
 OKB = ("pass", "skipping")
@@ -68,8 +70,11 @@ def main():
         try: cs = gh(["pr", "checks", str(p["number"]), "-R", REPO, "--json", "name,bucket"])
         except RuntimeError as e:
             cs = None if "no checks" in str(e) else []; L.append(f"- #{p['number']} 查检查失败：{e}") if cs == [] else None
-        cs = [c for c in (cs or []) if c["name"] != "review-pr"]
+        allcs = cs or []
+        cs = [c for c in allcs if c["name"] != "review-pr"]
         bad = [f"{c['name']}={c['bucket']}" for c in cs if c["bucket"] not in OKB]
+        why = RG.block_reason(gh, REPO, p["number"], allcs, jload(f"{BASE}/out/outbound/ledger.json", {})) if cs and not bad else None
+        if why: L.append(f"- #{p['number']} 草稿，检查全绿但不转 ready：{why}"); continue
         if cs and not bad:
             L.append(f"- #{p['number']} 草稿，{len(cs)} 项检查全绿 → 将 gh pr ready")
             acts.append({"key": f"ready:{p['number']}", "type": "gh.pr.ready", "pr": p["number"], "head": p["headRefOid"],
