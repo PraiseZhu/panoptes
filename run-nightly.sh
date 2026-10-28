@@ -14,7 +14,7 @@
 #                 --pr N --date <merge day> --write-merged --wait-lock S --no-issues --out reports/catch-up/PR-N.json.
 #                 A lock timeout (exit 75) stops and retries on the next invocation; after 3 attempts a PR is
 #                 given up and recorded in system_health (reports/catch-up/run-*.json and the next daily report).
-#                 Only one catch-up at a time (catch-up.lock; a second one exits 0 silently).
+#                 Only one catch-up at a time (catch-up.lock; a second one exits 0 with one '[catch-up] … skipped' line).
 #                 With --create-issues (and ARGUS_ALLOW_ISSUES=1 exported) the children get --create-issues instead.
 #                 Installed by scripts/bootstrap-box.sh as a cron job every 2 hours (scripts/catch-up.cron).
 #   --trigger     who started this run, recorded as run.trigger: event (on-merge trigger) | catch-up | manual.
@@ -135,6 +135,18 @@ set -- ${ARGS[@]+"${ARGS[@]}"}
 [[ -n "$TRIGGER" ]] || { [[ -n "$CATCH_UP" ]] && TRIGGER=catch-up || TRIGGER=manual; }
 case "$TRIGGER" in event|catch-up|manual) ;; *) echo "--trigger must be event, catch-up or manual (got '$TRIGGER')" >&2; exit 1 ;; esac
 export PANOPTES_TRIGGER="$TRIGGER"
+
+# Beijing even-hour gate for the hourly catch-up cron (scripts/catch-up.cron: "7 * * * *" + PANOPTES_CATCHUP_GATE=even).
+# Debian cron 3.0pl1 has no per-file time zone and the platform switches the box zone, so the hour is decided here, like pi run.sh @HH:
+# only --catch-up with PANOPTES_CATCHUP_GATE=even is gated (mergewatch / outage replay / manual runs are not).
+# PANOPTES_FAKE_BJ_HOUR overrides the hour for tests.
+if [[ -n "$CATCH_UP" && "${PANOPTES_CATCHUP_GATE:-}" == "even" ]]; then
+  BJ_HOUR="${PANOPTES_FAKE_BJ_HOUR:-$(TZ=Asia/Shanghai date +%H)}"
+  if (( 10#$BJ_HOUR % 2 != 0 )); then
+    printf '[catch-up] %s trigger=%s: Beijing hour %s is odd; catch-up runs on even Beijing hours only, skipped\n' "$(TZ=Asia/Shanghai date +%Y-%m-%dT%H:%M:%S+08:00)" "$TRIGGER" "$BJ_HOUR"
+    exit 0
+  fi
+fi
 
 # Issue creation is OFF unless --create-issues is given AND ARGUS_ALLOW_ISSUES=1 is in the caller's env.
 CREATE=""
@@ -282,9 +294,10 @@ if [[ -n "$CATCH_UP" ]]; then
   done
   # catch-up writes no report of its own: the bootstrap status file is not needed (exec would skip the EXIT trap)
   rm -f "$BOOT_STATUS"
-  # A second catch-up while one is running: nothing to add, leave quietly. The children take nightly.lock themselves.
+  # A second catch-up while one is running: nothing to add, exit 0 with one log line (stdout = catch-up-cron.log under cron)
+  # so a skipped tick is visible instead of silent. The children take nightly.lock themselves.
   exec 8>"$ARGUS_ROOT/catch-up.lock"
-  flock -n 8 || exit 0
+  flock -n 8 || { printf '[catch-up] %s trigger=%s: catch-up.lock held by another catch-up; skipped\n' "$(TZ=Asia/Shanghai date +%Y-%m-%dT%H:%M:%S+08:00)" "${TRIGGER:-catch-up}"; exit 0; }
   cd "$PANOPTES_DIR/argus"
   export PANOPTES_RUN_NIGHTLY="$PANOPTES_DIR/run-nightly.sh"
   ctl "run-nightly exec catch-up (exec replaces the shell: no exit line follows)" "\"exitCode\":null"

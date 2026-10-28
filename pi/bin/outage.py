@@ -52,7 +52,7 @@ POLICY = {
     "catchup": dict(day=None, stale=4, latest=True),
 }
 DEFAULT = dict(day=None, stale=3, latest=True)
-# panoptes catch-up 不在 pi-line.cron 里（/etc/cron.d/panoptes-catch-up，7 */2）
+# panoptes catch-up 不在 pi-line.cron 里（/etc/cron.d/panoptes-catch-up，7 * * * * + run-nightly.sh 北京偶数点门控）
 EXTRA = {"catchup": ([(h, 7) for h in range(0, 24, 2)], ["/workspace/panoptes/run-nightly.sh", "--catch-up", "--trigger", "catch-up", "--wait-lock", "14400"])}
 NO_REPLAY_BY_DESIGN = {}   # 10-28：都补了；保留给 watchdog（按设计不补 = replayed 里 skipped:* 的槽位）
 ORDER = ["credcheck", "daily"]
