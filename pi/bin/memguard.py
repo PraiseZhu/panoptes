@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """memguard phase 1 (observe only; design: fleet-standards/memory-protection-design.md section 5).
-Every 10 s appends one JSON line to $MEMGUARD_DIR/obs-YYYYMMDD.jsonl (box-local date): MemAvailable / MemFree / swap,
+Every 10 s appends one JSON line to $MEMGUARD_DIR/obs-YYYYMMDD.jsonl (Beijing date, TZ pinned in code): MemAvailable / MemFree / swap,
 PSI memory some/full avg10, host balloon MB, top RSS processes, and every Pi task (prfix / pi-dispatch / panoptes run) with
 its process-tree RSS. NEVER signals or kills anything. Files older than KEEP_DAYS are deleted.
   memguard.py            cron entry: start the daemon unless one already holds the pidfile lock (idempotent)
@@ -8,6 +8,9 @@ its process-tree RSS. NEVER signals or kills anything. Files older than KEEP_DAY
   memguard.py --rollback stop the daemon and touch $MEMGUARD_DIR/disable (cron then starts nothing); rm the file to re-enable
 """
 import fcntl, json, os, signal, sys, time
+# 10-28: box TZ drifts (seen America/Los_Angeles); ts and obs-YYYYMMDD are always Beijing time
+os.environ["TZ"] = "Asia/Shanghai"
+time.tzset()
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import prwatch   # noqa: E402  (proc_table / tree / prfix_runs / dispatch_runs / panoptes_procs)
 
