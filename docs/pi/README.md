@@ -72,7 +72,7 @@ panoptes catch-up 每 2 小时 :07 + 每次合并（mergewatch）起跑；修 PR
 | ~/.config/cindy-launch/nudge-loop.sh | 不依赖 cron 的 cron 看门狗：每 60 秒 cron 不在就 sudo -n 拉起 | 常驻 | /workspace/box-ops/cron-restarts.log |
 | takeover/dailyretro、roster | 日报复盘、花名册恢复（复盘经 outbound 私信 Praise）；switch.sh / restore 60 段同步管理这两个标记 | — | — |
 
-时区：平台会随时改 /etc/localtime（10-23 见过 Asia/Shanghai、Asia/Taipei、America/Los_Angeles）。Pi 线所有作业按北京小时门控，不受影响；panoptes 自己的 `7 */2` 会落在北京奇数或偶数小时，重作业靠 nightly.lock 协调，不靠钟点错开。
+时区：平台会随时改 /etc/localtime（10-23 见过 Asia/Shanghai、Asia/Taipei、America/Los_Angeles）。Pi 线所有作业按北京小时门控，不受影响；panoptes catch-up 每小时 :07 触发，由 run-nightly.sh 按北京小时只在偶数点真跑（PANOPTES_CATCHUP_GATE=even），重作业仍靠 nightly.lock 协调。
 | ledger.py / build-ledger.mjs | pi 模式**真实**重建 ledger/daily/<日>.json（写前备份、写后核对，坏了隔离为 .bad-*）；认 `dm:` 私信 key；直接收 PraiseZhu 本人的 P0–P2；复测「fail 优先」 | 23:40 | ledger/daily/ |
 | opsfix.py retest | 范围 = 上次成功复测后合并的 `QA: #N` 修复 PR（out/ops/retest-state.json 水位线）；锁/内存不够 rc 75 下个时段补（09/12/16/20 :30）；回写后生成交接 issue close/reopen 动作 | 09/12/16/20 :30 | 台账、out/opsfix/ |
 | followup.py | 跟进作者回应（感谢/提醒/7 次升级），真实推进 followup/state.json；私信经 outbound（拒发无正文无 PR 号的私信） | 06/15 :27 | followup/state.json |
