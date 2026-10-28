@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """outage — 停机检测和停机后补跑（Praise 10-26 批准的方案）。零模型。
 
-心跳：mergewatch 每分钟调 beat()，写 out/outage/heartbeat.json（时间、boot_id、单调递增 seq）。
+心跳：mergewatch 每分钟调 beat()，写 out/outage/heartbeat.json + $PI_STATE/outage-heartbeat.json（时间、boot_id、单调递增 seq；两份取新的，重启后 out/ 没了也能判）。
+boot_id 变了（重启）且间隔 > 1 分钟也算停机。外发型作业（OUT_KEYS）补跑前先对 outbound 账本和 actions done 账本，已发的不补。
 判停机：看「现在 − 上次心跳」，不看 uptime（平台暂停虚拟机时 uptime 不一定归零）。间隔 > GAP_MIN 分钟 = 一次停机窗口。
 分两种：
   - pause（暂停 / 停摆后恢复）：补跑。
@@ -22,6 +23,8 @@ CST = dt.timezone(dt.timedelta(hours=8))
 BASE = os.environ.get("PI_STATE") or "/workspace/mivo-qa/pi"
 D = lambda: os.path.join(BASE, "out", "outage")
 HB = lambda: os.path.join(D(), "heartbeat.json")
+HB2 = lambda: os.path.join(BASE, "outage-heartbeat.json")   # 10-28：第二份放 $PI_STATE 根（和 outbound-enabled 同级，重启/恢复后还在；18:08 重启后 out/outage/ 是新建的，心跳丢了就判不出停机）
+LEDGER = lambda: os.path.join(BASE, "out", "outbound", "ledger.json")
 WIN = lambda: os.path.join(D(), "windows.json")
 REPLAYED = lambda: os.path.join(D(), "replayed.json")
 WITNESS = os.environ.get("PI_OUTAGE_WITNESS") or "/workspace/pi-work/locks/outage-seq-witness"
@@ -53,6 +56,10 @@ DEFAULT = dict(day=None, stale=3, latest=True)
 EXTRA = {"catchup": ([(h, 7) for h in range(0, 24, 2)], ["/workspace/panoptes/run-nightly.sh", "--catch-up", "--trigger", "catch-up", "--wait-lock", "14400"])}
 NO_REPLAY_BY_DESIGN = {}   # 10-28：都补了；保留给 watchdog（按设计不补 = replayed 里 skipped:* 的槽位）
 ORDER = ["credcheck", "daily"]
+# 外发型作业：补跑前先对 outbound 账本 + 作业自己的 actions done 账本，键已经发过就不补（标 skipped:已外发）
+OUT_KEYS = {"daily": lambda d: [f"mivo-daily-report:{d}"], "jasper": lambda d: [f"brief:{d}"],
+            "pm": lambda d: [f"pm-retro:{d}", f"pm-cos:{d}"], "opsreview": lambda d: [f"ops-review:{d}"]}
+OUT_DONE = ("done", "sending", "uncertain")
 
 
 def schedule(path=None):
@@ -88,7 +95,7 @@ def boot_id():
     except OSError: return ""
 
 
-def classify(prev, now, witness_seq=None, mark=None):
+def classify(prev, now, witness_seq=None, mark=None, boot=None):
     """prev = 上次心跳 dict；返回 None（没停）或 {"kind": pause|rollback, "start", "end", "gap_min", "why"}"""
     if not prev or "ts" not in prev: return None
     last = dt.datetime.fromisoformat(prev["ts"])
@@ -100,18 +107,22 @@ def classify(prev, now, witness_seq=None, mark=None):
     if witness_seq is not None and prev.get("seq", 0) < witness_seq: why.append(f"seq {prev.get('seq')} < witness {witness_seq}")
     if why: return {"kind": "rollback", "start": prev["ts"], "end": now.isoformat(timespec="seconds"), "gap_min": round(gap, 1), "why": why}
     if gap > GAP_MIN: return {"kind": "pause", "start": prev["ts"], "end": now.isoformat(timespec="seconds"), "gap_min": round(gap, 1), "why": ["heartbeat gap"]}
+    bid = boot_id() if boot is None else boot
+    if gap > 1 and prev.get("boot_id") and bid and prev["boot_id"] != bid:   # 重启了：心跳文件还在、间隔不到 GAP_MIN 也算
+        return {"kind": "pause", "start": prev["ts"], "end": now.isoformat(timespec="seconds"), "gap_min": round(gap, 1), "why": ["reboot (boot_id changed)"]}
     return None
 
 
 def beat(now=None):
     """每分钟一次。返回新发现的停机窗口（或 None）。"""
     now = now or dt.datetime.now(CST)
-    prev = jl(HB(), None)
+    prev = max((x for x in (jl(HB(), None), jl(HB2(), None)) if x and "ts" in x), key=lambda x: x["ts"], default=None)   # 两份取新的
     try: ws = int(open(WITNESS).read().strip())
     except (OSError, ValueError): ws = None
     w = classify(prev, now, ws)
     seq = max((prev or {}).get("seq", 0), ws or 0) + 1
-    jw(HB(), {"ts": now.isoformat(timespec="seconds"), "boot_id": boot_id(), "seq": seq})
+    hb = {"ts": now.isoformat(timespec="seconds"), "boot_id": boot_id(), "seq": seq}
+    jw(HB(), hb); jw(HB2(), hb)
     try:
         os.makedirs(os.path.dirname(WITNESS), exist_ok=True); open(WITNESS, "w").write(str(seq))
     except OSError: pass
@@ -162,6 +173,8 @@ def _plan(w, now, replayed=None, sched=None):
             day = _arg_day({"day": "data"} if pol["day"] == "brief" else pol, slot)   # 去重键 = 数据日（jasper 也是，和 10-27 的记录同口径）
             key = f"{job}:{day}" if day else f"{job}@{si}"
             if key in replayed or any(x[0] == job and x[1] == (day or si) for x in out): continue
+            sent = _sent(job, _arg_day(pol, slot))
+            if sent: skipped.append((job, si, f"已外发（{sent}）")); continue
             if (now - slot).total_seconds() / 3600 > pol["stale"]: skipped.append((job, si, f"过期（超过 {pol['stale']} 小时）")); continue
             out.append((job, day or si, si))
         if pol.get("latest"):
@@ -170,6 +183,14 @@ def _plan(w, now, replayed=None, sched=None):
             out = [x for x in out if x[0] != job] + xs[-1:]
     rank = lambda j: ORDER.index(j) if j in ORDER else len(ORDER)
     return sorted(out, key=lambda x: (rank(x[0]), x[2])), skipped
+
+
+def _sent(job, day, ledger=None):
+    """外发型作业的键在 outbound 账本或 out/<job>/<day>.actions.json 里已 done → 返回那个键；否则 None"""
+    if job not in OUT_KEYS or not day: return None
+    ledger = jl(LEDGER(), {}) if ledger is None else ledger
+    acts = {a.get("key"): a.get("status") for f in (job, "ops") for a in jl(os.path.join(BASE, "out", f, f"{day}.actions.json"), {}).get("actions", [])}
+    return next((k for k in OUT_KEYS[job](day) if (ledger.get(k) or {}).get("status") in OUT_DONE or acts.get(k) == "done"), None)
 
 
 def mark_skipped(skipped):
@@ -193,6 +214,9 @@ def replay(items, runner=None, sched=None):
     for job, kd, slot in items:
         key = f"{job}@{kd}" if kd == slot else f"{job}:{kd}"
         if key in replayed: continue
+        pol = {**DEFAULT, **POLICY.get(job, {})}; sent = _sent(job, _arg_day(pol, dt.datetime.fromisoformat(slot)))
+        if sent:   # 计划之后才发出去的也不补
+            replayed[key] = {"slot": slot, "at": dt.datetime.now(CST).isoformat(timespec="seconds"), "status": f"skipped:已外发（{sent}）"}; jw(REPLAYED(), replayed); continue
         replayed[key] = {"slot": slot, "at": dt.datetime.now(CST).isoformat(timespec="seconds"), "status": "running"}; jw(REPLAYED(), replayed)
         cmd = command(job, kd, slot, sched)
         env = dict(os.environ, QA_HOME="/workspace/mivo-qa") if job in EXTRA else None
