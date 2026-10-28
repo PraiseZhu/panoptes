@@ -124,10 +124,17 @@ test('run-nightly.sh memory gate end to end: 9000 runs normally, 5500 degraded (
 test('on-merge: slot busy + memory ok -> concurrent; memory low -> keeps waiting (gives up); same PR twice -> refused', async () => {
   const root = mkdtempSync(join(tmpdir(), 'argus-slot-')); mkdirSync(join(root, 'priority'))
   const mi = (avail) => { const f = join(root, `mi-${avail}`); writeFileSync(f, `MemTotal: 16000000 kB\nMemAvailable: ${avail} kB\nSwapTotal: 8388604 kB\nSwapFree: ${5 * 1048576} kB\n`); return f }
+  const vm = (mb) => { const f = join(root, `vm-${mb}`); writeFileSync(f, `balloon_inflate ${mb * 256 + 1000}\nballoon_deflate 1000\n`); return f }
   const h = holder(root); await sleepMs(300)
   try {
-    let r = sh(root, `exec 9>$ARGUS_ROOT/nightly.lock; slot_acquire_onmerge 9 101 5 && echo $SLOT_MODE; ls $ARGUS_ROOT/priority | grep -c conc; slot_release_priority; ls $ARGUS_ROOT/priority | grep -c 'conc\\|req'`, { PANOPTES_MEMINFO: mi(9 * 1048576) })
+    let r = sh(root, `exec 9>$ARGUS_ROOT/nightly.lock; slot_acquire_onmerge 9 101 5 && echo $SLOT_MODE; ls $ARGUS_ROOT/priority | grep -c conc; slot_release_priority; ls $ARGUS_ROOT/priority | grep -c 'conc\\|req'`, { PANOPTES_MEMINFO: mi(9 * 1048576), PANOPTES_VMSTAT: vm(0) })
     assert.deepEqual(r.stdout.trim().split('\n'), ['concurrent', '1', '0'])
+    // 10-28: balloon > 2G -> no second concurrent run even with 9G available (keeps waiting, gives up)
+    r = sh(root, `exec 9>$ARGUS_ROOT/nightly.lock; slot_acquire_onmerge 9 105 1 && echo $SLOT_MODE || echo gave-up`, { PANOPTES_MEMINFO: mi(9 * 1048576), PANOPTES_VMSTAT: vm(3072) })
+    assert.equal(r.stdout.trim(), 'gave-up')
+    assert.match(r.stderr, /balloon 3072 MiB > 2048 MiB: no second concurrent run/)
+    r = sh(root, `exec 9>$ARGUS_ROOT/nightly.lock; slot_acquire_onmerge 9 106 5 && echo $SLOT_MODE; slot_release_priority`, { PANOPTES_MEMINFO: mi(9 * 1048576), PANOPTES_VMSTAT: vm(2048) })
+    assert.equal(r.stdout.trim(), 'concurrent')
     r = sh(root, `exec 9>$ARGUS_ROOT/nightly.lock; slot_acquire_onmerge 9 102 1 && echo $SLOT_MODE || echo gave-up`, { PANOPTES_MEMINFO: mi(6 * 1048576) })
     assert.equal(r.stdout.trim(), 'gave-up')
     const same = spawn('bash', ['-c', `source ${SLOT}; exec {x}>${root}/priority/pr-103.lock; flock $x; sleep 30`], { stdio: 'ignore' }); await sleepMs(300)
