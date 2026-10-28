@@ -34,6 +34,7 @@ def zombies():
     return out
 MEM_LIMIT = 8192   # 10-28: 3G -> 8G, aligned with the QA full-run gate (an orphan grep held 4.8G for 4h, avail 4.6G, no alert)
 MEM_TO = ["Mivo 测试项目经理", "Mivo QA 运维"]          # names, routed by outbound's SendToAgent relay
+MEM_CRIT = 3072   # 10-28 (PM): tiered — < 8G for 5 min -> MEM_TO bots only; < 3G for 5 min -> also DM Praise
 # 10-28 hourly long-lived big-process scan: report only, never kill. Whitelist by a process's OWN argv (first two words) or by
 # ancestry from a QA root; a child of sand-* is NOT whitelisted (the 10-28 grep's parent was sand-exit-watch).
 BIG_RSS_MB, BIG_AGE_S = 1024, 1800
@@ -74,6 +75,20 @@ def low_streak(limit=MEM_LIMIT, n=30):
         if a >= limit: break
         k += 1
     return k
+def mem_tier(avail, low8, low3):
+    """'crit' (< 3G for 5 min: bots + Praise DM), 'warn' (< 8G for 5 min: bots only) or ''."""
+    if avail < MEM_CRIT and low3 >= 5: return "crit"
+    return "warn" if avail < MEM_LIMIT and low8 >= 5 else ""
+def mem_bots_due(tier, st, now):
+    """Bot-notice dedupe per tier: fire on first entry or escalation warn->crit (even if warn already fired), 24h reminder;
+    no new notice on de-escalation; state cleared on recovery."""
+    rank = {"": 0, "warn": 1, "crit": 2}; prev = st.get("mem_tier", "")
+    if not tier:
+        st.update(mem_tier="", mem_sent=0); return False
+    due = rank[tier] > rank.get(prev, 0) or now - st.get("mem_sent", 0) > 86400
+    if rank[tier] > rank.get(prev, 0): st["mem_tier"] = tier   # keep the highest tier fired until recovery (no flapping re-fire)
+    if due: st["mem_sent"] = now
+    return due
 def balloon_mb():
     """Host virtio_balloon size: pages held by the host (inflate - deflate). With DEFLATE_ON_OOM negotiated the
     kernel keeps these pages inside MemTotal and counts them as used, so they lower MemAvailable without any process RSS."""
@@ -197,8 +212,13 @@ def main():
     if float(la[2]) > ncpu: alerts.append(("load", f"15 分钟负载 {la[2]} > {ncpu} 核（持续高）"))
     low_min = low_streak()
     cause = mem_cause(bal, rss_top)
-    if avail < MEM_LIMIT and low_min >= 5: alerts.append(("mem", f"可用内存持续 {low_min} 分钟 < 8G（现 {avail}MB，cause={cause}，balloon={bal}MB，top5 RSS={rss_top}MB"
-                                                     + ("；宿主机 balloon 占用，guest 内无法释放，需平台侧处理）" if cause == "balloon" else "）")))
+    low3 = low_streak(MEM_CRIT) if avail < MEM_CRIT else 0
+    tier = mem_tier(avail, low_min, low3); mem_raw = None
+    if tier:
+        lim, n = ("3G", low3) if tier == "crit" else ("8G", low_min)
+        mem_raw = (f"可用内存持续 {n} 分钟 < {lim}（现 {avail}MB，cause={cause}，balloon={bal}MB，top5 RSS={rss_top}MB"
+                   + ("；宿主机 balloon 占用，guest 内无法释放，需平台侧处理）" if cause == "balloon" else "）"))
+        if tier == "crit": alerts.append(("mem", mem_raw))     # only the 3G tier reaches Praise's DM
     elif avail < MEM_LIMIT or low_min: issues.append(f"可用内存瞬时低（现 {avail}MB，连续 {low_min} 分钟；多为平台快照回收，不告警）")
     swap_used = int(sh("free -m | awk '/^Swap:/{print $3}'") or 0)
     if swap_used > 4096: alerts.append(("swap", f"swap 已用 {swap_used}MB > 4G（真实内存压力）"))
@@ -248,7 +268,7 @@ def main():
     # Old rule (alerts + issues, new key every hour) DM'd platform noise hourly: Xvfb zombies, snapshot-time memory reclaim.
     # 2026-10-24（Praise：私信看不懂）：按 praise_notice 的骨架写；恢复只告诉他之前要他动手的（自动修复失败）；释放磁盘这类不发
     def alert_item(code, raw):
-        if code == "mem": return PN.item("auto", "机器内存一直不够", f"可用内存已经连续 {low_min} 分钟低于 8G（现在 {avail}MB，cause={cause}）。",
+        if code == "mem": return PN.item("auto", "机器内存一直不够", f"可用内存已经连续 {low3} 分钟低于 3G（现在 {avail}MB，cause={cause}）。",
             "测试和修 PR 会排队等内存，变慢；内存太低时系统可能杀掉占内存最多的进程。", auto="重任务自动排队等内存；24 小时内还没好会再提醒你")
         if code == "swap": return PN.item("auto", "机器内存压力很大", f"机器已经把 {raw.split('已用 ')[-1].split('MB')[0]}MB 内容挪到硬盘上的交换区（超过 4G），说明内存真的不够用了。",
             "所有任务都会变慢。", auto="重任务自动排队等内存；24 小时内还没好会再提醒你")
@@ -274,8 +294,7 @@ def main():
             f"机器根目录（/）下出现了一个 node_modules 文件夹，会干扰测试，已经改名挪开（没删）：{e.split('已改名 ')[-1].split('，')[0]}。",
             "如果修 PR bot 正好在用它，可能要重装依赖。", todo="告诉修测试的会话一声，让修 PR bot 那边知道这件事"))
     msg = PN.text(*items); acts = []
-    mem_raw = next((x for c, x in alerts if c == "mem"), None)
-    if mem_raw and items and "mem" in sig.split(","):
+    if mem_bots_due(tier, st, t.timestamp()):
         acts += [{"key": f"boxhealth-mem:{d}:{t.strftime('%H%M')}:{n}", "type": "SendToAgent", "to": n, "priority": True, "text": mem_raw} for n in MEM_TO]
     if new_big:
         acts.append({"key": f"boxhealth-bigproc:{d}:{t.strftime('%H%M')}", "type": "SendToAgent", "to": MEM_TO[0], "priority": False,
