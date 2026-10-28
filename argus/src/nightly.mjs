@@ -13,7 +13,7 @@ import { openDb } from './db.mjs'
 import { listNightlyPrs, getPull, getCommit, getBranchHead, listPullFiles, addFullText, getHandoff, shanghaiDayWindow, findIssuesByMarkerLabel, createIssue, commentIssue, reopenIssue, findCommentByMarker, listPullReviewComments, listPullCommits, listTeamMembers } from './github.mjs'
 import { classifyChange, highRiskFiles, withoutHandoff, isTestPath } from './classify.mjs'
 import { parseHandoff, splitHandoffCases, toHandoffReport, settleHandoff } from './handoff.mjs'
-import { executeOnSha, ensureMirror, mergeBase, sandboxMode, janitor, mirrorPath } from './runner.mjs'
+import { executeOnSha, ensureMirror, mergeBase, sandboxMode, janitor, mirrorPath, currentUmask, INHERITED_UMASK, PINNED_UMASK, fmtUmask } from './runner.mjs'
 import { decideOutcome, failedIds, setupFailed, failureKeys, compareKey } from './decide.mjs'
 import { analyzePr } from './ai.mjs'
 import { evaluateJev } from './jev.mjs'
@@ -1145,7 +1145,7 @@ export function verdictOf(pr) {
 // otherwise Debian's launcher. Must match the profile's linux BD2_CHROME.
 const LINUX_CHROMIUM = existsSync('/usr/local/bin/chromium') ? '/usr/local/bin/chromium' : '/usr/bin/chromium'
 
-function envSnapshot() {
+export function envSnapshot() {
   const ver = (cmd, args) => { try { return execFileSync(cmd, args, { encoding: 'utf8', timeout: 15_000 }).trim().split('\n')[0] } catch { return null } }
   let free = null
   try { const s = statfsSync(CACHE_DIR); free = Math.round((s.bavail * s.bsize) / 1024 ** 3) } catch { /* ignore */ }
@@ -1154,7 +1154,18 @@ function envSnapshot() {
     sandbox: sandboxMode({}), bwrap: ver('bwrap', ['--version']), chromium: ver(LINUX_CHROMIUM, ['--version']), chromium_path: LINUX_CHROMIUM,
     playwright: (() => { try { return JSON.parse(readFileSync(join(CODE_DIR, 'node_modules/playwright/package.json'), 'utf8')).version } catch { return null } })(),
     python: ver(process.env.ARGUS_PYTHON ?? 'python3', ['--version']), disk_free_gb: free,
+    umask: currentUmask(), umask_inherited: process.env.PANOPTES_INHERITED_UMASK || INHERITED_UMASK,
   }
+}
+
+// 实际 umask 不是 0022 → env_problem（测试夹具权限会变，权限相关断言可能假失败）
+export function checkUmask(health) {
+  const want = fmtUmask(PINNED_UMASK)
+  const u = health.environment?.umask
+  if (u !== want) health.env_problems.push({ message: `umask is ${u ?? 'unknown'} (expected ${want}): test fixture permissions will differ, permission checks such as RUNNER_OWNER_MISMATCH may fail falsely` })
+  // 固定后的值总是 0022：真正反映 QA 环境的是固定前继承到的值，不是 0022 也记一条（已被固定，但环境本身该修）
+  const inh = health.environment?.umask_inherited
+  if (inh != null && inh !== want) health.env_problems.push({ message: `inherited umask was ${inh} (expected ${want}); panoptes pinned it to ${want} for this run, but the QA environment should be fixed (umask 002 caused false RUNNER_OWNER_MISMATCH on mivo #1385)` })
 }
 
 
@@ -1670,6 +1681,7 @@ export async function runNightly(opts = {}) {
   if (env.sandbox !== 'bwrap') health.env_problems.push({ message: `sandbox mode is '${env.sandbox}' (expected bwrap)` })
   if (!env.chromium) health.env_problems.push({ message: `${LINUX_CHROMIUM} missing: browser E2E will be unavailable` })
   if (env.disk_free_gb != null && env.disk_free_gb < 12) health.env_problems.push({ message: `low disk: ${env.disk_free_gb} GB free` })
+  checkUmask(health)
   recordBootstrap(health, readBootstrapStatus())
   recordSeverityPin(health)
   const db = openDb()
