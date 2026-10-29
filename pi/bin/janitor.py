@@ -296,8 +296,8 @@ class Run:
         self.r["trash_entries"] = len(_ls(W.trash_root()))
         ages = [time.time() - os.lstat(os.path.join(W.trash_root(), x)).st_ctime for x in _ls(W.trash_root())]
         self.r["trash_oldest_min"] = int(max(ages) / 60) if ages else 0
-        self.r["root_bytes"] = du(W.ROOT) if os.path.isdir(W.ROOT) else 0
-        self.r["free_gb"] = round(shutil.disk_usage(W.ROOT if os.path.isdir(W.ROOT) else "/").free / (1 << 30), 1)
+        self.r["root_bytes"] = du(W.root()) if os.path.isdir(W.root()) else 0
+        self.r["free_gb"] = round(shutil.disk_usage(W.root() if os.path.isdir(W.root()) else "/").free / (1 << 30), 1)
         return self.r
 
 class _null:
@@ -311,7 +311,7 @@ def state():
 
 def cmd_run(A, conf):
     enforce = conf["enforce"] and not A.dry_run
-    free = shutil.disk_usage(W.ROOT if os.path.isdir(W.ROOT) else "/").free / (1 << 30)
+    free = shutil.disk_usage(W.root() if os.path.isdir(W.root()) else "/").free / (1 << 30)
     aggr = A.aggressive or free < conf["free_gb_low"]
     st = state(); data = aggr or time.time() - (st.get("data_at") or 0) > 3600
     try:
@@ -330,7 +330,7 @@ def cmd_reap(A, conf):
     wd = os.path.abspath(A.path)
     if not os.path.lexists(wd): return 0                                    # already gone: idempotent
     if os.path.islink(wd) or not W.under(wd, W.path("wt")) or os.path.dirname(os.path.dirname(wd)) != W.path("wt"):
-        print(f"refuse: {wd} is not wt/<kind>/<name> under {W.ROOT}"); return 1
+        print(f"refuse: {wd} is not wt/<kind>/<name> under {W.root()}"); return 1
     m = W.marker(wd)
     if m is None: print(f"refuse: {wd} has no {W.MARK}"); return 1
     r = Run(conf, conf["enforce"], False)
