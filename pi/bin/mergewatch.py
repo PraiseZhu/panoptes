@@ -71,11 +71,10 @@ def load():
 def save(st):
     if DRY:
         return
-    os.makedirs(STATE_DIR, exist_ok=True)
-    tmp = STATE + '.tmp'
-    with open(tmp, 'w') as f:
-        json.dump(st, f, indent=1, ensure_ascii=False)
-    os.replace(tmp, STATE)
+    # 10-29：固定 STATE+'.tmp' 在多个 mergewatch 并发时会被别人 rename 掉 → FileNotFoundError；复用 outage.jw（唯一临时名 + os.replace）
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from outage import jw
+    jw(STATE, st)
 
 
 def catchup_running():
