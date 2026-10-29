@@ -2,12 +2,15 @@
 """python3 test/test_janitor.py -- janitor.py + workroot.py (plan 2026-10-24 §10): everything in a temp dir -- a bare "GitHub"
 remote, the bot clone, worktrees, a person's repo next to it, a fake gh on PATH. Never touches a real repo or GitHub."""
 import os, sys, json, time, shutil, subprocess, tempfile, unittest, io, contextlib, fcntl
+from unittest import mock
 for _k in [k for k in os.environ if k.startswith("GIT_")]: del os.environ[_k]
 T = tempfile.mkdtemp(prefix="janitor-test-")
-os.environ.update(PI_WORK_ROOT=f"{T}/work", PI_STATE=f"{T}/state", JANITOR_OUT=f"{T}/state/out/janitor", JANITOR_CONF=f"{T}/janitor.json",
+ENV = dict(PI_WORK_ROOT=f"{T}/work", PI_STATE=f"{T}/state", JANITOR_OUT=f"{T}/state/out/janitor", JANITOR_CONF=f"{T}/janitor.json",
                   FAKE_GH_LOG=f"{T}/gh.log", FAKE_GH_FIXTURE=f"{T}/gh.json", PYTHONDONTWRITEBYTECODE="1",
                   GIT_CONFIG_COUNT="3", GIT_CONFIG_KEY_0="user.name", GIT_CONFIG_VALUE_0="t", GIT_CONFIG_KEY_1="user.email",
                   GIT_CONFIG_VALUE_1="t@t", GIT_CONFIG_KEY_2="init.defaultBranch", GIT_CONFIG_VALUE_2="main")
+GIT_ENV = {k: v for k, v in ENV.items() if k.startswith("GIT_")}
+os.environ.update(ENV)   # for import time; every test re-applies ENV in setUp (other test modules may change os.environ during collection)
 os.makedirs(f"{T}/bin"); open(f"{T}/bin/gh", "w").write('''#!/usr/bin/env python3
 import json, os, sys
 a = sys.argv[1:]; open(os.environ["FAKE_GH_LOG"], "a").write(json.dumps(a) + "\\n")
@@ -23,7 +26,7 @@ if a[0] == "api":
         print(v); sys.exit(0)
     if "/compare/" in p: print(fx.get("compare", {}).get(p.split("...", 1)[1], "diverged")); sys.exit(0)
 sys.exit(3)
-'''); os.chmod(f"{T}/bin/gh", 0o755); os.environ["PATH"] = f"{T}/bin:" + os.environ["PATH"]
+'''); os.chmod(f"{T}/bin/gh", 0o755); ENV["PATH"] = f"{T}/bin:" + os.environ["PATH"]; os.environ["PATH"] = ENV["PATH"]
 B = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin"); sys.path.insert(0, B)
 import workroot as W   # noqa: E402
 import janitor as J    # noqa: E402
@@ -36,7 +39,8 @@ def real_state(): return {p: (sorted(os.listdir(p)) if os.path.isdir(p) else Non
 REAL_BEFORE = real_state()
 
 def sh(*a, cwd=None):
-    r = subprocess.run(a, cwd=cwd, capture_output=True, text=True)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}; env.update(GIT_ENV)   # identity explicit, not inherited
+    r = subprocess.run(a, cwd=cwd, capture_output=True, text=True, env=env)
     if r.returncode: raise AssertionError(f"{a}: {r.stdout}{r.stderr}")
     return r.stdout.strip()
 def wf(p, s):
@@ -53,8 +57,16 @@ def snapshot(root):
             out.append((os.path.relpath(p, root), os.path.islink(p), os.path.getsize(p) if os.path.isfile(p) and not os.path.islink(p) else 0))
     return sorted(out)
 
+def isolate(tc):
+    """re-apply this module's env for one test and refuse to run unless the work root is inside T"""
+    p = mock.patch.dict(os.environ, ENV); p.start(); tc.addCleanup(p.stop)
+    for k in [k for k in os.environ if k.startswith("GIT_") and k not in GIT_ENV]: del os.environ[k]
+    if not os.path.realpath(W.root()).startswith(os.path.realpath(T) + os.sep):
+        raise AssertionError(f"work root {W.root()} is not inside {T}: refusing to touch real dirs")
+
 class Base(unittest.TestCase):
     def setUp(self):
+        isolate(self)
         for d in ("work", "state", "human", "origin.git", "seed", "outside", "data"): shutil.rmtree(f"{T}/{d}", ignore_errors=True)
         for f in ("gh.log", "janitor.json"):
             if os.path.exists(f"{T}/{f}"): os.remove(f"{T}/{f}")
@@ -181,7 +193,7 @@ class TestRemote(Base):
             self.gh({"prs": {"xindong/mivo-canvas-plugin": [self.PR]}, "refs": {"qa-fix/fixpr-1-x": "a" * 40}})
             open(mark, "w").close()
             for _ in range(2):   # marker appears, then persists
-                self.run_j("run"); self.assertEqual(self.deletes(), [])
+                self.run_j("run"); self.assertEqual(self.deletes(), []); self.assertNotIn("delete remote", self.out)
                 self.assertIn("ROLLBACK-SUSPECTED", self.last()["remote_kept"][0]["why"]); self.assertEqual(self.last()["remote_deleted"], [])
             os.remove(mark)      # marker removed -> deleted on the next run
             self.run_j("run"); self.assertEqual(len(self.deletes()), 1); self.assertEqual(self.last()["remote_deleted"][0]["branch"], "qa-fix/fixpr-1-x")
@@ -250,6 +262,7 @@ class TestIdempotentAndData(Base):
 class TestWatchdog(Base):
     def test_15_watchdog_reads_the_report(self):
         import watchdog as WD
+        p = mock.patch.object(WD, "BASE", f"{T}/state"); p.start(); self.addCleanup(p.stop)   # lib.BASE is fixed at first import (maybe another module's PI_STATE)
         now = J.now_cst(); f = f"{T}/state/out/janitor/last.json"; os.makedirs(os.path.dirname(f), exist_ok=True)
         r = {"ran_at": now.isoformat(), "mode": "enforce", "free_gb": 3, "unmarked": [{"path": "/x/wt/mivo/a"}], "trash_oldest_min": 90,
              "skipped": [{"path": "/x/wt/mivo/b", "why": "单子锁被占", "age_h": 5}, {"path": "/x/wt/mivo/d", "why": "进程 9 还在跑", "age_h": 5}],

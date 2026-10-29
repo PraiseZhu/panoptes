@@ -3,8 +3,8 @@
 daily head check refused the 【补发】 prefix, --days 2 never scanned 10-25, and the channel-history check took the original
 10-25 message as "already sent"; overdue:aj0928/aj0928-handoff#6 was skipped as "stale relay (9h old)". Scratch state only:
 temp BASE/ledger/sent.json, fake Slack and fake sender. No network, no sends. Run: python3 test/test_outbound_resend.py"""
-for _k in [k for k in __import__("os").environ if k.startswith("GIT_")]: del __import__("os").environ[_k]
 import datetime as dt, json, os, shutil, sys, tempfile, types, unittest
+from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bin"))
 sys.modules.setdefault("merger", types.SimpleNamespace(FIELDS="number", blockers=lambda p: []))
 import hashlib  # noqa: E402
@@ -21,6 +21,9 @@ BODY = "Mivo 播报 10 月 25 日（北京时间）：合了 15 个 PR，没有 
 
 class T(unittest.TestCase):
     def setUp(self):
+        # no GIT_* (e.g. GIT_DIR from a hook) for this test -- scoped to the test, not os.environ at import (that wiped other modules' git identity)
+        p = mock.patch.dict(os.environ); p.start(); self.addCleanup(p.stop)
+        for k in [k for k in os.environ if k.startswith("GIT_")]: del os.environ[k]
         self.tmp = t = tempfile.mkdtemp(prefix="outbound-resend-")
         names = ("BASE", "LEDGER", "QA_SLACK", "OUTBOUND_FLAG", "GROK_SENT", "DISABLED_TYPES", "mode", "secret_env", "now_cst",
                  "today", "slack", "run", "MEMINFO")

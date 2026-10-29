@@ -11,7 +11,13 @@ Not backed up (grokbot-box sync excludes it). Tickets, evidence and logs stay in
 import contextlib, fcntl, json, os, shutil, subprocess, time
 from lib import PI_CODE, PI_WORK, now_cst
 
-ROOT = os.path.abspath(os.environ.get("PI_WORK_ROOT") or PI_WORK)
+def root():
+    """the work root, read from PI_WORK_ROOT at call time (never cached at import: a test that sets it after another module
+    imported workroot must not end up on the real /workspace/pi-work)"""
+    return os.path.abspath(os.environ.get("PI_WORK_ROOT") or PI_WORK)
+def __getattr__(name):   # W.ROOT stays readable, but is resolved lazily
+    if name == "ROOT": return root()
+    raise AttributeError(name)
 MARK = ".pi-owned.json"
 REPOS = {   # same partial-clone filter as the person's clone (blobs over 1 MB come on demand)
     "mivo": {"url": "https://github.com/xindong/mivo-canvas-plugin.git", "filter": "blob:limit=1048576"},
@@ -19,7 +25,7 @@ REPOS = {   # same partial-clone filter as the person's clone (blobs over 1 MB c
 }
 class Busy(Exception): """a lock is held by someone else: try again next round"""
 
-def path(*p): return os.path.join(ROOT, *p)
+def path(*p): return os.path.join(root(), *p)
 def clone_dir(repo): return path("clones", repo)
 def wt_root(kind): return path("wt", kind)
 def tmp_root(): return path("tmp")
@@ -28,7 +34,7 @@ def nm_cache(h): return path("cache", "nm", h)
 def lock_file(name): return path("locks", name)
 def under(p, root=None):
     """p's real path is inside root (default ROOT) -- symlinks resolved, so a link pointing out never counts as inside."""
-    r = os.path.realpath(root or ROOT); return os.path.realpath(p).startswith(r + os.sep)
+    r = os.path.realpath(root or globals()["root"]()); return os.path.realpath(p).startswith(r + os.sep)
 
 def _git(args, cwd=None, t=900):
     r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=t, stdin=subprocess.DEVNULL)
