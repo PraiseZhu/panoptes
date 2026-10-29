@@ -937,7 +937,7 @@ export async function runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha
     if (cr.error?.kind === 'severity-standard') health.qa_tool_failures.push({ pr: number, stage: 'code-review', message: cr.error.message })
     else health.llm_errors.push({ pr: number, stage: 'code-review', model: LLM_MODEL, ...cr.error })
     // ran: false = the review itself did not complete (model/gateway error, or the severity pin failed); status carries the failure kind
-    out.code_review = { status: cr.status, ran: false, error: cr.error }
+    out.code_review = { status: cr.status, ran: false, error: cr.error, ...(cr.fallback ? { fallback: cr.fallback } : {}) }
     return
   }
   if (cr.gateError) health.qa_tool_failures.push({ pr: number, stage: 'ming-qa assert-code-review', message: cr.gateError.message })
@@ -950,6 +950,8 @@ export async function runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha
     reused: Boolean(cr.reused), reused_from: cr.reused_from ?? null, fresh_requested: Boolean(opts.freshReview), fresh_comparison: cr.fresh_comparison ?? null, sampling: cr.sampling ?? null,
     // 模型回复不是单个严格 JSON（多个对象连写 / 代码围栏），取的是最后一个带 findings 数组的对象（mingqa.pickReviewJson）
     ...(cr.json_loose ? { json_loose: true } : {}),
+    // 主审查模型 bad_json / 回空，改用 REVIEW_FALLBACK_MODEL 重试了一次（mingqa.codeReview）
+    ...(cr.fallback ? { fallback: cr.fallback } : {}),
     cache_key: ck ? { key: ck.key.slice(0, 16), reviewed_sha: ck.reviewed_sha, review_base_sha: ck.review_base_sha, diff_hash: ck.diff_hash.slice(0, 16), prompt_hash: ck.prompt_hash.slice(0, 16), prompt_version: ck.prompt_version, model: ck.model, context_hash: ck.context_hash?.slice(0, 16) ?? null } : null,
     verdict: reviewVerdict(cr.doc) }
   const toVerify = []

@@ -150,6 +150,21 @@ export function settleVerdict(final, read) {
   return { ...base, status: 'undetermined', status_reason: verdict ? null : 'no verdict' }
 }
 
+// 复核会话回复的 JSON schema（anthropic/* 复核模型走 json_schema 时用；其它模型的 response_format 不变，见 mingqa.responseFormatFor）。
+// 覆盖 system prompt 里的四种动作（read / grep / ls / final）和 {"actions":[…]} 批量形式
+const VERIFY_ACTION = {
+  type: 'object',
+  properties: {
+    action: { type: 'string', enum: ['read', 'grep', 'ls', 'final'] },
+    path: { type: 'string' }, start: { type: 'integer' }, end: { type: 'integer' }, pattern: { type: 'string' },
+    verdict: { type: 'string', enum: ['reachable', 'not-reachable', 'intended-design', 'cannot-determine'] },
+    reasoning: { type: 'string' }, supported_scenario: { type: 'string' }, design_reference: { type: 'string' },
+    call_path: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, line: { type: 'integer' }, note: { type: 'string' } }, required: ['file', 'line'], additionalProperties: false } },
+  },
+  additionalProperties: false,
+}
+export const VERIFY_RESPONSE_SCHEMA = { name: 'review_verify_step', schema: { ...VERIFY_ACTION, properties: { ...VERIFY_ACTION.properties, actions: { type: 'array', items: VERIFY_ACTION } } } }
+
 // 一次复核会话。chat：mingqa.chat（注入便于测试）。返回 { status, verdict, reasoning, call_path, steps, model, tokens, … }
 export async function verifyReviewFinding({ secrets, finding, reader, context, std, chat, model, maxSteps = VERIFY_MAX_STEPS }) {
   const messages = [{ role: 'system', content: system(std) }, { role: 'user', content: redact(userPrompt({ finding, context })) }]
@@ -158,7 +173,7 @@ export async function verifyReviewFinding({ secrets, finding, reader, context, s
   const steps = []
   let tokens = 0, usedModel = null
   for (let i = 1; i <= maxSteps; i++) {
-    const res = await chat({ secrets, messages, effort: 'high', model })
+    const res = await chat({ secrets, messages, effort: 'high', model, schema: VERIFY_RESPONSE_SCHEMA })
     if (!res.ok) return { status: 'not-run', status_reason: `verifier call failed: ${res.error?.kind ?? ''} ${res.error?.message ?? ''}`.trim(), steps, tokens, model: usedModel ?? model ?? null }
     tokens += res.tokens ?? 0
     usedModel = res.model ?? usedModel
