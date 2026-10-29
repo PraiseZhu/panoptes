@@ -118,13 +118,17 @@ export async function chat({ secrets, messages, effort = 'high', model = LLM_MOD
         body: jsonObjectBody({ model, reasoning_effort: effort, response_format: { type: 'json_object' }, max_completion_tokens: 16_000, messages, ...(samplingSupported ? REVIEW_SAMPLING : {}) }),
         signal: AbortSignal.timeout(Math.max(1, Math.floor(Math.min(Number(timeoutMs) || 1, budgetLeftMs(deadline, now))))),
       }), { delayMs: netRetryDelayMs, sleep, deadline, now })
-      const data = await resp.json().catch(() => ({}))
+      // 回包读不出来（网关 200 但 body 不是 JSON，或根本没有 choices）单独算一类：这时候模型可能根本没被调到，
+      // 不能记成「模型回了非 JSON」，否则责任方记错（PR #1340）
+      const data = await resp.json().catch(() => null)
       if (!resp.ok) {
         lastErr = { kind: 'http', status: resp.status, message: redact(String(data?.error?.message ?? '')).slice(0, 300) }
         if (resp.status === 400 && samplingSupported && /temperature|seed/i.test(String(data?.error?.message ?? ''))) { samplingSupported = false; i--; continue }
         if (resp.status >= 500 || resp.status === 429) continue
         return { ok: false, error: lastErr }
       }
+      if (!data || !data.choices?.length) { lastErr = { kind: 'bad_response', message: `gateway response body is not usable (${data ? 'no choices' : 'not JSON'}) (HTTP ${resp.status})` }; continue }
+      const finish = data.choices?.[0]?.finish_reason ?? null
       const content = data.choices?.[0]?.message?.content ?? ''
       let picked = null
       try { const parsed = parseModelJson(content); picked = select ? select(parsed) : parsed } catch { picked = null }
@@ -132,7 +136,15 @@ export async function chat({ secrets, messages, effort = 'high', model = LLM_MOD
         const { json, loose, all } = picked
         return { ok: true, json, ...(loose ? { json_loose: true } : {}), ...(all?.length > 1 ? { json_all: all } : {}), tokens: data?.usage?.total_tokens ?? null, ms: now() - started, model: data.model ?? model, sampling: samplingSupported ? REVIEW_SAMPLING : 'unsupported' }
       }
-      lastErr = { kind: 'bad_json', message: `model returned non-JSON${select ? ' or no usable object' : ''} (${content.length} chars)` }
+      // 空内容和「回了但不能用」以前压成同一句 bad_json，报告里只剩 "(0 chars)"：空内容单独标 kind=empty，
+      // 并把 finish_reason 一起带上 —— 只有它能说明是推理把 max_completion_tokens 用完（length）还是被拦（content_filter），
+      // 和 AI 补测 parseModelJson 的分法一致（#966）。
+      const empty = !String(content).trim()
+      lastErr = { kind: empty ? 'empty' : 'bad_json', ...(finish ? { finish_reason: finish } : {}),
+        message: `${empty ? 'model returned empty content' : `model returned non-JSON${select ? ' or no usable object' : ''}`} (${content.length} chars${finish ? `, finish_reason=${finish}` : ''})` }
+      // finish_reason=length：推理已经把 max_completion_tokens 吃完。temperature 0 + 固定 seed + 同一个 token 上限，
+      // 再发一次得到的是同一份空内容 / 半截 JSON（PR #1340 两次报错逐字节相同），所以不发第 2 次，把分类后的失败交回上层
+      if (finish === 'length') break
     } catch (err) {
       // 记下底层原因（undici cause.code / message）和这一轮耗时，否则只剩一句 "fetch failed"，查不出是断连、DNS 还是超时
       const cause = [err?.cause?.code, err?.cause?.message].filter(Boolean).join(' ')
