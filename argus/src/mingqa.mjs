@@ -23,7 +23,8 @@ export const REVIEW_FALLBACK_MODEL = 'openai/gpt-6-sol'
 export const isAnthropicModel = (model) => /^anthropic\//i.test(String(model ?? ''))
 export function responseFormatFor(model, schema = null) {
   if (!isAnthropicModel(model)) return { type: 'json_object' }
-  return { type: 'json_schema', json_schema: { name: schema?.name ?? 'response', schema: schema?.schema ?? { type: 'object' } } }
+  // strict：调用方写了就原样透传；没写就不发（非 strict）。必填靠 schema 自己的 required 表达，网关对非 strict 的 required 生效（10-29 验收 required-experiment）
+  return { type: 'json_schema', json_schema: { name: schema?.name ?? 'response', schema: schema?.schema ?? { type: 'object' }, ...(typeof schema?.strict === 'boolean' ? { strict: schema.strict } : {}) } }
 }
 
 // ── 三个维度 ──────────────────────────────────────────────

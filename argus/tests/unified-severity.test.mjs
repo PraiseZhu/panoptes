@@ -172,7 +172,8 @@ test('AI 单独的 P1：复核判可达、调用链里的文件都在会话里�
 test('复核：判可达却引用会话里没读过的文件 / 没给调用链 → 不算证实；复核调用失败 → not-run，都进待核实', async () => {
   assert.equal(V.settleVerdict({ verdict: 'reachable', call_path: [{ file: 'src/never-read.ts', line: 1 }] }, new Set(['src/a.ts'])).status, 'undetermined')
   assert.equal(V.settleVerdict({ verdict: 'reachable', call_path: [] }, new Set()).status, 'undetermined')
-  assert.equal(V.settleVerdict({ verdict: 'not-reachable' }, new Set()).status, 'refuted')
+  assert.equal(V.settleVerdict({ verdict: 'not-reachable', reasoning: '入口不传这个字段' }, new Set()).status, 'refuted')
+  assert.equal(V.settleVerdict({ verdict: 'not-reachable' }, new Set()).status, 'undetermined')
   assert.equal(V.settleVerdict({ verdict: 'whatever' }, new Set()).status, 'undetermined')
   const pr = { number: 2002, title: 't', body: '', user: { login: 'x' }, merged_at: '2026-10-22T00:00:00Z' }
   const failing = async () => ({ ok: false, error: { kind: 'http', status: 502, message: 'bad gateway' } })
