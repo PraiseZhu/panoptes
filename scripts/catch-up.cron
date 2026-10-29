@@ -3,6 +3,8 @@
 # list PRs merged yesterday + today (Asia/Shanghai), test only those without a matching reports/merged/PR-N.json
 # (through the run lock), exit 0 within seconds when nothing is missing. run-nightly.sh also sweeps stale /tmp/argus-*
 # dirs (scripts/sweep-tmp.sh, > 24 h, not in use) at every start, i.e. on every cron tick.
+# umask 0022 in the command: cron hands its own umask down (this box: 0002), which run-nightly.sh records as an
+# inherited umask env_problem and degrades every report (PR #1377 / #1380). cron has no UMASK= directive here.
 SHELL=/bin/bash
 PATH=/usr/local/bin:/usr/bin:/bin
-7 * * * * @USER@ PANOPTES_CATCHUP_GATE=even QA_HOME=@QA_HOME@ @PANOPTES_DIR@/run-nightly.sh --catch-up --trigger catch-up --wait-lock 14400 >>@QA_HOME@/argus-root/logs/catch-up-cron.log 2>&1
+7 * * * * @USER@ umask 0022; PANOPTES_CATCHUP_GATE=even QA_HOME=@QA_HOME@ @PANOPTES_DIR@/run-nightly.sh --catch-up --trigger catch-up --wait-lock 14400 >>@QA_HOME@/argus-root/logs/catch-up-cron.log 2>&1
