@@ -91,6 +91,11 @@ status must be "failed" if any P0/P1 finding exists, else "passed".
 ${std.text}`
 }
 
+// Anthropic 的结构化输出只认 json_schema，收到 response_format=json_object 网关直接 400（#1340 复核整段落成）：
+// 这家模型干脆不发 response_format，靠提示词里的「只回 JSON」。其他模型照旧 json_object
+const ANTHROPIC_MODEL = /anthropic\/|claude/i
+export const usesJsonObject = (model) => !ANTHROPIC_MODEL.test(String(model ?? ''))
+
 // 确定性参数：temperature 0 + 固定 seed（网关 2026-10-11 实测接受）。网关若以 400 拒绝这两个参数，去掉重试一次并记下 'unsupported'
 export const REVIEW_SAMPLING = { temperature: 0, seed: 20261011 }
 let samplingSupported = true
@@ -102,8 +107,9 @@ export const REVIEW_MAX_MS = 20 * 60_000
 // select(parsed)：调用方从 parseModelJson 的结果里挑要用的对象，返回 { json, loose, all } 或 null（null = 按「不是 JSON」处理，照常重试）。
 // 不传就用 parseModelJson 的结果（复核会话：多个对象都要，见 review-verify.mjs）
 export async function chat({ secrets, messages, effort = 'high', model = LLM_MODEL, timeoutMs = 8 * 60_000, attempts = 2, netAttempts = 3, fetchImpl = fetch, netRetryDelayMs = 2000, sleep = realSleep, now = Date.now, maxMs = REVIEW_MAX_MS, select = null }) {
+  const format = usesJsonObject(model) ? { response_format: { type: 'json_object' } } : {}
   // 输入里没有 json 网关必回 400：发之前就拦下，不进重试
-  try { jsonObjectBody({ response_format: { type: 'json_object' }, messages }) } catch (err) { return { ok: false, error: { kind: 'config', message: err.message } } }
+  try { jsonObjectBody({ ...format, messages }) } catch (err) { return { ok: false, error: { kind: 'config', message: err.message } } }
   const deadline = now() + maxMs
   let lastErr = null, netFail = false
   for (let i = 1; i <= netAttempts; i++) {
@@ -115,7 +121,7 @@ export async function chat({ secrets, messages, effort = 'high', model = LLM_MOD
       const resp = await fetchRetryingNetwork(fetchImpl, toChatCompletionsUrl(secrets.ARGUS_LLM_BASE_URL), () => ({
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${secrets.ARGUS_LLM_API_KEY}` },
-        body: jsonObjectBody({ model, reasoning_effort: effort, response_format: { type: 'json_object' }, max_completion_tokens: 16_000, messages, ...(samplingSupported ? REVIEW_SAMPLING : {}) }),
+        body: jsonObjectBody({ model, reasoning_effort: effort, ...format, max_completion_tokens: 16_000, messages, ...(samplingSupported ? REVIEW_SAMPLING : {}) }),
         signal: AbortSignal.timeout(Math.max(1, Math.floor(Math.min(Number(timeoutMs) || 1, budgetLeftMs(deadline, now))))),
       }), { delayMs: netRetryDelayMs, sleep, deadline, now })
       const data = await resp.json().catch(() => ({}))
