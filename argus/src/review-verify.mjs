@@ -12,7 +12,7 @@ import { CACHE_DIR } from './paths.mjs'
 import { redact } from './util.mjs'
 
 // /2（2026-10-24）：搜索命中不再算读过文件；调用链里的每个文件、每个行号都要在会话里用 read 实际读到过（旧缓存作废）
-export const VERIFY_PROMPT_VERSION = 'panoptes-review-verify/2'
+export const VERIFY_PROMPT_VERSION = 'panoptes-review-verify/3'
 export const VERIFY_MAX_STEPS = 10
 const BATCH_MAX = 4
 export const VERIFY_MAX_PER_PR = Number(process.env.ARGUS_VERIFY_MAX_PER_PR ?? 3)
@@ -145,10 +145,28 @@ export function settleVerdict(final, read) {
     if (unseen.length) return { ...base, status: 'undetermined', status_reason: `call path cites files / lines the session never read: ${unseen.slice(0, 5).join(', ')}` }
     return { ...base, status: 'confirmed' }
   }
+  // 否定结论（refuted / intended-design）没有理由不算数：留在待核实（10-29 CR-001：Opus 只回 {action:final, verdict:not-reachable} 被当成了 refuted）
+  if ((verdict === 'not-reachable' || verdict === 'intended-design') && !base.reasoning.trim()) return { ...base, status: 'undetermined', status_reason: `${verdict} without reasoning` }
   if (verdict === 'not-reachable') return { ...base, status: 'refuted' }
   if (verdict === 'intended-design') return { ...base, status: 'intended-design' }
   return { ...base, status: 'undetermined', status_reason: verdict ? null : 'no verdict' }
 }
+
+// 复核会话回复的 JSON schema（anthropic/* 复核模型走 json_schema 时用；其它模型的 response_format 不变，见 mingqa.responseFormatFor）。
+// 按动作区分（anyOf），每种都写 required：Anthropic 结构化输出会省掉可选字段（10-29 验收：final 只回 action+verdict，没有 reasoning）。
+// final 必须有 verdict + reasoning；verdict=reachable 另外必须有 call_path（用 verdict 单值枚举拆成两支表达，不用 if/then）。
+// 代码里 settleVerdict 仍会再校验一遍（非 anthropic 模型不受 schema 约束）
+const str = { type: 'string' }, int = { type: 'integer' }
+const obj = (properties, required) => ({ type: 'object', properties, required, additionalProperties: false })
+const CALL_PATH = { type: 'array', minItems: 1, items: obj({ file: str, line: int, note: str }, ['file', 'line']) }
+const READ = obj({ action: { type: 'string', enum: ['read'] }, path: str, start: int, end: int }, ['action', 'path', 'start', 'end'])
+const GREP = obj({ action: { type: 'string', enum: ['grep'] }, pattern: str, path: str }, ['action', 'pattern'])
+const LS = obj({ action: { type: 'string', enum: ['ls'] }, path: str }, ['action', 'path'])
+const FINAL_EXTRA = { reasoning: str, supported_scenario: str, design_reference: str }
+const FINAL_REACHABLE = obj({ action: { type: 'string', enum: ['final'] }, verdict: { type: 'string', enum: ['reachable'] }, ...FINAL_EXTRA, call_path: CALL_PATH }, ['action', 'verdict', 'reasoning', 'call_path'])
+const FINAL_OTHER = obj({ action: { type: 'string', enum: ['final'] }, verdict: { type: 'string', enum: ['not-reachable', 'intended-design', 'cannot-determine'] }, ...FINAL_EXTRA, call_path: CALL_PATH }, ['action', 'verdict', 'reasoning'])
+const BATCH = obj({ actions: { type: 'array', minItems: 1, items: { anyOf: [READ, GREP, LS] } } }, ['actions'])
+export const VERIFY_RESPONSE_SCHEMA = { name: 'review_verify_step', schema: { anyOf: [READ, GREP, LS, FINAL_REACHABLE, FINAL_OTHER, BATCH] } }
 
 // 一次复核会话。chat：mingqa.chat（注入便于测试）。返回 { status, verdict, reasoning, call_path, steps, model, tokens, … }
 export async function verifyReviewFinding({ secrets, finding, reader, context, std, chat, model, maxSteps = VERIFY_MAX_STEPS }) {
@@ -158,7 +176,7 @@ export async function verifyReviewFinding({ secrets, finding, reader, context, s
   const steps = []
   let tokens = 0, usedModel = null
   for (let i = 1; i <= maxSteps; i++) {
-    const res = await chat({ secrets, messages, effort: 'high', model })
+    const res = await chat({ secrets, messages, effort: 'high', model, schema: VERIFY_RESPONSE_SCHEMA })
     if (!res.ok) return { status: 'not-run', status_reason: `verifier call failed: ${res.error?.kind ?? ''} ${res.error?.message ?? ''}`.trim(), steps, tokens, model: usedModel ?? model ?? null }
     tokens += res.tokens ?? 0
     usedModel = res.model ?? usedModel

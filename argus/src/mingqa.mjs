@@ -15,6 +15,17 @@ import { loadSeverityStandard } from './severity.mjs'
 export const MINGQA_DIR = process.env.ARGUS_MINGQA_DIR ?? join(CODE_DIR, '..', 'ming-qa') // panoptes: submodule next to argus/
 const QA_AGENT = () => join(MINGQA_DIR, 'skills/quality-assurance-agent/scripts/qa_agent.py')
 export const LLM_MODEL = process.env.ARGUS_LLM_MODEL ?? 'openai/gpt-6-luna'
+// 审查模型回空 / 非 JSON（bad_json）时，只换这个模型再试一次（默认审查模型不变）。#1340 上 luna 连续两次回空
+export const REVIEW_FALLBACK_MODEL = 'openai/gpt-6-sol'
+
+// 网关对 anthropic/* 不支持 response_format json_object（400：Anthropic structured output requires json_schema）。
+// anthropic/* 且调用方给了 schema → 发 json_schema；没给 schema 就用一个只要求是对象的宽松 schema；其余模型照旧 json_object
+export const isAnthropicModel = (model) => /^anthropic\//i.test(String(model ?? ''))
+export function responseFormatFor(model, schema = null) {
+  if (!isAnthropicModel(model)) return { type: 'json_object' }
+  // strict：调用方写了就原样透传；没写就不发（非 strict）。必填靠 schema 自己的 required 表达，网关对非 strict 的 required 生效（10-29 验收 required-experiment）
+  return { type: 'json_schema', json_schema: { name: schema?.name ?? 'response', schema: schema?.schema ?? { type: 'object' }, ...(typeof schema?.strict === 'boolean' ? { strict: schema.strict } : {}) } }
+}
 
 // ── 三个维度 ──────────────────────────────────────────────
 // 白盒：看得到代码内部 —— 单元测试、类型检查、静态守卫（lint / 日志 / i18n / 循环依赖 / 目录结构）、代码审查
@@ -101,9 +112,10 @@ let samplingSupported = true
 export const REVIEW_MAX_MS = 20 * 60_000
 // select(parsed)：调用方从 parseModelJson 的结果里挑要用的对象，返回 { json, loose, all } 或 null（null = 按「不是 JSON」处理，照常重试）。
 // 不传就用 parseModelJson 的结果（复核会话：多个对象都要，见 review-verify.mjs）
-export async function chat({ secrets, messages, effort = 'high', model = LLM_MODEL, timeoutMs = 8 * 60_000, attempts = 2, netAttempts = 3, fetchImpl = fetch, netRetryDelayMs = 2000, sleep = realSleep, now = Date.now, maxMs = REVIEW_MAX_MS, select = null }) {
+export async function chat({ secrets, messages, effort = 'high', model = LLM_MODEL, timeoutMs = 8 * 60_000, attempts = 2, netAttempts = 3, fetchImpl = fetch, netRetryDelayMs = 2000, sleep = realSleep, now = Date.now, maxMs = REVIEW_MAX_MS, select = null, schema = null }) {
+  const responseFormat = responseFormatFor(model, schema)
   // 输入里没有 json 网关必回 400：发之前就拦下，不进重试
-  try { jsonObjectBody({ response_format: { type: 'json_object' }, messages }) } catch (err) { return { ok: false, error: { kind: 'config', message: err.message } } }
+  try { jsonObjectBody({ response_format: responseFormat, messages }) } catch (err) { return { ok: false, error: { kind: 'config', message: err.message } } }
   const deadline = now() + maxMs
   let lastErr = null, netFail = false
   for (let i = 1; i <= netAttempts; i++) {
@@ -115,7 +127,7 @@ export async function chat({ secrets, messages, effort = 'high', model = LLM_MOD
       const resp = await fetchRetryingNetwork(fetchImpl, toChatCompletionsUrl(secrets.ARGUS_LLM_BASE_URL), () => ({
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${secrets.ARGUS_LLM_API_KEY}` },
-        body: jsonObjectBody({ model, reasoning_effort: effort, response_format: { type: 'json_object' }, max_completion_tokens: 16_000, messages, ...(samplingSupported ? REVIEW_SAMPLING : {}) }),
+        body: jsonObjectBody({ model, reasoning_effort: effort, response_format: responseFormat, max_completion_tokens: 16_000, messages, ...(samplingSupported ? REVIEW_SAMPLING : {}) }),
         signal: AbortSignal.timeout(Math.max(1, Math.floor(Math.min(Number(timeoutMs) || 1, budgetLeftMs(deadline, now))))),
       }), { delayMs: netRetryDelayMs, sleep, deadline, now })
       const data = await resp.json().catch(() => ({}))
@@ -310,7 +322,7 @@ export function referenceText(reference) {
   ].join('\n\n')
 }
 
-export async function codeReview({ secrets, pr, files, results, profile, outDir, cacheKey = null, cached = null, prior = null, verdictOf = null, source = {}, reference = null }) {
+export async function codeReview({ secrets, pr, files, results, profile, outDir, cacheKey = null, cached = null, prior = null, verdictOf = null, source = {}, reference = null, deps = {}, log = (m) => console.error(m) }) {
   mkdirSync(outDir, { recursive: true })
   if (cached) return withLoose(await finishReview({ outDir, doc: cached.doc, model: cached.model, tokens: 0, ms: 0, sampling: cached.sampling ?? null, reused: true, reusedFrom: { key: cached.key.slice(0, 16), stored_at: cached.stored_at, ...(cached.source ?? {}), original_tokens: cached.tokens ?? null } }), cached.json_loose)
   if (!secrets.ARGUS_LLM_BASE_URL || !secrets.ARGUS_LLM_API_KEY) return { status: 'unavailable', error: { kind: 'config', message: 'QA_LLM_BASE_URL / QA_LLM_API_KEY not configured' } }
@@ -331,8 +343,22 @@ export async function codeReview({ secrets, pr, files, results, profile, outDir,
     'Respond with a single json object in the format given by the system prompt.',
   ].join('\n\n'))
   // 模型回复是宽松 JSON（多个对象连写 / 围栏）时取最后一个带 findings 数组的对象；没有就按解析失败处理（pickReviewJson）
-  const res = await chat({ secrets, effort: REVIEW_EFFORT, messages: [{ role: 'system', content: reviewSystemPrompt(std) }, { role: 'user', content: user }], select: pickReviewJson })
-  if (!res.ok) return { status: 'error', error: res.error }
+  const messages = [{ role: 'system', content: reviewSystemPrompt(std) }, { role: 'user', content: user }]
+  const callChat = deps.chat ?? chat
+  const primary = deps.model ?? LLM_MODEL
+  let res = await callChat({ secrets, effort: REVIEW_EFFORT, model: primary, messages, select: pickReviewJson })
+  let fallback = null
+  // 主审查模型回空 / 非 JSON → 换 REVIEW_FALLBACK_MODEL 再试一次（只一次）；备用也不行就按原来的 bad_json 失败返回
+  if (!res.ok && res.error?.kind === 'bad_json' && primary !== REVIEW_FALLBACK_MODEL) {
+    fallback = { from: primary, to: REVIEW_FALLBACK_MODEL, reason: res.error.message ?? 'bad_json' }
+    log(`[panoptes] PR #${pr.number} code review: ${primary} returned bad_json (${fallback.reason}); retrying once with ${REVIEW_FALLBACK_MODEL}`)
+    const fb = await callChat({ secrets, effort: REVIEW_EFFORT, model: REVIEW_FALLBACK_MODEL, messages, select: pickReviewJson })
+    fallback.ok = Boolean(fb.ok)
+    if (fb.ok) res = fb
+    else { fallback.error = fb.error ?? null; log(`[panoptes] PR #${pr.number} code review: fallback ${REVIEW_FALLBACK_MODEL} also failed (${fb.error?.kind ?? ''})`) }
+  }
+  if (!res.ok) return { status: 'error', error: fallback ? { ...res.error, fallback } : res.error, ...(fallback ? { fallback } : {}) }
+  const withFb = (o) => (fallback ? { ...o, fallback } : o)
   const doc = toCodeReviewDoc(res.json, files, { standardVersion: std.version })
   if (prior && verdictOf) {
     // 对比模式：已有缓存结论 → 不覆盖缓存；结论不同时缓存结论有效
@@ -344,11 +370,11 @@ export async function codeReview({ secrets, pr, files, results, profile, outDir,
       reusedFrom: same ? null : { key: prior.key.slice(0, 16), stored_at: prior.stored_at, ...(prior.source ?? {}), original_tokens: prior.tokens ?? null } }), same ? res.json_loose : prior.json_loose)
     out.fresh_comparison = { cached_key: prior.key.slice(0, 16), cached_stored_at: prior.stored_at ?? null, cached_sampling: prior.sampling ?? null, fresh_sampling: res.sampling ?? null,
       cached_verdict: cachedVerdict, fresh_verdict: freshVerdict, same, authoritative: 'cached', fresh_file: freshPath, fresh_model: res.model, fresh_tokens: res.tokens, cache_overwritten: false }
-    return out
+    return withFb(out)
   }
   const out = withLoose(await finishReview({ outDir, doc, model: res.model, tokens: res.tokens, ms: res.ms, sampling: res.sampling, reused: false }), res.json_loose)
   if (cacheKey) { try { storeReviewVerdict(cacheKey, { doc, model: res.model, tokens: res.tokens, sampling: res.sampling, ...(res.json_loose ? { json_loose: true } : {}), source: { ...source, review_file: out.reviewPath } }) } catch { /* 缓存写不进去不影响本次结果 */ } }
-  return out
+  return withFb(out)
 }
 // 结论来自宽松解析的回复：记 json_loose（缓存条目里也记，复用时带出来）
 const withLoose = (out, loose) => (loose ? { ...out, json_loose: true } : out)

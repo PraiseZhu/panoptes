@@ -14,7 +14,7 @@ const { notifiable } = await import('../../report/finding-policy.mjs')
 const SHA = 'a'.repeat(40)
 const entry = (extra = {}) => ({ source: 'code-review', test_backed: false, check_id: 'code-review', severity: 'P1', llm_severity: 'P1', verdict: 'CONFIRMED', title: 't', file: 'src/a.ts', line: 3, fingerprint: `fp-${Math.random()}`, evidence: {}, ...extra })
 const reader = { read: (p) => ({ ok: true, path: p, start: 1, end: 999, text: `${p}\n1: x` }), grep: () => ({ ok: true, text: '' }), ls: () => ({ ok: true, text: '' }) }
-const verdict = (v) => { const models = []; let i = 0; const fn = async ({ model }) => { models.push(model); if (i++ === 0) return { ok: true, json: { action: 'read', path: 'src/a.ts' }, tokens: 1, model }; return { ok: true, json: v === 'reachable' ? { action: 'final', verdict: 'reachable', call_path: [{ file: 'src/a.ts', line: 3 }] } : { action: 'final', verdict: v }, tokens: 1, model } }; fn.models = models; return fn }
+const verdict = (v) => { const models = []; let i = 0; const fn = async ({ model }) => { models.push(model); if (i++ === 0) return { ok: true, json: { action: 'read', path: 'src/a.ts' }, tokens: 1, model }; return { ok: true, json: v === 'reachable' ? { action: 'final', verdict: 'reachable', reasoning: 'r', call_path: [{ file: 'src/a.ts', line: 3 }] } : { action: 'final', verdict: v, reasoning: 'r' }, tokens: 1, model } }; fn.models = models; return fn }
 const failingTest = { id: 'ai1-1', result: 'fails-on-current', reproduced: true, file: 'src/a.repro.test.ts', mutation_file: 'src/a.ts', purpose: 'p' }
 
 async function run({ v, aiTests = [], e = entry() }) {
