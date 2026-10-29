@@ -2,7 +2,7 @@
 // ming-qa 代码审查 → 写 reports/YYYY-MM-DD.json。默认绝不写 GitHub；提 issue 只在 --create-issues 且
 // ARGUS_ALLOW_ISSUES=1 时才可能发生。
 import { yieldToPriority } from './priority.mjs'
-import { memAvailableGb, machineLoad, isIdle } from './memory.mjs'
+import { memAvailableGb, machineLoad, isIdle, startMemLowWater, lowMemoryHit, lowMemMb } from './memory.mjs'
 import { mkdirSync, writeFileSync, renameSync, existsSync, readFileSync, statfsSync, readdirSync } from 'node:fs'
 import { join, resolve, dirname, basename, posix } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
@@ -158,7 +158,9 @@ export function recordSeverityPin(health, file = SEVERITY_PIN_STATE(), { now = n
 // ── 内存护栏：可用内存不够时，覆盖率轮次不与首轮并行，改为排在首轮之后 ─────────────────
 export const parallelMinFreeGb = () => Number(process.env.ARGUS_PARALLEL_MIN_FREE_GB ?? 8)
 export { memAvailableGb }
-export function parallelDecision({ freeGb = memAvailableGb(), minGb = parallelMinFreeGb(), maxParallel = Number(process.env.ARGUS_MAX_PARALLEL ?? 2) } = {}) {
+export function parallelDecision({ freeGb = memAvailableGb(), minGb = parallelMinFreeGb(), maxParallel = Number(process.env.ARGUS_MAX_PARALLEL ?? 2), gateMode = process.env.PANOPTES_GATE_MODE } = {}) {
+  // 10-28：内存门降级时首轮（含 lint / eslint）和覆盖率轮次（vitest）一律串行，不看 ARGUS_MAX_PARALLEL
+  if (gateMode === 'degraded') return { parallel: false, reason: 'memory gate degraded: lint and unit tests serialized' }
   if (maxParallel <= 1) return { parallel: false, reason: 'ARGUS_MAX_PARALLEL=1' }
   if (freeGb == null) return { parallel: false, reason: 'MemAvailable unknown' }
   if (freeGb < minGb) return { parallel: false, reason: `MemAvailable ${freeGb} GB < ${minGb} GB` }
@@ -242,7 +244,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     // tested_at：这个 PR 得出结论的时间（上海时区 ISO 8601，带 +08:00）；test_started_at：开始处理的时间
     test_started_at: toShanghaiIso(new Date(startedAt)), tested_at: null,
     // gate_wait_s：开测前在 run-nightly.sh 内存门等了多少秒（10-27：SLA 把排队/等内存和流水线分开算）
-    gate_wait_s: Number(process.env.PANOPTES_GATE_WAIT_S) || 0, reviewed_sha: null, review_base_sha: null,
+    gate_wait_s: Number(process.env.PANOPTES_GATE_WAIT_S) || 0, memory_gate: memoryGate(), reviewed_sha: null, review_base_sha: null,
     // 因每日模型额度用尽而没做的事（Jev 分诊 / AI 补测 / 代码审查 / 摘要），每项 { kind, pool, cap, used, dimensions, message }
     quota_capped: [],
   }
@@ -345,6 +347,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   let covRun = wantCov && par.parallel ? startCov() : Promise.resolve(null)
   // afterCoverage 的步骤（bench：对机器负载敏感）等并行的覆盖率轮次（单测分片）跑完再开始
   const beforeStep = (st) => (st.afterCoverage && par?.parallel ? covRun : null)
+  const lowWater = startMemLowWater()   // 10-28：从首轮到判定之间的 MemAvailable 最低值（跌破 1.5G → 环境问题）
   let first = await executeOnSha({ ...common, label: 'h1', sha, stepIds: plan.stepIds, beforeStep })
   if (setupFailed(first)) {
     health.qa_tool_failures.push({ pr: number, stage: 'setup', message: 'dependency install failed, retrying once', detail: tail(redact(first.find((r) => r.kind === 'setup')?.tail ?? ''), 600) })
@@ -415,6 +418,9 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   const decision = decideOutcome({ first, rerun, base, latest, baseKnown: Boolean(baseSha), latestIsSame })
   out.outcome = decision.outcome
   out.outcome_reason = decision.reasonZh
+  out.mem_low_water_mb = lowWater.stop()
+  const lowMem = lowMemoryEnvProblem(out.outcome, out.mem_low_water_mb)
+  if (lowMem) { out.outcome = lowMem.outcome; out.outcome_reason = lowMem.reasonZh; health.env_problems.push({ pr: number, message: lowMem.message }) }
   out.coverage = toCoverage({ profile, triage, results: first, files })
   // 计划要跑却没有结果的步骤（安装失败后中止、时间预算用完等）也列进 skipped_steps
   const ranIds = new Set(first.map((r) => r.id))
@@ -516,15 +522,17 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
 
   // 覆盖率（统一分级，Praise 2026-10-23）：新代码覆盖率低于 90 本身不再记 P2，数字照常写在 coverage_gate 里当信息。
   // 只有 PR 正文或 docs/pr/<N>/qa.md 自己写明了覆盖率目标却没达到，才按「自己定的验收没达成」记 P2（source: stated-acceptance）
+  // 10-28：运行中内存跌破 1.5G → 失败检查都是环境问题（上面已记 env_problems），不进 findings / 待核实
+  if (lowMem) for (const c of out.failed_checks) c.low_memory = true
   const stated = statedAcceptanceFinding({ gate: out.coverage_gate, body: pr.body, qaMd: handoffRaw.qa, repo, number, sha, baseSha })
   if (stated) out.findings.push(stated)
   for (const c of out.failed_checks.filter((x) => x.not_a_pr_finding)) health.env_problems.push({ pr: number, message: `trial check '${c.check_id}' timed out${c.test ? ` (${c.test})` : ''} and passed on the idle-machine rerun: treated as environment load, not a PR finding` })
   // 失败检查：unverified / setup-failed / timeout / flaky 不是作者的问题 → 待核实（QA 自查）；其余按 severityFor 进 findings
   const asCheck = (c) => ({ source: 'check', test_backed: checkIsTestBacked(c), ...c })
-  for (const c of out.failed_checks.filter((x) => !x.not_a_pr_finding && QA_SELF_CHECK_STATUSES.includes(x.status))) {
+  for (const c of out.failed_checks.filter((x) => !x.not_a_pr_finding && !x.low_memory && QA_SELF_CHECK_STATUSES.includes(x.status))) {
     out.pending_verification.push(toPending('check-qa', asCheck(c), { reason: `check ${c.status}: not attributable to the PR author; QA re-runs / fixes the environment first`, reasonZh: `检查结果是 ${c.status}，不是作者的问题，QA 先自己查清（重跑、修环境）` }))
   }
-  out.findings = [...out.failed_checks.filter((c) => !c.not_a_pr_finding && !QA_SELF_CHECK_STATUSES.includes(c.status)).map(asCheck), ...out.findings]
+  out.findings = [...out.failed_checks.filter((c) => !c.not_a_pr_finding && !c.low_memory && !QA_SELF_CHECK_STATUSES.includes(c.status)).map(asCheck), ...out.findings]
   out.severity = out.findings.length ? maxSev(out.findings.map((f) => f.severity)) : 'P3'
   if (out.pending_verification.length) out.pending_summary = pendingSummary(out.pending_verification)
   Object.assign(out, dimensionsOf(out.checks, out.skipped_steps))
@@ -1604,7 +1612,7 @@ export async function processTargets(targets, { opts = {}, health, startedAt = n
         const msg = redact(err.message).slice(0, 800)
         const fp = fingerprintOf(repo ?? '', ['qa-error', 'pipeline', msg])
         // 测试系统自己出错：PR 本身没测到，不是作者的问题 → 不定级（untested），待核实（QA 自查）
-        result = { number: t.number, ...(t.meta ?? {}), discovery_reason: t.reason, verdict: 'qa-error', severity: 'untested', tested: false, error: msg, failed_checks: [], checks: [], coverage_gate: null, test_started_at: beat.started_at, tested_at: null,
+        result = { number: t.number, ...(t.meta ?? {}), discovery_reason: t.reason, verdict: 'qa-error', severity: 'untested', tested: false, error: msg, memory_gate: memoryGate(), failed_checks: [], checks: [], coverage_gate: null, test_started_at: beat.started_at, tested_at: null,
           findings: [], pending_verification: [toPending('qa-error', { source: 'qa-error', check_id: 'pipeline', dimension: null, severity: null, title: 'QA pipeline error (the PR itself was not verified)', fingerprint: fp, pr_fingerprint: prFingerprint(fp, t.number), evidence: { error: msg } }, { reason: 'QA pipeline error', reasonZh: '测试系统自己出错，PR 本身没测到' })] }
       }
     }
@@ -1848,4 +1856,22 @@ export function coverageTimeoutMin(step, parallel, env = process.env) {
   const f = Number(env.ARGUS_COVERAGE_TIMEOUT_FACTOR) > 0 ? Number(env.ARGUS_COVERAGE_TIMEOUT_FACTOR) : (parallel ? 2 : 1.5)
   const cap = Number(env.ARGUS_COVERAGE_TIMEOUT_MAX_MIN) > 0 ? Number(env.ARGUS_COVERAGE_TIMEOUT_MAX_MIN) : 300
   return Math.max(base, Math.min(cap, Math.round(base * f)))
+}
+
+// 10-28：内存门结果（run-nightly.sh 导出）。mode=degraded 表示内存不够正常分片数，用了更少分片跑（shards < normal_shards）；
+// 没经过 run-nightly.sh（直接跑 cli）时为 null
+export function memoryGate(env = process.env) {
+  if (!env.PANOPTES_GATE_MODE) return null
+  const num = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v))
+  return { mode: env.PANOPTES_GATE_MODE, degraded: env.PANOPTES_GATE_MODE === 'degraded', shards: num(env.PANOPTES_GATE_SHARDS), normal_shards: num(env.PANOPTES_GATE_NORMAL_SHARDS), mem_available_mb: num(env.PANOPTES_GATE_MEM_MB),
+    ...(env.PANOPTES_GATE_LOW_SWAP === '1' ? { low_swap: true, swap_free_mb: num(env.PANOPTES_GATE_SWAP_FREE_MB), swap_alert: 'SwapFree < 4 GiB: memory rules only, max 1 shard' } : {}) }
+}
+
+// 10-28：运行中内存低水位 < 1.5G（ARGUS_LOW_MEM_MB）且有失败 → 记环境问题（infra_failed → verdict qa-env-problem），不算测试失败。
+// 通过 / 纯文档 / 已是环境问题的不改：成功的运行即使中途跌破 1536 MiB 也不记 env_problem（结果可信，只在 mem_low_water_mb 里留数）
+export function lowMemoryEnvProblem(outcome, lowWaterMb, env = process.env) {
+  if (!lowMemoryHit(lowWaterMb, env) || ['passed', 'docs_only', 'infra_failed'].includes(outcome)) return null
+  const t = lowMemMb(env)
+  return { outcome: 'infra_failed', reasonZh: `运行中可用内存跌到 ${lowWaterMb} MiB（低于 ${t} MiB），失败按环境问题处理，不算测试失败`,
+    message: `MemAvailable dropped to ${lowWaterMb} MiB (< ${t} MiB) during the run: outcome '${outcome}' recorded as an environment problem, not a test failure` }
 }
