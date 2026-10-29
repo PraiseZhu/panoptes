@@ -94,3 +94,24 @@ os.remove(O.LEDGER())
 # 5) mergewatch 接了心跳；停机恢复本身不置 dirty（main sha 变了才置，见 test_mergewatch_resume.py）
 mw = open(f"{B}/mergewatch.py").read(); assert "outage.beat()" in mw and "st['dirty'] = True" in mw
 print("ok test_outage")
+
+# 10-29：ROLLBACK-SUSPECTED 标记一直在（06:38–09:08）时，正常 1 分钟心跳不能每分钟报 rollback
+M = lambda h, m, s=0: dt.datetime(2026, 10, 29, h, m, s, tzinfo=O.CST)
+assert O.classify({"ts": M(6, 38, 1).isoformat(), "seq": 1}, M(6, 39, 1), None, True, "b")["why"] == ["ROLLBACK-SUSPECTED"]   # 标记新出现：报一次
+assert O.classify({"ts": M(8, 20, 1).isoformat(), "seq": 1, "mark": True}, M(8, 21, 1), None, True, "b") is None   # 标记已见过 + 1 分钟心跳：不报
+assert O.classify({"ts": M(8, 20, 1).isoformat(), "seq": 1, "mark": False}, M(8, 21, 1), None, False, "b") is None   # 普通 1 分钟心跳
+assert O.classify({"ts": M(6, 42, 2).isoformat(), "seq": 1, "mark": True}, M(6, 52, 26), None, True, "b")["kind"] == "pause"   # 标记期间的真停机照样判 pause
+assert O.classify({"ts": M(8, 21, 1).isoformat(), "seq": 1, "mark": True}, M(8, 19, 1), None, True, "b")["why"] == ["clock-backwards"]   # 时钟倒退照报
+assert O.classify({"ts": M(8, 21, 1).isoformat(), "seq": 1, "mark": False}, M(8, 19, 1), None, False, "b")["kind"] == "rollback"
+w = O.classify({"ts": M(9, 42, 11).isoformat(), "seq": 1, "mark": False}, M(9, 47, 40), None, False, "b")
+assert w["kind"] == "pause" and w["gap_min"] == 5.5 and w["why"] == ["heartbeat gap"]   # 09:47 的 5.5 分钟心跳间隔照旧
+print("test_outage 10-29 ok")
+# beat() 端到端：标记文件持续存在，只在第一拍报 rollback
+for p in (O.HB(), O.HB2(), O.WITNESS):
+    if os.path.exists(p): os.remove(p)
+O.beat(M(8, 0)); open(O.ROLLBACK_MARK, "w").close()
+ks = [(O.beat(M(8, i)) or {}).get("kind") for i in range(1, 6)]
+os.remove(O.ROLLBACK_MARK)
+assert ks == ["rollback", None, None, None, None], ks
+assert O.beat(M(8, 6)) is None and (O.beat(M(8, 4)) or {}).get("kind") == "rollback"   # 标记删了正常；时钟倒退照报
+print("test_outage beat ok")
