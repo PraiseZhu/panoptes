@@ -188,6 +188,11 @@ def heartbeat(mode):
     except Exception as e:  # 心跳坏了不能挡合并即测
         log(f'heartbeat error: {type(e).__name__}: {e}')
         return None
+    if mode == 'pi':
+        try:   # 10-28：ROLLBACK-SUSPECTED 删掉后，把暂停过的外发型补跑重新起一次
+            for s0 in outage.resume_held(): log(f'rollback hold lifted -> replay re-spawned for window {s0}')
+        except Exception as e:
+            log(f'resume_held error: {type(e).__name__}: {e}')
     if w:
         log(f"outage {w['kind']} {w['start']} -> {w['end']} ({w['gap_min']} min; {', '.join(w['why'])})")
         if w['kind'] == 'pause' and mode == 'pi':

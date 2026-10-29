@@ -18,6 +18,8 @@ boot_id 变了（重启）且间隔 > 1 分钟也算停机。外发型作业（O
 watchdog 用 windows() 把同一停机窗口里的 missed:* 合成一条告警。
 用法：outage.py status | outage.py replay-plan（只打印）"""
 import os, sys, json, time, subprocess, datetime as dt
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import rollback_hold
 
 CST = dt.timezone(dt.timedelta(hours=8))
 BASE = os.environ.get("PI_STATE") or "/workspace/mivo-qa/pi"
@@ -28,7 +30,7 @@ LEDGER = lambda: os.path.join(BASE, "out", "outbound", "ledger.json")
 WIN = lambda: os.path.join(D(), "windows.json")
 REPLAYED = lambda: os.path.join(D(), "replayed.json")
 WITNESS = os.environ.get("PI_OUTAGE_WITNESS") or "/workspace/pi-work/locks/outage-seq-witness"
-ROLLBACK_MARK = os.environ.get("PI_ROLLBACK_MARK") or "/workspace/box-ops/ROLLBACK-SUSPECTED"
+ROLLBACK_MARK = rollback_hold.mark_path()   # 兼容旧引用；判断一律走 rollback_hold.active()
 RUN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run.sh")
 GAP_MIN = 5
 EXPIRE_H = 30
@@ -60,6 +62,19 @@ ORDER = ["credcheck", "daily"]
 OUT_KEYS = {"daily": lambda d: [f"mivo-daily-report:{d}"], "jasper": lambda d: [f"brief:{d}"],
             "pm": lambda d: [f"pm-retro:{d}", f"pm-cos:{d}"], "opsreview": lambda d: [f"ops-review:{d}"]}
 OUT_DONE = ("done", "sending", "uncertain")
+# 10-28：会对外发东西的作业（飞书 / Slack / GitHub 评论或改状态，含经 outbound 账本发的）。ROLLBACK-SUSPECTED 存在时补跑跳过它们，
+# 不记 replayed（标记删掉后还能补）；记到 HELD，mergewatch 心跳见标记消失再起一次补跑。不在 POLICY 里的作业（DEFAULT）按外发处理（宁可不补）。
+#   daily/followup: feishu/slack/gh.issue；jasper: brief；pm/pmnudge: 催办/复盘外发；opsreview: grok.group；handoff: gh.issue.create；
+#   prretro: gh.pr.ready；prfix: fix PR + slack.dm；opsfix retest --execute: 写回 + gh.issue.reopen；catchup: panoptes 测完评论 PR、发飞书。
+SENDS = {"daily", "followup", "jasper", "pm", "pmnudge", "opsreview", "handoff", "prretro", "prfix", "opsfix", "catchup"}
+# 不外发、可照常补：credcheck（只读）、dailyretro（只写文件）、compare、ledger（本地台账文件）、roster（out/ 下）、p2（只写 out/p2）
+HELD = lambda: os.path.join(D(), "held.json")
+
+
+def sends(job): return job in SENDS or job not in POLICY
+
+
+def held(job): return rollback_hold.active() and sends(job)
 
 
 def schedule(path=None):
@@ -100,7 +115,7 @@ def classify(prev, now, witness_seq=None, mark=None, boot=None):
     if not prev or "ts" not in prev: return None
     last = dt.datetime.fromisoformat(prev["ts"])
     gap = (now - last).total_seconds() / 60
-    mark = os.path.exists(ROLLBACK_MARK) if mark is None else mark
+    mark = rollback_hold.active() if mark is None else mark
     why = []
     if mark: why.append("ROLLBACK-SUSPECTED")
     if gap < -1: why.append("clock-backwards")
@@ -173,6 +188,7 @@ def _plan(w, now, replayed=None, sched=None):
             day = _arg_day({"day": "data"} if pol["day"] == "brief" else pol, slot)   # 去重键 = 数据日（jasper 也是，和 10-27 的记录同口径）
             key = f"{job}:{day}" if day else f"{job}@{si}"
             if key in replayed: continue
+            if held(job): skipped.append((job, si, HOLD_WHY)); continue   # 不落 replayed，标记删掉后还能补
             if any(x[0] == job and x[1] == (day or si) for x in out):   # 10-28: daily @07,08 -- the 08:35 retry has the same data day
                 skipped.append((job, si, "同数据日已补跑")); continue
             sent = _sent(job, _arg_day(pol, slot))
@@ -195,9 +211,30 @@ def _sent(job, day, ledger=None):
     return next((k for k in OUT_KEYS[job](day) if (ledger.get(k) or {}).get("status") in OUT_DONE or acts.get(k) == "done"), None)
 
 
+HOLD_WHY = "疑似回滚，外发型作业暂停补跑"
+
+
+def _hold(w, jobs):
+    """记下被暂停的窗口（mergewatch 心跳见标记消失后重起补跑）"""
+    h = jl(HELD(), {}); e = h.setdefault(w["start"], {"jobs": []}); e["jobs"] = sorted(set(e["jobs"]) | set(jobs)); jw(HELD(), h)
+
+
+def resume_held(spawn=None):
+    """标记已删、有暂停过的窗口 → 每个窗口起一次补跑（过期规则照旧），清掉记录。返回起了补跑的窗口 start。"""
+    h = jl(HELD(), {})
+    if not h or rollback_hold.active(): return []
+    jw(HELD(), {})
+    wins = {x["start"]: x for x in windows()}
+    out = [s for s in h if s in wins]
+    for s in out: (spawn or spawn_replay)(wins[s])
+    return out
+
+
 def mark_skipped(skipped):
     r = jl(REPLAYED(), {})
-    for job, si, why in skipped: r.setdefault(f"{job}@{si}", {"slot": si, "at": dt.datetime.now(CST).isoformat(timespec="seconds"), "status": f"skipped:{why}"})
+    for job, si, why in skipped:
+        if why == HOLD_WHY: continue
+        r.setdefault(f"{job}@{si}", {"slot": si, "at": dt.datetime.now(CST).isoformat(timespec="seconds"), "status": f"skipped:{why}"})
     jw(REPLAYED(), r)
 
 
@@ -210,12 +247,16 @@ def command(job, kd, slot, sched=None):
     return [RUN, job] + args
 
 
-def replay(items, runner=None, sched=None):
+def replay(items, runner=None, sched=None, w=None):
     """按顺序同步跑，跑之前先落盘去重键（中途断了也不会重复补）。runner 测试用。"""
     replayed = jl(REPLAYED(), {})
     for job, kd, slot in items:
         key = f"{job}@{kd}" if kd == slot else f"{job}:{kd}"
         if key in replayed: continue
+        if held(job):
+            print(f"held {job} {slot}: {HOLD_WHY}", flush=True)
+            if w: _hold(w, [job])
+            continue   # 计划后才出现的标记：跑之前再看一次
         pol = {**DEFAULT, **POLICY.get(job, {})}; sent = _sent(job, _arg_day(pol, dt.datetime.fromisoformat(slot)))
         if sent:   # 计划之后才发出去的也不补
             replayed[key] = {"slot": slot, "at": dt.datetime.now(CST).isoformat(timespec="seconds"), "status": f"skipped:已外发（{sent}）"}; jw(REPLAYED(), replayed); continue
@@ -243,9 +284,11 @@ def main():
         w = next((x for x in reversed(windows()) if len(a) < 2 or x["start"] == a[1]), None)
         items, skipped = _plan(w, now)
         if a[0] == "replay" and skipped: mark_skipped(skipped)
+        hj = [x[0] for x in skipped if x[2] == HOLD_WHY]
+        if a[0] == "replay" and hj and w: _hold(w, hj)
         print(f"skipped={skipped}", flush=True)
         print(f"{now.isoformat(timespec='seconds')} window={w and (w['kind'], w['start'], w['end'])} plan={items}", flush=True)
-        if a[0] == "replay" and items: print(json.dumps(replay(items), ensure_ascii=False), flush=True)
+        if a[0] == "replay" and items: print(json.dumps(replay(items, w=w), ensure_ascii=False), flush=True)
         return 0
     print(__doc__); return 2
 
