@@ -25,18 +25,21 @@ function valid(schema, v) {
 }
 const S = VERIFY_RESPONSE_SCHEMA.schema
 
-test('VERIFY_PROMPT_VERSION /3: a cache entry keyed under /2 is not hit', () => {
-  assert.equal(V.VERIFY_PROMPT_VERSION, 'panoptes-review-verify/3')
+test('VERIFY_PROMPT_VERSION /4: cache entries keyed under /2 or /3 are not hit', () => {
+  assert.equal(V.VERIFY_PROMPT_VERSION, 'panoptes-review-verify/4')
   const dir = mkdtempSync(join(tmpdir(), 'argus-vcache-'))
   const finding = { fingerprint: 'fp', title: 't', file: 'a.sh', line: 126 }
   const args = { sha: 's'.repeat(40), finding, model: 'anthropic/claude-opus-5-5', std: { version: 'v' }, contextHash: 'c' }
-  // 和 verifyCacheKey 相同的组成，只是版本号是 /2（#99 之前写下的、没有 reasoning 的 refuted）
-  const oldKey = createHash('sha256').update(JSON.stringify({ v: 'panoptes-review-verify/2', std: 'v', sha: args.sha, fp: 'fp', title: 't', file: 'a.sh', line: 126, model: args.model, ctx: 'c' })).digest('hex')
-  mkdirSync(dir, { recursive: true })
-  writeFileSync(join(dir, `${oldKey}.json`), JSON.stringify({ key: oldKey, result: { status: 'refuted', reasoning: '' } }))
-  assert.ok(V.lookupVerification(oldKey, dir), 'sanity: the /2 entry itself is readable')
   const newKey = V.verifyCacheKey(args)
-  assert.notEqual(newKey, oldKey)
+  assert.equal(V.lookupVerification(newKey, dir), null)
+  // 和 verifyCacheKey 相同的组成，只换版本号：/2（#99 之前，无 reasoning 的 refuted）、/3（#99，旧 schema 下的 undetermined 等）
+  for (const v of ['panoptes-review-verify/2', 'panoptes-review-verify/3']) {
+    const oldKey = createHash('sha256').update(JSON.stringify({ v, std: 'v', sha: args.sha, fp: 'fp', title: 't', file: 'a.sh', line: 126, model: args.model, ctx: 'c' })).digest('hex')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, `${oldKey}.json`), JSON.stringify({ key: oldKey, result: { status: 'undetermined', reasoning: '' } }))
+    assert.ok(V.lookupVerification(oldKey, dir), `sanity: the ${v} entry itself is readable`)
+    assert.notEqual(newKey, oldKey, v)
+  }
   assert.equal(V.lookupVerification(newKey, dir), null)
 })
 

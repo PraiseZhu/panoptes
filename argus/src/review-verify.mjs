@@ -12,7 +12,7 @@ import { CACHE_DIR } from './paths.mjs'
 import { redact } from './util.mjs'
 
 // /2（2026-10-24）：搜索命中不再算读过文件；调用链里的每个文件、每个行号都要在会话里用 read 实际读到过（旧缓存作废）
-export const VERIFY_PROMPT_VERSION = 'panoptes-review-verify/3'
+export const VERIFY_PROMPT_VERSION = 'panoptes-review-verify/4'
 export const VERIFY_MAX_STEPS = 10
 const BATCH_MAX = 4
 export const VERIFY_MAX_PER_PR = Number(process.env.ARGUS_VERIFY_MAX_PER_PR ?? 3)
