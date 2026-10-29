@@ -154,6 +154,12 @@ export function stepEnv(runDir, profile) {
   }
 }
 
+// 请求的版本不在镜像里（合并后 main 被回退 / 合并分支合并后删掉）是输入事实，不是 QA 机器坏掉：
+// 上层（nightly.mjs processTargets）据此把这一轮记成 not-tested，不记 qa-error —— 否则一条永久事实
+// 每轮都把整轮打成 system_health.status=failed + complete=false，签名收敛不了。
+export const VERSION_MISSING_ZH = '镜像里缺这个版本：'
+export const isVersionMissingError = (err) => String(err?.message ?? '').startsWith(VERSION_MISSING_ZH)
+
 // mode 'worktree'（默认）：裸镜像的链接 worktree；
 // mode 'clone'：从镜像 `git clone --shared` 出一个独立仓（对象经 alternates 共享，几乎不占空间）。
 // 有的项目测试要求「主 checkout 根目录有 .git」（Mivo 的 bug-doctor intake 测试），链接 worktree 的主仓是裸仓，会误报失败。
@@ -163,7 +169,7 @@ export async function checkout(mirror, sha, runDir, { repo, lfs = false, mode = 
   // 否则 git 会把「整个 commit 缺失」说成 clone 模式下的 unable to read tree（像镜像 tree 损坏）或
   // worktree 模式下的 invalid reference，运维看不出该去查「这个版本没挂在任何分支上」
   const present = await run('git', ['-C', mirror, 'cat-file', '-e', `${sha}^{commit}`], { env: baseEnv(), timeoutMs: 60_000 })
-  if (!present.ok && !present.budgetExceeded) throw new Error(`镜像里缺这个版本：${sha}（本地镜像 ${mirror} 没有这个 commit，可能合并后 main 被回退或合并分支已删除）`)
+  if (!present.ok && !present.budgetExceeded) throw new Error(`${VERSION_MISSING_ZH}${sha}（本地镜像 ${mirror} 没有这个 commit，可能合并后 main 被回退或合并分支已删除）`)
   if (mode === 'clone') {
     const c = await run('git', ['clone', '--quiet', '--shared', '--no-checkout', mirror, src], { env: baseEnv(), timeoutMs: 10 * 60_000 })
     if (!c.ok) throw new Error(`克隆镜像失败：${c.tail.slice(-500)}`)
