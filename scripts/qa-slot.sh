@@ -93,10 +93,9 @@ slot_mem_avail_kb() {
   awk '/^MemAvailable:/{print $2}' "${PANOPTES_MEMINFO:-/proc/meminfo}"
 }
 slot_swap_free_kb() { awk '/^SwapFree:/{print $2}' "${PANOPTES_MEMINFO:-/proc/meminfo}"; }
-# 10-29 (PM): SwapTotal in kB (empty when the line is missing). SwapTotal 0 = machine has no swap at all: the gate alerts and
-# runs by memory rules only, capped at 1 shard (never blocks testing forever waiting for swap that cannot appear)
-slot_swap_total_kb() { awk '/^SwapTotal:/{print $2}' "${PANOPTES_MEMINFO:-/proc/meminfo}"; }
-slot_no_swap() { local t; t=$(slot_swap_total_kb); [[ -n "$t" ]] && (( t == 0 )); }
+# 10-28 (PM): SwapFree < PANOPTES_MIN_SWAP_GB (4G), including no swap at all (SwapTotal 0): the gate alerts and runs by
+# memory rules only, capped at 1 shard (>= 6144 MiB; below that it waits as before). Low swap never blocks testing forever.
+slot_low_swap() { (( $(slot_swap_free_kb || echo 0) < ${PANOPTES_MIN_SWAP_GB:-4} * 1024 * 1024 )); }
 # host virtio balloon in MB: (balloon_inflate - balloon_deflate) pages from /proc/vmstat (cumulative counters; log only)
 slot_balloon_mb() { awk -v pg="$(getconf PAGESIZE 2>/dev/null || echo 4096)" '/^balloon_inflate /{i=$2} /^balloon_deflate /{d=$2} END{v=(i-d)*pg/1048576; print (v>0?int(v):0)}' "${PANOPTES_VMSTAT:-/proc/vmstat}" 2>/dev/null || echo 0; }
 # 10-28: host balloon took up to 9.3G (14:21-14:28 BJT, MemAvailable 2.5G). A second concurrent run is admitted only while
@@ -126,9 +125,8 @@ slot_shard_mem_mb() { case "$1" in 2) echo $(( ${PANOPTES_MIN_MEM_GB:-8} * 1024 
 SLOT_NORMAL_SHARDS=2
 # largest shard count whose row fits the current MemAvailable (0 = not even one shard, or swap below 4G)
 slot_shards_for_mem() {
-  local mb=$(( $(slot_mem_avail_kb) / 1024 )) swap max=$SLOT_NORMAL_SHARDS; swap=$(slot_swap_free_kb)
-  if slot_no_swap; then max=1   # no swap at all: memory rules only, at most 1 shard
-  else (( ${swap:-0} >= ${PANOPTES_MIN_SWAP_GB:-4} * 1024 * 1024 )) || { echo 0; return; }; fi
+  local mb=$(( $(slot_mem_avail_kb) / 1024 )) max=$SLOT_NORMAL_SHARDS
+  slot_low_swap && max=1   # swap free < 4G (or none): memory rules only, at most 1 shard
   local n; for (( n = max; n >= 1; n-- )); do (( mb >= $(slot_shard_mem_mb "$n") )) && { echo "$n"; return; }; done
   echo 0
 }
@@ -137,14 +135,14 @@ slot_shards_for_mem() {
 # GATE_SHARDS (shards that fit, see the mapping above):
 #   normal    MemAvailable >= 8G and SwapFree >= 4G: GATE_SHARDS=2
 #   docs-only memory low but the optional command (args) says this run is docs-only (no tests run): no wait
-#   degraded  < 8G but enough for 1 shard (>= 6G, swap >= 4G), at once or as soon as it gets there while waiting (no full
+#   degraded  < 8G (or swap free < 4G) but enough for 1 shard (>= 6G), at once or as soon as it gets there while waiting (no full
 #             30-min wait any more: the host balloon reclaims memory, 8G cannot be guaranteed): caller runs GATE_SHARDS
 #             unit shards and the coverage round after the first round (no parallel)
 #   skip      below one shard for the whole PANOPTES_MEM_WAIT_S (1800 s, polled every PANOPTES_MEM_POLL_S = 60 s):
 #             caller does not run (exit 76 = memory skip, slot released, next catch-up retries without counting an attempt)
 slot_mem_gate() {
-  GATE_WAIT_S=0; GATE_MODE=normal; GATE_SHARDS=$SLOT_NORMAL_SHARDS; GATE_NO_SWAP=0
-  slot_no_swap && GATE_NO_SWAP=1   # caller alerts; slot_shards_for_mem caps at 1 shard (>= 6144 MiB), < 6144 waits as before
+  GATE_WAIT_S=0; GATE_MODE=normal; GATE_SHARDS=$SLOT_NORMAL_SHARDS; GATE_LOW_SWAP=0
+  slot_low_swap && GATE_LOW_SWAP=1   # caller alerts; slot_shards_for_mem caps at 1 shard (>= 6144 MiB), < 6144 waits as before
   slot_mem_ok && return 0
   if (( $# > 0 )) && "$@" >/dev/null 2>&1; then GATE_MODE=docs-only; return 0; fi
   local poll="${PANOPTES_MEM_POLL_S:-60}" start=$SECONDS n
@@ -153,7 +151,7 @@ slot_mem_gate() {
     if (( n >= SLOT_NORMAL_SHARDS )); then GATE_MODE=normal; GATE_SHARDS=$n; return 0; fi
     if (( n >= 1 )); then GATE_MODE=degraded; GATE_SHARDS=$n; return 0; fi
     if (( GATE_WAIT_S >= ${PANOPTES_MEM_WAIT_S:-1800} )); then GATE_MODE=skip; GATE_SHARDS=0; return 0; fi
-    echo "[panoptes] memory below one shard (>= $(slot_shard_mem_mb 1) MiB available, >= ${PANOPTES_MIN_SWAP_GB:-4} GiB swap free), waiting (${GATE_WAIT_S}s so far)" >&2
+    echo "[panoptes] memory below one shard (>= $(slot_shard_mem_mb 1) MiB available$( (( GATE_LOW_SWAP )) || echo ", >= ${PANOPTES_MIN_SWAP_GB:-4} GiB swap free for 2 shards")), waiting (${GATE_WAIT_S}s so far)" >&2
     sleep "$poll"
   done
 }

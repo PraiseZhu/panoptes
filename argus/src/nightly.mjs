@@ -1862,7 +1862,7 @@ export function memoryGate(env = process.env) {
   if (!env.PANOPTES_GATE_MODE) return null
   const num = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v))
   return { mode: env.PANOPTES_GATE_MODE, degraded: env.PANOPTES_GATE_MODE === 'degraded', shards: num(env.PANOPTES_GATE_SHARDS), normal_shards: num(env.PANOPTES_GATE_NORMAL_SHARDS), mem_available_mb: num(env.PANOPTES_GATE_MEM_MB),
-    ...(env.PANOPTES_GATE_NO_SWAP === '1' ? { swap: 0, swap_alert: 'SwapTotal 0: memory rules only, max 1 shard' } : {}) }
+    ...(env.PANOPTES_GATE_LOW_SWAP === '1' ? { low_swap: true, swap_free_mb: num(env.PANOPTES_GATE_SWAP_FREE_MB), swap_alert: 'SwapFree < 4 GiB: memory rules only, max 1 shard' } : {}) }
 }
 
 // 10-28：运行中内存低水位 < 1.5G（ARGUS_LOW_MEM_MB）且有失败 → 记环境问题（infra_failed → verdict qa-env-problem），不算测试失败。

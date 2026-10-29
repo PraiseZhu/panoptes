@@ -2,7 +2,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -96,14 +96,14 @@ test('slot_mem_gate: PI_TEST_MEM_AVAIL_MB 9000 / 6500 / 4000 → normal / degrad
   assert.equal(gate(9000, 'false'), 'normal|0|2')                       // 内存够：不问文档检查
   assert.equal(gate(6500), 'degraded|0|1')                            // 10-28：<8G、≥6G：不等 30 分钟，马上用 1 片跑
   assert.match(gate(4000), /^skip\|[1-9]\d*\|0$/)                     // <6G（不够一片）：照旧等满再跳过
-  assert.match(gate(9000, '', 3), /^skip\|/)                          // swap <4G：就算 9G 也不跑
+  assert.equal(gate(9000, '', 3), 'degraded|0|1')                      // 10-28 PM：swap <4G：告警，按内存最多 1 片
   assert.equal(gate(4000, 'true'), 'docs-only|0|2')                     // 纯文档：不等
   // PI_TEST_MEM_AVAIL_MB 只在 PANOPTES_TEST=1 时生效：真机上设了它也不改读数（这里真读数是假 meminfo 的 1 kB → 跳过，而不是 9000 的正常）
   assert.match(sh(root, 'slot_mem_gate; echo $GATE_MODE', { PANOPTES_MEMINFO: fakeMem(root), PI_TEST_MEM_AVAIL_MB: '9000', PANOPTES_TEST: '', PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '1' }).stdout.trim(), /^skip$/)
   // 10-28 分片↔内存表：2 片 8192 MiB、1 片 6144 MiB；取装得下的最大片数，swap 不够一律 0
   const fit = (mb, swap = 5) => sh(root, 'slot_shards_for_mem', { PANOPTES_MEMINFO: fakeMem(root, swap), PANOPTES_TEST: '1', PI_TEST_MEM_AVAIL_MB: String(mb) }).stdout.trim()
   assert.deepEqual([16000, 8192, 8191, 6144, 6143, 5500, 1000].map((mb) => fit(mb)), ['2', '2', '1', '1', '0', '0', '0'])
-  assert.equal(fit(9000, 3), '0')
+  assert.equal(fit(9000, 3), '1'); assert.equal(fit(16000, 0), '1'); assert.equal(fit(6143, 2), '0')
   assert.equal(sh(root, 'slot_mem_gate; echo $GATE_SHARDS', { PANOPTES_MEMINFO: fakeMem(root), PANOPTES_TEST: '1', PI_TEST_MEM_AVAIL_MB: '7200', PANOPTES_MIN_MEM_GB: '7' }).stdout.trim(), '2') // 阈值仍跟 PANOPTES_MIN_MEM_GB
   // 等待期间内存回到够一片：不等满，立刻降级跑
   const grow = sh(root, 'slot_mem_avail_kb() { if (( SECONDS - T0 >= 1 )); then echo $((6500*1024)); else echo $((3000*1024)); fi; }; T0=$SECONDS; slot_mem_gate; echo "$GATE_MODE|$GATE_SHARDS"', { PANOPTES_MEMINFO: fakeMem(root), PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '30' }).stdout.trim()
@@ -111,11 +111,11 @@ test('slot_mem_gate: PI_TEST_MEM_AVAIL_MB 9000 / 6500 / 4000 → normal / degrad
   assert.equal(sh(root, 'slot_balloon_mb', { PANOPTES_VMSTAT: fakeVmstat(root) }).stdout.trim(), '6144')
 })
 
-// 10-29 PM：SwapTotal 0（机器没有 swap）→ 不等、不退出：告警，只按内存规则跑，最多 1 片；< 6144 照旧等
+// 10-28 PM：SwapTotal 0（机器没有 swap）→ 不等、不退出：告警，只按内存规则跑，最多 1 片；< 6144 照旧等
 test('no swap (SwapTotal 0): >= 8192 and 6144-8191 -> 1 shard + alert + memory_gate swap=0; < 6144 waits as before', async () => {
   const root = mkdtempSync(join(tmpdir(), 'argus-noswap-'))
   const f = join(root, 'mi-noswap'); writeFileSync(f, 'MemTotal: 16386368 kB\nMemAvailable: 1 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n')
-  const gate = (mb) => sh(root, 'slot_mem_gate; echo "$GATE_MODE|$GATE_SHARDS|$GATE_NO_SWAP|$GATE_WAIT_S"', { PANOPTES_MEMINFO: f, PANOPTES_TEST: '1', PI_TEST_MEM_AVAIL_MB: String(mb), PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '1' }).stdout.trim()
+  const gate = (mb) => sh(root, 'slot_mem_gate; echo "$GATE_MODE|$GATE_SHARDS|$GATE_LOW_SWAP|$GATE_WAIT_S"', { PANOPTES_MEMINFO: f, PANOPTES_TEST: '1', PI_TEST_MEM_AVAIL_MB: String(mb), PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '1' }).stdout.trim()
   assert.equal(gate(9000), 'degraded|1|1|0')
   assert.equal(gate(8192), 'degraded|1|1|0')
   assert.equal(gate(7000), 'degraded|1|1|0')
@@ -128,11 +128,31 @@ test('no swap (SwapTotal 0): >= 8192 and 6144-8191 -> 1 shard + alert + memory_g
     PANOPTES_NVM_DIR: nvm, QA_SECRETS_FILE: secrets, PANOPTES_BOOTSTRAP: '0', PANOPTES_TMP_SWEEP: '0', PANOPTES_TEST: '1', PANOPTES_GATE_DRYRUN: '1', PI_TEST_MEM_AVAIL_MB: '9000',
     PANOPTES_MEMINFO: f, PANOPTES_VMSTAT: fakeVmstat(root), PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '1', ARGUS_UNIT_SHARDS: '', ARGUS_MAX_PARALLEL: '' } })
   assert.equal(r.status, 0, r.stderr)
-  assert.match(r.stderr, /ALERT SwapTotal 0/)
+  assert.match(r.stderr, /ALERT SwapFree 0 MiB < 4 GiB: running by memory rules only, max 1 shard \(needs >= 6144 MiB available\)/)
   assert.match(r.stdout, /gate: mode=degraded wait=0s shards=1 max_parallel=1/)
   const { memoryGate } = await import('../src/nightly.mjs')
-  const mg = memoryGate({ PANOPTES_GATE_MODE: 'degraded', PANOPTES_GATE_SHARDS: '1', PANOPTES_GATE_NORMAL_SHARDS: '2', PANOPTES_GATE_MEM_MB: '9000', PANOPTES_GATE_NO_SWAP: '1' })
-  assert.equal(mg.swap, 0); assert.equal(mg.shards, 1); assert.match(mg.swap_alert, /SwapTotal 0/)
+  const mg = memoryGate({ PANOPTES_GATE_MODE: 'degraded', PANOPTES_GATE_SHARDS: '1', PANOPTES_GATE_NORMAL_SHARDS: '2', PANOPTES_GATE_MEM_MB: '9000', PANOPTES_GATE_LOW_SWAP: '1', PANOPTES_GATE_SWAP_FREE_MB: '0' })
+  assert.equal(mg.low_swap, true); assert.equal(mg.swap_free_mb, 0); assert.equal(mg.shards, 1); assert.match(mg.swap_alert, /SwapFree < 4 GiB/)
+})
+
+// 10-28 PM：swap free 1-3G（这里 2G）+ 9000 MiB → 告警 + 1 片（以前是等满再 exit 76）
+test('low swap (SwapFree 2 GiB) with 9000 MiB -> 1 shard + alert, no wait', () => {
+  const root = mkdtempSync(join(tmpdir(), 'argus-lowswap-'))
+  const f = join(root, 'mi'); writeFileSync(f, `MemTotal: 16386368 kB\nMemAvailable: 1 kB\nSwapTotal: 8388604 kB\nSwapFree: ${2 * 1048576} kB\n`)
+  assert.equal(sh(root, 'slot_mem_gate; echo "$GATE_MODE|$GATE_SHARDS|$GATE_LOW_SWAP|$GATE_WAIT_S"', { PANOPTES_MEMINFO: f, PANOPTES_TEST: '1', PI_TEST_MEM_AVAIL_MB: '9000', PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '1' }).stdout.trim(), 'degraded|1|1|0')
+  const w = sh(root, 'slot_mem_gate; echo "$GATE_MODE"', { PANOPTES_MEMINFO: f, PANOPTES_TEST: '1', PI_TEST_MEM_AVAIL_MB: '5000', PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '1' })
+  assert.equal(w.stdout.trim(), 'skip'); assert.match(w.stderr, /\(>= 6144 MiB available\), waiting/); assert.doesNotMatch(w.stderr, /swap free/)
+  const nvm = join(root, 'nvm'); mkdirSync(nvm); writeFileSync(join(nvm, 'nvm.sh'), 'nvm() { :; }\n')
+  const secrets = join(root, 'secrets.env'); writeFileSync(secrets, 'GITHUB_TOKEN=x\nQA_LLM_BASE_URL=http://127.0.0.1:9\nQA_LLM_API_KEY=x\n')
+  const qa = join(root, 'qa')
+  const r = spawnSync('bash', [join(dirname(SLOT), '..', 'run-nightly.sh'), '--date', '2026-10-27'], { encoding: 'utf8', timeout: 60_000, env: { ...process.env, QA_HOME: qa,
+    PANOPTES_NVM_DIR: nvm, QA_SECRETS_FILE: secrets, PANOPTES_BOOTSTRAP: '0', PANOPTES_TMP_SWEEP: '0', PANOPTES_TEST: '1', PANOPTES_GATE_DRYRUN: '1', PI_TEST_MEM_AVAIL_MB: '9000',
+    PANOPTES_MEMINFO: f, PANOPTES_VMSTAT: fakeVmstat(root), PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '1', ARGUS_UNIT_SHARDS: '', ARGUS_MAX_PARALLEL: '' } })
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(r.stderr, /ALERT SwapFree 2048 MiB < 4 GiB/)
+  assert.match(r.stdout, /gate: mode=degraded wait=0s shards=1 max_parallel=1/)
+  const alert = readFileSync(join(qa, 'argus-root', 'logs', 'control.log'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).find((e) => e.msg === 'run-nightly low swap alert')
+  assert.equal(alert.level, 'warn')
 })
 
 // 同样三档走真的 run-nightly.sh（假 nvm / 假密钥 / 临时 QA_HOME，PANOPTES_GATE_DRYRUN=1 在门后停下，不跑测试）

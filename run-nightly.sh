@@ -84,7 +84,7 @@ SECRETS="${QA_SECRETS_FILE:-/home/box/.config/mivo-qa/secrets.env}"
 # Launch / exit lines in control.log (before any lock, on every exit path) so an interrupted or queued run is visible.
 mkdir -p "$QA_HOME/argus-root/logs" 2>/dev/null || true
 CONTROL_LOG="$QA_HOME/argus-root/logs/control.log"
-ctl() { printf '{"t":"%s","level":"info","msg":"%s","pid":%d,%s}\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$1" "$$" "$2" >>"$CONTROL_LOG" 2>/dev/null || true; }
+ctl() { printf '{"t":"%s","level":"%s","msg":"%s","pid":%d,%s}\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "${3:-info}" "$1" "$$" "$2" >>"$CONTROL_LOG" 2>/dev/null || true; }
 LAUNCH_ARGS="$(printf '%s ' "$@" | sed 's/[\\"]/\\&/g')"
 ctl "run-nightly launch" "\"args\":\"${LAUNCH_ARGS% }\""
 EXTRA_EXIT_CLEANUP=":"
@@ -352,13 +352,14 @@ mem_avail_kb() { slot_mem_avail_kb; }
 GATE_PRS=(); prev=""; for a in "$@"; do [[ "$prev" == --pr ]] && GATE_PRS+=("$a"); [[ "$a" == --pr=* ]] && GATE_PRS+=("${a#--pr=}"); prev="$a"; done
 DOCS_CHECK=(); (( ${#GATE_PRS[@]} == 1 )) && DOCS_CHECK=(timeout 60 node --disable-warning=ExperimentalWarning src/cli.mjs docs-only --pr "${GATE_PRS[0]}")
 slot_mem_gate ${DOCS_CHECK[@]+"${DOCS_CHECK[@]}"}
-if [[ "$GATE_NO_SWAP" == 1 ]]; then   # 10-29 PM: no swap -> alert, run by memory only with at most 1 shard
-  msg="ALERT SwapTotal 0 (no swap on this machine): running by memory rules only, max 1 shard"
-  echo "[panoptes] $msg" | tee -a "$LOG" >&2; ctl "run-nightly no swap alert" "\"level_alert\":\"warn\",\"reason\":\"$msg\""
+GATE_SWAP_FREE_MB=$(( $(slot_swap_free_kb || echo 0) / 1024 ))
+if [[ "$GATE_LOW_SWAP" == 1 ]]; then   # 10-28 PM: swap free < 4G (or none) -> alert, run by memory only with at most 1 shard
+  msg="ALERT SwapFree $GATE_SWAP_FREE_MB MiB < ${PANOPTES_MIN_SWAP_GB:-4} GiB: running by memory rules only, max 1 shard (needs >= $(slot_shard_mem_mb 1) MiB available)"
+  echo "[panoptes] $msg" | tee -a "$LOG" >&2; ctl "run-nightly low swap alert" "\"reason\":\"$msg\"" warn
 fi
 GATE_MEM_MB=$(( $(mem_avail_kb) / 1024 ))
 # nightly.mjs records gate_wait_s (SLA: queue vs pipeline) and memory_gate { mode, shards, normal_shards, mem_available_mb } per PR
-export PANOPTES_GATE_WAIT_S="$GATE_WAIT_S" PANOPTES_GATE_MODE="$GATE_MODE" PANOPTES_GATE_SHARDS="$GATE_SHARDS" PANOPTES_GATE_NORMAL_SHARDS="$SLOT_NORMAL_SHARDS" PANOPTES_GATE_MEM_MB="$GATE_MEM_MB" PANOPTES_GATE_NO_SWAP="$GATE_NO_SWAP"
+export PANOPTES_GATE_WAIT_S="$GATE_WAIT_S" PANOPTES_GATE_MODE="$GATE_MODE" PANOPTES_GATE_SHARDS="$GATE_SHARDS" PANOPTES_GATE_NORMAL_SHARDS="$SLOT_NORMAL_SHARDS" PANOPTES_GATE_MEM_MB="$GATE_MEM_MB" PANOPTES_GATE_LOW_SWAP="$GATE_LOW_SWAP" PANOPTES_GATE_SWAP_FREE_MB="$GATE_SWAP_FREE_MB"
 mem_now="MemAvailable $GATE_MEM_MB MiB, SwapFree $(( $(slot_swap_free_kb) / 1024 )) MiB, balloon $(slot_balloon_mb) MiB"
 case "$GATE_MODE" in
   docs-only) msg="$mem_now: below gate, PR #${GATE_PRS[0]} is docs-only (no tests), not waiting"
@@ -366,7 +367,7 @@ case "$GATE_MODE" in
   degraded) msg="$mem_now after ${GATE_WAIT_S}s: < ${PANOPTES_MIN_MEM_GB:-8} GiB: degraded run with $GATE_SHARDS of $SLOT_NORMAL_SHARDS shards (ARGUS_UNIT_SHARDS=$GATE_SHARDS, ARGUS_MAX_PARALLEL=1)"
     export ARGUS_UNIT_SHARDS="$GATE_SHARDS" ARGUS_MAX_PARALLEL=1
     echo "[panoptes] $msg" | tee -a "$LOG" >&2; ctl "run-nightly low memory, degraded" "\"reason\":\"$msg\"" ;;
-  skip) msg="$mem_now after ${GATE_WAIT_S}s: below one shard (${PANOPTES_DEGRADED_MEM_GB:-6} GiB / swap ${PANOPTES_MIN_SWAP_GB:-4} GiB): not running, exit 76, next catch-up retries"
+  skip) msg="$mem_now after ${GATE_WAIT_S}s: below one shard (needs >= $(slot_shard_mem_mb 1) MiB available): not running, exit 76, next catch-up retries"
     echo "[panoptes] SKIP $msg" | tee -a "$LOG" >&2; ctl "run-nightly low memory, skipped" "\"reason\":\"$msg\""
     exit 76 ;;
   *) (( GATE_WAIT_S > 0 )) && ctl "run-nightly memory gate passed" "\"gate_wait_s\":$GATE_WAIT_S" ;;
