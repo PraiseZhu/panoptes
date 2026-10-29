@@ -17,7 +17,7 @@ boot_id 变了（重启）且间隔 > 1 分钟也算停机。外发型作业（O
   - 停机期间的合并：mergewatch 恢复后把 dirty 置真，catch-up 会把没报告的合并 PR 全测一遍。
 watchdog 用 windows() 把同一停机窗口里的 missed:* 合成一条告警。
 用法：outage.py status | outage.py replay-plan（只打印）"""
-import os, sys, json, time, subprocess, datetime as dt
+import os, sys, json, time, subprocess, tempfile, contextlib, fcntl, datetime as dt
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rollback_hold
 
@@ -65,10 +65,15 @@ OUT_DONE = ("done", "sending", "uncertain")
 # 10-28：会对外发东西的作业（飞书 / Slack / GitHub 评论或改状态，含经 outbound 账本发的）。ROLLBACK-SUSPECTED 存在时补跑跳过它们，
 # 不记 replayed（标记删掉后还能补）；记到 HELD，mergewatch 心跳见标记消失再起一次补跑。不在 POLICY 里的作业（DEFAULT）按外发处理（宁可不补）。
 #   daily/followup: feishu/slack/gh.issue；jasper: brief；pm/pmnudge: 催办/复盘外发；opsreview: grok.group；handoff: gh.issue.create；
-#   prretro: gh.pr.ready；prfix: fix PR + slack.dm；opsfix retest --execute: 写回 + gh.issue.reopen；catchup: panoptes 测完评论 PR、发飞书。
+#   prretro: gh.pr.ready；prfix: fix PR + slack.dm；opsfix retest --execute: 写回 + gh.issue.reopen；
+#   catchup: cron 不带 --create-issues，nightly 自己只写报告、不直接外发；保守起见仍放在 SENDS（标记期间补测推迟到恢复后）。
 SENDS = {"daily", "followup", "jasper", "pm", "pmnudge", "opsreview", "handoff", "prretro", "prfix", "opsfix", "catchup"}
 # 不外发、可照常补：credcheck（只读）、dailyretro（只写文件）、compare、ledger（本地台账文件）、roster（out/ 下）、p2（只写 out/p2）
 HELD = lambda: os.path.join(D(), "held.json")
+HOLD_STATE = lambda: os.path.join(D(), "hold-state.json")       # {"absent_since": ISO|None}：标记连续消失从何时起
+RESUMED = lambda: os.path.join(D(), "resumed.json")             # 恢复记录（watchdog 写进给 Praise 的汇总）
+HELD_PROBLEMS = lambda: os.path.join(D(), "held-problems.json") # held.json 损坏 / 窗口已被 windows.json 挤掉（watchdog 告警）
+RESUME_AFTER_MIN = 15   # PM 10-28：标记连续消失 ≥ 15 分钟才自动恢复（吸收抖动；期间再出现就重新计时）
 
 
 def sends(job): return job in SENDS or job not in POLICY
@@ -100,9 +105,26 @@ def jl(p, d):
 
 
 def jw(p, obj):
-    os.makedirs(os.path.dirname(p), exist_ok=True); t = p + ".tmp"
-    with open(t, "w") as f: json.dump(obj, f, ensure_ascii=False, indent=1)
-    os.replace(t, p)
+    """原子写：同目录唯一临时文件 + os.replace（10-28 验收：固定 .tmp 名在并发写时会互相 rename 掉、崩 FileNotFoundError）"""
+    d = os.path.dirname(p); os.makedirs(d, exist_ok=True)
+    fd, t = tempfile.mkstemp(dir=d, prefix=os.path.basename(p) + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f: json.dump(obj, f, ensure_ascii=False, indent=1)
+        os.replace(t, p)
+    except BaseException:
+        try: os.remove(t)
+        except OSError: pass
+        raise
+
+
+@contextlib.contextmanager
+def held_lock():
+    """held.json / hold-state.json / resumed.json 的读改写都在这把锁里（多个心跳 / replay 进程并发时恢复恰好一次）"""
+    os.makedirs(D(), exist_ok=True)
+    with open(os.path.join(D(), "held.lock"), "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try: yield
+        finally: fcntl.flock(f, fcntl.LOCK_UN)
 
 
 def boot_id():
@@ -218,19 +240,50 @@ def _sent(job, day, ledger=None):
 HOLD_WHY = "疑似回滚，外发型作业暂停补跑"
 
 
+def _problem(now, what):
+    print(f"outage held problem: {what}", file=sys.stderr, flush=True)
+    ps = jl(HELD_PROBLEMS(), []); ps.append({"at": now.isoformat(timespec="seconds"), "what": what}); jw(HELD_PROBLEMS(), ps[-50:])
+
+
+def _read_held(now):
+    """锁内调用。held.json 损坏 → 记问题、改名留证（.bad-<ts>），按空处理"""
+    if not os.path.exists(HELD()): return {}
+    try:
+        h = json.load(open(HELD()))
+        if not isinstance(h, dict): raise ValueError("not an object")
+        return h
+    except Exception as e:
+        bad = f"{HELD()}.bad-{now.strftime('%Y%m%d%H%M%S')}"
+        try: os.replace(HELD(), bad)
+        except OSError: bad = HELD()
+        _problem(now, f"held.json 读不了（{type(e).__name__}: {str(e)[:80]}），暂停过的外发型补跑记录丢了；原文件 {bad}")
+        return {}
+
+
 def _hold(w, jobs):
-    """记下被暂停的窗口（mergewatch 心跳见标记消失后重起补跑）"""
-    h = jl(HELD(), {}); e = h.setdefault(w["start"], {"jobs": []}); e["jobs"] = sorted(set(e["jobs"]) | set(jobs)); jw(HELD(), h)
+    """记下被暂停的窗口（mergewatch 心跳见标记连续消失 15 分钟后重起补跑）"""
+    with held_lock():
+        h = _read_held(dt.datetime.now(CST)); e = h.setdefault(w["start"], {"jobs": []}); e["jobs"] = sorted(set(e["jobs"]) | set(jobs)); jw(HELD(), h)
 
 
-def resume_held(spawn=None):
-    """标记已删、有暂停过的窗口 → 每个窗口起一次补跑（过期规则照旧），清掉记录。返回起了补跑的窗口 start。"""
-    h = jl(HELD(), {})
-    if not h or rollback_hold.active(): return []
-    jw(HELD(), {})
-    wins = {x["start"]: x for x in windows()}
-    out = [s for s in h if s in wins]
-    for s in out: (spawn or spawn_replay)(wins[s])
+def resume_held(spawn=None, now=None):
+    """标记连续消失 ≥ RESUME_AFTER_MIN 分钟、有暂停过的窗口 → 每个窗口起一次补跑（过期规则照旧），清掉记录。
+    判断 + 清记录 + 起补跑全在 held_lock 里（并发调用恰好一次）。返回起了补跑的窗口 start。"""
+    now = now or dt.datetime.now(CST)
+    with held_lock():
+        h = _read_held(now); st = jl(HOLD_STATE(), {})
+        if rollback_hold.active() or not h:   # 标记在（或重新出现）→ 计时清零
+            if st.get("absent_since"): jw(HOLD_STATE(), {"absent_since": None})
+            return []
+        since = st.get("absent_since")
+        if not since: jw(HOLD_STATE(), {"absent_since": now.isoformat(timespec="seconds")}); return []
+        if (now - dt.datetime.fromisoformat(since)).total_seconds() < RESUME_AFTER_MIN * 60: return []
+        wins = {x["start"]: x for x in windows()}
+        out = [s for s in h if s in wins]; lost = [s for s in h if s not in wins]
+        if lost: _problem(now, "暂停过的窗口已不在 windows.json（只留最近 50 条），没法自动补：" + "、".join(f"{s}（{'、'.join(h[s].get('jobs', []))}）" for s in lost))
+        jw(HELD(), {}); jw(HOLD_STATE(), {"absent_since": None})
+        rs = jl(RESUMED(), []); rs.append({"at": now.isoformat(timespec="seconds"), "absent_since": since, "windows": {s: h[s].get("jobs", []) for s in out}}); jw(RESUMED(), rs[-50:])
+        for s in out: (spawn or spawn_replay)(wins[s])
     return out
 
 

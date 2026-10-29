@@ -189,7 +189,7 @@ def heartbeat(mode):
         log(f'heartbeat error: {type(e).__name__}: {e}')
         return None
     if mode == 'pi':
-        try:   # 10-28：ROLLBACK-SUSPECTED 删掉后，把暂停过的外发型补跑重新起一次
+        try:   # 10-28：ROLLBACK-SUSPECTED 连续消失 ≥ 15 分钟后，把暂停过的外发型补跑重新起一次（判断+重起在 outage.held_lock 内）
             for s0 in outage.resume_held(): log(f'rollback hold lifted -> replay re-spawned for window {s0}')
         except Exception as e:
             log(f'resume_held error: {type(e).__name__}: {e}')

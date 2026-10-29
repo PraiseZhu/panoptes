@@ -138,6 +138,15 @@ def job_checks(now, probs, since):
                                f"{a} 到 {b} 机器暂停（心跳断了 {ow['gap_min']} 分钟），错过 {len(missed)} 轮。{groups}",
                                "补跑按原数据日各一次（见 out/outage/replayed.json），过期的不补。",
                                todo=(f"看看这些要不要手动补：{'、'.join(manual)}" if manual else "不用处理"))
+    # 10-28 #96：疑似回滚暂停的外发型补跑——恢复了哪些窗口（fyi）、held 记录丢了（action）；只看最近 24 小时
+    recent = lambda xs: [x for x in xs if isinstance(x, dict) and x.get("at") and (now - dt.datetime.fromisoformat(x["at"])).total_seconds() < 86400]
+    for x in recent(outage.jl(outage.RESUMED(), [])):
+        ws = "；".join(f"{s0[5:16].replace('T', ' ')} 起的窗口（{'、'.join(j) or '无'}）" for s0, j in x.get("windows", {}).items()) or "无"
+        probs[f"outage:resumed:{x['at']}"] = PN.item("fyi", f"回滚标记已消失 {outage.RESUME_AFTER_MIN} 分钟以上，暂停的外发型补跑已恢复",
+                                                     f"{x['at'][5:16].replace('T', ' ')} 恢复了 {len(x.get('windows', {}))} 个暂停窗口：{ws}。", "补跑按原规则（过期不补、已外发不补）。", todo="不用处理")
+    for x in recent(outage.jl(outage.HELD_PROBLEMS(), [])):
+        probs[f"outage:held-lost:{x['at']}"] = PN.item("action", "暂停的外发型补跑记录丢了", x.get("what", ""), "这些窗口不会自动补跑。",
+                                                       todo="看 out/outage/held-problems.json，决定要不要手动跑 outage.py replay <窗口 start>")
     for job in sorted(set(CADENCE) | set(DAILY)):
         rs = runs(job, 1)
         if rs and rs[-1][3] and "syntax-error" in rs[-1][3]: probs[f"syntax:{job}"] = job_item(job, "它的程序被改坏了，启动不起来", f"的程序 {job}.py 编译失败（{rs[-1][3][:80]}）")
