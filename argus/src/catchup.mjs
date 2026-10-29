@@ -20,6 +20,10 @@ export const MAX_ATTEMPTS = 3
 export const LOCK_TIMEOUT_EXIT = 75
 // run-nightly.sh 内存门跳过（10-27）：没开测，不算尝试次数、不放弃，下次再试
 export const MEM_SKIP_EXIT = 76
+// run-nightly.sh exit 3（pipeline 失败 / QA 环境坏，例如合并 commit 不在本地镜像里读不出 tree）也是「一个测试都没跑」：
+// 10-29 22:07 / 23:22 / 23:40 三轮补测 #1411/#1413/#1419/#1422 在 66 分钟内把 3 次预算烧成永久 gave_up，工具修好也补不到。
+// 所以和 76 一样只记录、不计数、不放弃。
+export const PIPELINE_ERROR_EXIT = 3
 export const catchUpDir = (reportsDir = REPORTS_DIR) => join(reportsDir, 'catch-up')
 export const statePath = (reportsDir = REPORTS_DIR) => join(catchUpDir(reportsDir), 'state.json')
 
@@ -151,6 +155,13 @@ export function catchUp({ repo, now = new Date(), reportsDir = REPORTS_DIR, merg
       result.stopped = 'memory-skip'; break
     }
     const still = gapOf(g, mergedDir)
+    // pipeline 失败没开测（exit 3）：撤回这次计数、不放弃，接着试下一个缺口（工具修好后照样会补上）
+    if (code === PIPELINE_ERROR_EXIT && still) {
+      st.attempts--; st.last_reason = 'pipeline-error'
+      st.history.push({ at: toShanghaiIso(), exit_code: code, filled: false, pipeline_error: true })
+      result.runs.push({ number: g.number, attempt: st.attempts, exit_code: code, duration_s: Math.round((Date.now() - t0) / 1000), filled: false, remaining_gap: still.reason, pipeline_error: true })
+      continue
+    }
     const run = { number: g.number, attempt: st.attempts, exit_code: code, duration_s: Math.round((Date.now() - t0) / 1000), filled: !still, remaining_gap: still?.reason ?? null }
     result.runs.push(run)
     st.history.push({ at: toShanghaiIso(), exit_code: code, filled: !still })
