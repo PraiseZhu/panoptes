@@ -2,10 +2,14 @@
 """python3 test/test_boxhealth_cleanup.py -- boxhealth's 7-day cleanup (2026-10-24: really deletes), in a temp dir
 (a fake /tmp, a fake HOME with npm / pip caches, a fake QA lock). Never touches the real /tmp or caches."""
 import os, sys, time, json, fcntl, tempfile, shutil, subprocess, unittest
+from unittest import mock
 T = tempfile.mkdtemp(prefix="boxhealth-test-")
-os.environ.update(HOME=f"{T}/home", BOXHEALTH_TMP_ROOT=f"{T}/tmp", PI_STATE=f"{T}/state", BOXHEALTH_LOG_DIRS=f"{T}/logs1:{T}/logs2")
+ENV = dict(HOME=f"{T}/home", BOXHEALTH_TMP_ROOT=f"{T}/tmp", PI_STATE=f"{T}/state", BOXHEALTH_LOG_DIRS=f"{T}/logs1:{T}/logs2")
+os.environ.update(ENV)   # for import; every test re-applies ENV (another test module may have changed os.environ since)
 B_ = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin"); sys.path.insert(0, B_)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import boxhealth as B   # noqa: E402
+from isolation import assert_inside   # noqa: E402
 
 def mk(p, days, text="x"):
     os.makedirs(os.path.dirname(p), exist_ok=True); open(p, "w").write(text)
@@ -19,7 +23,15 @@ def age_dir(p, days):
 class TestCleanup(unittest.TestCase):
     def setUp(self):
         for d in ("home", "tmp", "logs1", "logs2"): shutil.rmtree(f"{T}/{d}", ignore_errors=True); os.makedirs(f"{T}/{d}")
-        B.QA_LOCKS = [f"{T}/nightly.lock"]; open(B.QA_LOCKS[0], "a").close()
+        for p in (mock.patch.dict(os.environ, ENV), mock.patch.object(B, "QA_LOCKS", [f"{T}/nightly.lock"]), mock.patch.object(B, "LOGS_CAP", []),
+                  mock.patch.object(B, "really_clean", self.checked_clean)):
+            p.start(); self.addCleanup(p.stop)
+        open(B.QA_LOCKS[0], "a").close()
+        assert_inside(T, B.TMP_ROOT, *B.LOG_DIRS, os.path.expanduser("~"))   # 10-28: a stale TMP_ROOT=/tmp once made this real /tmp
+    real_clean = staticmethod(B.really_clean)
+    def checked_clean(self, cand):
+        assert_inside(T, *(p for p, _ in cand), os.path.expanduser("~"))       # never rm anything outside the sandbox
+        return self.real_clean(cand)
     def paths(self): return {p: k for p, k in B.cleanup_candidates()[0]}
 
     def test_seven_days_unused_and_not_held(self):

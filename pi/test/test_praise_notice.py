@@ -3,6 +3,7 @@
 Local only. Run: cd bin && python3 ../test/test_praise_notice.py"""
 for _k in [k for k in __import__("os").environ if k.startswith("GIT_")]: del __import__("os").environ[_k]
 import os, sys, unittest
+from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bin"))
 import praise_notice as PN
 BOX_MERGER = os.path.exists("/workspace/mivo-merger/app/scripts/loops/automerge/policy.json")   # box-only data (CI has none)
@@ -93,9 +94,9 @@ class Producers(unittest.TestCase):
         self.assertEqual(O.env_item("panoptes HEAD 1234abcd != origin/HEAD 5678ef01")["kind"], "action")
 
     def test_boxhealth_honours_dry_run_flag(self):
-        sys.argv = ["boxhealth.py", "--dry-run"]
-        import boxhealth as B
-        self.assertTrue(B.DRY)
+        import boxhealth as B   # may be cached from an earlier test module: DRY is read when used, not at import
+        with mock.patch.object(sys, "argv", ["boxhealth.py", "--dry-run"]): self.assertTrue(B.DRY)
+        with mock.patch.object(sys, "argv", ["boxhealth.py"]), mock.patch.dict(os.environ, PI_BOXHEALTH_DRYRUN="1"): self.assertTrue(B.DRY)
 
     def test_watchdog_falls_back_when_praise_notice_is_broken(self):
         import importlib, builtins

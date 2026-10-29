@@ -27,8 +27,8 @@ from lib import *
 import workroot as W
 import rollback_hold
 
-CONF = os.environ.get("JANITOR_CONF") or f"{PI_CODE}/conf/janitor.json"
-OUT = os.environ.get("JANITOR_OUT") or f"{BASE}/out/janitor"
+def _CONF(): return globals()["CONF"] if "CONF" in globals() else (os.environ.get("JANITOR_CONF") or f"{PI_CODE}/conf/janitor.json")   # read at call time; a test may set CONF
+def _OUT(): return globals()["OUT"] if "OUT" in globals() else (os.environ.get("JANITOR_OUT") or f"{BASE}/out/janitor")   # read at call time; a test may set OUT
 BOT_BRANCH = {"mivo": re.compile(r"^fix/qa-\d+-[0-9a-f]{8}$"), "panoptes": re.compile(r"^fix/infra-[0-9a-f]{8}$")}
 REMOTE = {   # repo -> remote branches of bot PRs: name prefix, the bot's mark in the PR body, merged ones too?
     "mivo": {"gh": "xindong/mivo-canvas-plugin", "prefix": "qa-fix/", "mark": "<!-- pi-line ", "merged": False},
@@ -46,10 +46,10 @@ DEFAULTS = {"enforce": False, "tmp_hours": 6, "nm_keep": 2, "salvage_max_bytes":
 class ConfError(Exception): pass
 def load_conf():
     c = json.loads(json.dumps(DEFAULTS))
-    if os.path.exists(CONF):
-        try: user = json.load(open(CONF))
-        except (OSError, ValueError) as e: raise ConfError(f"{CONF}: {e}")
-        if not isinstance(user, dict) or not isinstance(user.get("enforce", False), bool): raise ConfError(f"{CONF}: enforce must be true/false")
+    if os.path.exists(_CONF()):
+        try: user = json.load(open(_CONF()))
+        except (OSError, ValueError) as e: raise ConfError(f"{_CONF()}: {e}")
+        if not isinstance(user, dict) or not isinstance(user.get("enforce", False), bool): raise ConfError(f"{_CONF()}: enforce must be true/false")
         for k, v in user.items():
             if k.startswith("_"): continue
             c[k] = {**c[k], **v} if isinstance(c.get(k), dict) and isinstance(v, dict) else v
@@ -158,8 +158,8 @@ class Run:
         _, d = git("diff", "HEAD", "--binary", cwd=wd, t=300)
         body = f"# {wd} ({m.get('kind')} {m.get('ticket')}) status:\n" + "\n".join(f"# {l}" for l in lines) + "\n" + (d or "")
         if len(body.encode()) > self.c["salvage_max_bytes"]: return "太大，没留底"
-        os.makedirs(f"{OUT}/salvage", exist_ok=True)
-        f = f"{OUT}/salvage/{m.get('kind')}-{os.path.basename(wd)}-{int(time.time())}.patch"
+        os.makedirs(f"{_OUT()}/salvage", exist_ok=True)
+        f = f"{_OUT()}/salvage/{m.get('kind')}-{os.path.basename(wd)}-{int(time.time())}.patch"
         write_atomic(f, body); return f
     def clones(self):
         """per bot clone (under its repo lock): prune registrations whose directory is gone; delete bot branches no worktree uses"""
@@ -306,7 +306,7 @@ class _null:
 
 def state():
     try:
-        with open(f"{OUT}/state.json") as f: return json.load(f)
+        with open(f"{_OUT()}/state.json") as f: return json.load(f)
     except (OSError, ValueError): return {}
 
 def cmd_run(A, conf):
@@ -320,7 +320,7 @@ def cmd_run(A, conf):
     except W.Busy: print("skip: another janitor run holds janitor.lock"); return 75
     if data: st["data_at"] = time.time()
     st["errors_in_a_row"] = (st.get("errors_in_a_row", 0) + 1) if r["errors"] else 0; r["errors_in_a_row"] = st["errors_in_a_row"]
-    os.makedirs(OUT, exist_ok=True); write_atomic(f"{OUT}/last.json", json.dumps(r, ensure_ascii=False, indent=1)); write_atomic(f"{OUT}/state.json", json.dumps(st))
+    os.makedirs(_OUT(), exist_ok=True); write_atomic(f"{_OUT()}/last.json", json.dumps(r, ensure_ascii=False, indent=1)); write_atomic(f"{_OUT()}/state.json", json.dumps(st))
     print(f"{now_cst():%H:%M:%S} {r['mode']}: reaped {len(r['reaped'])}, skipped {len(r['skipped'])}, unmarked {len(r['unmarked'])}, "
           f"branches {len(r['branches_deleted'])}, remote {len(r['remote_deleted'])}/{len(r['remote_kept'])} kept, deleted {len(r['deleted'])}, "
           f"trash {r['trash_entries']} ({r['trash_bytes'] >> 20}M), work root {r['root_bytes'] >> 20}M, free {r['free_gb']}G, errors {len(r['errors'])}")
@@ -339,7 +339,7 @@ def cmd_reap(A, conf):
     return 0 if ok or r.r["skipped"] else 1
 
 def cmd_status(A):
-    try: r = json.load(open(f"{OUT}/last.json"))
+    try: r = json.load(open(f"{_OUT()}/last.json"))
     except (OSError, ValueError): print("janitor has not run yet"); return 0
     if A.json: print(json.dumps(r, ensure_ascii=False, indent=1)); return 0
     print(f"{r['ran_at']} {r['mode']}: reaped {len(r['reaped'])}, skipped {len(r['skipped'])}, unmarked {len(r['unmarked'])}, "
@@ -365,3 +365,8 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+def __getattr__(name):   # CONF OUT: resolved lazily (env read at use, not at import), old attribute reads keep working
+    if name in ('CONF', 'OUT'): return globals()["_" + name]()
+    raise AttributeError(name)

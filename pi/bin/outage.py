@@ -22,14 +22,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rollback_hold
 
 CST = dt.timezone(dt.timedelta(hours=8))
-BASE = os.environ.get("PI_STATE") or "/workspace/mivo-qa/pi"
-D = lambda: os.path.join(BASE, "out", "outage")
+def _BASE(): return globals()["BASE"] if "BASE" in globals() else (os.environ.get("PI_STATE") or "/workspace/mivo-qa/pi")   # read at call time; a test may set BASE
+D = lambda: os.path.join(_BASE(), "out", "outage")
 HB = lambda: os.path.join(D(), "heartbeat.json")
-HB2 = lambda: os.path.join(BASE, "outage-heartbeat.json")   # 10-28：第二份放 $PI_STATE 根（和 outbound-enabled 同级，重启/恢复后还在；18:08 重启后 out/outage/ 是新建的，心跳丢了就判不出停机）
-LEDGER = lambda: os.path.join(BASE, "out", "outbound", "ledger.json")
+HB2 = lambda: os.path.join(_BASE(), "outage-heartbeat.json")   # 10-28：第二份放 $PI_STATE 根（和 outbound-enabled 同级，重启/恢复后还在；18:08 重启后 out/outage/ 是新建的，心跳丢了就判不出停机）
+LEDGER = lambda: os.path.join(_BASE(), "out", "outbound", "ledger.json")
 WIN = lambda: os.path.join(D(), "windows.json")
 REPLAYED = lambda: os.path.join(D(), "replayed.json")
-WITNESS = os.environ.get("PI_OUTAGE_WITNESS") or "/workspace/pi-work/locks/outage-seq-witness"
+def _WITNESS(): return globals()["WITNESS"] if "WITNESS" in globals() else (os.environ.get("PI_OUTAGE_WITNESS") or "/workspace/pi-work/locks/outage-seq-witness")   # read at call time; a test may set WITNESS
 ROLLBACK_MARK = rollback_hold.mark_path()   # 兼容旧引用；判断一律走 rollback_hold.active()
 RUN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run.sh")
 GAP_MIN = 5
@@ -157,7 +157,7 @@ def beat(now=None):
     """每分钟一次。返回新发现的停机窗口（或 None）。"""
     now = now or dt.datetime.now(CST)
     prev = max((x for x in (jl(HB(), None), jl(HB2(), None)) if x and "ts" in x), key=lambda x: x["ts"], default=None)   # 两份取新的
-    try: ws = int(open(WITNESS).read().strip())
+    try: ws = int(open(_WITNESS()).read().strip())
     except (OSError, ValueError): ws = None
     mark = rollback_hold.active()
     w = classify(prev, now, ws, mark)
@@ -165,7 +165,7 @@ def beat(now=None):
     hb = {"ts": now.isoformat(timespec="seconds"), "boot_id": boot_id(), "seq": seq, "mark": mark}
     jw(HB(), hb); jw(HB2(), hb)
     try:
-        os.makedirs(os.path.dirname(WITNESS), exist_ok=True); open(WITNESS, "w").write(str(seq))
+        os.makedirs(os.path.dirname(_WITNESS()), exist_ok=True); open(_WITNESS(), "w").write(str(seq))
     except OSError: pass
     if w:
         wins = jl(WIN(), []); wins.append(w); jw(WIN(), wins[-50:])
@@ -233,7 +233,7 @@ def _sent(job, day, ledger=None):
     """外发型作业的键在 outbound 账本或 out/<job>/<day>.actions.json 里已 done → 返回那个键；否则 None"""
     if job not in OUT_KEYS or not day: return None
     ledger = jl(LEDGER(), {}) if ledger is None else ledger
-    acts = {a.get("key"): a.get("status") for f in (job, "ops") for a in jl(os.path.join(BASE, "out", f, f"{day}.actions.json"), {}).get("actions", [])}
+    acts = {a.get("key"): a.get("status") for f in (job, "ops") for a in jl(os.path.join(_BASE(), "out", f, f"{day}.actions.json"), {}).get("actions", [])}
     return next((k for k in OUT_KEYS[job](day) if (ledger.get(k) or {}).get("status") in OUT_DONE or acts.get(k) == "done"), None)
 
 
@@ -329,7 +329,7 @@ def spawn_replay(w):
     """mergewatch 发现 pause 后调：后台起一个 `outage.py replay <窗口 start>`，不挡心跳。"""
     if os.environ.get("PI_OUTAGE_NO_SPAWN"): return None
     return subprocess.Popen([sys.executable, os.path.abspath(__file__), "replay", w["start"]], stdin=subprocess.DEVNULL,
-                            stdout=open(os.path.join(BASE, "out", "logs", "outage-replay.log"), "a"), stderr=subprocess.STDOUT, start_new_session=True).pid
+                            stdout=open(os.path.join(_BASE(), "out", "logs", "outage-replay.log"), "a"), stderr=subprocess.STDOUT, start_new_session=True).pid
 
 
 def main():
@@ -351,3 +351,8 @@ def main():
 
 
 if __name__ == "__main__": sys.exit(main())
+
+
+def __getattr__(name):   # BASE WITNESS: resolved lazily (env read at use, not at import), old attribute reads keep working
+    if name in ('BASE', 'WITNESS'): return globals()["_" + name]()
+    raise AttributeError(name)

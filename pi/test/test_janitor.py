@@ -3,6 +3,7 @@
 remote, the bot clone, worktrees, a person's repo next to it, a fake gh on PATH. Never touches a real repo or GitHub."""
 import os, sys, json, time, shutil, subprocess, tempfile, unittest, io, contextlib, fcntl
 from unittest import mock
+_ENV_BEFORE = dict(os.environ)   # restored right after the imports below: this module's env must not leak into other test modules
 for _k in [k for k in os.environ if k.startswith("GIT_")]: del os.environ[_k]
 T = tempfile.mkdtemp(prefix="janitor-test-")
 ENV = dict(PI_WORK_ROOT=f"{T}/work", PI_STATE=f"{T}/state", JANITOR_OUT=f"{T}/state/out/janitor", JANITOR_CONF=f"{T}/janitor.json",
@@ -10,7 +11,7 @@ ENV = dict(PI_WORK_ROOT=f"{T}/work", PI_STATE=f"{T}/state", JANITOR_OUT=f"{T}/st
                   GIT_CONFIG_COUNT="3", GIT_CONFIG_KEY_0="user.name", GIT_CONFIG_VALUE_0="t", GIT_CONFIG_KEY_1="user.email",
                   GIT_CONFIG_VALUE_1="t@t", GIT_CONFIG_KEY_2="init.defaultBranch", GIT_CONFIG_VALUE_2="main")
 GIT_ENV = {k: v for k, v in ENV.items() if k.startswith("GIT_")}
-os.environ.update(ENV)   # for import time; every test re-applies ENV in setUp (other test modules may change os.environ during collection)
+os.environ.update(ENV)   # for import time only (restored below); every test re-applies ENV in setUp
 os.makedirs(f"{T}/bin"); open(f"{T}/bin/gh", "w").write('''#!/usr/bin/env python3
 import json, os, sys
 a = sys.argv[1:]; open(os.environ["FAKE_GH_LOG"], "a").write(json.dumps(a) + "\\n")
@@ -30,6 +31,7 @@ sys.exit(3)
 B = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin"); sys.path.insert(0, B)
 import workroot as W   # noqa: E402
 import janitor as J    # noqa: E402
+os.environ.clear(); os.environ.update(_ENV_BEFORE)
 # 10-24: every built-in default path points into T as well -- a test conf that leaves one out must never fall back to the box's
 # real dirs (one did: test_10 with enforce=true removed the real /tmp/opsfix-retest/nm-* cache before this line existed)
 J.DEFAULTS.update(legacy_tmp=[f"{T}/data/legacy"], evidence={**J.DEFAULTS["evidence"], "dir": f"{T}/data/evidence"},
