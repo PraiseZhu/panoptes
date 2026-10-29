@@ -2,7 +2,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -118,6 +118,23 @@ test('run-nightly.sh memory gate end to end: 9000 runs normally, 5500 degraded (
   assert.match(r.stderr, /SKIP MemAvailable 4000 MiB, SwapFree 5120 MiB, balloon 6144 MiB after \d+s: below the degraded floor/)
   // 退出后槽位已释放：马上能拿到 nightly.lock
   assert.equal(spawnSync('bash', ['-c', `exec 9>${join(root, 'qa-4000', 'argus-root', 'nightly.lock')}; flock -n 9 && echo free`], { encoding: 'utf8' }).stdout.trim(), 'free')
+})
+
+// 10-29 gate_wait_s 累计每次尝试：单 PR 运行把内存门等待加到 argus-root/gate-wait/PR-N 上；有 merged 报告后从 0 开始
+test('run-nightly.sh --pr N: gate wait accumulates across attempts, restarts once the merged report exists', () => {
+  const root = mkdtempSync(join(tmpdir(), 'argus-gate-acc-'))
+  const nvm = join(root, 'nvm'); mkdirSync(nvm); writeFileSync(join(nvm, 'nvm.sh'), 'nvm() { :; }\n')
+  const secrets = join(root, 'secrets.env'); writeFileSync(secrets, 'GITHUB_TOKEN=x\nQA_LLM_BASE_URL=http://127.0.0.1:9\nQA_LLM_API_KEY=x\n')
+  const qa = join(root, 'qa'), gw = join(qa, 'argus-root', 'gate-wait'); mkdirSync(gw, { recursive: true })
+  const script = join(dirname(SLOT), '..', 'run-nightly.sh')
+  const run = () => spawnSync('bash', [script, '--pr', '7', '--date', '2026-10-27'], { encoding: 'utf8', timeout: 60_000, env: { ...process.env, QA_HOME: qa,
+    PANOPTES_NVM_DIR: nvm, QA_SECRETS_FILE: secrets, PANOPTES_BOOTSTRAP: '0', PANOPTES_TMP_SWEEP: '0', PANOPTES_TEST: '1', PANOPTES_GATE_DRYRUN: '1', PI_TEST_MEM_AVAIL_MB: '9000',
+    PANOPTES_MEMINFO: fakeMem(root), PANOPTES_VMSTAT: fakeVmstat(root), PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '1', ARGUS_UNIT_SHARDS: '', ARGUS_MAX_PARALLEL: '' } })
+  writeFileSync(join(gw, 'PR-7'), '1801\n')   // an earlier skipped attempt waited 1801 s
+  let r = run(); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /gate: mode=normal wait=1801s/)
+  assert.equal(readFileSync(join(gw, 'PR-7'), 'utf8').trim(), '1801')
+  mkdirSync(join(qa, 'reports', 'merged'), { recursive: true }); writeFileSync(join(qa, 'reports', 'merged', 'PR-7.json'), '{}')
+  r = run(); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /gate: mode=normal wait=0s/)
 })
 
 // 10-28 合并即测 SLA：按 PR 加锁，内存够（8G+4G 交换）就和占槽的运行并行，不够就照旧排队

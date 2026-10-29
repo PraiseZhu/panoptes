@@ -350,6 +350,15 @@ mem_avail_kb() { slot_mem_avail_kb; }
 GATE_PRS=(); prev=""; for a in "$@"; do [[ "$prev" == --pr ]] && GATE_PRS+=("$a"); [[ "$a" == --pr=* ]] && GATE_PRS+=("${a#--pr=}"); prev="$a"; done
 DOCS_CHECK=(); (( ${#GATE_PRS[@]} == 1 )) && DOCS_CHECK=(timeout 60 node --disable-warning=ExperimentalWarning src/cli.mjs docs-only --pr "${GATE_PRS[0]}")
 slot_mem_gate ${DOCS_CHECK[@]+"${DOCS_CHECK[@]}"}
+# 10-29: gate_wait_s counts the memory-gate wait of every attempt for a single-PR run (a skipped / failed attempt's 30 min used
+# to vanish: #1340 reported 600 s of ~2400 s). Running total in argus-root/gate-wait/PR-N; restarts at 0 once reports/merged/PR-N.json exists.
+if (( ${#GATE_PRS[@]} == 1 )); then
+  GW_FILE="$ARGUS_ROOT/gate-wait/PR-${GATE_PRS[0]}"; gw_prev=0
+  [[ -f "$QA_HOME/reports/merged/PR-${GATE_PRS[0]}.json" ]] || gw_prev="$(cat "$GW_FILE" 2>/dev/null)"
+  [[ "$gw_prev" =~ ^[0-9]+$ ]] || gw_prev=0
+  GATE_WAIT_S=$(( GATE_WAIT_S + gw_prev ))
+  mkdir -p "${GW_FILE%/*}" && echo "$GATE_WAIT_S" > "$GW_FILE"
+fi
 export PANOPTES_GATE_WAIT_S="$GATE_WAIT_S" PANOPTES_GATE_MODE="$GATE_MODE"   # nightly.mjs records gate_wait_s per PR (SLA: queue vs pipeline)
 mem_now="MemAvailable $(( $(mem_avail_kb) / 1024 )) MiB, SwapFree $(( $(slot_swap_free_kb) / 1024 )) MiB, balloon $(slot_balloon_mb) MiB"
 case "$GATE_MODE" in

@@ -22,7 +22,7 @@ Checks (all from files already on disk, plus one `gh pr list` every 30 min):
     above never saw the 02:07-02:28 outage after the restore (keys not restored), and nobody was told.
 Cron: */5, own quiet log out/logs/watchdog-<day>.log (only on change). --dry-run prints findings, sends nothing.
 """
-import sys, time, glob, hashlib
+import sys, time, glob, hashlib, statistics
 from lib import *
 import outage
 try:
@@ -145,18 +145,31 @@ def job_checks(now, probs, since):
 
 SLA_P95_MIN = 2   # 合并 → 开测 p95 ≤ 2 分钟（Praise 10-26）
 SLA_MIN_N = 5
+SLA_P95_N = 20   # 10-29：样本 < 20 时 p95 就是最大值（7 个样本 p95=最慢那一个），改报最大值 + 中位数
 
 
-def merge_sla(reports, now, hours=24):
-    """reports: [(merged_at_iso, test_started_at_iso)]；返回 (样本数, p95 分钟) —— 只看最近 hours 小时合并的"""
+def merge_delays(reports, now, hours=24):
+    """reports: [(merged_at_iso, test_started_at_iso)]；最近 hours 小时合并的 合并→开测 分钟数，升序"""
     ds = []
     for m, s in reports:
         try:
             mt = dt.datetime.fromisoformat(m.replace("Z", "+00:00")); st = dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
         except Exception: continue
         if (now - mt).total_seconds() <= hours * 3600: ds.append(max(0.0, (st - mt).total_seconds() / 60))
+    return sorted(ds)
+
+
+def merge_sla(reports, now, hours=24):
+    """返回 (样本数, p95 分钟)"""
+    ds = merge_delays(reports, now, hours)
     if not ds: return 0, None
-    ds.sort(); return len(ds), ds[min(len(ds) - 1, int(round(0.95 * (len(ds) - 1))))]
+    return len(ds), ds[min(len(ds) - 1, int(round(0.95 * (len(ds) - 1))))]
+
+
+def stat_label(ds):
+    """样本够就报 p95；不够报最大值和中位数（不贴 p95 标签）"""
+    if len(ds) >= SLA_P95_N: return f"p95 {ds[min(len(ds) - 1, int(round(0.95 * (len(ds) - 1))))]:.0f} 分钟"
+    return f"最大 {ds[-1]:.0f} 分钟、中位数 {statistics.median(ds):.0f} 分钟（样本 {len(ds)} < {SLA_P95_N}，不算 p95）"
 
 
 def merge_sla_check(now, probs, rdir=f"{QA}/reports/merged"):
@@ -174,10 +187,11 @@ def merge_sla_check(now, probs, rdir=f"{QA}/reports/merged"):
         except (TypeError, ValueError, OverflowError): continue
     _, q95 = merge_sla(adj, now)
     if p95 is None: return n, p95   # 没有样本
-    if n >= SLA_MIN_N and p95 > SLA_P95_MIN:
-        gate = (f"其中等内存门以外的排队 p95 是 {q95:.0f} 分钟，其余是在等内存。" if q95 is not None and q95 < p95 else "")
-        probs["sla:merge-to-test"] = PN.item("fyi", "合并到开测变慢了", f"最近 24 小时 {n} 个合并 PR，合并到开始测试的 p95 是 {p95:.0f} 分钟（目标 ≤ {SLA_P95_MIN} 分钟）。{gate}",
-                                             "测试结果和问题通知会跟着晚。", todo=PN.ask_session(f"合并即测 SLA 超标（p95 {p95:.0f} 分钟，不含等内存 {q95:.0f} 分钟），查 mergewatch / catch-up 排队和内存门"))
+    if n >= SLA_MIN_N and p95 > SLA_P95_MIN:   # n < 20 时 p95 下标就是最大值，阈值判断不变
+        lab, qlab = stat_label(merge_delays([r[:2] for r in rows], now)), stat_label(merge_delays(adj, now) or [0.0])
+        gate = (f"其中等内存门以外的排队：{qlab}，其余是在等内存。" if q95 is not None and q95 < p95 else "")
+        probs["sla:merge-to-test"] = PN.item("fyi", "合并到开测变慢了", f"最近 24 小时 {n} 个合并 PR，合并到开始测试 {lab}（目标 p95 ≤ {SLA_P95_MIN} 分钟）。{gate}",
+                                             "测试结果和问题通知会跟着晚。", todo=PN.ask_session(f"合并即测 SLA 超标（{lab}；不含等内存 {qlab}），查 mergewatch / catch-up 排队和内存门"))
     return n, p95
 
 

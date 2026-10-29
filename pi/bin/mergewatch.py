@@ -19,6 +19,11 @@ per fresh merge without a report (not already running). It does not wait for cat
 takes the single QA slot as soon as it is free, or while the slot holder is parked between PRs (scripts/qa-slot.sh).
 The catch-up launch below stays as the fallback for anything missed.
 
+Re-enqueue (10-29, #1340 waited 328 min): a priority run that ends without reports/merged/PR-N.json (failed, timed out,
+or exit 76 from the memory gate) is relaunched on the next tick instead of waiting for the 2-hourly catch-up.
+state.json inflight {PR: {day, tries}} keeps it idempotent (never relaunched while running / queued, dropped once the
+report exists) and bounded (MAX_TRIES launches, then left to catch-up).
+
 Gate: runs only when /workspace/fleet-mode is `pi` (the Grok on-merge routine owns `grok`).
 Alerts: none per tick. state.json carries last_check (heartbeat) and fail_streak; boxcheck/boxhealth alert on
 staleness or a fail streak >= 15, once per state change.
@@ -37,6 +42,7 @@ LAUNCH_LOG = os.path.join(QA_HOME, 'argus-root', 'logs', 'mergewatch-catch-up.lo
 REPORTS = os.path.join(QA_HOME, 'reports')
 API_PULLS = 'https://api.github.com/repos/xindong/mivo-canvas-plugin/pulls?state=closed&sort=updated&direction=desc&per_page=30'
 DRY = '--dry-run' in sys.argv
+MAX_TRIES = 3   # same bound as catch-up (retries 3x)
 
 
 def now():
@@ -140,6 +146,18 @@ def running_prs(proc='/proc'):
     return out
 
 
+def requeue(inflight, busy, reports=REPORTS):
+    """inflight {"N": {day, tries}} 里已结束但没报告的 PR → [(n, day)] 立刻重排；有报告的删掉，tries 用完的交给 catch-up。原地改 inflight。"""
+    out = []
+    for k in sorted(inflight, key=int):
+        n, e = int(k), inflight[k]
+        if os.path.exists(os.path.join(reports, 'merged', f'PR-{n}.json')) or e.get('tries', 0) >= MAX_TRIES:
+            del inflight[k]
+        elif n not in busy:
+            out.append((n, e['day']))
+    return out
+
+
 def priority_cmd(number, day):
     """和补测子运行同一套参数（catchup.mjs catchUpChildArgs），trigger event，加 --priority 插队。"""
     return [RUN_NIGHTLY, '--priority', '--pr', str(number), '--date', day, '--write-merged', '--wait-lock', '14400',
@@ -153,7 +171,7 @@ def launch(cmd, sha):
         return subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=lf, stderr=subprocess.STDOUT,
                                 start_new_session=True, cwd='/workspace/panoptes',
                                 env={**os.environ, 'QA_HOME': QA_HOME,
-                                     'ARGUS_PR_TIMEOUT_MIN': os.environ.get('ARGUS_PR_TIMEOUT_MIN', '90'),  # one stuck PR must not block the queue for hours; 10-28 Praise raised 45 -> 90 because low-memory degraded runs (#1340, #1385) exceed 45 min; catch-up retries a timed-out PR
+                                     'ARGUS_PR_TIMEOUT_MIN': os.environ.get('ARGUS_PR_TIMEOUT_MIN', '90'),  # one stuck PR must not block the queue for hours; 10-28 Praise raised 45 -> 90 because low-memory degraded runs (#1340, #1385) exceed 45 min; mergewatch requeue() relaunches a timed-out PR
                                      'PATH': '/usr/local/bin:/usr/bin:/bin'})
 
 
@@ -192,7 +210,7 @@ def main():
     st = load()
     st['last_check'] = now()
     # 10-27：停机恢复不再单独置 dirty（同一个 main sha 每次恢复都重起一次 catch-up，10-27 03:46–09:18 起了 6 次、都无事可做）。
-    # 停机期间有合并 → main sha 变了 → 下面照样置 dirty；失败/漏测的由 2 小时一次的 catch-up cron 兜底。
+    # 停机期间有合并 → main sha 变了 → 下面照样置 dirty；失败的插队运行由下面 requeue 立刻重排，漏测的由 2 小时一次的 catch-up cron 兜底。
     try:
         st.pop('auth', None)   # 10-26: praiseautomation App removed (belongs to another account); default git credentials only
         out = subprocess.run(['git', 'ls-remote', REPO_URL, 'refs/heads/main'], capture_output=True, text=True,
@@ -219,22 +237,32 @@ def main():
         st['main_moved_at'] = now()
         st['dirty'] = True
 
+    inflight = st.setdefault('inflight', {})
+    busy = running_prs()
+
+    def go(n, day):
+        cmd = priority_cmd(n, day)
+        if DRY:
+            return log('DRY: would launch ' + ' '.join(cmd))
+        p = launch(cmd, sha)
+        e = inflight.setdefault(str(n), {'day': day, 'tries': 0})
+        e['tries'] += 1
+        busy.add(n)
+        log(f"launched priority run pid {p.pid} for PR #{n} (main {sha[:8]}, try {e['tries']}/{MAX_TRIES})")
+
+    # 失败 / 超时 / 内存门跳过（exit 76）的插队运行：不等 2 小时一次的 catch-up，这一轮就重排
+    for n, day in requeue(inflight, busy):
+        go(n, day)
+
     tok = gh_token() if st.get('dirty') else None
     if st.get('dirty') and tok:
         # 合并即测插队：每个新合并的 PR 单独起一个 --priority 运行（不等 catch-up.lock / 顺序队列，槽位上限 1，见 scripts/qa-slot.sh）
         since = st.get('merged_seen') or (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=2)).isoformat()
         try:
             pulls = fetch_pulls(tok)
-            busy = running_prs()
             for n, day in fresh_merges(pulls, since):
-                if n in busy:
-                    continue
-                cmd = priority_cmd(n, day)
-                if DRY:
-                    log('DRY: would launch ' + ' '.join(cmd))
-                else:
-                    p = launch(cmd, sha)
-                    log(f'launched priority run pid {p.pid} for PR #{n} (main {sha[:8]})')
+                if n not in busy and str(n) not in inflight:
+                    go(n, day)
             ms = [p['merged_at'] for p in pulls if p.get('merged_at')]
             if ms:
                 st['merged_seen'] = max([since] + [m.replace('Z', '+00:00') for m in ms])

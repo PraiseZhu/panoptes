@@ -23,7 +23,12 @@ open(f"{pd}/42/cmdline", "wb").write(b"bash\0/workspace/panoptes/run-nightly.sh\
 open(f"{pd}/43/cmdline", "wb").write(b"python3\0x.py\0--pr\0" + b"99\0")
 assert M.running_prs(pd) == {13}
 src = open(f"{B}/mergewatch.py").read()
-assert "fresh_merges(pulls, since)" in src and "if n in busy" in src
+assert "fresh_merges(pulls, since)" in src and "n not in busy and str(n) not in inflight" in src
+# 10-29 重排：结束了没报告（失败 / 超时 / exit 76）→ 立刻重排；在跑的不重复；有报告的删掉；超过 MAX_TRIES 交给 catch-up
+inf = {"13": {"day": "d13", "tries": 1}, "20": {"day": "d20", "tries": 1}, "12": {"day": "d12", "tries": 1}, "21": {"day": "d21", "tries": M.MAX_TRIES}}
+assert M.requeue(inf, busy={20}, reports=rd) == [(13, "d13")]
+assert set(inf) == {"13", "20"}, inf                                 # 12 有报告、21 次数用完 → 移出
+assert M.requeue(inf, busy={13, 20}, reports=rd) == []              # 重排后在跑 → 不再起（幂等）
 os.environ["GITHUB_TOKEN"] = "t_env"; assert M.gh_token() == "t_env"   # 原凭证，不用 App
 assert "ghapp" not in src and "praiseautomation.json" not in src
 print("ok test_mergewatch_priority")
