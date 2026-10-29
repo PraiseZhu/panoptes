@@ -177,6 +177,46 @@ test('run-nightly.sh memory gate end to end: 9000 runs normally, 6500 degraded (
   assert.equal(spawnSync('bash', ['-c', `exec 9>${join(root, 'qa-4000', 'argus-root', 'nightly.lock')}; flock -n 9 && echo free`], { encoding: 'utf8' }).stdout.trim(), 'free')
 })
 
+// 10-29 gate_wait_s 累计每次尝试：单 PR 运行把内存门等待加到 argus-root/gate-wait/PR-N 上；有 merged 报告后从 0 开始
+test('run-nightly.sh --pr N: gate wait accumulates across attempts, restarts once the merged report exists', () => {
+  const root = mkdtempSync(join(tmpdir(), 'argus-gate-acc-'))
+  const nvm = join(root, 'nvm'); mkdirSync(nvm); writeFileSync(join(nvm, 'nvm.sh'), 'nvm() { :; }\n')
+  const secrets = join(root, 'secrets.env'); writeFileSync(secrets, 'GITHUB_TOKEN=x\nQA_LLM_BASE_URL=http://127.0.0.1:9\nQA_LLM_API_KEY=x\n')
+  const qa = join(root, 'qa'), gw = join(qa, 'argus-root', 'gate-wait')   // not pre-created
+  const script = join(dirname(SLOT), '..', 'run-nightly.sh')
+  const run = () => spawnSync('bash', [script, '--pr', '7', '--date', '2026-10-27'], { encoding: 'utf8', timeout: 60_000, env: { ...process.env, QA_HOME: qa,
+    PANOPTES_NVM_DIR: nvm, QA_SECRETS_FILE: secrets, PANOPTES_BOOTSTRAP: '0', PANOPTES_TMP_SWEEP: '0', PANOPTES_TEST: '1', PANOPTES_GATE_DRYRUN: '1', PI_TEST_MEM_AVAIL_MB: '9000',
+    PANOPTES_MEMINFO: fakeMem(root), PANOPTES_VMSTAT: fakeVmstat(root), PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '1', ARGUS_UNIT_SHARDS: '', ARGUS_MAX_PARALLEL: '' } })
+  // first attempt of a new PR: no gate-wait file yet must not trip set -e (#92 acceptance blocker)
+  let r = run(); assert.equal(r.status, 0, r.stdout + r.stderr); assert.match(r.stdout, /gate: mode=normal wait=0s/)
+  assert.equal(readFileSync(join(gw, 'PR-7'), 'utf8').trim(), '0')
+  writeFileSync(join(gw, 'PR-7'), '1801\n')   // an earlier skipped attempt waited 1801 s
+  r = run(); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /gate: mode=normal wait=1801s/)
+  assert.equal(readFileSync(join(gw, 'PR-7'), 'utf8').trim(), '1801')
+  mkdirSync(join(qa, 'reports', 'merged'), { recursive: true }); writeFileSync(join(qa, 'reports', 'merged', 'PR-7.json'), '{}')
+  r = run(); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /gate: mode=normal wait=0s/)
+})
+
+// merge of #92 + #93: low-swap degraded run and the accumulated gate wait both show up
+test('run-nightly.sh --pr N: low swap degraded run keeps the accumulated gate wait (alert + reason + title)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'argus-gate-acc-swap-'))
+  const nvm = join(root, 'nvm'); mkdirSync(nvm); writeFileSync(join(nvm, 'nvm.sh'), 'nvm() { :; }\n')
+  const secrets = join(root, 'secrets.env'); writeFileSync(secrets, 'GITHUB_TOKEN=x\nQA_LLM_BASE_URL=http://127.0.0.1:9\nQA_LLM_API_KEY=x\n')
+  const qa = join(root, 'qa'), gw = join(qa, 'argus-root', 'gate-wait'); mkdirSync(gw, { recursive: true }); writeFileSync(join(gw, 'PR-8'), '1801\n')
+  const r = spawnSync('bash', [join(dirname(SLOT), '..', 'run-nightly.sh'), '--pr', '8', '--date', '2026-10-27'], { encoding: 'utf8', timeout: 60_000, env: { ...process.env, QA_HOME: qa,
+    PANOPTES_NVM_DIR: nvm, QA_SECRETS_FILE: secrets, PANOPTES_BOOTSTRAP: '0', PANOPTES_TMP_SWEEP: '0', PANOPTES_TEST: '1', PANOPTES_GATE_DRYRUN: '1', PI_TEST_MEM_AVAIL_MB: '9000',
+    PANOPTES_MEMINFO: fakeMem(root, 2), PANOPTES_VMSTAT: fakeVmstat(root), PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '1', ARGUS_UNIT_SHARDS: '', ARGUS_MAX_PARALLEL: '' } })
+  assert.equal(r.status, 0, r.stdout + r.stderr)
+  assert.match(r.stdout, /gate: mode=degraded wait=1801s shards=1 max_parallel=1/)
+  assert.match(r.stderr, /ALERT SwapFree 2048 MiB < 4 GiB/)
+  assert.match(r.stderr, /after 1801s: low swap free: SwapFree 2048 MiB < 4096 MiB: degraded run with 1 of 2 shards/)
+  assert.equal(readFileSync(join(gw, 'PR-8'), 'utf8').trim(), '1801')
+  const log = readFileSync(join(qa, 'argus-root', 'logs', 'control.log'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+  assert.equal(log.find((e) => e.msg === 'run-nightly low swap alert').level, 'warn')
+  assert.ok(log.some((e) => e.msg === 'run-nightly low swap free, degraded'))
+  assert.ok(!log.some((e) => e.msg === 'run-nightly low memory, degraded'))
+})
+
 // 10-28 合并即测 SLA：按 PR 加锁，内存够（slot_shards_for_mem ≥ 1 片）就和占槽的运行并行，不够就照旧排队
 test('on-merge: slot busy + memory ok -> concurrent; memory low -> keeps waiting (gives up); same PR twice -> refused', async () => {
   const root = mkdtempSync(join(tmpdir(), 'argus-slot-')); mkdirSync(join(root, 'priority'))

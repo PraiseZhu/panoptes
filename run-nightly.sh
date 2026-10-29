@@ -70,7 +70,7 @@
 # Output: $QA_HOME/reports/YYYY-MM-DD.json  (logs: $QA_HOME/argus-root/logs)
 # Exit codes: 0 ok/degraded, 3 pipeline failed or QA environment broken (see system_health), 1 usage/config error,
 #             75 another run active / lock wait timed out, 76 skipped for low memory (memory gate below: still < 8 GB after
-#             30 min and below the 6 GB / 4 GB swap degraded floor; nothing ran, catch-up retries it without counting an attempt).
+#             30 min and below the 6 GB degraded floor (one shard); nothing ran, catch-up retries it without counting an attempt; mergewatch requeue counts it as one of its MAX_TRIES).
 set -euo pipefail
 # Pin umask to 022 (QA once ran under 002: fixture dirs became 0775 → false RUNNER_OWNER_MISMATCH on mivo #1385).
 # The inherited value is passed on so system_health can record it; the Node side checks the actual umask.
@@ -357,6 +357,15 @@ if [[ "$GATE_LOW_SWAP" == 1 ]]; then   # 10-28 PM: swap free < 4G (or none) -> a
   msg="ALERT SwapFree $GATE_SWAP_FREE_MB MiB < ${PANOPTES_MIN_SWAP_GB:-4} GiB: running by memory rules only, max 1 shard (needs >= $(slot_shard_mem_mb 1) MiB available)"
   echo "[panoptes] $msg" | tee -a "$LOG" >&2; ctl "run-nightly low swap alert" "\"reason\":\"$msg\"" warn
 fi
+# 10-29: gate_wait_s counts the memory-gate wait of every attempt for a single-PR run (a skipped / failed attempt's 30 min used
+# to vanish: #1340 reported 600 s of ~2400 s). Running total in argus-root/gate-wait/PR-N; restarts at 0 once reports/merged/PR-N.json exists.
+if (( ${#GATE_PRS[@]} == 1 )); then
+  GW_FILE="$ARGUS_ROOT/gate-wait/PR-${GATE_PRS[0]}"; gw_prev=0
+  [[ -f "$QA_HOME/reports/merged/PR-${GATE_PRS[0]}.json" ]] || gw_prev="$(cat "$GW_FILE" 2>/dev/null || true)"
+  [[ "$gw_prev" =~ ^[0-9]+$ ]] || gw_prev=0
+  GATE_WAIT_S=$(( GATE_WAIT_S + gw_prev ))
+  mkdir -p "${GW_FILE%/*}" && echo "$GATE_WAIT_S" > "$GW_FILE"
+fi
 GATE_MEM_MB=$(( $(mem_avail_kb) / 1024 ))
 # nightly.mjs records gate_wait_s (SLA: queue vs pipeline) and memory_gate { mode, shards, normal_shards, mem_available_mb } per PR
 export PANOPTES_GATE_WAIT_S="$GATE_WAIT_S" PANOPTES_GATE_MODE="$GATE_MODE" PANOPTES_GATE_SHARDS="$GATE_SHARDS" PANOPTES_GATE_NORMAL_SHARDS="$SLOT_NORMAL_SHARDS" PANOPTES_GATE_MEM_MB="$GATE_MEM_MB" PANOPTES_GATE_LOW_SWAP="$GATE_LOW_SWAP" PANOPTES_GATE_SWAP_FREE_MB="$GATE_SWAP_FREE_MB"
@@ -364,11 +373,11 @@ mem_now="MemAvailable $GATE_MEM_MB MiB, SwapFree $(( $(slot_swap_free_kb) / 1024
 case "$GATE_MODE" in
   docs-only) msg="$mem_now: below gate, PR #${GATE_PRS[0]} is docs-only (no tests), not waiting"
     echo "[panoptes] $msg" | tee -a "$LOG" >&2; ctl "run-nightly memory gate skipped (docs-only)" "\"reason\":\"$msg\"" ;;
-  degraded) if [[ "$GATE_LOW_SWAP" == 1 ]]; then why="low swap free: SwapFree $GATE_SWAP_FREE_MB MiB < $(( ${PANOPTES_MIN_SWAP_GB:-4} * 1024 )) MiB"
-    else why="low memory: MemAvailable $GATE_MEM_MB MiB < $(slot_shard_mem_mb 2) MiB"; fi
+  degraded) if [[ "$GATE_LOW_SWAP" == 1 ]]; then why_t="low swap free"; why="$why_t: SwapFree $GATE_SWAP_FREE_MB MiB < $(( ${PANOPTES_MIN_SWAP_GB:-4} * 1024 )) MiB"
+    else why_t="low memory"; why="$why_t: MemAvailable $GATE_MEM_MB MiB < $(slot_shard_mem_mb 2) MiB"; fi
     msg="$mem_now after ${GATE_WAIT_S}s: $why: degraded run with $GATE_SHARDS of $SLOT_NORMAL_SHARDS shards (ARGUS_UNIT_SHARDS=$GATE_SHARDS, ARGUS_MAX_PARALLEL=1)"
     export ARGUS_UNIT_SHARDS="$GATE_SHARDS" ARGUS_MAX_PARALLEL=1
-    echo "[panoptes] $msg" | tee -a "$LOG" >&2; ctl "run-nightly low memory, degraded" "\"reason\":\"$msg\"" ;;
+    echo "[panoptes] $msg" | tee -a "$LOG" >&2; ctl "run-nightly $why_t, degraded" "\"reason\":\"$msg\"" ;;
   skip) msg="$mem_now after ${GATE_WAIT_S}s: below one shard (needs >= $(slot_shard_mem_mb 1) MiB available): not running, exit 76, next catch-up retries"
     echo "[panoptes] SKIP $msg" | tee -a "$LOG" >&2; ctl "run-nightly low memory, skipped" "\"reason\":\"$msg\""
     exit 76 ;;

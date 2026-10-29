@@ -25,6 +25,7 @@ appends them to out/logs/janitor-<day>.log)."""
 import argparse, json, os, re, shutil, subprocess, sys, time
 from lib import *
 import workroot as W
+import rollback_hold
 
 CONF = os.environ.get("JANITOR_CONF") or f"{PI_CODE}/conf/janitor.json"
 OUT = os.environ.get("JANITOR_OUT") or f"{BASE}/out/janitor"
@@ -222,6 +223,8 @@ class Run:
                         st = gh(["api", f"repos/{R['gh']}/compare/main...{tip}", "--jq", ".status"], js=False).strip()
                         if st not in ("identical", "behind"):
                             self.r["remote_kept"].append({**k, "why": f"远端分支最新提交 {tip[:9]} 不是 PR 的 head，也不在 main 里（被推进过？）"}); continue
+                    if rollback_hold.active():   # 10-28：疑似回滚期间不对 GitHub 做直接写，标记删掉后下一轮再删
+                        self.r["remote_kept"].append({**k, "why": "ROLLBACK-SUSPECTED 存在，暂不删远端分支"}); continue
                     self.say("delete remote", f"{R['gh']} {br}", f"PR #{p.get('number')} 已{'合并' if p.get('mergedAt') else '关闭'}，远端 = PR head 或已在 main")
                     if self.enforce: gh(["api", "-X", "DELETE", f"repos/{R['gh']}/git/refs/heads/{br}"], js=False)
                     self.r["remote_deleted"].append({**k, "tip": tip})

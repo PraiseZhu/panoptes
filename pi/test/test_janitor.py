@@ -175,6 +175,21 @@ class TestRemote(Base):
         self.gh({"prs": {"xindong/mivo-canvas-plugin": [nomark, merged]}, "refs": {"qa-fix/fixpr-1-x": "a" * 40}})
         self.run_j("run"); self.assertEqual(self.deletes(), [])                         # not ours / merged mivo (GitHub deletes those)
 
+    def test_16_rollback_hold_keeps_remote_branch(self):   # 10-28 #96: no direct GitHub delete while ROLLBACK-SUSPECTED exists
+        mark = f"{T}/ROLLBACK-SUSPECTED"; saved = os.environ.get("PI_ROLLBACK_MARK"); os.environ["PI_ROLLBACK_MARK"] = mark
+        try:
+            self.gh({"prs": {"xindong/mivo-canvas-plugin": [self.PR]}, "refs": {"qa-fix/fixpr-1-x": "a" * 40}})
+            open(mark, "w").close()
+            for _ in range(2):   # marker appears, then persists
+                self.run_j("run"); self.assertEqual(self.deletes(), [])
+                self.assertIn("ROLLBACK-SUSPECTED", self.last()["remote_kept"][0]["why"]); self.assertEqual(self.last()["remote_deleted"], [])
+            os.remove(mark)      # marker removed -> deleted on the next run
+            self.run_j("run"); self.assertEqual(len(self.deletes()), 1); self.assertEqual(self.last()["remote_deleted"][0]["branch"], "qa-fix/fixpr-1-x")
+        finally:
+            if os.path.exists(mark): os.remove(mark)
+            if saved is None: os.environ.pop("PI_ROLLBACK_MARK", None)
+            else: os.environ["PI_ROLLBACK_MARK"] = saved
+
 class TestIdempotentAndData(Base):
     def test_08_runs_are_idempotent(self):
         wd = self.wt(pid=dead_pid()); self.wt("pi-wt-5-abcdef12", "fix/qa-5-abcdef12", pid=os.getpid())

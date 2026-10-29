@@ -136,7 +136,8 @@ slot_shards_for_mem() {
 #             30-min wait any more: the host balloon reclaims memory, 8G cannot be guaranteed): caller runs GATE_SHARDS
 #             unit shards and the coverage round after the first round (no parallel)
 #   skip      below one shard for the whole PANOPTES_MEM_WAIT_S (1800 s, polled every PANOPTES_MEM_POLL_S = 60 s):
-#             caller does not run (exit 76 = memory skip, slot released, next catch-up retries without counting an attempt)
+#             caller does not run (exit 76 = memory skip, slot released, next catch-up retries without counting an attempt;
+#             mergewatch requeue counts it toward MAX_TRIES)
 slot_mem_gate() {
   GATE_WAIT_S=0; GATE_MODE=normal; GATE_SHARDS=$SLOT_NORMAL_SHARDS; GATE_LOW_SWAP=0
   slot_low_swap && GATE_LOW_SWAP=1   # caller alerts; slot_shards_for_mem caps at 1 shard (>= 6144 MiB), < 6144 waits as before

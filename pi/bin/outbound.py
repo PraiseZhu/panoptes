@@ -638,6 +638,9 @@ def main():
     log(f"mode={mode()} flag={os.path.exists(OUTBOUND_FLAG)} gate={'OPEN' if gate else 'closed'} dry_run={o.dry_run}")
     for k in ("MIVO_SLACK_BOT_TOKEN", "MIVO_FEISHU_APP_ID", "MIVO_FEISHU_APP_SECRET"): log(f"cred {k}: {'set' if os.environ.get(k) else 'unset'}")
     if not gate and not o.dry_run: log("gate closed -> nothing to do"); return 0
+    import rollback_hold   # 10-28：疑似回滚时本机可能是旧快照 -> 只出计划（同 --dry-run：只读校验、不动账本、不发），标记删掉后下一轮照常发
+    hold = rollback_hold.active()
+    if hold and not o.dry_run: log(f"ROLLBACK HOLD: {rollback_hold.mark_path()} exists -> plan only, nothing sent, ledger unchanged"); o.dry_run = True
     if not o.dry_run:   # memory floor: send nothing, ledger untouched -> every pending action goes out on a later run
         why = mem_floor()
         if why:
@@ -800,7 +803,7 @@ def main():
         text = full if len(full) <= 3800 else full[:3600] + f"\n…（截断，全文 out/outbound/relay-{today()}-{stamp[-4:]}.md）"
         dm(f"relay-digest:{stamp}", text, [k for _, k, *_ in batch])
     fails += len(nonlocal_fail)
-    out = [f"# outbound {'dry-run' if o.dry_run else 'run'} {now_cst().isoformat(timespec='seconds')} gate={'OPEN' if gate else 'closed'}", "",
+    out = [f"# outbound {'dry-run' if o.dry_run else 'run'} {now_cst().isoformat(timespec='seconds')} gate={'OPEN' if gate else 'closed'}" + (" rollback-hold" if hold else ""), "",
            "| job | key | type | to | result | detail |", "|---|---|---|---|---|---|"] + [f"| {' | '.join(str(x).replace('|','/') for x in r)} |" for r in rows]
     print("\n".join(out))
     tag = f".resend-{re.sub(r'[^A-Za-z0-9_.-]+', '_', resend)}" if resend else ""   # never overwrite the cron run's report
