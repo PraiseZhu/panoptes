@@ -114,7 +114,7 @@ slot_mem_ok() {
 #   docs-only memory low but the optional command (args) says this run is docs-only (no tests run): no wait
 #   degraded  still low after the full wait, but MemAvailable >= 5G (PANOPTES_DEGRADED_MEM_GB) and SwapFree >= 4G:
 #             caller runs one unit shard and the coverage round after the first round (no parallel)
-#   skip      otherwise: caller does not run (exit 76 = memory skip, slot released, next catch-up retries without counting an attempt)
+#   skip      otherwise: caller does not run (exit 76 = memory skip, slot released, next catch-up retries without counting an attempt; mergewatch requeue counts it toward MAX_TRIES)
 slot_mem_gate() {
   GATE_WAIT_S=0; GATE_MODE=normal
   slot_mem_ok && return 0

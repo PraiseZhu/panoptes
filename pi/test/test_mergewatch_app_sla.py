@@ -22,10 +22,15 @@ probs = {}; W.merge_sla_check(now, probs, tempfile.mkdtemp()); assert not probs
 # 10-27：gate_wait_s 单独算（#1315 等内存门 30 分钟）：总 p95 还是 40，不含等内存的排队 p95 降到 1
 for i in (10, 11): json.dump({"prs": [{"merged_at": slow[i][0], "test_started_at": slow[i][1], "gate_wait_s": 39 * 60}]}, open(f"{rd}/PR-{i}.json", "w"))
 probs = {}; assert W.merge_sla_check(now, probs, rd) == (12, 40)
-assert "等内存门以外的排队 p95 是 1 分钟" in probs["sla:merge-to-test"]["what"], probs
+w = probs["sla:merge-to-test"]["what"]
+assert "最大 40 分钟、中位数 1 分钟（样本 12 < 20，不算 p95）" in w and "等内存门以外的排队：最大 1 分钟" in w and "p95 40" not in w, w
 # 坏行：test_started_at 不是时间、gate_wait_s 不是数字 → 只跳过那一行，不崩
 json.dump({"prs": [{"merged_at": iso(100), "test_started_at": "not-a-time", "gate_wait_s": 5}]}, open(f"{rd}/PR-bad1.json", "w"))
 json.dump({"prs": [{"merged_at": iso(100), "test_started_at": iso(99), "gate_wait_s": "abc"}]}, open(f"{rd}/PR-bad2.json", "w"))
 probs = {}; n, p = W.merge_sla_check(now, probs, rd); assert n == 13 and p == 40 and "sla:merge-to-test" in probs, (n, p)
 assert "不含等内存 1 分钟" in probs["sla:merge-to-test"]["todo"] or "1 分钟" in probs["sla:merge-to-test"]["what"], probs
+# 10-29：样本 ≥ 20 才报 p95
+for i in range(20, 30): json.dump({"prs": [{"merged_at": iso(60 + i), "test_started_at": iso(60 + i - 1)}]}, open(f"{rd}/PR-{i}.json", "w"))
+probs = {}; W.merge_sla_check(now, probs, rd); w = probs["sla:merge-to-test"]["what"]
+assert "p95 40 分钟" in w and "中位数" not in w, w
 print("ok test_mergewatch_app_sla")
