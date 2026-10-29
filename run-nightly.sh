@@ -70,7 +70,7 @@
 # Output: $QA_HOME/reports/YYYY-MM-DD.json  (logs: $QA_HOME/argus-root/logs)
 # Exit codes: 0 ok/degraded, 3 pipeline failed or QA environment broken (see system_health), 1 usage/config error,
 #             75 another run active / lock wait timed out, 76 skipped for low memory (memory gate below: still < 8 GB after
-#             30 min and below the 5 GB / 4 GB swap degraded floor; nothing ran, catch-up retries it without counting an attempt).
+#             30 min and below the 6 GB / 4 GB swap degraded floor; nothing ran, catch-up retries it without counting an attempt).
 set -euo pipefail
 # Pin umask to 022 (QA once ran under 002: fixture dirs became 0775 → false RUNNER_OWNER_MISMATCH on mivo #1385).
 # The inherited value is passed on so system_health can record it; the Node side checks the actual umask.
@@ -342,7 +342,7 @@ LOG="$ARGUS_ROOT/logs/nightly-$(date +%Y%m%dT%H%M%S).log"
 # Memory gate (box: 15 GB + 8 GB swap, shared by several bots; 2026-10-14 froze from memory exhaustion).
 # 电脑运维 rule (10-27), scripts/qa-slot.sh slot_mem_gate: start normally only at MemAvailable >= 8 GB AND SwapFree >= 4 GB,
 # 10-28: below 8 GB but enough for fewer shards (shard <-> memory table in qa-slot.sh slot_shard_mem_mb: 2 shards 8 GB,
-# 1 shard 5 GB) -> degraded at once with GATE_SHARDS (coverage round after the first round, never in parallel), no 30-min
+# 1 shard 6 GB) -> degraded at once with GATE_SHARDS (coverage round after the first round, never in parallel), no 30-min
 # wait (the host balloon reclaims memory, 8 GB cannot be guaranteed). Below one shard: wait up to PANOPTES_MEM_WAIT_S
 # (1800 s), still low -> skip: exit 76 without running (the slot lock is released on exit) and the next catch-up retests the PR.
 # A single docs-only PR (no tests run) does not wait (10-27, #1315 waited
@@ -362,7 +362,7 @@ case "$GATE_MODE" in
   degraded) msg="$mem_now after ${GATE_WAIT_S}s: < ${PANOPTES_MIN_MEM_GB:-8} GiB: degraded run with $GATE_SHARDS of $SLOT_NORMAL_SHARDS shards (ARGUS_UNIT_SHARDS=$GATE_SHARDS, ARGUS_MAX_PARALLEL=1)"
     export ARGUS_UNIT_SHARDS="$GATE_SHARDS" ARGUS_MAX_PARALLEL=1
     echo "[panoptes] $msg" | tee -a "$LOG" >&2; ctl "run-nightly low memory, degraded" "\"reason\":\"$msg\"" ;;
-  skip) msg="$mem_now after ${GATE_WAIT_S}s: below one shard (${PANOPTES_DEGRADED_MEM_GB:-5} GiB / swap ${PANOPTES_MIN_SWAP_GB:-4} GiB): not running, exit 76, next catch-up retries"
+  skip) msg="$mem_now after ${GATE_WAIT_S}s: below one shard (${PANOPTES_DEGRADED_MEM_GB:-6} GiB / swap ${PANOPTES_MIN_SWAP_GB:-4} GiB): not running, exit 76, next catch-up retries"
     echo "[panoptes] SKIP $msg" | tee -a "$LOG" >&2; ctl "run-nightly low memory, skipped" "\"reason\":\"$msg\""
     exit 76 ;;
   *) (( GATE_WAIT_S > 0 )) && ctl "run-nightly memory gate passed" "\"gate_wait_s\":$GATE_WAIT_S" ;;

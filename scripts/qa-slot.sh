@@ -114,9 +114,11 @@ slot_mem_ok() {
 # and coverage round may run in parallel, so 2 shards costs ~2 x 1.2G x 2 rounds on top of node/git/browser overhead:
 #   shards  MemAvailable   source
 #   2       >= 8192 MiB    电脑运维 8G rule (PANOPTES_MIN_MEM_GB) = the normal run
-#   1       >= 5120 MiB    old degraded floor (PANOPTES_DEGRADED_MEM_GB): 1 shard, ARGUS_MAX_PARALLEL=1
-#   0       <  5120 MiB    not enough for one shard: wait (box would freeze), skip with exit 76 after PANOPTES_MEM_WAIT_S
-slot_shard_mem_mb() { case "$1" in 2) echo $(( ${PANOPTES_MIN_MEM_GB:-8} * 1024 ));; 1) echo $(( ${PANOPTES_DEGRADED_MEM_GB:-5} * 1024 ));; *) echo 0;; esac; }
+#   1       >= 6144 MiB    degraded floor (PANOPTES_DEGRADED_MEM_GB, 10-28 raised 5G -> 6G: one vitest process measured at
+#                          2.77G RSS peak, and the host balloon reclaims memory mid-run): 1 shard, ARGUS_MAX_PARALLEL=1,
+#                          lint and unit tests serialized
+#   0       <  6144 MiB    not enough for one shard: wait (box would freeze), skip with exit 76 after PANOPTES_MEM_WAIT_S
+slot_shard_mem_mb() { case "$1" in 2) echo $(( ${PANOPTES_MIN_MEM_GB:-8} * 1024 ));; 1) echo $(( ${PANOPTES_DEGRADED_MEM_GB:-6} * 1024 ));; *) echo 0;; esac; }
 SLOT_NORMAL_SHARDS=2
 # largest shard count whose row fits the current MemAvailable (0 = not even one shard, or swap below 4G)
 slot_shards_for_mem() {
@@ -130,7 +132,7 @@ slot_shards_for_mem() {
 # GATE_SHARDS (shards that fit, see the mapping above):
 #   normal    MemAvailable >= 8G and SwapFree >= 4G: GATE_SHARDS=2
 #   docs-only memory low but the optional command (args) says this run is docs-only (no tests run): no wait
-#   degraded  < 8G but enough for 1 shard (>= 5G, swap >= 4G), at once or as soon as it gets there while waiting (no full
+#   degraded  < 8G but enough for 1 shard (>= 6G, swap >= 4G), at once or as soon as it gets there while waiting (no full
 #             30-min wait any more: the host balloon reclaims memory, 8G cannot be guaranteed): caller runs GATE_SHARDS
 #             unit shards and the coverage round after the first round (no parallel)
 #   skip      below one shard for the whole PANOPTES_MEM_WAIT_S (1800 s, polled every PANOPTES_MEM_POLL_S = 60 s):

@@ -87,32 +87,32 @@ test('processTargets parks between PRs (not mid-PR) and notes it', async () => {
   assert.ok(health.notes.some((n) => /parked 3s before #2/.test(n)))
 })
 
-// 10-27 内存门（电脑运维规则）：≥8G 正常；等满后 ≥5G 且 swap ≥4G 降级；否则跳过；单个纯文档 PR 低内存不等
+// 10-27 内存门（电脑运维规则）：≥8G 正常；≥6G 且 swap ≥4G 降级；否则跳过；单个纯文档 PR 低内存不等
 const fakeMem = (root, swapGb = 5) => { const f = join(root, 'meminfo'); writeFileSync(f, `MemTotal: 16386368 kB\nMemAvailable: 1 kB\nSwapFree: ${swapGb * 1048576} kB\n`); return f }
 const fakeVmstat = (root) => { const f = join(root, 'vmstat'); writeFileSync(f, 'balloon_inflate 64896512\nballoon_deflate 63323648\n'); return f }
-test('slot_mem_gate: PI_TEST_MEM_AVAIL_MB 9000 / 5500 / 4000 → normal / degraded / skip; docs-only skips the wait', () => {
+test('slot_mem_gate: PI_TEST_MEM_AVAIL_MB 9000 / 6500 / 4000 → normal / degraded / skip; docs-only skips the wait', () => {
   const root = mkdtempSync(join(tmpdir(), 'argus-gate-'))
   const gate = (mb, check = '', swap = 5) => sh(root, `slot_mem_gate ${check}; echo "$GATE_MODE|$GATE_WAIT_S|$GATE_SHARDS"`, { PANOPTES_MEMINFO: fakeMem(root, swap), PANOPTES_TEST: '1', PI_TEST_MEM_AVAIL_MB: String(mb), PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '1' }).stdout.trim()
   assert.equal(gate(9000, 'false'), 'normal|0|2')                       // 内存够：不问文档检查
-  assert.equal(gate(5500), 'degraded|0|1')                            // 10-28：<8G、≥5G：不等 30 分钟，马上用 1 片跑
-  assert.match(gate(4000), /^skip\|[1-9]\d*\|0$/)                     // <5G（不够一片）：照旧等满再跳过
+  assert.equal(gate(6500), 'degraded|0|1')                            // 10-28：<8G、≥6G：不等 30 分钟，马上用 1 片跑
+  assert.match(gate(4000), /^skip\|[1-9]\d*\|0$/)                     // <6G（不够一片）：照旧等满再跳过
   assert.match(gate(9000, '', 3), /^skip\|/)                          // swap <4G：就算 9G 也不跑
   assert.equal(gate(4000, 'true'), 'docs-only|0|2')                     // 纯文档：不等
   // PI_TEST_MEM_AVAIL_MB 只在 PANOPTES_TEST=1 时生效：真机上设了它也不改读数（这里真读数是假 meminfo 的 1 kB → 跳过，而不是 9000 的正常）
   assert.match(sh(root, 'slot_mem_gate; echo $GATE_MODE', { PANOPTES_MEMINFO: fakeMem(root), PI_TEST_MEM_AVAIL_MB: '9000', PANOPTES_TEST: '', PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '1' }).stdout.trim(), /^skip$/)
-  // 10-28 分片↔内存表：2 片 8192 MiB、1 片 5120 MiB；取装得下的最大片数，swap 不够一律 0
+  // 10-28 分片↔内存表：2 片 8192 MiB、1 片 6144 MiB；取装得下的最大片数，swap 不够一律 0
   const fit = (mb, swap = 5) => sh(root, 'slot_shards_for_mem', { PANOPTES_MEMINFO: fakeMem(root, swap), PANOPTES_TEST: '1', PI_TEST_MEM_AVAIL_MB: String(mb) }).stdout.trim()
-  assert.deepEqual([16000, 8192, 8191, 5120, 5119, 1000].map((mb) => fit(mb)), ['2', '2', '1', '1', '0', '0'])
+  assert.deepEqual([16000, 8192, 8191, 6144, 6143, 5500, 1000].map((mb) => fit(mb)), ['2', '2', '1', '1', '0', '0', '0'])
   assert.equal(fit(9000, 3), '0')
-  assert.equal(sh(root, 'slot_mem_gate; echo $GATE_SHARDS', { PANOPTES_MEMINFO: fakeMem(root), PANOPTES_TEST: '1', PI_TEST_MEM_AVAIL_MB: '6200', PANOPTES_MIN_MEM_GB: '6' }).stdout.trim(), '2') // 阈值仍跟 PANOPTES_MIN_MEM_GB
+  assert.equal(sh(root, 'slot_mem_gate; echo $GATE_SHARDS', { PANOPTES_MEMINFO: fakeMem(root), PANOPTES_TEST: '1', PI_TEST_MEM_AVAIL_MB: '7200', PANOPTES_MIN_MEM_GB: '7' }).stdout.trim(), '2') // 阈值仍跟 PANOPTES_MIN_MEM_GB
   // 等待期间内存回到够一片：不等满，立刻降级跑
-  const grow = sh(root, 'slot_mem_avail_kb() { if (( SECONDS - T0 >= 1 )); then echo $((6000*1024)); else echo $((3000*1024)); fi; }; T0=$SECONDS; slot_mem_gate; echo "$GATE_MODE|$GATE_SHARDS"', { PANOPTES_MEMINFO: fakeMem(root), PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '30' }).stdout.trim()
+  const grow = sh(root, 'slot_mem_avail_kb() { if (( SECONDS - T0 >= 1 )); then echo $((6500*1024)); else echo $((3000*1024)); fi; }; T0=$SECONDS; slot_mem_gate; echo "$GATE_MODE|$GATE_SHARDS"', { PANOPTES_MEMINFO: fakeMem(root), PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '30' }).stdout.trim()
   assert.equal(grow, 'degraded|1')
   assert.equal(sh(root, 'slot_balloon_mb', { PANOPTES_VMSTAT: fakeVmstat(root) }).stdout.trim(), '6144')
 })
 
 // 同样三档走真的 run-nightly.sh（假 nvm / 假密钥 / 临时 QA_HOME，PANOPTES_GATE_DRYRUN=1 在门后停下，不跑测试）
-test('run-nightly.sh memory gate end to end: 9000 runs normally, 5500 degraded (1 shard, no parallel), 4000 skipped with exit 76 and the slot released', () => {
+test('run-nightly.sh memory gate end to end: 9000 runs normally, 6500 degraded (1 shard, no parallel), 4000 skipped with exit 76 and the slot released', () => {
   const root = mkdtempSync(join(tmpdir(), 'argus-gate-e2e-'))
   const nvm = join(root, 'nvm'); mkdirSync(nvm); writeFileSync(join(nvm, 'nvm.sh'), 'nvm() { :; }\n')
   const secrets = join(root, 'secrets.env'); writeFileSync(secrets, 'GITHUB_TOKEN=x\nQA_LLM_BASE_URL=http://127.0.0.1:9\nQA_LLM_API_KEY=x\n')
@@ -121,7 +121,7 @@ test('run-nightly.sh memory gate end to end: 9000 runs normally, 5500 degraded (
     PANOPTES_NVM_DIR: nvm, QA_SECRETS_FILE: secrets, PANOPTES_BOOTSTRAP: '0', PANOPTES_TMP_SWEEP: '0', PANOPTES_TEST: '1', PANOPTES_GATE_DRYRUN: '1', PI_TEST_MEM_AVAIL_MB: String(mb),
     PANOPTES_MEMINFO: fakeMem(root), PANOPTES_VMSTAT: fakeVmstat(root), PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '1', ARGUS_UNIT_SHARDS: '', ARGUS_MAX_PARALLEL: '' } })
   let r = run(9000); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /gate: mode=normal wait=0s shards=auto max_parallel=auto/)
-  r = run(5500); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /gate: mode=degraded wait=0s shards=1 max_parallel=1/)
+  r = run(6500); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /gate: mode=degraded wait=0s shards=1 max_parallel=1/)
   r = run(4000); assert.equal(r.status, 76, r.stdout + r.stderr); assert.doesNotMatch(r.stdout, /gate: mode=/)
   assert.match(r.stderr, /SKIP MemAvailable 4000 MiB, SwapFree 5120 MiB, balloon 6144 MiB after [1-9]\d*s: below one shard/)
   // 退出后槽位已释放：马上能拿到 nightly.lock
@@ -168,4 +168,30 @@ test('memoryGate: report records degraded run (shards used vs normal, MemAvailab
     { mode: 'degraded', degraded: true, shards: 1, normal_shards: 2, mem_available_mb: 5500 })
   assert.equal(memoryGate({ PANOPTES_GATE_MODE: 'normal', PANOPTES_GATE_SHARDS: '2', PANOPTES_GATE_NORMAL_SHARDS: '2', PANOPTES_GATE_MEM_MB: '9000' }).degraded, false)
   assert.equal(memoryGate({}), null)
+})
+
+// 10-28：降级时 lint（首轮）和单测 vitest（覆盖率轮次）不并行；正常内存照旧并行
+test('parallelDecision: memory gate degraded -> lint and unit tests serialized even with ARGUS_MAX_PARALLEL=2 and plenty of memory', async () => {
+  const { parallelDecision } = await import('../src/nightly.mjs')
+  assert.deepEqual(parallelDecision({ freeGb: 12, minGb: 8, maxParallel: 2, gateMode: 'degraded' }), { parallel: false, reason: 'memory gate degraded: lint and unit tests serialized' })
+  assert.equal(parallelDecision({ freeGb: 12, minGb: 8, maxParallel: 2, gateMode: 'normal' }).parallel, true)
+  assert.equal(parallelDecision({ freeGb: 12, minGb: 8, maxParallel: 2, gateMode: undefined }).parallel, true)
+})
+
+// 10-28：运行中内存低水位 < 1536 MiB → 失败记环境问题（infra_failed），不算测试失败
+test('low-memory low-water mark: sampler keeps the minimum; < 1536 MiB turns a failure into infra_failed, passes untouched', async () => {
+  const { startMemLowWater, lowMemoryHit } = await import('../src/memory.mjs')
+  const { lowMemoryEnvProblem, verdictOf } = await import('../src/nightly.mjs')
+  const seq = [4000, 1200, 3000]; let i = 0
+  const lw = startMemLowWater({ intervalMs: 5, read: () => seq[Math.min(i++, seq.length - 1)] })
+  await new Promise((r) => setTimeout(r, 40))
+  assert.equal(lw.stop(), 1200)
+  assert.equal(lowMemoryHit(1535, {}), true); assert.equal(lowMemoryHit(1536, {}), false); assert.equal(lowMemoryHit(null, {}), false)
+  const lm = lowMemoryEnvProblem('defect', 1200, {})
+  assert.equal(lm.outcome, 'infra_failed'); assert.match(lm.message, /1200 MiB \(< 1536 MiB\).*environment problem/)
+  assert.equal(verdictOf({ outcome: lm.outcome, findings: [], checks: [] }), 'qa-env-problem')
+  assert.equal(lowMemoryEnvProblem('needs_review', 1500, {}).outcome, 'infra_failed')
+  assert.equal(lowMemoryEnvProblem('passed', 1000, {}), null)     // 通过就是通过
+  assert.equal(lowMemoryEnvProblem('defect', 2000, {}), null)     // 内存够：失败照旧算
+  assert.equal(lowMemoryEnvProblem('defect', 1900, { ARGUS_LOW_MEM_MB: '2048' }).outcome, 'infra_failed')
 })
