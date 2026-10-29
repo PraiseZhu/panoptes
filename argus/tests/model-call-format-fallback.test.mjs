@@ -124,7 +124,7 @@ test('verify schema: per-action variants with required; final requires verdict+r
   assert.ok(reach.required.includes('call_path'))
   assert.ok(!finals.find((f) => f !== reach).properties.verdict.enum.includes('reachable'))
   const read = variants.find((v) => v.properties?.action?.enum?.[0] === 'read')
-  assert.deepEqual(read.required, ['action', 'path', 'start', 'end'])
+  assert.deepEqual(read.required, ['action', 'path', 'start'])
   const batch = variants.find((v) => v.properties?.actions)
   assert.deepEqual(batch.required, ['actions'])
   for (const item of batch.properties.actions.items.anyOf) assert.ok(item.required.includes('action'))
