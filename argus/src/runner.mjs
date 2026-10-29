@@ -61,7 +61,8 @@ export function mirrorPath(repo) {
 }
 
 // 本地裸镜像：只取分支，不取 refs/pull；每次任务前 fetch。
-// 网络抖动时重试 3 次；仍失败但镜像里已有需要的版本就照常测，否则报错交给上层重排队
+// 网络抖动时重试 3 次；仍失败但镜像里已有需要的版本就照常测，否则报错交给上层重排队。
+// 需要的提交不在镜像里（不在任何分支尖上的 merge commit）时按提交号补拉一次，仍没有就报错
 export async function ensureMirror(repo, neededSha = null, { extraRefspecs = [] } = {}) {
   const dir = mirrorPath(repo)
   const url = `https://github.com/${repo}.git`
@@ -83,10 +84,20 @@ export async function ensureMirror(repo, neededSha = null, { extraRefspecs = [] 
     // 每次等待也不越过 PR 时间预算（#1166：45 min 预算跑成 46 min 32 s，正是这 15+30+45 s）
     if (!await waitWithinBudget(attempt * 15_000)) break
   }
+  const hasCommit = async (sha) => (await run('git', ['-C', dir, 'cat-file', '-e', `${sha}^{commit}`], { env: baseEnv(), timeoutMs: 30_000 })).ok
   if (!res.ok) {
-    const have = neededSha && (await run('git', ['-C', dir, 'cat-file', '-e', `${neededSha}^{commit}`], { env: baseEnv(), timeoutMs: 30_000 })).ok
+    const have = neededSha && await hasCommit(neededSha)
     if (!have) throw new Error(`更新代码仓失败：${res.tail.slice(-500)}`)
     log('info', 'mirror fetch failed, using cached commit', { repo })
+  }
+  // fetch 返回 0 不代表需要的提交进了镜像：合并分支删掉 / 主干重写后，merge commit 不在任何分支尖上，分支引用没变时
+  // fetch 什么都不下载（10-29 8 次 nightly exit 3：缺提交的镜像照常返回，到 checkout 才炸成 unable to read tree）。
+  // 按提交号补拉一次（GitHub 对 refs/pull/* 里的合并提交也允许这样取），仍取不到就报错，不把缺提交的镜像交出去。
+  // 预算用完 / 正在停止时 cat-file 一开就返回失败，测不出缺不缺，按旧行为交给上层收尾
+  if (neededSha && !overBudget() && !isStopping() && !await hasCommit(neededSha)) {
+    const one = await run('git', [...auth.args, '-C', dir, 'fetch', 'origin', neededSha], { env, timeoutMs: 20 * 60_000 })
+    if (!await hasCommit(neededSha)) throw new Error(`镜像里没有要测的提交 ${neededSha}（按提交号补拉失败：${one.tail.slice(-300)}）`)
+    log('info', 'mirror backfilled missing commit', { repo, sha: neededSha })
   }
   return dir
 }
