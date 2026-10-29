@@ -364,7 +364,9 @@ mem_now="MemAvailable $GATE_MEM_MB MiB, SwapFree $(( $(slot_swap_free_kb) / 1024
 case "$GATE_MODE" in
   docs-only) msg="$mem_now: below gate, PR #${GATE_PRS[0]} is docs-only (no tests), not waiting"
     echo "[panoptes] $msg" | tee -a "$LOG" >&2; ctl "run-nightly memory gate skipped (docs-only)" "\"reason\":\"$msg\"" ;;
-  degraded) msg="$mem_now after ${GATE_WAIT_S}s: < ${PANOPTES_MIN_MEM_GB:-8} GiB: degraded run with $GATE_SHARDS of $SLOT_NORMAL_SHARDS shards (ARGUS_UNIT_SHARDS=$GATE_SHARDS, ARGUS_MAX_PARALLEL=1)"
+  degraded) if [[ "$GATE_LOW_SWAP" == 1 ]]; then why="low swap free: SwapFree $GATE_SWAP_FREE_MB MiB < $(( ${PANOPTES_MIN_SWAP_GB:-4} * 1024 )) MiB"
+    else why="low memory: MemAvailable $GATE_MEM_MB MiB < $(slot_shard_mem_mb 2) MiB"; fi
+    msg="$mem_now after ${GATE_WAIT_S}s: $why: degraded run with $GATE_SHARDS of $SLOT_NORMAL_SHARDS shards (ARGUS_UNIT_SHARDS=$GATE_SHARDS, ARGUS_MAX_PARALLEL=1)"
     export ARGUS_UNIT_SHARDS="$GATE_SHARDS" ARGUS_MAX_PARALLEL=1
     echo "[panoptes] $msg" | tee -a "$LOG" >&2; ctl "run-nightly low memory, degraded" "\"reason\":\"$msg\"" ;;
   skip) msg="$mem_now after ${GATE_WAIT_S}s: below one shard (needs >= $(slot_shard_mem_mb 1) MiB available): not running, exit 76, next catch-up retries"

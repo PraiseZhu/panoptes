@@ -65,7 +65,7 @@ slot_release_priority() { [[ -n "${SLOT_REQ:-}" ]] && rm -f "$SLOT_REQ"; [[ -n "
 # 10-28 (merge-to-test SLA p95 <= 2 min; #1345 waited 21 min, #1315 31 min behind one lock):
 # slot_acquire_onmerge FD PR WAIT_S. On-merge runs lock per PR (priority/pr-<N>.lock: the same PR never runs twice) instead of
 # serializing on priority.lock. Order each poll: free slot -> SLOT_MODE=lock; holder parked -> borrowed; else, when memory
-# admission passes (slot_mem_ok: the 电脑运维 8 GB free + 4 GB swap rule, unchanged) and fewer than PANOPTES_ONMERGE_MAX_CONC
+# admission passes (slot_mem_ok: at least 1 shard fits per slot_shards_for_mem, 10-28 PM) and fewer than PANOPTES_ONMERGE_MAX_CONC
 # (default 2) concurrent runs are live -> SLOT_MODE=concurrent (priority/conc-<pid>, caller limits ARGUS_MAX_PARALLEL=1).
 # Not enough memory: keep waiting for the slot exactly as before (then run-nightly's own gate: normal / degraded / skip).
 slot_acquire_onmerge() {
@@ -106,11 +106,8 @@ slot_balloon_ok() {
     echo "[panoptes] balloon ${b} MiB > ${PANOPTES_MAX_BALLOON_CONC_MB:-2048} MiB: no second concurrent run, waiting for the slot" >&2; return 1
   fi
 }
-slot_mem_ok() {
-  local avail swap
-  avail=$(slot_mem_avail_kb); swap=$(slot_swap_free_kb)
-  (( ${avail:-0} >= ${PANOPTES_MIN_MEM_GB:-8} * 1024 * 1024 && ${swap:-0} >= ${PANOPTES_MIN_SWAP_GB:-4} * 1024 * 1024 ))
-}
+# 10-28 PM: on-merge admission reuses the shard table (no separate 8G + 4G rule that could diverge): admit iff >= 1 shard fits
+slot_mem_ok() { (( $(slot_shards_for_mem) >= 1 )); }
 
 # 10-28 shard <-> memory mapping (index = unit shards, value = MemAvailable needed in MiB; SwapFree >= 4G always required).
 # Normal run = 2 shards (argus/src/shard.mjs hard cap ARGUS_SHARD_MAX default 2; mivo profile perShardGb 1.2), first round
@@ -143,7 +140,7 @@ slot_shards_for_mem() {
 slot_mem_gate() {
   GATE_WAIT_S=0; GATE_MODE=normal; GATE_SHARDS=$SLOT_NORMAL_SHARDS; GATE_LOW_SWAP=0
   slot_low_swap && GATE_LOW_SWAP=1   # caller alerts; slot_shards_for_mem caps at 1 shard (>= 6144 MiB), < 6144 waits as before
-  slot_mem_ok && return 0
+  (( $(slot_shards_for_mem) >= SLOT_NORMAL_SHARDS )) && return 0
   if (( $# > 0 )) && "$@" >/dev/null 2>&1; then GATE_MODE=docs-only; return 0; fi
   local poll="${PANOPTES_MEM_POLL_S:-60}" start=$SECONDS n
   while :; do

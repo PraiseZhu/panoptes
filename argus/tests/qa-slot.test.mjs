@@ -51,14 +51,17 @@ test('cap other than 1 is refused (电脑运维: max 1 concurrent QA)', () => {
   assert.equal(r.stdout.trim(), 'refused')
 })
 
-test('memory gate: MemAvailable >= 8 GB AND SwapFree >= 4 GB by default, both configurable', () => {
+test('slot_mem_ok (on-merge admission) = slot_shards_for_mem >= 1: >= 6144 MiB admits (any swap), < 6144 rejects; thresholds configurable', () => {
   const root = mkdtempSync(join(tmpdir(), 'argus-slot-'))
   const mi = (avail, swap) => { const f = join(root, `mi-${avail}-${swap}`); writeFileSync(f, `MemTotal: 16000000 kB\nMemAvailable: ${avail} kB\nSwapTotal: 8388604 kB\nSwapFree: ${swap} kB\n`); return f }
   const ok = (f, env = {}) => sh(root, 'slot_mem_ok && echo y || echo n', { PANOPTES_MEMINFO: f, ...env }).stdout.trim()
   assert.equal(ok(mi(9 * 1048576, 5 * 1048576)), 'y')
-  assert.equal(ok(mi(7 * 1048576, 5 * 1048576)), 'n')
-  assert.equal(ok(mi(9 * 1048576, 3 * 1048576)), 'n')
-  assert.equal(ok(mi(7 * 1048576, 3 * 1048576), { PANOPTES_MIN_MEM_GB: '6', PANOPTES_MIN_SWAP_GB: '2' }), 'y')
+  assert.equal(ok(mi(7 * 1048576, 5 * 1048576)), 'y')
+  assert.equal(ok(mi(9 * 1048576, 2 * 1048576)), 'y')       // low swap: still 1 shard
+  assert.equal(ok(mi(6144 * 1024, 0)), 'y')
+  assert.equal(ok(mi(6143 * 1024, 5 * 1048576)), 'n')
+  assert.equal(ok(mi(5 * 1048576, 2 * 1048576)), 'n')
+  assert.equal(ok(mi(7 * 1048576, 5 * 1048576), { PANOPTES_DEGRADED_MEM_GB: '8' }), 'n')
 })
 
 test('yieldToPriority: parks while a live request exists, writes and removes the yield ack', async () => {
@@ -150,6 +153,7 @@ test('low swap (SwapFree 2 GiB) with 9000 MiB -> 1 shard + alert, no wait', () =
     PANOPTES_MEMINFO: f, PANOPTES_VMSTAT: fakeVmstat(root), PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '1', ARGUS_UNIT_SHARDS: '', ARGUS_MAX_PARALLEL: '' } })
   assert.equal(r.status, 0, r.stderr)
   assert.match(r.stderr, /ALERT SwapFree 2048 MiB < 4 GiB/)
+  assert.match(r.stderr, /low swap free: SwapFree 2048 MiB < 4096 MiB: degraded run/)
   assert.match(r.stdout, /gate: mode=degraded wait=0s shards=1 max_parallel=1/)
   const alert = readFileSync(join(qa, 'argus-root', 'logs', 'control.log'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).find((e) => e.msg === 'run-nightly low swap alert')
   assert.equal(alert.level, 'warn')
@@ -166,16 +170,17 @@ test('run-nightly.sh memory gate end to end: 9000 runs normally, 6500 degraded (
     PANOPTES_MEMINFO: fakeMem(root), PANOPTES_VMSTAT: fakeVmstat(root), PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '1', ARGUS_UNIT_SHARDS: '', ARGUS_MAX_PARALLEL: '' } })
   let r = run(9000); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /gate: mode=normal wait=0s shards=auto max_parallel=auto/)
   r = run(6500); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /gate: mode=degraded wait=0s shards=1 max_parallel=1/)
+  assert.match(r.stderr, /low memory: MemAvailable 6500 MiB < 8192 MiB: degraded run/)
   r = run(4000); assert.equal(r.status, 76, r.stdout + r.stderr); assert.doesNotMatch(r.stdout, /gate: mode=/)
   assert.match(r.stderr, /SKIP MemAvailable 4000 MiB, SwapFree 5120 MiB, balloon 6144 MiB after [1-9]\d*s: below one shard/)
   // 退出后槽位已释放：马上能拿到 nightly.lock
   assert.equal(spawnSync('bash', ['-c', `exec 9>${join(root, 'qa-4000', 'argus-root', 'nightly.lock')}; flock -n 9 && echo free`], { encoding: 'utf8' }).stdout.trim(), 'free')
 })
 
-// 10-28 合并即测 SLA：按 PR 加锁，内存够（8G+4G 交换）就和占槽的运行并行，不够就照旧排队
+// 10-28 合并即测 SLA：按 PR 加锁，内存够（slot_shards_for_mem ≥ 1 片）就和占槽的运行并行，不够就照旧排队
 test('on-merge: slot busy + memory ok -> concurrent; memory low -> keeps waiting (gives up); same PR twice -> refused', async () => {
   const root = mkdtempSync(join(tmpdir(), 'argus-slot-')); mkdirSync(join(root, 'priority'))
-  const mi = (avail) => { const f = join(root, `mi-${avail}`); writeFileSync(f, `MemTotal: 16000000 kB\nMemAvailable: ${avail} kB\nSwapTotal: 8388604 kB\nSwapFree: ${5 * 1048576} kB\n`); return f }
+  const mi = (avail, swapKb = 5 * 1048576) => { const f = join(root, `mi-${avail}-${swapKb}`); writeFileSync(f, `MemTotal: 16000000 kB\nMemAvailable: ${avail} kB\nSwapTotal: 8388604 kB\nSwapFree: ${swapKb} kB\n`); return f }
   const vm = (mb) => { const f = join(root, `vm-${mb}`); writeFileSync(f, `balloon_inflate ${mb * 256 + 1000}\nballoon_deflate 1000\n`); return f }
   const h = holder(root); await sleepMs(300)
   try {
@@ -187,7 +192,10 @@ test('on-merge: slot busy + memory ok -> concurrent; memory low -> keeps waiting
     assert.match(r.stderr, /balloon 3072 MiB > 2048 MiB: no second concurrent run/)
     r = sh(root, `exec 9>$ARGUS_ROOT/nightly.lock; slot_acquire_onmerge 9 106 5 && echo $SLOT_MODE; slot_release_priority`, { PANOPTES_MEMINFO: mi(9 * 1048576), PANOPTES_VMSTAT: vm(2048) })
     assert.equal(r.stdout.trim(), 'concurrent')
-    r = sh(root, `exec 9>$ARGUS_ROOT/nightly.lock; slot_acquire_onmerge 9 102 1 && echo $SLOT_MODE || echo gave-up`, { PANOPTES_MEMINFO: mi(6 * 1048576) })
+    // 10-28 PM：swap free 2G + 9000 MiB → 仍放行（1 片）
+    r = sh(root, `exec 9>$ARGUS_ROOT/nightly.lock; slot_acquire_onmerge 9 107 5 && echo $SLOT_MODE; slot_release_priority`, { PANOPTES_MEMINFO: mi(9000 * 1024, 2 * 1048576), PANOPTES_VMSTAT: vm(0) })
+    assert.equal(r.stdout.trim(), 'concurrent')
+    r = sh(root, `exec 9>$ARGUS_ROOT/nightly.lock; slot_acquire_onmerge 9 102 1 && echo $SLOT_MODE || echo gave-up`, { PANOPTES_MEMINFO: mi(6143 * 1024) })
     assert.equal(r.stdout.trim(), 'gave-up')
     const same = spawn('bash', ['-c', `source ${SLOT}; exec {x}>${root}/priority/pr-103.lock; flock $x; sleep 30`], { stdio: 'ignore' }); await sleepMs(300)
     try {
