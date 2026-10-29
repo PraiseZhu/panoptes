@@ -109,26 +109,43 @@ slot_mem_ok() {
   (( ${avail:-0} >= ${PANOPTES_MIN_MEM_GB:-8} * 1024 * 1024 && ${swap:-0} >= ${PANOPTES_MIN_SWAP_GB:-4} * 1024 * 1024 ))
 }
 
-# Memory gate (10-27, 电脑运维's rule). Sets GATE_MODE and GATE_WAIT_S (seconds waited):
-#   normal    MemAvailable >= 8G and SwapFree >= 4G (at once or within PANOPTES_MEM_WAIT_S = 1800 s, polled every PANOPTES_MEM_POLL_S = 60 s)
+# 10-28 shard <-> memory mapping (index = unit shards, value = MemAvailable needed in MiB; SwapFree >= 4G always required).
+# Normal run = 2 shards (argus/src/shard.mjs hard cap ARGUS_SHARD_MAX default 2; mivo profile perShardGb 1.2), first round
+# and coverage round may run in parallel, so 2 shards costs ~2 x 1.2G x 2 rounds on top of node/git/browser overhead:
+#   shards  MemAvailable   source
+#   2       >= 8192 MiB    电脑运维 8G rule (PANOPTES_MIN_MEM_GB) = the normal run
+#   1       >= 5120 MiB    old degraded floor (PANOPTES_DEGRADED_MEM_GB): 1 shard, ARGUS_MAX_PARALLEL=1
+#   0       <  5120 MiB    not enough for one shard: wait (box would freeze), skip with exit 76 after PANOPTES_MEM_WAIT_S
+slot_shard_mem_mb() { case "$1" in 2) echo $(( ${PANOPTES_MIN_MEM_GB:-8} * 1024 ));; 1) echo $(( ${PANOPTES_DEGRADED_MEM_GB:-5} * 1024 ));; *) echo 0;; esac; }
+SLOT_NORMAL_SHARDS=2
+# largest shard count whose row fits the current MemAvailable (0 = not even one shard, or swap below 4G)
+slot_shards_for_mem() {
+  local mb=$(( $(slot_mem_avail_kb) / 1024 )) swap; swap=$(slot_swap_free_kb)
+  (( ${swap:-0} >= ${PANOPTES_MIN_SWAP_GB:-4} * 1024 * 1024 )) || { echo 0; return; }
+  local n; for (( n = SLOT_NORMAL_SHARDS; n >= 1; n-- )); do (( mb >= $(slot_shard_mem_mb "$n") )) && { echo "$n"; return; }; done
+  echo 0
+}
+
+# Memory gate (10-27 电脑运维's rule, 10-28: fewer shards instead of a 30-min wait). Sets GATE_MODE, GATE_WAIT_S (seconds waited),
+# GATE_SHARDS (shards that fit, see the mapping above):
+#   normal    MemAvailable >= 8G and SwapFree >= 4G: GATE_SHARDS=2
 #   docs-only memory low but the optional command (args) says this run is docs-only (no tests run): no wait
-#   degraded  still low after the full wait, but MemAvailable >= 5G (PANOPTES_DEGRADED_MEM_GB) and SwapFree >= 4G:
-#             caller runs one unit shard and the coverage round after the first round (no parallel)
-#   skip      otherwise: caller does not run (exit 76 = memory skip, slot released, next catch-up retries without counting an attempt)
+#   degraded  < 8G but enough for 1 shard (>= 5G, swap >= 4G), at once or as soon as it gets there while waiting (no full
+#             30-min wait any more: the host balloon reclaims memory, 8G cannot be guaranteed): caller runs GATE_SHARDS
+#             unit shards and the coverage round after the first round (no parallel)
+#   skip      below one shard for the whole PANOPTES_MEM_WAIT_S (1800 s, polled every PANOPTES_MEM_POLL_S = 60 s):
+#             caller does not run (exit 76 = memory skip, slot released, next catch-up retries without counting an attempt)
 slot_mem_gate() {
-  GATE_WAIT_S=0; GATE_MODE=normal
+  GATE_WAIT_S=0; GATE_MODE=normal; GATE_SHARDS=$SLOT_NORMAL_SHARDS
   slot_mem_ok && return 0
   if (( $# > 0 )) && "$@" >/dev/null 2>&1; then GATE_MODE=docs-only; return 0; fi
-  local poll="${PANOPTES_MEM_POLL_S:-60}" start=$SECONDS
-  while ! slot_mem_ok; do
-    if (( SECONDS - start >= ${PANOPTES_MEM_WAIT_S:-1800} )); then
-      GATE_WAIT_S=$(( SECONDS - start ))
-      local avail swap; avail=$(slot_mem_avail_kb); swap=$(slot_swap_free_kb)
-      if (( ${avail:-0} >= ${PANOPTES_DEGRADED_MEM_GB:-5} * 1024 * 1024 && ${swap:-0} >= ${PANOPTES_MIN_SWAP_GB:-4} * 1024 * 1024 )); then GATE_MODE=degraded; else GATE_MODE=skip; fi
-      return 0
-    fi
-    echo "[panoptes] memory below gate (>= ${PANOPTES_MIN_MEM_GB:-8} GiB available, >= ${PANOPTES_MIN_SWAP_GB:-4} GiB swap free), waiting ($(( SECONDS - start ))s so far)" >&2
+  local poll="${PANOPTES_MEM_POLL_S:-60}" start=$SECONDS n
+  while :; do
+    n=$(slot_shards_for_mem); GATE_WAIT_S=$(( SECONDS - start ))
+    if (( n >= SLOT_NORMAL_SHARDS )); then GATE_MODE=normal; GATE_SHARDS=$n; return 0; fi
+    if (( n >= 1 )); then GATE_MODE=degraded; GATE_SHARDS=$n; return 0; fi
+    if (( GATE_WAIT_S >= ${PANOPTES_MEM_WAIT_S:-1800} )); then GATE_MODE=skip; GATE_SHARDS=0; return 0; fi
+    echo "[panoptes] memory below one shard (>= $(slot_shard_mem_mb 1) MiB available, >= ${PANOPTES_MIN_SWAP_GB:-4} GiB swap free), waiting (${GATE_WAIT_S}s so far)" >&2
     sleep "$poll"
   done
-  GATE_WAIT_S=$(( SECONDS - start )); return 0
 }

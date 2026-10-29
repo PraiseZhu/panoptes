@@ -242,7 +242,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     // tested_at：这个 PR 得出结论的时间（上海时区 ISO 8601，带 +08:00）；test_started_at：开始处理的时间
     test_started_at: toShanghaiIso(new Date(startedAt)), tested_at: null,
     // gate_wait_s：开测前在 run-nightly.sh 内存门等了多少秒（10-27：SLA 把排队/等内存和流水线分开算）
-    gate_wait_s: Number(process.env.PANOPTES_GATE_WAIT_S) || 0, reviewed_sha: null, review_base_sha: null,
+    gate_wait_s: Number(process.env.PANOPTES_GATE_WAIT_S) || 0, memory_gate: memoryGate(), reviewed_sha: null, review_base_sha: null,
     // 因每日模型额度用尽而没做的事（Jev 分诊 / AI 补测 / 代码审查 / 摘要），每项 { kind, pool, cap, used, dimensions, message }
     quota_capped: [],
   }
@@ -1846,4 +1846,12 @@ export function coverageTimeoutMin(step, parallel, env = process.env) {
   const f = Number(env.ARGUS_COVERAGE_TIMEOUT_FACTOR) > 0 ? Number(env.ARGUS_COVERAGE_TIMEOUT_FACTOR) : (parallel ? 2 : 1.5)
   const cap = Number(env.ARGUS_COVERAGE_TIMEOUT_MAX_MIN) > 0 ? Number(env.ARGUS_COVERAGE_TIMEOUT_MAX_MIN) : 300
   return Math.max(base, Math.min(cap, Math.round(base * f)))
+}
+
+// 10-28：内存门结果（run-nightly.sh 导出）。mode=degraded 表示内存不够正常分片数，用了更少分片跑（shards < normal_shards）；
+// 没经过 run-nightly.sh（直接跑 cli）时为 null
+export function memoryGate(env = process.env) {
+  if (!env.PANOPTES_GATE_MODE) return null
+  const num = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v))
+  return { mode: env.PANOPTES_GATE_MODE, degraded: env.PANOPTES_GATE_MODE === 'degraded', shards: num(env.PANOPTES_GATE_SHARDS), normal_shards: num(env.PANOPTES_GATE_NORMAL_SHARDS), mem_available_mb: num(env.PANOPTES_GATE_MEM_MB) }
 }

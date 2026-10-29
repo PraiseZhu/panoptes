@@ -182,6 +182,7 @@ Merged reports written by nightly also carry `run.source_report` (path of the ni
 | **`triage`** | dimension applicability for this PR, see *Triage* |
 | `ai_summary` | `{ summary, risks, suspect, failure_explanation }`, or `{ status: "capped", reason }` (pr-summary quota used up) |
 | **`quota_capped`** | `[{ pr, kind, pool, cap, used, day, dimensions, message }]` — what this PR did not get because a daily model-call quota was used up (`kind` ∈ `jev`, `ai-test`, `ai-review`, `pr-summary`, `ai-verify`; `dimensions` = the QA dimensions marked `capped`). Empty when nothing was capped; absent in reports before 2026-10-11 |
+| **`memory_gate`** | `{ mode, degraded, shards, normal_shards, mem_available_mb }` from run-nightly.sh's memory gate (`mode` ∈ `normal`, `degraded`, `docs-only`). `degraded: true` = memory was below the normal run (8 GB), so unit tests ran with `shards` (< `normal_shards`) and no parallel rounds; mapping in `scripts/qa-slot.sh` `slot_shard_mem_mb` (2 shards 8192 MiB, 1 shard 5120 MiB). `null` when not run via run-nightly.sh; absent before 2026-10-28 |
 | `evidence_dir`, `duration_s` | |
 | `reused`, `reused_from`, `reused_report_generated_at`, `reused_report_system_health` | only for reused on-merge results |
 | **`handoff`** | Mivo PR handoff (`docs/pr/<N>/review.md`, `qa.md`), see *PR handoff*. Absent in reports before 2026-10-20 and in reused results produced before that |
