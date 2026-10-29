@@ -649,7 +649,7 @@ def main():
         if os.path.exists(LOWMEM()): os.remove(LOWMEM())
     if not o.dry_run:   # one executor at a time even when called directly (run.sh's flock only covers cron runs)
         import fcntl, time as _t
-        _lk = open("/tmp/pi-fallback-outbound.exec.lock", "w")
+        _lk = open(f'{os.environ.get("PI_LOCK_DIR") or "/tmp"}/pi-fallback-outbound.exec.lock', "w")   # PI_LOCK_DIR: tests only
         for _ in range(60):
             try: fcntl.flock(_lk, fcntl.LOCK_EX | fcntl.LOCK_NB); break
             except BlockingIOError: _t.sleep(5)

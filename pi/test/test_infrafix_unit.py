@@ -41,6 +41,11 @@ class Tmp(unittest.TestCase):
     PATHS = ("PANOPTES", "LIVE", "WT_ROOT", "NOTES", "OUT", "GATES", "REPORTS", "CATCHUP", "LOGDIR")
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="infrafix-test-")
+        self.env = dict(os.environ)
+        # this module's env, every test: another test module may have changed os.environ (PI_FLEET_MODE=grok made run_ticket "off").
+        # PI_WORK_ROOT/HOME/npm cache: infra_outbound's W.mkdtemp() and npm otherwise write the real /workspace/pi-work/tmp, ~/.npm/_logs
+        os.environ.update(PI_FLEET_MODE="pi", INFRA_TEST_MEM_GB="8", PI_WORK_ROOT=f"{self.tmp}/work", HOME=f"{self.tmp}/home",
+                          npm_config_cache=f"{self.tmp}/home/.npm")
         self.saved = {k: getattr(X, k) for k in self.PATHS + ("record_actions", "gh", "pi", "mode")}
         X.NOTES = f"{self.tmp}/notes"; X.OUT = f"{self.tmp}/out"; X.GATES = f"{self.tmp}/gates.json"
         X.REPORTS = f"{self.tmp}/reports/merged"; X.CATCHUP = f"{self.tmp}/reports/catch-up"; X.LOGDIR = f"{self.tmp}/logs"
@@ -49,7 +54,6 @@ class Tmp(unittest.TestCase):
         self.actions = []
         X.record_actions = lambda job, day, acts: self.actions.extend(acts)
         X.gh = lambda *a, **k: (_ for _ in ()).throw(AssertionError("unexpected gh call"))
-        self.env = dict(os.environ)
     def tearDown(self):
         for k, v in self.saved.items(): setattr(X, k, v)
         os.environ.clear(); os.environ.update(self.env)

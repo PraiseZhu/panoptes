@@ -19,7 +19,10 @@ class Base(Tmp):
     def setUp(self):
         super().setUp()
         self.acts = []; self.calls = []
-        self.orig = {k: getattr(prfix, k) for k in ("gather", "fix_one", "record_actions", "mem_gb")}
+        self.orig = {k: getattr(prfix, k) for k in ("gather", "fix_one", "record_actions", "mem_gb", "pid_alive")}
+        # this test process stands in for a live prfix run: pid_alive() looks for "prfix" in /proc/<pid>/cmdline, which a
+        # `pytest test/` run (no file name on its command line) does not have
+        real_alive = self.orig["pid_alive"]; prfix.pid_alive = lambda pid: pid == os.getpid() or real_alive(pid)
         prfix.record_actions = lambda job, day, acts: self.acts.extend(acts)
         prfix.mem_gb = lambda: 8.0
         rep = {1178: report(1178, "PraiseZhu", [finding(A), finding(B)], t=NOW - dt.timedelta(hours=2)),

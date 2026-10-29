@@ -57,14 +57,14 @@ os.environ["PATH"] = "/usr/local/bin:" + os.environ.get("PATH", "")
 _E = os.environ.get
 # 10-24 (plan §4.1): the bot's own clone and worktrees under PI_WORK -- a person's /workspace/mivo-canvas-plugin and
 # /workspace/praise-pr are no longer touched; every worktree carries .pi-owned.json (janitor reaps only marked ones)
-GIT = _E("PRFIX_GIT") or W.clone_dir("mivo")
-WT_ROOT = _E("PRFIX_WT_ROOT") or W.wt_root("mivo")
+def _GIT(): return globals()["GIT"] if "GIT" in globals() else (_E("PRFIX_GIT") or W.clone_dir("mivo"))   # read at call time; a test may set GIT
+def _WT_ROOT(): return globals()["WT_ROOT"] if "WT_ROOT" in globals() else (_E("PRFIX_WT_ROOT") or W.wt_root("mivo"))   # read at call time; a test may set WT_ROOT
 NOTES = _E("PRFIX_NOTES") or "/workspace/praise-pr/notes"
-TMPROOT = _E("PRFIX_TMP") or W.wt_root("mivo-dry")
+def _TMPROOT(): return globals()["TMPROOT"] if "TMPROOT" in globals() else (_E("PRFIX_TMP") or W.wt_root("mivo-dry"))   # read at call time; a test may set TMPROOT
 OUT = _E("PRFIX_OUT") or f"{BASE}/out/praise-pr"
 GATES = _E("PRFIX_GATES") or f"{PI_CODE}/conf/gates.json"
 CI_RULES = _E("PRFIX_CI_RULES") or f"{PI_CODE}/conf/ci-rules"   # <repo name>.md: the target repo's CI rules brief (10-25)
-QA_LOCK = _E("PRFIX_QA_LOCK") or f"{QA}/argus-root/nightly.lock"   # the flock panoptes run-nightly.sh takes (exec 9>)
+def _QA_LOCK(): return globals()["QA_LOCK"] if "QA_LOCK" in globals() else (_E("PRFIX_QA_LOCK") or f"{QA}/argus-root/nightly.lock")   # read at call time; a test may set QA_LOCK   # the flock panoptes run-nightly.sh takes (exec 9>)
 RULINGS = "/workspace/fleet-standards/p2-rulings.md"
 LEDGER_DIR = f"{QA}/ledger/daily"
 GIT_ID = ["-c", "user.name=Praise", "-c", "user.email=zhuzan@xd.com"]   # = repo-local config of /workspace/mivo-canvas-plugin
@@ -224,9 +224,9 @@ def _write(p, data, mode="w"):
 def _rjson(p): return json.loads(_read(p))
 def tail(s, n=60): return "\n".join((s or "").rstrip().splitlines()[-n:])
 def git(*a, cwd=None, t=600):
-    if cwd is None and not os.path.exists(GIT) and os.path.abspath(GIT) == W.clone_dir("mivo"):
+    if cwd is None and not os.path.exists(_GIT()) and os.path.abspath(_GIT()) == W.clone_dir("mivo"):
         W.ensure_clone("mivo")      # 10-24: the bot clone, made on first use (a test pointing GIT elsewhere never gets here)
-    return run(["git", *a], cwd=cwd or GIT, t=t)
+    return run(["git", *a], cwd=cwd or _GIT(), t=t)
 def fp8(fp): return (fp or "")[4:12]
 def iso(t): return t.astimezone(CST).isoformat(timespec="seconds") if t else None
 def ts(s):
@@ -255,7 +255,7 @@ def unlock(f):
 def repo_lock():
     """10-24 parallel runs: serialise what changes the shared clone's metadata (fetch, worktree add/remove/prune, branch -D).
     Edits, tests, commit and pre-push inside a ticket's own worktree run in parallel."""
-    if os.path.abspath(GIT) == W.clone_dir("mivo"):           # the bot clone: the same lock janitor / opsfix take
+    if os.path.abspath(_GIT()) == W.clone_dir("mivo"):           # the bot clone: the same lock janitor / opsfix take
         W.ensure_clone("mivo")                                 # made once, before the lock (cloning takes that lock itself)
         with W.repo_lock("mivo"): yield
         return
@@ -835,7 +835,7 @@ def remote_has(b):
     return None if rc else bool(o.strip())
 def ours_dir(wd):
     wd = os.path.abspath(wd); par = os.path.dirname(wd)
-    return (par == os.path.abspath(WT_ROOT) and os.path.basename(wd).startswith("pi-wt-")) or par == os.path.abspath(TMPROOT)
+    return (par == os.path.abspath(_WT_ROOT()) and os.path.basename(wd).startswith("pi-wt-")) or par == os.path.abspath(_TMPROOT())
 
 def drop_worktree(wd, branch=None):
     """Remove a worktree and its local branch that this script created. Refuses directories outside WT_ROOT/pi-wt-* and
@@ -848,7 +848,7 @@ def drop_worktree(wd, branch=None):
             W.trash(wd); rc, o = git("worktree", "prune"); msg.append(f"worktree -> trash, prune rc={rc}{'' if rc == 0 else ' ' + tail(o, 2)}")
         else:
             git("worktree", "prune"); msg.append("worktree prune (目录已不在)")
-    mine = os.path.dirname(wd) == os.path.abspath(TMPROOT) or re.fullmatch(r"pi-wt-\d+-[0-9a-f]{8}", os.path.basename(wd))
+    mine = os.path.dirname(wd) == os.path.abspath(_TMPROOT()) or re.fullmatch(r"pi-wt-\d+-[0-9a-f]{8}", os.path.basename(wd))
     if os.path.isdir(wd) and mine and wd not in {w["path"] for w in worktrees()}:
         shutil.rmtree(wd, ignore_errors=True); msg.append("rm -rf (未登记的残留目录)")
     if branch:
@@ -864,7 +864,7 @@ def stale_scan(tickets=None):
     tickets = tickets if tickets is not None else load_tickets().get("tickets", {})
     rows = []; wts = worktrees(); reg = {w["path"]: w for w in wts}
     running = {f"{t.get('qa')}-{fp8(t.get('fp'))}" for t in tickets.values() if t.get("status") == "running" and pid_alive(t.get("pid"))}
-    wroot, troot = os.path.abspath(WT_ROOT), os.path.abspath(TMPROOT)
+    wroot, troot = os.path.abspath(_WT_ROOT()), os.path.abspath(_TMPROOT())
     for w in wts:
         p, b = w["path"], w["branch"]
         if os.path.dirname(p) == wroot and re.fullmatch(r"pi-wt-rev-\d+", os.path.basename(p)) and w["detached"]:
@@ -924,7 +924,7 @@ def cleanup_stale(yes):
             tl = try_lock(f"{OUT}/locks/rev-{rv.group(1)}.lock") if rv else try_lock(f"{OUT}/locks/{g[0]}-{g[1]}.lock") if len(g) == 2 else True
             if not tl: done.append((r, ["跳过：这一单正在运行（锁被占）"])); continue
             try:
-                if r["path"] and os.path.dirname(r["path"]) == os.path.abspath(TMPROOT) and r["path"] not in {w["path"] for w in worktrees()}:
+                if r["path"] and os.path.dirname(r["path"]) == os.path.abspath(_TMPROOT()) and r["path"] not in {w["path"] for w in worktrees()}:
                     (shutil.rmtree if os.path.isdir(r["path"]) else os.remove)(r["path"]); done.append((r, ["rm"]))
                 elif r["path"]: done.append((r, drop_worktree(r["path"], r["branch"] if BRANCH_RE.match(r["branch"] or "") else None)))
                 elif r["branch"]:
@@ -1328,7 +1328,7 @@ def fix_one(c, A, d):
     n, sev, fp = c["qa"], c["sev"], c["fp"]
     tag = f"QA{n}-{fp[:12]}"; c["tag"] = tag; _TAG["t"] = tag
     branch = f"fix/qa-{n}-{fp8(fp)}"
-    wd = f"{TMPROOT}/{tag}" if A.dry_run else f"{WT_ROOT}/pi-wt-{n}-{fp8(fp)}"
+    wd = f"{_TMPROOT()}/{tag}" if A.dry_run else f"{_WT_ROOT()}/pi-wt-{n}-{fp8(fp)}"
     res = {"qa": n, "sev": sev, "fp": fp, "steps": [], "model": [], "base": None, "pred_pr": None, "wd": wd,
            "branch": None if A.dry_run else branch, "round": c.get("round", 1)}
     out = {"status": "failed", "kind": "transient", "error": None, "action_key": None}
@@ -1336,7 +1336,7 @@ def fix_one(c, A, d):
     def step(k, ok, text=""): res["steps"].append((k, ok, text)); log(k, "OK" if ok else "FAIL")
     log("pick", tag, sev, c.get("title"), f"round {res['round']}", "dry-run" if A.dry_run else "real")
     try:
-        os.makedirs(TMPROOT, exist_ok=True)
+        os.makedirs(_TMPROOT(), exist_ok=True)
         with repo_lock():   # 10-24: parallel prfix processes share one clone; its refs / worktree list change one at a time
             if not A.dry_run:   # a legacy prfix worktree (pi-wt-<N>) may still hold this branch
                 for w in worktrees():
@@ -1354,7 +1354,7 @@ def fix_one(c, A, d):
             rc, o = git("worktree", "add", "-q", *(["--detach", wd, base] if A.dry_run else ["-b", branch, wd, base]))
             if rc: raise Transient(f"worktree add 失败：{tail(o, 3)}")
             created = True
-            W.mark(wd, "dry" if A.dry_run else "prfix", repo="mivo", clone=os.path.abspath(GIT), ticket=tag, branch=res["branch"], base_sha=base,
+            W.mark(wd, "dry" if A.dry_run else "prfix", repo="mivo", clone=os.path.abspath(_GIT()), ticket=tag, branch=res["branch"], base_sha=base,
                    lock=f"{OUT}/locks/{n}-{fp8(fp)}.lock", tickets=f"{OUT}/tickets.json", ticket_key=f"{n}:{fp}")
         junk = set()   # untracked files the pre-push run left (build output): never part of the fix
         chg = lambda: changed(wd, base, junk)
@@ -1772,8 +1772,8 @@ def run_ticket(A, ctx, vs):
     qa_lk = None; tk_lk = None; tk = {}
     try:
         gates, _ = load_gates()   # fresh read right before acting (defence in depth; --qa included)
-        qa_lk = None if SHARE_WITH_PANOPTES else try_lock(QA_LOCK)
-        if not qa_lk and not SHARE_WITH_PANOPTES: return finish({"status": "busy", "reason": f"panoptes 正在跑（{QA_LOCK} 被占）", "ticket": v["key"]}, BUSY, A)
+        qa_lk = None if SHARE_WITH_PANOPTES else try_lock(_QA_LOCK())
+        if not qa_lk and not SHARE_WITH_PANOPTES: return finish({"status": "busy", "reason": f"panoptes 正在跑（{_QA_LOCK()} 被占）", "ticket": v["key"]}, BUSY, A)
         _QA_HOLD["f"] = qa_lk
         # 10-24 parallel runs, no global run lock. The claim is atomic under tickets.json's flock: re-read every ticket (another
         # prfix may have taken or finished one since gather()), re-evaluate, take the first todo whose per-ticket lock is free
@@ -1948,7 +1948,7 @@ def revise_merge(A, d, n, qa, fp, p, red):
     the related tests and pre-push, then hand outbound a bundle with the merge commit (gh.pr.push-fix mode merge: plain push, a
     fast-forward of the PR branch). A clean local merge is committed as is."""
     head, br = p["headRefOid"], p["headRefName"]
-    tag = f"REV{n}-{head[:9]}"; wd = f"{TMPROOT}/{tag}" if A.dry_run else f"{WT_ROOT}/pi-wt-rev-{n}"
+    tag = f"REV{n}-{head[:9]}"; wd = f"{_TMPROOT()}/{tag}" if A.dry_run else f"{_WT_ROOT()}/pi-wt-rev-{n}"
     res = {"qa": qa, "sev": "", "fp": fp, "steps": [], "model": [], "base": None, "pred_pr": n, "wd": wd, "branch": None, "round": "merge"}
     out = {"status": "failed", "kind": "transient", "error": None, "action_key": None}
     created = False; ev = f"{OUT}/{d}-{tag}-merge{'-dry' if A.dry_run else ''}"
@@ -1956,7 +1956,7 @@ def revise_merge(A, d, n, qa, fp, p, red):
     def step(k, ok, text=""): res["steps"].append((k, ok, text)); log(k, "OK" if ok else "FAIL")
     log("merge main into", n, head[:9])
     try:
-        os.makedirs(TMPROOT, exist_ok=True)
+        os.makedirs(_TMPROOT(), exist_ok=True)
         with repo_lock():
             if os.path.exists(wd): log("leftover ->", drop_worktree(wd))
             rc, o = git("fetch", "-q", "origin", "main", f"+refs/heads/{br}:refs/remotes/origin/{br}")
@@ -1965,7 +1965,7 @@ def revise_merge(A, d, n, qa, fp, p, red):
             main = git("rev-parse", "origin/main")[1].strip(); res["base"] = main
             old_base = git("merge-base", main, head)[1].strip()
             rc, o = git("worktree", "add", "-q", "--detach", wd, head)
-            if rc == 0: W.mark(wd, "dry" if A.dry_run else "revise", repo="mivo", clone=os.path.abspath(GIT), ticket=tag, base_sha=head,
+            if rc == 0: W.mark(wd, "dry" if A.dry_run else "revise", repo="mivo", clone=os.path.abspath(_GIT()), ticket=tag, base_sha=head,
                                lock=f"{OUT}/locks/rev-{n}.lock", tickets=f"{OUT}/tickets.json", ticket_key=f"rev:{n}")
             if rc: raise Transient(f"worktree add 失败：{tail(o, 3)}")
             created = True
@@ -2050,7 +2050,7 @@ def revise_merge(A, d, n, qa, fp, p, red):
 
 def revise_one(A, d, n, qa, fp, p, red):
     head, br = p["headRefOid"], p["headRefName"]
-    tag = f"REV{n}-{head[:9]}"; wd = f"{TMPROOT}/{tag}" if A.dry_run else f"{WT_ROOT}/pi-wt-rev-{n}"
+    tag = f"REV{n}-{head[:9]}"; wd = f"{_TMPROOT()}/{tag}" if A.dry_run else f"{_WT_ROOT()}/pi-wt-rev-{n}"
     names = [c.get("name") or c.get("context") or "?" for c in red]
     res = {"qa": qa, "sev": "", "fp": fp, "steps": [], "model": [], "base": None, "pred_pr": n, "wd": wd, "branch": None, "round": "revise"}
     out = {"status": "failed", "kind": "transient", "error": None, "action_key": None}
@@ -2059,7 +2059,7 @@ def revise_one(A, d, n, qa, fp, p, red):
     def step(k, ok, text=""): res["steps"].append((k, ok, text)); log(k, "OK" if ok else "FAIL")
     log("revise", n, head[:9], names)
     try:
-        os.makedirs(TMPROOT, exist_ok=True)
+        os.makedirs(_TMPROOT(), exist_ok=True)
         with repo_lock():
             if os.path.exists(wd): log("leftover ->", drop_worktree(wd))
             rc, o = git("fetch", "-q", "origin", "main", f"+refs/heads/{br}:refs/remotes/origin/{br}")
@@ -2067,7 +2067,7 @@ def revise_one(A, d, n, qa, fp, p, red):
             if git("rev-parse", f"refs/remotes/origin/{br}")[1].strip() != head: raise Transient("PR 的 head 在这期间变了")
             base = git("merge-base", "origin/main", head)[1].strip(); res["base"] = base
             rc, o = git("worktree", "add", "-q", "--detach", wd, head)
-            if rc == 0: W.mark(wd, "dry" if A.dry_run else "revise", repo="mivo", clone=os.path.abspath(GIT), ticket=tag, base_sha=head,
+            if rc == 0: W.mark(wd, "dry" if A.dry_run else "revise", repo="mivo", clone=os.path.abspath(_GIT()), ticket=tag, base_sha=head,
                                lock=f"{OUT}/locks/rev-{n}.lock", tickets=f"{OUT}/tickets.json", ticket_key=f"rev:{n}")
             if rc: raise Transient(f"worktree add 失败：{tail(o, 3)}")
             created = True
@@ -2230,3 +2230,8 @@ def main(argv=None):
         sys.stdout = real_out
 
 if __name__ == "__main__": sys.exit(main())
+
+
+def __getattr__(name):   # GIT WT_ROOT TMPROOT QA_LOCK: resolved lazily (env read at use, not at import), old attribute reads keep working
+    if name in ('GIT', 'WT_ROOT', 'TMPROOT', 'QA_LOCK'): return globals()["_" + name]()
+    raise AttributeError(name)

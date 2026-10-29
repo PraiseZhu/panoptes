@@ -16,7 +16,7 @@ changes it. box-ops cron (/etc/cron.d/box-ops) does NO cleanup, so cleanup has a
 from lib import *
 import praise_notice as PN
 import glob, time
-DRY = os.environ.get("PI_BOXHEALTH_DRYRUN") == "1" or "--dry-run" in sys.argv   # 10-24: --dry-run used to be ignored (a "dry" run wrote health.log)
+def _DRY(): return globals()["DRY"] if "DRY" in globals() else (os.environ.get("PI_BOXHEALTH_DRYRUN") == "1" or "--dry-run" in sys.argv)   # read at call time; a test may set DRY   # 10-24: --dry-run used to be ignored (a "dry" run wrote health.log)
 STATE = f"{BASE}/out/box/alert-state.json"
 def jload(f, d):
     try: return json.load(open(f))
@@ -101,18 +101,18 @@ def mem_cause(bal, rss_top):
     return "balloon" if bal >= 2048 and rss_top < bal else "process"
 def sh(c): return subprocess.run(c, shell=True, capture_output=True, text=True, timeout=300).stdout.strip()
 def fix(desc, cmd, fixed):
-    if DRY: fixed.append("[dry] " + desc); return
+    if _DRY(): fixed.append("[dry] " + desc); return
     r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=300)
     fixed.append(desc + ("" if r.returncode == 0 else f" (失败 rc={r.returncode})"))
 def du(paths):
     return sum(int(sh(f"du -sb {p} 2>/dev/null | cut -f1") or 0) for p in paths)
 KEEP_DAYS = 7
-TMP_ROOT = os.environ.get("BOXHEALTH_TMP_ROOT") or "/tmp"          # tests only
+def _TMP_ROOT(): return globals()["TMP_ROOT"] if "TMP_ROOT" in globals() else (os.environ.get("BOXHEALTH_TMP_ROOT") or "/tmp")   # read at call time; a test may set TMP_ROOT   # tests only
 LOGS_CAP = ["/var/log/earlyoom.log", "/workspace/box-ops/*.log", "/workspace/grokbot-box-check/*.log"]
 LOG_MAX, LOG_KEEP = 200 << 20, 20 << 20
 BLACK = re.compile(r"(?i)cindy|keyring|restic|snapshot|box-restore|agent-data|^\.x11|^\.ice|^\.font|^tmux|^ssh-|^systemd|^sand|^xdg")
-LOG_DIRS = (os.environ.get("BOXHEALTH_LOG_DIRS") or "/workspace/mivo-qa/argus-root/logs:/workspace/mivo-qa/pi/out/logs:/workspace/box-ops:"
-            "/workspace/grokbot-box-check").split(":")                 # env: tests only
+def _LOG_DIRS(): return globals()["LOG_DIRS"] if "LOG_DIRS" in globals() else ((os.environ.get("BOXHEALTH_LOG_DIRS") or "/workspace/mivo-qa/argus-root/logs:/workspace/mivo-qa/pi/out/logs:/workspace/box-ops:"
+            "/workspace/grokbot-box-check").split(":"))   # read at call time; a test may set LOG_DIRS   # env: tests only
 LOG_NAME = re.compile(r"\.log($|[.-])|\.out$")              # x.log, x.log.1, x.log.gz, mem.log.20261016-022110.gz, catch-up-guard-*.out
 NAME_DAY = re.compile(r"(20\d\d)-?(\d\d)-?(\d\d)")
 def log_day(name):
@@ -143,10 +143,10 @@ def cleanup_candidates():
     for root in (f"{H}/.npm/_cacache", f"{H}/.npm/_npx", f"{H}/.cache/pip"):   # cache entries, one by one: what was used stays
         c += [(p, "file") for p in sh(f"find {root} -type f -mtime +{KEEP_DAYS} 2>/dev/null").splitlines() if p]
     c += [(p, "sudo") for p in sh(f"find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -mtime +{KEEP_DAYS} 2>/dev/null").splitlines() if p]
-    if os.path.exists(f"{TMP_ROOT}/cindy.deb"): c.append((f"{TMP_ROOT}/cindy.deb", "file"))
+    if os.path.exists(f"{_TMP_ROOT()}/cindy.deb"): c.append((f"{_TMP_ROOT()}/cindy.deb", "file"))
     held = held_paths(); me = os.getuid()
     cutoff = now_cst().date() - dt.timedelta(days=KEEP_DAYS)          # a full 7-day window stays (infrafix reads 7 days)
-    for d in LOG_DIRS:
+    for d in _LOG_DIRS():
         try: names = sorted(os.listdir(d))
         except OSError: continue
         for name in names:
@@ -156,8 +156,8 @@ def cleanup_candidates():
             old = day < cutoff if day else time.time() - os.path.getmtime(p) > KEEP_DAYS * 86400
             if old: c.append((p, "file"))
     # 10-24 review: a QA run holding its lock no longer stops /tmp -- argus-* are never ours and held paths are skipped anyway
-    for name in sorted(os.listdir(TMP_ROOT)):
-        p = f"{TMP_ROOT}/{name}"
+    for name in sorted(os.listdir(_TMP_ROOT())):
+        p = f"{_TMP_ROOT()}/{name}"
         try: stt = os.lstat(p)
         except OSError: continue
         if stt.st_uid != me or BLACK.search(name) or name.startswith("argus-") or name == "cindy.deb": continue
@@ -241,25 +241,25 @@ def main():
         dst = "/node_modules.bak-" + t.strftime("%Y%m%d%H%M")
         issues.append(f"根目录有 /node_modules（{', '.join(sorted(os.listdir('/node_modules')))[:120]}）")
         fix(f"sudo mv /node_modules {dst}（未删除；需通知 Praise PR bot）", f"sudo -n mv /node_modules {dst}", fixed)
-        events.append(f"/node_modules 已改名 {dst}，请转告 Praise PR bot" if not DRY else "/node_modules 待改名")
+        events.append(f"/node_modules 已改名 {dst}，请转告 Praise PR bot" if not _DRY() else "/node_modules 待改名")
     big = big_procs(ps_rows()); seen = st.get("bigproc_seen") or {}
     keyof = lambda b: f'{b["pid"]}@{int(time.time() - b["etimes"]) // 60}'      # pid + start minute: pid reuse is a new process
     new_big = [b for b in big if keyof(b) not in seen]; st["bigproc_seen"] = {keyof(b): 1 for b in big}
     if big: issues.append("长驻大进程 " + ", ".join(f'{b["pid"]}({b["rss_mb"]}M,{b["etimes"] // 60}min)' for b in big[:5]))
     cand, locks = cleanup_candidates(); cand_b = du([p for p, k in cand if k != "trunc"]) if cand else 0
-    clean = not DRY; freed = 0
+    clean = not _DRY(); freed = 0
     if clean and cand:
         freed = really_clean(cand)
         if freed > 500 * 2**20: events.append(f"清理释放 {freed // 2**20}MB > 500MB")
     bad = [f for f in fixed if "失败" in f]
-    if bad and not DRY: alerts.append(("fix-failed", "自动修复失败: " + "; ".join(bad)))
-    if fixed and not DRY and len(bad) < len(fixed): events.append("已修复: " + "; ".join(f for f in fixed if f not in bad))
-    line = (f"{t.strftime('%F %T')} CST [pi-line{' dry' if DRY else ''}] avail={avail}MB balloon={bal}MB low_streak={low_min}min load={load} disk={disk} zombies={zomb}(ours {len(ours)}) top={top.strip()} "
+    if bad and not _DRY(): alerts.append(("fix-failed", "自动修复失败: " + "; ".join(bad)))
+    if fixed and not _DRY() and len(bad) < len(fixed): events.append("已修复: " + "; ".join(f for f in fixed if f not in bad))
+    line = (f"{t.strftime('%F %T')} CST [pi-line{' dry' if _DRY() else ''}] avail={avail}MB balloon={bal}MB low_streak={low_min}min load={load} disk={disk} zombies={zomb}(ours {len(ours)}) top={top.strip()} "
             f"clean={'done freed=' + str(freed // 2**20) + 'MB' if clean else 'dry'} candidates={len(cand)}项/{cand_b // 2**20}M"
             f"{' (测试在跑: ' + ','.join(os.path.basename(l) for l in locks) + ' 被占；只清它没在用的)' if locks else ''} "
             f"janitor={janitor_summary()} "
             f"issues={'; '.join(issues) or 'none'} fixed={'; '.join(fixed) or 'none'}")
-    if DRY: print(line); print("candidates:", *(f"{k} {p}" for p, k in cand), sep="\n  ")
+    if _DRY(): print(line); print("candidates:", *(f"{k} {p}" for p, k in cand), sep="\n  ")
     else:
         open("/workspace/box-ops/health.log", "a").write(line + "\n")
         out = f"{BASE}/out/box/{d}.health.md"; old = open(out).read() if os.path.exists(out) else f"# box-health {d}（Pi line）\n"
@@ -300,8 +300,13 @@ def main():
         acts.append({"key": f"boxhealth-bigproc:{d}:{t.strftime('%H%M')}", "type": "SendToAgent", "to": MEM_TO[0], "priority": False,
                      "text": "长驻大进程（>30 分钟且 RSS>1G，非白名单；只报告，未杀）：\n" + "\n".join(
                          f'pid={b["pid"]} parent={b["parent"]} rss={b["rss_mb"]}MB elapsed={b["etimes"] // 60}min cmd={b["args"]}' for b in new_big)})
-    if not DRY: write_atomic(STATE, json.dumps(st, ensure_ascii=False, indent=1))
+    if not _DRY(): write_atomic(STATE, json.dumps(st, ensure_ascii=False, indent=1))
     if msg: acts.insert(0, {"key": f"boxhealth:{d}:{t.strftime('%H%M')}", "type": "slack.dm", "to": "Praise", "text": msg})
-    if DRY: print("would send:", *(f'{a["to"]}: {a["text"]}' for a in acts), sep="\n  ")
+    if _DRY(): print("would send:", *(f'{a["to"]}: {a["text"]}' for a in acts), sep="\n  ")
     elif acts: record_actions("box", d, acts)
 if __name__ == "__main__": sys.exit(main())
+
+
+def __getattr__(name):   # DRY TMP_ROOT LOG_DIRS: resolved lazily (env read at use, not at import), old attribute reads keep working
+    if name in ('DRY', 'TMP_ROOT', 'LOG_DIRS'): return globals()["_" + name]()
+    raise AttributeError(name)
