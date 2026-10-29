@@ -97,12 +97,15 @@ def boot_id():
 
 def classify(prev, now, witness_seq=None, mark=None, boot=None):
     """prev = 上次心跳 dict；返回 None（没停）或 {"kind": pause|rollback, "start", "end", "gap_min", "why"}"""
-    if not prev or "ts" not in prev: return None
+    mark = os.path.exists(ROLLBACK_MARK) if mark is None else mark
+    if not prev or "ts" not in prev:   # 10-29：心跳文件缺失/损坏又有标记 → 直接报一次（否则这拍写 mark=True，之后永不报）
+        return {"kind": "rollback", "start": now.isoformat(timespec="seconds"), "end": now.isoformat(timespec="seconds"), "gap_min": 0.0, "why": ["ROLLBACK-SUSPECTED (no previous heartbeat)"]} if mark else None
     last = dt.datetime.fromisoformat(prev["ts"])
     gap = (now - last).total_seconds() / 60
-    mark = os.path.exists(ROLLBACK_MARK) if mark is None else mark
     why = []
-    if mark: why.append("ROLLBACK-SUSPECTED")
+    # 10-29 修：标记文件是「粘性」的（运维排查完才删），只在它新出现时报一次 rollback；上次心跳已见过标记就不再每分钟重报，
+    # 否则 06:38–09:08 每个正常 1 分钟心跳都被判 rollback，期间真实的 10+ 分钟停机也被吞掉不补跑。
+    if mark and not prev.get("mark"): why.append("ROLLBACK-SUSPECTED")
     if gap < -1: why.append("clock-backwards")
     if witness_seq is not None and prev.get("seq", 0) < witness_seq: why.append(f"seq {prev.get('seq')} < witness {witness_seq}")
     if why: return {"kind": "rollback", "start": prev["ts"], "end": now.isoformat(timespec="seconds"), "gap_min": round(gap, 1), "why": why}
@@ -119,9 +122,10 @@ def beat(now=None):
     prev = max((x for x in (jl(HB(), None), jl(HB2(), None)) if x and "ts" in x), key=lambda x: x["ts"], default=None)   # 两份取新的
     try: ws = int(open(WITNESS).read().strip())
     except (OSError, ValueError): ws = None
-    w = classify(prev, now, ws)
+    mark = os.path.exists(ROLLBACK_MARK)
+    w = classify(prev, now, ws, mark)
     seq = max((prev or {}).get("seq", 0), ws or 0) + 1
-    hb = {"ts": now.isoformat(timespec="seconds"), "boot_id": boot_id(), "seq": seq}
+    hb = {"ts": now.isoformat(timespec="seconds"), "boot_id": boot_id(), "seq": seq, "mark": mark}
     jw(HB(), hb); jw(HB2(), hb)
     try:
         os.makedirs(os.path.dirname(WITNESS), exist_ok=True); open(WITNESS, "w").write(str(seq))
