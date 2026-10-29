@@ -67,6 +67,7 @@ export async function ensureMirror(repo, neededSha = null, { extraRefspecs = [] 
   const url = `https://github.com/${repo}.git`
   const auth = await gitAuth(repo)
   const env = { ...baseEnv(), ...auth.env }
+  const hasNeeded = async () => Boolean(neededSha) && (await run('git', ['-C', dir, 'cat-file', '-e', `${neededSha}^{commit}`], { env: baseEnv(), timeoutMs: 30_000 })).ok
   if (!existsSync(join(dir, 'HEAD'))) {
     mkdirSync(MIRRORS_DIR, { recursive: true })
     // 不用 partial clone：worktree 检出时的按需取对象不会带上凭证
@@ -84,9 +85,17 @@ export async function ensureMirror(repo, neededSha = null, { extraRefspecs = [] 
     if (!await waitWithinBudget(attempt * 15_000)) break
   }
   if (!res.ok) {
-    const have = neededSha && (await run('git', ['-C', dir, 'cat-file', '-e', `${neededSha}^{commit}`], { env: baseEnv(), timeoutMs: 30_000 })).ok
-    if (!have) throw new Error(`更新代码仓失败：${res.tail.slice(-500)}`)
+    if (!await hasNeeded()) throw new Error(`更新代码仓失败：${res.tail.slice(-500)}`)
     log('info', 'mirror fetch failed, using cached commit', { repo })
+  }
+  // 分支 fetch 只取 refs/heads/*（开放 PR 另加 refs/pull/N/head）：需要的版本不挂在任何分支上时
+  // （合并后 main 被回退、探针 PR 的一次性基线分支合并后删掉）镜像里仍然没有它，但 GitHub 保留
+  // refs/pull/N/{head,merge} 并允许按可达版本取对象，所以再按这个版本本身向远端要一次；远端确实没有时
+  // 照旧由 checkout 报「镜像里缺这个版本」。只认完整 sha：名字/选项形式不当请求发给远端
+  if (/^[a-f0-9]{40,64}$/i.test(neededSha ?? '') && !isStopping() && !overBudget() && !await hasNeeded()) {
+    const bySha = await run('git', [...auth.args, '-C', dir, 'fetch', 'origin', neededSha], { env, timeoutMs: 20 * 60_000 })
+    if (bySha.ok) log('info', 'mirror fetched version not on any branch', { repo, sha: neededSha })
+    else log('info', 'mirror fetch by version failed', { repo, sha: neededSha })
   }
   return dir
 }
