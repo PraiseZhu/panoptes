@@ -7,7 +7,7 @@
 2. Per test module: its pi/bin modules are imported fresh (under its own env); what it does to os.environ, os.kill/killpg,
    sys.argv and sys.modules while being imported is recorded, rolled back before the next module is collected, re-applied
    while its own tests run, and rolled back again afterwards. Test modules can no longer see each other's state."""
-import os, sys, tempfile
+import os, shutil, sys, tempfile
 import pytest
 
 _T = tempfile.mkdtemp(prefix="pi-pytest-")
@@ -18,7 +18,14 @@ SANDBOX_ENV = {
     "npm_config_cache": f"{_T}/home/.npm", "PI_LOCK_DIR": f"{_T}/tmp",   # mergewatch / outbound job flocks (else the real /tmp ones)
 }
 for _d in ("state", "work", "home", "tmp", "logs", "memguard"): os.makedirs(f"{_T}/{_d}", exist_ok=True)
+os.makedirs(f"{_T}/mktemp", exist_ok=True)
+SANDBOX_ENV["TMPDIR"] = f"{_T}/mktemp"   # every mkdtemp() (tests and their subprocesses) lands in the sandbox, not real /tmp
 os.environ.update(SANDBOX_ENV)
+tempfile.tempdir = SANDBOX_ENV["TMPDIR"]
+
+def pytest_sessionfinish(session, exitstatus):
+    tempfile.tempdir = None
+    shutil.rmtree(_T, ignore_errors=True)   # conftest's own temp root, and everything the tests made under it
 for _k in [k for k in os.environ if k.startswith("GIT_")]: del os.environ[_k]   # e.g. GIT_DIR from a pre-push hook
 
 HERE = os.path.dirname(os.path.abspath(__file__))

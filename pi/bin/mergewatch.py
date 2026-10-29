@@ -207,7 +207,7 @@ def main():
     if mode != 'pi':
         return 0
     # one tick at a time
-    lk = open(f'{os.environ.get("PI_LOCK_DIR") or "/tmp"}/pi-fallback-mergewatch.lock', 'w')   # PI_LOCK_DIR: tests only
+    lk = open(f'{os.environ.get("PI_LOCK_DIR") or "/tmp"}/pi-fallback-mergewatch.lock', 'w')   # PI_LOCK_DIR: test-only (pi/test/conftest.py); never set in production, where this is /tmp; cron/run.sh locks ignore it
     try:
         fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:

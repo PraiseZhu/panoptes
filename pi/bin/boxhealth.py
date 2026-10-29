@@ -16,6 +16,7 @@ changes it. box-ops cron (/etc/cron.d/box-ops) does NO cleanup, so cleanup has a
 from lib import *
 import praise_notice as PN
 import glob, time
+# lazy on purpose: read env at call time, not import, so a test (or a later PI_STATE/PI_WORK_ROOT) never gets a path frozen to the real box; an assigned module attribute (tests) wins
 def _DRY(): return globals()["DRY"] if "DRY" in globals() else (os.environ.get("PI_BOXHEALTH_DRYRUN") == "1" or "--dry-run" in sys.argv)   # read at call time; a test may set DRY   # 10-24: --dry-run used to be ignored (a "dry" run wrote health.log)
 STATE = f"{BASE}/out/box/alert-state.json"
 def jload(f, d):
@@ -107,10 +108,12 @@ def fix(desc, cmd, fixed):
 def du(paths):
     return sum(int(sh(f"du -sb {p} 2>/dev/null | cut -f1") or 0) for p in paths)
 KEEP_DAYS = 7
+# lazy on purpose: read env at call time, not import, so a test (or a later PI_STATE/PI_WORK_ROOT) never gets a path frozen to the real box; an assigned module attribute (tests) wins
 def _TMP_ROOT(): return globals()["TMP_ROOT"] if "TMP_ROOT" in globals() else (os.environ.get("BOXHEALTH_TMP_ROOT") or "/tmp")   # read at call time; a test may set TMP_ROOT   # tests only
 LOGS_CAP = ["/var/log/earlyoom.log", "/workspace/box-ops/*.log", "/workspace/grokbot-box-check/*.log"]
 LOG_MAX, LOG_KEEP = 200 << 20, 20 << 20
 BLACK = re.compile(r"(?i)cindy|keyring|restic|snapshot|box-restore|agent-data|^\.x11|^\.ice|^\.font|^tmux|^ssh-|^systemd|^sand|^xdg")
+# lazy on purpose: read env at call time, not import, so a test (or a later PI_STATE/PI_WORK_ROOT) never gets a path frozen to the real box; an assigned module attribute (tests) wins
 def _LOG_DIRS(): return globals()["LOG_DIRS"] if "LOG_DIRS" in globals() else ((os.environ.get("BOXHEALTH_LOG_DIRS") or "/workspace/mivo-qa/argus-root/logs:/workspace/mivo-qa/pi/out/logs:/workspace/box-ops:"
             "/workspace/grokbot-box-check").split(":"))   # read at call time; a test may set LOG_DIRS   # env: tests only
 LOG_NAME = re.compile(r"\.log($|[.-])|\.out$")              # x.log, x.log.1, x.log.gz, mem.log.20261016-022110.gz, catch-up-guard-*.out
@@ -307,6 +310,7 @@ def main():
 if __name__ == "__main__": sys.exit(main())
 
 
+# lazy on purpose: keeps old `module.X` reads working while X itself is resolved at use (see the _X() accessors)
 def __getattr__(name):   # DRY TMP_ROOT LOG_DIRS: resolved lazily (env read at use, not at import), old attribute reads keep working
     if name in ('DRY', 'TMP_ROOT', 'LOG_DIRS'): return globals()["_" + name]()
     raise AttributeError(name)
