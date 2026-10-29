@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rollback_hold
 
 CST = dt.timezone(dt.timedelta(hours=8))
+# lazy on purpose: read env at call time, not import, so a test (or a later PI_STATE/PI_WORK_ROOT) never gets a path frozen to the real box; an assigned module attribute (tests) wins
 def _BASE(): return globals()["BASE"] if "BASE" in globals() else (os.environ.get("PI_STATE") or "/workspace/mivo-qa/pi")   # read at call time; a test may set BASE
 D = lambda: os.path.join(_BASE(), "out", "outage")
 HB = lambda: os.path.join(D(), "heartbeat.json")
@@ -29,6 +30,7 @@ HB2 = lambda: os.path.join(_BASE(), "outage-heartbeat.json")   # 10-28：第二�
 LEDGER = lambda: os.path.join(_BASE(), "out", "outbound", "ledger.json")
 WIN = lambda: os.path.join(D(), "windows.json")
 REPLAYED = lambda: os.path.join(D(), "replayed.json")
+# lazy on purpose: read env at call time, not import, so a test (or a later PI_STATE/PI_WORK_ROOT) never gets a path frozen to the real box; an assigned module attribute (tests) wins
 def _WITNESS(): return globals()["WITNESS"] if "WITNESS" in globals() else (os.environ.get("PI_OUTAGE_WITNESS") or "/workspace/pi-work/locks/outage-seq-witness")   # read at call time; a test may set WITNESS
 ROLLBACK_MARK = rollback_hold.mark_path()   # 兼容旧引用；判断一律走 rollback_hold.active()
 RUN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run.sh")
@@ -353,6 +355,7 @@ def main():
 if __name__ == "__main__": sys.exit(main())
 
 
+# lazy on purpose: keeps old `module.X` reads working while X itself is resolved at use (see the _X() accessors)
 def __getattr__(name):   # BASE WITNESS: resolved lazily (env read at use, not at import), old attribute reads keep working
     if name in ('BASE', 'WITNESS'): return globals()["_" + name]()
     raise AttributeError(name)

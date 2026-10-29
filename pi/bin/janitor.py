@@ -27,6 +27,7 @@ from lib import *
 import workroot as W
 import rollback_hold
 
+# lazy on purpose: read env at call time, not import, so a test (or a later PI_STATE/PI_WORK_ROOT) never gets a path frozen to the real box; an assigned module attribute (tests) wins
 def _CONF(): return globals()["CONF"] if "CONF" in globals() else (os.environ.get("JANITOR_CONF") or f"{PI_CODE}/conf/janitor.json")   # read at call time; a test may set CONF
 def _OUT(): return globals()["OUT"] if "OUT" in globals() else (os.environ.get("JANITOR_OUT") or f"{BASE}/out/janitor")   # read at call time; a test may set OUT
 BOT_BRANCH = {"mivo": re.compile(r"^fix/qa-\d+-[0-9a-f]{8}$"), "panoptes": re.compile(r"^fix/infra-[0-9a-f]{8}$")}
@@ -367,6 +368,7 @@ if __name__ == "__main__":
     sys.exit(main())
 
 
+# lazy on purpose: keeps old `module.X` reads working while X itself is resolved at use (see the _X() accessors)
 def __getattr__(name):   # CONF OUT: resolved lazily (env read at use, not at import), old attribute reads keep working
     if name in ('CONF', 'OUT'): return globals()["_" + name]()
     raise AttributeError(name)

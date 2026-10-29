@@ -57,13 +57,16 @@ os.environ["PATH"] = "/usr/local/bin:" + os.environ.get("PATH", "")
 _E = os.environ.get
 # 10-24 (plan §4.1): the bot's own clone and worktrees under PI_WORK -- a person's /workspace/mivo-canvas-plugin and
 # /workspace/praise-pr are no longer touched; every worktree carries .pi-owned.json (janitor reaps only marked ones)
+# lazy on purpose: read env at call time, not import, so a test (or a later PI_STATE/PI_WORK_ROOT) never gets a path frozen to the real box; an assigned module attribute (tests) wins
 def _GIT(): return globals()["GIT"] if "GIT" in globals() else (_E("PRFIX_GIT") or W.clone_dir("mivo"))   # read at call time; a test may set GIT
 def _WT_ROOT(): return globals()["WT_ROOT"] if "WT_ROOT" in globals() else (_E("PRFIX_WT_ROOT") or W.wt_root("mivo"))   # read at call time; a test may set WT_ROOT
 NOTES = _E("PRFIX_NOTES") or "/workspace/praise-pr/notes"
+# lazy on purpose: read env at call time, not import, so a test (or a later PI_STATE/PI_WORK_ROOT) never gets a path frozen to the real box; an assigned module attribute (tests) wins
 def _TMPROOT(): return globals()["TMPROOT"] if "TMPROOT" in globals() else (_E("PRFIX_TMP") or W.wt_root("mivo-dry"))   # read at call time; a test may set TMPROOT
 OUT = _E("PRFIX_OUT") or f"{BASE}/out/praise-pr"
 GATES = _E("PRFIX_GATES") or f"{PI_CODE}/conf/gates.json"
 CI_RULES = _E("PRFIX_CI_RULES") or f"{PI_CODE}/conf/ci-rules"   # <repo name>.md: the target repo's CI rules brief (10-25)
+# lazy on purpose: read env at call time, not import, so a test (or a later PI_STATE/PI_WORK_ROOT) never gets a path frozen to the real box; an assigned module attribute (tests) wins
 def _QA_LOCK(): return globals()["QA_LOCK"] if "QA_LOCK" in globals() else (_E("PRFIX_QA_LOCK") or f"{QA}/argus-root/nightly.lock")   # read at call time; a test may set QA_LOCK   # the flock panoptes run-nightly.sh takes (exec 9>)
 RULINGS = "/workspace/fleet-standards/p2-rulings.md"
 LEDGER_DIR = f"{QA}/ledger/daily"
@@ -2232,6 +2235,7 @@ def main(argv=None):
 if __name__ == "__main__": sys.exit(main())
 
 
+# lazy on purpose: keeps old `module.X` reads working while X itself is resolved at use (see the _X() accessors)
 def __getattr__(name):   # GIT WT_ROOT TMPROOT QA_LOCK: resolved lazily (env read at use, not at import), old attribute reads keep working
     if name in ('GIT', 'WT_ROOT', 'TMPROOT', 'QA_LOCK'): return globals()["_" + name]()
     raise AttributeError(name)
