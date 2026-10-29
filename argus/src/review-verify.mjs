@@ -12,11 +12,14 @@ import { CACHE_DIR } from './paths.mjs'
 import { redact } from './util.mjs'
 
 // /2（2026-10-24）：搜索命中不再算读过文件；调用链里的每个文件、每个行号都要在会话里用 read 实际读到过（旧缓存作废）
-export const VERIFY_PROMPT_VERSION = 'panoptes-review-verify/3'
+export const VERIFY_PROMPT_VERSION = 'panoptes-review-verify/4'
 export const VERIFY_MAX_STEPS = 10
 const BATCH_MAX = 4
 export const VERIFY_MAX_PER_PR = Number(process.env.ARGUS_VERIFY_MAX_PER_PR ?? 3)
 const READ_MAX_LINES = 220
+// grep 正则长度上限。10-29 验收 v2 CR-001 实测：成功的 grep 模式都 ≤ 170 字符；失败的都是 440–2736 字符的超长或分支，
+// 其中一次运行连续 7 次发这种模式（全部 ok:false），token 用量是正常运行的 3 倍。超过上限就不执行，回一句提示让它拆成几个短模式
+export const GREP_PATTERN_MAX = 200
 const OUT_CAP = 14_000
 const sha256 = (x) => createHash('sha256').update(String(x)).digest('hex')
 
@@ -72,8 +75,8 @@ export function repoReaderFor(mirror, sha, { exec = execFileSync } = {}) {
 
 const system = (std) => `你是 Mivo 合并后 QA 的复核员。AI 代码审查只看了 PR 的 diff，单独报出了一条 P1；在把它发给作者之前，你要用整个仓库核实它。
 你只能通过下面的只读动作看代码（被测提交上的版本）。每次只回一个 JSON 对象：一个动作，或者 {"actions":[…]} 一次最多 ${BATCH_MAX} 个读 / 搜动作；看到结果之后再下结论，不要和动作写在同一次回复里：
-- {"action":"read","path":"src/a.ts","start":1,"end":200}  读文件（每次最多 ${READ_MAX_LINES} 行）
-- {"action":"grep","pattern":"placeCroppedImageNode","path":"src"}  搜代码（扩展正则；path 可省；只显示命中行，不算读过文件）
+- {"action":"read","path":"src/a.ts","start":1,"end":200}  读文件（每次最多 ${READ_MAX_LINES} 行；end 可省）
+- {"action":"grep","pattern":"placeCroppedImageNode","path":"src"}  搜代码（扩展正则，最长 ${GREP_PATTERN_MAX} 字符；path 可省；只显示命中行，不算读过文件）
 - {"action":"ls","path":"src/store"}  列目录
 - {"action":"final","verdict":"reachable|not-reachable|intended-design|cannot-determine","reasoning":"…","supported_scenario":"…","call_path":[{"file":"…","line":1,"note":"…"}],"design_reference":"…"}
 
@@ -159,8 +162,9 @@ export function settleVerdict(final, read) {
 const str = { type: 'string' }, int = { type: 'integer' }
 const obj = (properties, required) => ({ type: 'object', properties, required, additionalProperties: false })
 const CALL_PATH = { type: 'array', minItems: 1, items: obj({ file: str, line: int, note: str }, ['file', 'line']) }
-const READ = obj({ action: { type: 'string', enum: ['read'] }, path: str, start: int, end: int }, ['action', 'path', 'start', 'end'])
-const GREP = obj({ action: { type: 'string', enum: ['grep'] }, pattern: str, path: str }, ['action', 'pattern'])
+// end 可省：省掉（或给 0 / 非数字）就读 start 起 READ_MAX_LINES 行，见 repoReaderFor.read
+const READ = obj({ action: { type: 'string', enum: ['read'] }, path: str, start: int, end: int }, ['action', 'path', 'start'])
+const GREP = obj({ action: { type: 'string', enum: ['grep'] }, pattern: { type: 'string', maxLength: GREP_PATTERN_MAX }, path: str }, ['action', 'pattern'])
 const LS = obj({ action: { type: 'string', enum: ['ls'] }, path: str }, ['action', 'path'])
 const FINAL_EXTRA = { reasoning: str, supported_scenario: str, design_reference: str }
 const FINAL_REACHABLE = obj({ action: { type: 'string', enum: ['final'] }, verdict: { type: 'string', enum: ['reachable'] }, ...FINAL_EXTRA, call_path: CALL_PATH }, ['action', 'verdict', 'reasoning', 'call_path'])
@@ -194,7 +198,7 @@ export async function verifyReviewFinding({ secrets, finding, reader, context, s
         out = reader.read(act.path, act.start, act.end)
         // 读到了内容才记；读者没给行范围（只在测试替身里）就按整份文件算
         if (out.ok && out.path) { const r = read.get(out.path) ?? []; r.push([Number.isInteger(out.start) ? out.start : 1, Number.isInteger(out.end) ? out.end : Infinity]); read.set(out.path, r) }
-      } else if (action === 'grep') out = reader.grep(act.pattern, act.path)
+      } else if (action === 'grep') out = String(act.pattern ?? '').length > GREP_PATTERN_MAX ? { ok: false, text: `pattern too long (${String(act.pattern).length} > ${GREP_PATTERN_MAX} chars), not run; split it into a few shorter greps` } : reader.grep(act.pattern, act.path)
       else out = reader.ls(act.path)
       steps.push({ action, path: act.path ?? null, pattern: act.pattern ?? null, ok: Boolean(out.ok) })
       parts.push(`结果（json 动作 ${action}${act.path ? ` ${act.path}` : ''}${act.pattern ? ` /${act.pattern}/` : ''}）：\n${out.text}`)
