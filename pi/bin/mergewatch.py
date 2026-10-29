@@ -20,7 +20,7 @@ takes the single QA slot as soon as it is free, or while the slot holder is park
 The catch-up launch below stays as the fallback for anything missed.
 
 Re-enqueue (10-29, #1340 waited 328 min): a priority run that ends without reports/merged/PR-N.json (failed, timed out,
-or exit 76 from the memory gate) is relaunched on the next tick instead of waiting for the 2-hourly catch-up.
+or exit 76 from the memory gate) is relaunched after a short backoff (2 / 10 min, BACKOFF_S) instead of waiting for the 2-hourly catch-up.
 state.json inflight {PR: {day, tries}} keeps it idempotent (never relaunched while running / queued, dropped once the
 report exists) and bounded (MAX_TRIES launches, then left to catch-up).
 
@@ -42,7 +42,8 @@ LAUNCH_LOG = os.path.join(QA_HOME, 'argus-root', 'logs', 'mergewatch-catch-up.lo
 REPORTS = os.path.join(QA_HOME, 'reports')
 API_PULLS = 'https://api.github.com/repos/xindong/mivo-canvas-plugin/pulls?state=closed&sort=updated&direction=desc&per_page=30'
 DRY = '--dry-run' in sys.argv
-MAX_TRIES = 3   # same bound as catch-up (retries 3x)
+MAX_TRIES = 3   # same bound as catch-up (retries 3x); every launch counts, memory skips (exit 76) included
+BACKOFF_S = (120, 600)   # earliest retry after try 1 / try 2 launched: fast failures (exit 75, crash) don't burn 3 tries in 3 min
 
 
 def now():
@@ -113,8 +114,9 @@ def fetch_pulls(tok):
         return json.load(r)
 
 
-def fresh_merges(pulls, since_iso, reports=REPORTS):
+def fresh_merges(pulls, since_iso, reports=None):
     """since_iso 之后合并、还没有 reports/merged/PR-N.json 的 PR：[(number, 上海合并日)]，旧的在前。"""
+    reports = reports or REPORTS
     since = dt.datetime.fromisoformat(since_iso.replace('Z', '+00:00'))
     out = []
     for p in pulls or []:
@@ -146,14 +148,14 @@ def running_prs(proc='/proc'):
     return out
 
 
-def requeue(inflight, busy, reports=REPORTS):
-    """inflight {"N": {day, tries}} 里已结束但没报告的 PR → [(n, day)] 立刻重排；有报告的删掉，tries 用完的交给 catch-up。原地改 inflight。"""
-    out = []
+def requeue(inflight, busy, reports=None, t=None):
+    """inflight {"N": {day, tries, next_at}} 里已结束但没报告、退避已到（next_at）的 PR → [(n, day)] 重排；有报告的删掉，tries 用完的交给 catch-up。原地改 inflight。"""
+    reports, t, out = reports or REPORTS, time.time() if t is None else t, []
     for k in sorted(inflight, key=int):
         n, e = int(k), inflight[k]
         if os.path.exists(os.path.join(reports, 'merged', f'PR-{n}.json')) or e.get('tries', 0) >= MAX_TRIES:
             del inflight[k]
-        elif n not in busy:
+        elif n not in busy and t >= e.get('next_at', 0):
             out.append((n, e['day']))
     return out
 
@@ -210,7 +212,26 @@ def main():
     st = load()
     st['last_check'] = now()
     # 10-27：停机恢复不再单独置 dirty（同一个 main sha 每次恢复都重起一次 catch-up，10-27 03:46–09:18 起了 6 次、都无事可做）。
-    # 停机期间有合并 → main sha 变了 → 下面照样置 dirty；失败的插队运行由下面 requeue 立刻重排，漏测的由 2 小时一次的 catch-up cron 兜底。
+    # 停机期间有合并 → main sha 变了 → 下面照样置 dirty；失败的插队运行由下面 requeue 退避后重排，漏测的由 2 小时一次的 catch-up cron 兜底。
+    sha = ''
+    inflight = st.setdefault('inflight', {})
+    busy = running_prs()
+
+    def go(n, day):
+        cmd = priority_cmd(n, day)
+        if DRY:
+            return log('DRY: would launch ' + ' '.join(cmd))
+        p = launch(cmd, sha or st.get('main_sha') or '')
+        e = inflight.setdefault(str(n), {'day': day, 'tries': 0})
+        e['tries'] += 1
+        e['next_at'] = time.time() + BACKOFF_S[min(e['tries'], len(BACKOFF_S)) - 1]
+        busy.add(n)
+        log(f"launched priority run pid {p.pid} for PR #{n} (main {(sha or st.get('main_sha') or '')[:8]}, try {e['tries']}/{MAX_TRIES})")
+
+    # 失败 / 超时 / 内存门跳过（exit 76）的插队运行：不等 2 小时一次的 catch-up，退避到点就重排；放在 ls-remote 前，GitHub 连不上也照样重排
+    for n, day in requeue(inflight, busy):
+        go(n, day)
+
     try:
         st.pop('auth', None)   # 10-26: praiseautomation App removed (belongs to another account); default git credentials only
         out = subprocess.run(['git', 'ls-remote', REPO_URL, 'refs/heads/main'], capture_output=True, text=True,
@@ -236,23 +257,6 @@ def main():
         st['main_sha'] = sha
         st['main_moved_at'] = now()
         st['dirty'] = True
-
-    inflight = st.setdefault('inflight', {})
-    busy = running_prs()
-
-    def go(n, day):
-        cmd = priority_cmd(n, day)
-        if DRY:
-            return log('DRY: would launch ' + ' '.join(cmd))
-        p = launch(cmd, sha)
-        e = inflight.setdefault(str(n), {'day': day, 'tries': 0})
-        e['tries'] += 1
-        busy.add(n)
-        log(f"launched priority run pid {p.pid} for PR #{n} (main {sha[:8]}, try {e['tries']}/{MAX_TRIES})")
-
-    # 失败 / 超时 / 内存门跳过（exit 76）的插队运行：不等 2 小时一次的 catch-up，这一轮就重排
-    for n, day in requeue(inflight, busy):
-        go(n, day)
 
     tok = gh_token() if st.get('dirty') else None
     if st.get('dirty') and tok:
