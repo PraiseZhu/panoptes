@@ -205,10 +205,10 @@ const run = async (number, handoff) => {
   const calls = JSON.parse(readFileSync(process.env.ARGUS_E2E_GH_STATE, 'utf8')).calls
   return { out, h, calls, mergeSha }
 }
-// 和交接无关、每次都不同的字段
+// 和交接无关、每次都不同的字段（mem_low_water_mb：运行中真实内存低水位，每次不同）
 const dropEndedAt = (v) => Array.isArray(v) ? v.map(dropEndedAt) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).filter(([k]) => k !== 'ended_at').map(([k, x]) => [k, dropEndedAt(x)])) : v
 const stable = (o) => dropEndedAt(_stable(o))
-const _stable = (o) => { const { handoff, number, merged_at, evidence_dir, test_started_at, tested_at, duration_s, merge_sha, tested_sha, base_sha, changed_files, triage, checks, ...rest } = o; return { ...rest, checks: checks.map(({ duration_ms, ...c }) => c), triage: { ...triage, duration_ms: null } } }
+const _stable = (o) => { const { handoff, number, merged_at, evidence_dir, test_started_at, tested_at, duration_s, merge_sha, tested_sha, base_sha, changed_files, triage, checks, mem_low_water_mb, ...rest } = o; return { ...rest, checks: checks.map(({ duration_ms, ...c }) => c), triage: { ...triage, duration_ms: null } } }
 
 test('handoff e2e processPr: SC-1 带交接的已合并代码 PR → present:true、每条 case 有 qa_status；SC-2 没交接 → present:false、其余字段一致；SC-3 分级不变', async () => {
   const withH = await run(3101, FULL)

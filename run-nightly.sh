@@ -352,9 +352,13 @@ mem_avail_kb() { slot_mem_avail_kb; }
 GATE_PRS=(); prev=""; for a in "$@"; do [[ "$prev" == --pr ]] && GATE_PRS+=("$a"); [[ "$a" == --pr=* ]] && GATE_PRS+=("${a#--pr=}"); prev="$a"; done
 DOCS_CHECK=(); (( ${#GATE_PRS[@]} == 1 )) && DOCS_CHECK=(timeout 60 node --disable-warning=ExperimentalWarning src/cli.mjs docs-only --pr "${GATE_PRS[0]}")
 slot_mem_gate ${DOCS_CHECK[@]+"${DOCS_CHECK[@]}"}
+if [[ "$GATE_NO_SWAP" == 1 ]]; then   # 10-29 PM: no swap -> alert, run by memory only with at most 1 shard
+  msg="ALERT SwapTotal 0 (no swap on this machine): running by memory rules only, max 1 shard"
+  echo "[panoptes] $msg" | tee -a "$LOG" >&2; ctl "run-nightly no swap alert" "\"level_alert\":\"warn\",\"reason\":\"$msg\""
+fi
 GATE_MEM_MB=$(( $(mem_avail_kb) / 1024 ))
 # nightly.mjs records gate_wait_s (SLA: queue vs pipeline) and memory_gate { mode, shards, normal_shards, mem_available_mb } per PR
-export PANOPTES_GATE_WAIT_S="$GATE_WAIT_S" PANOPTES_GATE_MODE="$GATE_MODE" PANOPTES_GATE_SHARDS="$GATE_SHARDS" PANOPTES_GATE_NORMAL_SHARDS="$SLOT_NORMAL_SHARDS" PANOPTES_GATE_MEM_MB="$GATE_MEM_MB"
+export PANOPTES_GATE_WAIT_S="$GATE_WAIT_S" PANOPTES_GATE_MODE="$GATE_MODE" PANOPTES_GATE_SHARDS="$GATE_SHARDS" PANOPTES_GATE_NORMAL_SHARDS="$SLOT_NORMAL_SHARDS" PANOPTES_GATE_MEM_MB="$GATE_MEM_MB" PANOPTES_GATE_NO_SWAP="$GATE_NO_SWAP"
 mem_now="MemAvailable $GATE_MEM_MB MiB, SwapFree $(( $(slot_swap_free_kb) / 1024 )) MiB, balloon $(slot_balloon_mb) MiB"
 case "$GATE_MODE" in
   docs-only) msg="$mem_now: below gate, PR #${GATE_PRS[0]} is docs-only (no tests), not waiting"

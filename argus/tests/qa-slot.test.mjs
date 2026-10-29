@@ -111,6 +111,30 @@ test('slot_mem_gate: PI_TEST_MEM_AVAIL_MB 9000 / 6500 / 4000 → normal / degrad
   assert.equal(sh(root, 'slot_balloon_mb', { PANOPTES_VMSTAT: fakeVmstat(root) }).stdout.trim(), '6144')
 })
 
+// 10-29 PM：SwapTotal 0（机器没有 swap）→ 不等、不退出：告警，只按内存规则跑，最多 1 片；< 6144 照旧等
+test('no swap (SwapTotal 0): >= 8192 and 6144-8191 -> 1 shard + alert + memory_gate swap=0; < 6144 waits as before', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'argus-noswap-'))
+  const f = join(root, 'mi-noswap'); writeFileSync(f, 'MemTotal: 16386368 kB\nMemAvailable: 1 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n')
+  const gate = (mb) => sh(root, 'slot_mem_gate; echo "$GATE_MODE|$GATE_SHARDS|$GATE_NO_SWAP|$GATE_WAIT_S"', { PANOPTES_MEMINFO: f, PANOPTES_TEST: '1', PI_TEST_MEM_AVAIL_MB: String(mb), PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '1' }).stdout.trim()
+  assert.equal(gate(9000), 'degraded|1|1|0')
+  assert.equal(gate(8192), 'degraded|1|1|0')
+  assert.equal(gate(7000), 'degraded|1|1|0')
+  assert.equal(gate(6144), 'degraded|1|1|0')
+  assert.match(gate(6143), /^skip\|0\|1\|[1-9]\d*$/)
+  // end to end: alert on stderr, 1 shard, no wait
+  const nvm = join(root, 'nvm'); mkdirSync(nvm); writeFileSync(join(nvm, 'nvm.sh'), 'nvm() { :; }\n')
+  const secrets = join(root, 'secrets.env'); writeFileSync(secrets, 'GITHUB_TOKEN=x\nQA_LLM_BASE_URL=http://127.0.0.1:9\nQA_LLM_API_KEY=x\n')
+  const r = spawnSync('bash', [join(dirname(SLOT), '..', 'run-nightly.sh'), '--date', '2026-10-27'], { encoding: 'utf8', timeout: 60_000, env: { ...process.env, QA_HOME: join(root, 'qa'),
+    PANOPTES_NVM_DIR: nvm, QA_SECRETS_FILE: secrets, PANOPTES_BOOTSTRAP: '0', PANOPTES_TMP_SWEEP: '0', PANOPTES_TEST: '1', PANOPTES_GATE_DRYRUN: '1', PI_TEST_MEM_AVAIL_MB: '9000',
+    PANOPTES_MEMINFO: f, PANOPTES_VMSTAT: fakeVmstat(root), PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '1', ARGUS_UNIT_SHARDS: '', ARGUS_MAX_PARALLEL: '' } })
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(r.stderr, /ALERT SwapTotal 0/)
+  assert.match(r.stdout, /gate: mode=degraded wait=0s shards=1 max_parallel=1/)
+  const { memoryGate } = await import('../src/nightly.mjs')
+  const mg = memoryGate({ PANOPTES_GATE_MODE: 'degraded', PANOPTES_GATE_SHARDS: '1', PANOPTES_GATE_NORMAL_SHARDS: '2', PANOPTES_GATE_MEM_MB: '9000', PANOPTES_GATE_NO_SWAP: '1' })
+  assert.equal(mg.swap, 0); assert.equal(mg.shards, 1); assert.match(mg.swap_alert, /SwapTotal 0/)
+})
+
 // 同样三档走真的 run-nightly.sh（假 nvm / 假密钥 / 临时 QA_HOME，PANOPTES_GATE_DRYRUN=1 在门后停下，不跑测试）
 test('run-nightly.sh memory gate end to end: 9000 runs normally, 6500 degraded (1 shard, no parallel), 4000 skipped with exit 76 and the slot released', () => {
   const root = mkdtempSync(join(tmpdir(), 'argus-gate-e2e-'))

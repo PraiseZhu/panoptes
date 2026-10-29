@@ -1610,7 +1610,7 @@ export async function processTargets(targets, { opts = {}, health, startedAt = n
         const msg = redact(err.message).slice(0, 800)
         const fp = fingerprintOf(repo ?? '', ['qa-error', 'pipeline', msg])
         // 测试系统自己出错：PR 本身没测到，不是作者的问题 → 不定级（untested），待核实（QA 自查）
-        result = { number: t.number, ...(t.meta ?? {}), discovery_reason: t.reason, verdict: 'qa-error', severity: 'untested', tested: false, error: msg, failed_checks: [], checks: [], coverage_gate: null, test_started_at: beat.started_at, tested_at: null,
+        result = { number: t.number, ...(t.meta ?? {}), discovery_reason: t.reason, verdict: 'qa-error', severity: 'untested', tested: false, error: msg, memory_gate: memoryGate(), failed_checks: [], checks: [], coverage_gate: null, test_started_at: beat.started_at, tested_at: null,
           findings: [], pending_verification: [toPending('qa-error', { source: 'qa-error', check_id: 'pipeline', dimension: null, severity: null, title: 'QA pipeline error (the PR itself was not verified)', fingerprint: fp, pr_fingerprint: prFingerprint(fp, t.number), evidence: { error: msg } }, { reason: 'QA pipeline error', reasonZh: '测试系统自己出错，PR 本身没测到' })] }
       }
     }
@@ -1861,11 +1861,12 @@ export function coverageTimeoutMin(step, parallel, env = process.env) {
 export function memoryGate(env = process.env) {
   if (!env.PANOPTES_GATE_MODE) return null
   const num = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v))
-  return { mode: env.PANOPTES_GATE_MODE, degraded: env.PANOPTES_GATE_MODE === 'degraded', shards: num(env.PANOPTES_GATE_SHARDS), normal_shards: num(env.PANOPTES_GATE_NORMAL_SHARDS), mem_available_mb: num(env.PANOPTES_GATE_MEM_MB) }
+  return { mode: env.PANOPTES_GATE_MODE, degraded: env.PANOPTES_GATE_MODE === 'degraded', shards: num(env.PANOPTES_GATE_SHARDS), normal_shards: num(env.PANOPTES_GATE_NORMAL_SHARDS), mem_available_mb: num(env.PANOPTES_GATE_MEM_MB),
+    ...(env.PANOPTES_GATE_NO_SWAP === '1' ? { swap: 0, swap_alert: 'SwapTotal 0: memory rules only, max 1 shard' } : {}) }
 }
 
 // 10-28：运行中内存低水位 < 1.5G（ARGUS_LOW_MEM_MB）且有失败 → 记环境问题（infra_failed → verdict qa-env-problem），不算测试失败。
-// 通过 / 纯文档 / 已是环境问题的不改
+// 通过 / 纯文档 / 已是环境问题的不改：成功的运行即使中途跌破 1536 MiB 也不记 env_problem（结果可信，只在 mem_low_water_mb 里留数）
 export function lowMemoryEnvProblem(outcome, lowWaterMb, env = process.env) {
   if (!lowMemoryHit(lowWaterMb, env) || ['passed', 'docs_only', 'infra_failed'].includes(outcome)) return null
   const t = lowMemMb(env)
