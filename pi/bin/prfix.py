@@ -1527,7 +1527,7 @@ def fix_one(c, A, d):
             if git("diff", "--quiet", "--", "package-lock.json", cwd=wd)[0]: git("checkout", "--", "package-lock.json", cwd=wd)
             fs = chg()
             if fs: git("add", "-A", "--", *fs, cwd=wd)
-            rc, o = git(*GIT_ID, "commit", "-q", *(["--amend", "--no-edit"] if amend else ["-m", title, "-m", f"QA: #{n}\nFingerprint: {fp}"]), cwd=wd)
+            rc, o = git(*GIT_ID, "commit", "-q", *(["--amend", "--no-edit"] if amend else ["-m", title, "-m", f"QA: #{n}\nFingerprint: {fp}\nPi-Open: fixpr:{n}:{fp}"]), cwd=wd)
             step("本地提交（作者 Praise）" + ("，并入修改" if amend else ""), rc == 0, o)
             if rc: raise Deterministic(f"本地提交失败：{tail(o, 3)}")
             return git("rev-parse", "HEAD", cwd=wd)[1].strip()
