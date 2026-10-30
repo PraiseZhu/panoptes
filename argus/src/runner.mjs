@@ -2,6 +2,7 @@
 import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync, statSync, lstatSync, realpathSync, cpSync } from 'node:fs'
 import { join, dirname, basename, resolve, relative, isAbsolute } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
+import { spawnSync } from 'node:child_process'
 import { run, isStopping, overBudget } from './exec.mjs'
 import { RUNS_DIR, MIRRORS_DIR, NPM_CACHE_DIR, UV_CACHE_DIR, UV_PYTHON_DIR, CACHE_DIR, CODE_DIR } from './paths.mjs'
 import { log, toPlainZh, waitWithinBudget } from './util.mjs'
@@ -248,6 +249,28 @@ export function bwrapArgs(runDir, { extraRo = [], extraRw = [], chdir = null } =
   for (const p of [CACHE_DIR, runDir, shortTmpOf(runDir), ...extraRw]) { mkdirSync(p, { recursive: true }); args.push('--bind', p, p) }
   if (chdir) args.push('--chdir', chdir)
   return args
+}
+
+// 步骤在沙箱里看到的 / 的属主（uid 字符串）；没有 bwrap 或探测失败返回 null。
+// bwrap 的 user namespace 没映射宿主 root 时，root 属主的 / 显示成溢出 uid 65534（/usr、/etc 同理），
+// 于是「路径链属主必须是 root 或自己」这类校验在沙箱里必然拒绝 —— 首跑、重跑、基线都一样（inf1-13fa895f）。
+// 探测一次就缓存：同一次运行里各 PR 的沙箱参数一致，只有 / 的属主是关心的值。
+let sandboxRootUidCache
+export function sandboxRootOwnerUid(runDir) {
+  if (sandboxRootUidCache !== undefined) return sandboxRootUidCache
+  sandboxRootUidCache = null
+  if (sandboxMode({}) !== 'bwrap') return null
+  try {
+    const res = spawnSync(BWRAP, [...bwrapArgs(runDir), '--', '/usr/bin/stat', '-c', '%u', '/'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 20_000 })
+    const uid = String(res.stdout ?? '').trim()
+    if (res.status === 0 && /^\d+$/.test(uid)) sandboxRootUidCache = uid
+  } catch { /* 探测失败：按「看不出」处理，不影响判定 */ }
+  return sandboxRootUidCache
+}
+// 沙箱看不出 root 属主：步骤里 root 属主的路径既不是 uid 0，也不是当前用户
+export function sandboxHidesRootOwner(runDir) {
+  const seen = sandboxRootOwnerUid(runDir)
+  return seen != null && seen !== '0' && seen !== String(process.getuid?.() ?? '')
 }
 
 function sandboxed(argv, runDir, profile, stepRo = []) {

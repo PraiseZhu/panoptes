@@ -13,7 +13,7 @@ import { openDb } from './db.mjs'
 import { listNightlyPrs, getPull, getCommit, getBranchHead, listPullFiles, addFullText, getHandoff, shanghaiDayWindow, findIssuesByMarkerLabel, createIssue, commentIssue, reopenIssue, findCommentByMarker, listPullReviewComments, listPullCommits, listTeamMembers } from './github.mjs'
 import { classifyChange, highRiskFiles, withoutHandoff, isTestPath } from './classify.mjs'
 import { parseHandoff, splitHandoffCases, toHandoffReport, settleHandoff } from './handoff.mjs'
-import { executeOnSha, ensureMirror, mergeBase, sandboxMode, janitor, mirrorPath, currentUmask, INHERITED_UMASK, PINNED_UMASK, fmtUmask } from './runner.mjs'
+import { executeOnSha, ensureMirror, mergeBase, sandboxMode, janitor, mirrorPath, currentUmask, INHERITED_UMASK, PINNED_UMASK, fmtUmask, sandboxRootOwnerUid, sandboxHidesRootOwner } from './runner.mjs'
 import { decideOutcome, failedIds, setupFailed, failureKeys, compareKey } from './decide.mjs'
 import { analyzePr } from './ai.mjs'
 import { evaluateJev } from './jev.mjs'
@@ -196,6 +196,14 @@ export async function waitForIdle({ maxWaitMs = 10 * 60_000, everyMs = 15_000, s
   return { ...m, idle: isIdle(m), waited_ms: Date.now() - t0 }
 }
 export const QA_SELF_CHECK_STATUSES = ['unverified', 'setup-failed', 'timeout', 'flaky']
+// 属主 / 权限校验类断言的特征：沙箱掩盖 root 属主时，这类用例在首跑、重跑和基线版本上都失败（inf1-13fa895f）
+export const OWNER_GUARD_RE = /65534|\buid\b|属主|所有者|\bowner\b|不可信|拒绝加载|permission denied|EACCES|EPERM/i
+// 沙箱看不出 root 属主（bwrap 里 / 显示成溢出 uid 65534）时，属主 / 权限校验类检查在基线版本上也必然失败：
+// 这是 QA 环境造的假失败，不是仓库基线坏了，不能记成 pre-existing（否则每个 PR 都报一次，infrafix 一直开工单）
+export function sandboxOwnerFakeFailure({ baseRun, tail, test, runDir }) {
+  if (baseRun !== 'fail' || !sandboxHidesRootOwner(runDir)) return false
+  return OWNER_GUARD_RE.test(`${test ?? ''}\n${tail ?? ''}`)
+}
 // introduced 已经排除了「最新主干上已通过」（那是 fixed-later），所以已合并 + 产品类 + introduced = 主干可能还坏着
 export const p0Candidate = ({ status, step, merged }) => Boolean(merged) && status === 'introduced' && step.kind !== 'quality' && !step.trialOnly
 // p0_note 按实际有没有在最新主干上复查写：latestSha = 复查时取到的主干 head（取不到为 null）；latestIsSame = 被测提交就是主干 head；
@@ -474,22 +482,28 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
       status = 'pre-existing'
       why = 'also fails on the base revision (base run failed; failure type not fingerprint-comparable, e.g. test_timeout)'
     }
-    const preExisting = status === 'pre-existing' || baseRun === 'fail'
+    const tailText = evidenceTail(r, named ? test : null)
+    // 沙箱看不出 root 属主时，属主 / 权限校验类用例在基线版本上也必然失败：环境假失败，不当仓库老问题
+    const ownerEnv = sandboxOwnerFakeFailure({ baseRun, tail: tailText, test: named ? test : null, runDir: evDir })
+    const preExisting = !ownerEnv && (status === 'pre-existing' || baseRun === 'fail')
     // 试运行检查（bench）的用例超时、空闲机器上重跑通过：机器负载（审计 2026-10-18 S3），不算这个 PR 的发现
     const envTimeout = isTrialTimeout(step, r, test, { status, rerun: compareOn(rerun), idle: out.rerun_idle_wait?.idle })
+    const attribution = envTimeout ? `${why}; test timed out in a trial-only check and passed on the idle-machine rerun: treated as environment load, not a PR finding`
+      : ownerEnv ? `${why}; the QA sandbox hides the root owner (the step sees / owned by uid ${sandboxRootOwnerUid(evDir)} instead of 0), so this owner/permission check fails on every revision: treated as a QA environment problem, not a repo baseline problem`
+        : why
     out.failed_checks.push({
       check_id: stepId, check_name: r?.nameZh, dimension: toBox(step, profile), qa_dimensions: step.covers ?? [],
       test: named ? test : null, failure_type: type, status, flaky: status === 'flaky', related_to_pr: status === 'flaky' ? false : undefined,
       pre_existing: preExisting,
-      severity: envTimeout ? 'P3' : severityFor({ status, step, merged }), attribution: envTimeout ? `${why}; test timed out in a trial-only check and passed on the idle-machine rerun: treated as environment load, not a PR finding` : why,
-      ...(envTimeout ? { not_a_pr_finding: true, env_suspected: 'trial-timeout' } : {}),
+      severity: envTimeout ? 'P3' : severityFor({ status, step, merged }), attribution,
+      ...(envTimeout ? { not_a_pr_finding: true, env_suspected: 'trial-timeout' } : ownerEnv ? { not_a_pr_finding: true, env_suspected: 'sandbox-root-owner' } : {}),
       // 统一分级 P0 要人工或裁决确认：已合并、产品类、本 PR 引入且（复查过的）最新主干仍失败 → 只标 p0_candidate，等级仍是 P1
       ...(!envTimeout && p0Candidate({ status, step, merged }) ? { p0_candidate: true, p0_note: p0NoteFor({ step, latestSha: out.latest_main_sha ?? null, latestIsSame, latestRun: latest ? compareOn(latest) : null }) } : {}),
       fingerprint: fp, pr_fingerprint: prFingerprint(fp, number),
       evidence: {
         tested_sha: sha, base_sha: baseSha, exit_code: r?.exitCode, signal: r?.signal ?? null, ended_at: r?.endedAt ?? null, timed_out: Boolean(r?.timedOut),
         first_run: 'fail', rerun: compareOn(rerun), base_run: baseRun, ...(latest ? { latest_main_run: compareOn(latest) } : {}),
-        command: (step.cmd ?? []).join(' '), log_tail: evidenceTail(r, named ? test : null), log_file: join(evDir, 'h1/logs', `${stepId}.log`),
+        command: (step.cmd ?? []).join(' '), log_tail: tailText, log_file: join(evDir, 'h1/logs', `${stepId}.log`),
         ...(step.trialOnly ? { machine_load: { first_run: r?.machine ?? null, rerun_wait: out.rerun_idle_wait ?? null, rerun: rerun?.find((y) => y.id === stepId)?.machine ?? null } } : {}),
         ...(baseComparison?.compared ? { base_log_file: join(evDir, 'b/logs', `${stepId}.log`) } : {}),
       },
@@ -533,11 +547,19 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   if (lowMem) for (const c of out.failed_checks) c.low_memory = true
   const stated = statedAcceptanceFinding({ gate: out.coverage_gate, body: pr.body, qaMd: handoffRaw.qa, repo, number, sha, baseSha })
   if (stated) out.findings.push(stated)
-  for (const c of out.failed_checks.filter((x) => x.not_a_pr_finding)) health.env_problems.push({ pr: number, message: `trial check '${c.check_id}' timed out${c.test ? ` (${c.test})` : ''} and passed on the idle-machine rerun: treated as environment load, not a PR finding` })
+  for (const c of out.failed_checks.filter((x) => x.env_suspected === 'trial-timeout')) health.env_problems.push({ pr: number, message: `trial check '${c.check_id}' timed out${c.test ? ` (${c.test})` : ''} and passed on the idle-machine rerun: treated as environment load, not a PR finding` })
+  // 沙箱看不出 root 属主造的假失败：写清原因进系统健康 + 待核实（QA 自查），不进 findings，也不改本 PR 引入的定级
+  const ownerFakes = out.failed_checks.filter((x) => x.env_suspected === 'sandbox-root-owner')
+  if (ownerFakes.length) {
+    health.env_problems.push({ pr: number, message: `sandbox hides the root owner: inside the step (bwrap user namespace) / is owned by uid ${sandboxRootOwnerUid(evDir) ?? 'unknown'} instead of root (0), so path-owner / permission checks (${ownerFakes.map((c) => c.check_id).join(', ')}) fail on the first run, the rerun and the base revision alike: recorded as a QA environment problem, not a repo baseline problem` })
+  }
   // 失败检查：unverified / setup-failed / timeout / flaky 不是作者的问题 → 待核实（QA 自查）；其余按 severityFor 进 findings
   const asCheck = (c) => ({ source: 'check', test_backed: checkIsTestBacked(c), ...c })
   for (const c of out.failed_checks.filter((x) => !x.not_a_pr_finding && !x.low_memory && QA_SELF_CHECK_STATUSES.includes(x.status))) {
     out.pending_verification.push(toPending('check-qa', asCheck(c), { reason: `check ${c.status}: not attributable to the PR author; QA re-runs / fixes the environment first`, reasonZh: `检查结果是 ${c.status}，不是作者的问题，QA 先自己查清（重跑、修环境）` }))
+  }
+  for (const c of ownerFakes) {
+    out.pending_verification.push(toPending('check-qa', asCheck(c), { reason: 'owner/permission check: the QA sandbox hides the root owner, so it fails on the base revision too; fix the sandbox (or run the check outside bwrap) before treating it as a repo problem', reasonZh: '属主 / 权限校验在沙箱里必然失败（步骤看不到 root 属主），先查 QA 沙箱，不要当成仓库基线坏了' }))
   }
   out.findings = [...out.failed_checks.filter((c) => !c.not_a_pr_finding && !c.low_memory && !QA_SELF_CHECK_STATUSES.includes(c.status)).map(asCheck), ...out.findings]
   out.severity = out.findings.length ? maxSev(out.findings.map((f) => f.severity)) : 'P3'
