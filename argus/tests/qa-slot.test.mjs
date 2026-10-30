@@ -207,10 +207,12 @@ test('run-nightly.sh --pr N: low swap degraded run keeps the accumulated gate wa
     PANOPTES_NVM_DIR: nvm, QA_SECRETS_FILE: secrets, PANOPTES_BOOTSTRAP: '0', PANOPTES_TMP_SWEEP: '0', PANOPTES_TEST: '1', PANOPTES_GATE_DRYRUN: '1', PI_TEST_MEM_AVAIL_MB: '9000',
     PANOPTES_MEMINFO: fakeMem(root, 2), PANOPTES_VMSTAT: fakeVmstat(root), PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '1', ARGUS_UNIT_SHARDS: '', ARGUS_MAX_PARALLEL: '' } })
   assert.equal(r.status, 0, r.stdout + r.stderr)
-  assert.match(r.stdout, /gate: mode=degraded wait=1801s shards=1 max_parallel=1/)
+  // 10-30: this attempt's own gate wait is SECONDS - start, 0 or 1 s if the clock crosses a whole second -> 1801 or 1802
+  const w = r.stdout.match(/gate: mode=degraded wait=(180[12])s shards=1 max_parallel=1/)?.[1]
+  assert.ok(w, r.stdout)
   assert.match(r.stderr, /ALERT SwapFree 2048 MiB < 4 GiB/)
-  assert.match(r.stderr, /after 1801s: low swap free: SwapFree 2048 MiB < 4096 MiB: degraded run with 1 of 2 shards/)
-  assert.equal(readFileSync(join(gw, 'PR-8'), 'utf8').trim(), '1801')
+  assert.match(r.stderr, new RegExp(`after ${w}s: low swap free: SwapFree 2048 MiB < 4096 MiB: degraded run with 1 of 2 shards`))
+  assert.equal(readFileSync(join(gw, 'PR-8'), 'utf8').trim(), w)
   const log = readFileSync(join(qa, 'argus-root', 'logs', 'control.log'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
   assert.equal(log.find((e) => e.msg === 'run-nightly low swap alert').level, 'warn')
   assert.ok(log.some((e) => e.msg === 'run-nightly low swap free, degraded'))
