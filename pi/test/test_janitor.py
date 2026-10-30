@@ -180,6 +180,7 @@ class TestInfraBranches(Base):
         self.assertEqual(sorted(u["path"] for u in r["unmarked"]), sorted([other, top]))                  # the worktree once, not .git/docs/a.txt
         self.assertEqual(sorted(h["path"] for h in r["held"]), sorted([held_in, held_top]))
         self.assertTrue(all(h["owner"] == "manual-hold" and h["created_at"] for h in r["held"]))
+        for u in r["unmarked"]: self.assertIn(f"unmarked {u['path']}", self.out)   # 10-30: the log names each unmarked dir, not just the count
         for d in (top, held_top, held_in, other): self.assertTrue(os.path.isdir(d), d)        # never reaped
         self.assertEqual(self.run_j("run"), 0, self.out); self.assertTrue(os.path.isdir(held_top) and os.path.isdir(held_in))
 
@@ -305,6 +306,20 @@ class TestWatchdog(Base):
         r.update(unmarked=[]); json.dump(r, open(f, "w")); probs = {}; WD.janitor_check(now, probs); self.assertEqual(probs, {})
         r.update(mode="dry-run", free_gb=1, held=[])
         probs = {}; WD.janitor_check(now, probs); self.assertEqual(probs, {})      # stale report: "janitor stopped" is job_checks' to say
+
+    def test_16_unmarked_key_per_dir_survives_set_changes(self):   # 10-30: a 4th dir coming and going must not recover/re-raise a/b/c
+        import watchdog as WD
+        p = mock.patch.object(WD, "BASE", f"{T}/state"); p.start(); self.addCleanup(p.stop)
+        now = J.now_cst(); f = f"{T}/state/out/janitor/last.json"; os.makedirs(os.path.dirname(f), exist_ok=True)
+        def keys(names):
+            json.dump({"ran_at": now.isoformat(), "mode": "enforce", "free_gb": 50, "skipped": [],
+                       "unmarked": [{"path": f"{T}/wt/{n}"} for n in names]}, open(f, "w"))
+            probs = {}; WD.janitor_check(now, probs); return {k for k in probs if k.startswith("janitor:unmarked:")}
+        k3 = keys("abc"); k4 = keys("abcd"); k3b = keys("abc")
+        self.assertEqual(len(k3), 3); self.assertEqual(len(k4), 4)
+        self.assertTrue(k3 <= k4, "a/b/c keys must stay open when d appears (no false recovered)")
+        self.assertEqual(k3, k3b, "same dirs -> same keys (no re-raise)")
+        self.assertEqual(keys("bc"), k3 - keys("a"), "removing a recovers only a's key")
 
 class TestZZIsolation(unittest.TestCase):
     def test_00_guard_reads_no_live_path(self):

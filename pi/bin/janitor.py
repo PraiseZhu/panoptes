@@ -338,6 +338,7 @@ def cmd_run(A, conf):
     print(f"{now_cst():%H:%M:%S} {r['mode']}: reaped {len(r['reaped'])}, skipped {len(r['skipped'])}, unmarked {len(r['unmarked'])}, "
           f"branches {len(r['branches_deleted'])}, remote {len(r['remote_deleted'])}/{len(r['remote_kept'])} kept, deleted {len(r['deleted'])}, "
           f"trash {r['trash_entries']} ({r['trash_bytes'] >> 20}M), work root {r['root_bytes'] >> 20}M, free {r['free_gb']}G, errors {len(r['errors'])}")
+    for u in r["unmarked"]: print(f"{now_cst():%H:%M:%S}   unmarked {u['path']}  -- {u.get('why', '')}")   # 10-30: name each dir, not just the count
     return 1 if r["errors"] else 0
 
 def cmd_reap(A, conf):
