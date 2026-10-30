@@ -6,6 +6,16 @@
       "apiKey": "$DEEPSEEK_API_KEY",
       "models": [
         {
+          "id": "deepseek/deepseek-flash:discount",
+          "reasoning": true,
+          "contextWindow": 1000000,
+          "maxTokens": 131072,
+          "thinkingLevelMap": {
+            "xhigh": "max",
+            "max": "max"
+          }
+        },
+        {
           "id": "deepseek/deepseek-flash",
           "reasoning": true,
           "contextWindow": 1000000,
