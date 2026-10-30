@@ -3,7 +3,7 @@
 // ARGUS_ALLOW_ISSUES=1 时才可能发生。
 import { yieldToPriority } from './priority.mjs'
 import { memAvailableGb, machineLoad, isIdle, startMemLowWater, lowMemoryHit, lowMemMb } from './memory.mjs'
-import { mkdirSync, writeFileSync, renameSync, existsSync, readFileSync, statfsSync, readdirSync } from 'node:fs'
+import { mkdirSync, writeFileSync, renameSync, existsSync, readFileSync, statSync, statfsSync, readdirSync } from 'node:fs'
 import { join, resolve, dirname, basename, posix } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { hostname } from 'node:os'
@@ -13,7 +13,7 @@ import { openDb } from './db.mjs'
 import { listNightlyPrs, getPull, getCommit, getBranchHead, listPullFiles, addFullText, getHandoff, shanghaiDayWindow, findIssuesByMarkerLabel, createIssue, commentIssue, reopenIssue, findCommentByMarker, listPullReviewComments, listPullCommits, listTeamMembers } from './github.mjs'
 import { classifyChange, highRiskFiles, withoutHandoff, isTestPath } from './classify.mjs'
 import { parseHandoff, splitHandoffCases, toHandoffReport, settleHandoff } from './handoff.mjs'
-import { executeOnSha, ensureMirror, mergeBase, sandboxMode, janitor, mirrorPath, currentUmask, INHERITED_UMASK, PINNED_UMASK, fmtUmask } from './runner.mjs'
+import { executeOnSha, ensureMirror, mergeBase, sandboxMode, sandboxRootUid, janitor, mirrorPath, currentUmask, INHERITED_UMASK, PINNED_UMASK, fmtUmask } from './runner.mjs'
 import { decideOutcome, failedIds, setupFailed, failureKeys, compareKey } from './decide.mjs'
 import { analyzePr } from './ai.mjs'
 import { evaluateJev } from './jev.mjs'
@@ -1172,6 +1172,8 @@ export function envSnapshot() {
     playwright: (() => { try { return JSON.parse(readFileSync(join(CODE_DIR, 'node_modules/playwright/package.json'), 'utf8')).version } catch { return null } })(),
     python: ver(process.env.ARGUS_PYTHON ?? 'python3', ['--version']), disk_free_gb: free,
     umask: currentUmask(), umask_inherited: process.env.PANOPTES_INHERITED_UMASK || INHERITED_UMASK,
+    // root_uid：宿主进程看到的 / 属主；sandbox_root_uid：沙箱内量出的 / 属主（量不出来为 null）
+    root_uid: statSync('/').uid, sandbox_root_uid: sandboxRootUid(),
   }
 }
 
@@ -1183,6 +1185,15 @@ export function checkUmask(health) {
   // 固定后的值总是 0022：真正反映 QA 环境的是固定前继承到的值，不是 0022 也记一条（已被固定，但环境本身该修）
   const inh = health.environment?.umask_inherited
   if (inh != null && inh !== want) health.env_problems.push({ message: `inherited umask was ${inh} (expected ${want}); panoptes pinned it to ${want} for this run, but the QA environment should be fixed (umask 002 caused false RUNNER_OWNER_MISMATCH on mivo #1385)` })
+}
+// 沙箱把 root 映射成 overflowuid（非特权 bwrap 只映射调用者自己的 uid）：被测仓里「父目录必须由 root/控制器独占」
+// 这类安全断言在沙箱内必然失败，基线版本又在同一个沙箱里跑，于是被记成「also fails on the base revision」＝pre-existing，
+// 日报看不出这是沙箱视角造成的假失败（10-30 六次）。两个 root 属主对不上时点名。
+export function checkUidMapping(health) {
+  const env = health.environment ?? {}
+  const sandboxUid = env.sandbox_root_uid
+  if (env.sandbox !== 'bwrap' || sandboxUid == null || sandboxUid === env.root_uid) return
+  health.env_problems.push({ message: `sandbox maps root to uid ${sandboxUid} (host root_uid ${env.root_uid}): root-owned path assertions such as "parent directory must be owned by the controller" fail inside the sandbox and on the base revision too, so they are reported as pre-existing (not a PR finding)` })
 }
 
 
@@ -1699,6 +1710,7 @@ export async function runNightly(opts = {}) {
   if (!env.chromium) health.env_problems.push({ message: `${LINUX_CHROMIUM} missing: browser E2E will be unavailable` })
   if (env.disk_free_gb != null && env.disk_free_gb < 12) health.env_problems.push({ message: `low disk: ${env.disk_free_gb} GB free` })
   checkUmask(health)
+  checkUidMapping(health)
   recordBootstrap(health, readBootstrapStatus())
   recordSeverityPin(health)
   const db = openDb()

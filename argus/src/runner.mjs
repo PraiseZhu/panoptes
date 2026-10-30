@@ -1,5 +1,6 @@
 // 在隔离 run 目录里检出指定版本并执行项目 profile 的步骤
-import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync, statSync, lstatSync, realpathSync, cpSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync, statSync, lstatSync, realpathSync, cpSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { join, dirname, basename, resolve, relative, isAbsolute } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
 import { run, isStopping, overBudget } from './exec.mjs'
@@ -248,6 +249,26 @@ export function bwrapArgs(runDir, { extraRo = [], extraRw = [], chdir = null } =
   for (const p of [CACHE_DIR, runDir, shortTmpOf(runDir), ...extraRw]) { mkdirSync(p, { recursive: true }); args.push('--bind', p, p) }
   if (chdir) args.push('--chdir', chdir)
   return args
+}
+
+// 沙箱里 host root 没有映射：非特权 bwrap 只映射调用者自己的 uid，沙箱内 /、/usr/bin 的属主变成 overflowuid(65534)。
+// 被测仓里「父目录必须由 root/控制器独占」这类安全断言在沙箱内必然失败，基线版本也在同一个沙箱里跑，
+// 于是逐个记成 pre-existing（10-30 六次 workspace-creation.native.test.mjs > tmp-chown）。这里真的进沙箱量一次属主，
+// 交给 system_health 点名（nightly 的 checkUidMapping），日报才能说明是沙箱视角造成的假失败。
+// 没跑进沙箱或量不出来时返回 null：宁可不报，也不报一个宿主的数字。
+export function sandboxRootUid({ runDir } = {}) {
+  if (process.platform !== 'linux' || sandboxMode({}) !== 'bwrap') return null
+  const own = runDir || mkdtempSync(join(tmpdir(), 'argus-root-uid-'))
+  try {
+    const r = spawnSync(BWRAP, [...bwrapArgs(own), '--', 'stat', '-c', '%u', '/'], { encoding: 'utf8', timeout: 30_000 })
+    const uid = Number(String(r.stdout ?? '').trim())
+    return r.error == null && r.status === 0 && Number.isInteger(uid) ? uid : null
+  } finally {
+    if (!runDir) {
+      rmSync(own, { recursive: true, force: true })
+      rmSync(shortTmpOf(own), { recursive: true, force: true })
+    }
+  }
 }
 
 function sandboxed(argv, runDir, profile, stepRo = []) {
