@@ -152,6 +152,10 @@ panoptes catch-up 每 2 小时 :07 + 每次合并（mergewatch）起跑；修 PR
 - **看门狗又加了两项**：测试系统某次运行超过 5 小时（2 小时兜底补测没有单 PR 超时，卡住会挡住所有合并测试）；Cindy 挂了且内存不够、暂时不拉起时私信一次。
 - **盯梢那边 PR 卡住怎么办**：看门狗报「Mac mini 盯梢那边有 PR 卡了很久」时，先在 Mac mini 上看盯梢还在不在跑。上次停摆是 Keel 插件换了命名空间，台账目录从 `ghost-fs/keel` 变成 `ghost-fs/_ns__xd__keel`；解法见 vigil 仓 `docs/operations.md`：改 profile 的 `keelLedgerRoot`、`keelNamespace` 后重新部署。盯梢正常但 PR 一直没人处理的，在 Cindy 里让 Mac mini 的会话直接处理。
 
+## 10-30 catch-up 每小时 + 只算 main
+- scripts/catch-up.cron 去掉 PANOPTES_CATCHUP_GATE=even，:07 每个北京小时都跑；奇数点在拿锁前先看内存，MemAvailable < 6144 MB 或 SwapFree < 4096 MB 就写一行 skipped、exit 0（不等 30 分钟）。偶数点内存门不变（依据 /workspace/pi-work/diag-1030/catchup-hourly-mem.md）。
+- catchup.mjs 和 watchdog 的 noreport 只算 baseRefName == main 的已合并 PR，其他分支记 skipped（catch-up 结果 `skipped[]`，watchdog 状态 `merged_skipped`）。
+
 ## 10-30 交接 issue 正文 + handoff 标签 + 交接文件外发
 - daily.py 开交接 issue 时正文写级别、file:line、测试的合并提交、指纹，标题带 `[P级]`；outbound 加 `handoff` 标签和 `mivo-qa-handoff` 标记（handoff.py 只跟踪带这两样的 issue），仓里没有该标签时不开（fail closed）。
 - 新外发类型 `gh.handoff.files {repo, day}`（PM 10-30 定）：内容由 Mivo QA 日报写，Pi 不生成。日报每天把两个文件放到 `/workspace/mivo-qa/handoff/staging/<仓名>/daily/<YYYY>/<MM>/<日>/feedback.md`、`receipts.md`，其中 `<仓名>` 取交接仓 owner/ 后面那段（`aj0928-handoff`、`handover-mivo`），`<日>` 是日报发出那天（数据日 +1）。outbound 原样推到交接仓同一路径（`daily/<YYYY>/<MM>/<日>/`，pm_extra.py、compare.py 读这里），普通 push 到 main。远端内容完全相同的文件不写；两份都相同就算 done，不产生空提交。文件没放好时标 stale，下一轮再看。daily.py 每天给每个交接仓排一条（key `handoff-files:<repo>:<日>`）。验收 10-30 加固：staging 文件先 realpath 再判断，必须在 staging 目录下（`../` 和软链都拒）；推上去的文件最后一行是 pi-line 归属标记（key + 用本机密钥 `$PI_STATE/outbound/handoff-files.key` 算的 HMAC，伪造不了）；远端文件内容不同且没有本 key 的有效标记就不覆盖，clone 之后、每次写之前各再查一遍；去重按内容，不按 key。两张仓库白名单：交接 issue 和交接文件只能发 aj0928/aj0928-handoff、zhongxingtian-ai/handover-mivo；dispatch（infra）issue 只能发 PraiseZhu/pr-qa-agent-deploy；xindong/mivo-canvas-plugin 一律拒。
