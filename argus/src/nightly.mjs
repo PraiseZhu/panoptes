@@ -3,7 +3,7 @@
 // ARGUS_ALLOW_ISSUES=1 时才可能发生。
 import { yieldToPriority } from './priority.mjs'
 import { memAvailableGb, machineLoad, isIdle, startMemLowWater, lowMemoryHit, lowMemMb } from './memory.mjs'
-import { mkdirSync, writeFileSync, renameSync, existsSync, readFileSync, statfsSync, readdirSync } from 'node:fs'
+import { mkdirSync, writeFileSync, renameSync, existsSync, readFileSync, statfsSync, readdirSync, statSync } from 'node:fs'
 import { join, resolve, dirname, basename, posix } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { hostname } from 'node:os'
@@ -1164,6 +1164,9 @@ const LINUX_CHROMIUM = existsSync('/usr/local/bin/chromium') ? '/usr/local/bin/c
 
 export function envSnapshot() {
   const ver = (cmd, args) => { try { return execFileSync(cmd, args, { encoding: 'utf8', timeout: 15_000 }).trim().split('\n')[0] } catch { return null } }
+  // / 的属主还要给 checkRootOwnership 用：沙箱的根按它造（runner.mjs bwrapArgs），盒子把它压缩掉时也得看得出来
+  let rootStat = null
+  try { rootStat = statSync('/') } catch { /* ignore */ }
   let free = null
   try { const s = statfsSync(CACHE_DIR); free = Math.round((s.bavail * s.bsize) / 1024 ** 3) } catch { /* ignore */ }
   return {
@@ -1172,6 +1175,8 @@ export function envSnapshot() {
     playwright: (() => { try { return JSON.parse(readFileSync(join(CODE_DIR, 'node_modules/playwright/package.json'), 'utf8')).version } catch { return null } })(),
     python: ver(process.env.ARGUS_PYTHON ?? 'python3', ['--version']), disk_free_gb: free,
     umask: currentUmask(), umask_inherited: process.env.PANOPTES_INHERITED_UMASK || INHERITED_UMASK,
+    uid: process.getuid?.() ?? null, root_uid: rootStat?.uid ?? null, root_gid: rootStat?.gid ?? null,
+    root_mode: rootStat ? (rootStat.mode & 0o7777).toString(8).padStart(4, '0') : null,
   }
 }
 
@@ -1183,6 +1188,19 @@ export function checkUmask(health) {
   // 固定后的值总是 0022：真正反映 QA 环境的是固定前继承到的值，不是 0022 也记一条（已被固定，但环境本身该修）
   const inh = health.environment?.umask_inherited
   if (inh != null && inh !== want) health.env_problems.push({ message: `inherited umask was ${inh} (expected ${want}); panoptes pinned it to ${want} for this run, but the QA environment should be fixed (umask 002 caused false RUNNER_OWNER_MISMATCH on mivo #1385)` })
+}
+
+// / 必须由 root 或控制器自己持有、且组/他人不可写：目标仓里「父目录必须由控制器独占管理」「控制器启动路径不可信」
+// 这类信任断言从 / 开始逐级检查。bwrapArgs 按这个属主造沙箱的根，所以这里不可信 = 盒子把 root 压缩成 nobody（65534），
+// 沙箱再怎样都造不出可信的根，所有路径都被拒，测试在 PR 版本和基线版本上一起失败（mivo review-capacity-check，
+// #1449/#1450/#1454）。同类先例：checkUmask。
+const rootTrusted = (uid, mode, self) => [0, self].includes(uid) && (!(mode & 0o022) || (uid === 0 && Boolean(mode & 0o1000)))
+
+export function checkRootOwnership(health) {
+  const env = health.environment ?? {}
+  const mode = Number.parseInt(env.root_mode ?? '', 8)
+  if (env.root_uid != null && !Number.isNaN(mode) && rootTrusted(env.root_uid, mode, env.uid)) return
+  health.env_problems.push({ message: `/ is owned by uid ${env.root_uid ?? 'unknown'} (mode ${env.root_mode ?? 'unknown'}), expected uid 0 or the controller's own uid ${env.uid ?? 'unknown'}: permission/trust assertions that walk up from / reject every path, so such tests fail on the base revision too` })
 }
 
 
@@ -1699,6 +1717,7 @@ export async function runNightly(opts = {}) {
   if (!env.chromium) health.env_problems.push({ message: `${LINUX_CHROMIUM} missing: browser E2E will be unavailable` })
   if (env.disk_free_gb != null && env.disk_free_gb < 12) health.env_problems.push({ message: `low disk: ${env.disk_free_gb} GB free` })
   checkUmask(health)
+  checkRootOwnership(health)
   recordBootstrap(health, readBootstrapStatus())
   recordSeverityPin(health)
   const db = openDb()

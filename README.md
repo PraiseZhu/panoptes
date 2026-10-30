@@ -248,7 +248,10 @@ leads, own-tests not run, QA errors — goes to **`prs[].pending_verification[]`
 ## Sandbox / 沙盒: bubblewrap
 
 Every install / test command runs as
-`bwrap --ro-bind / / --tmpfs /home --tmpfs /root --tmpfs /workspace --tmpfs /tmp … --bind <run dir> --bind <argus cache>`:
+`bwrap --tmpfs / --ro-bind-try <each top-level entry of the host /> … --tmpfs /home --tmpfs /root --tmpfs /workspace --tmpfs /tmp … --bind <run dir> --bind <argus cache>`
+(root is a per-run tmpfs owned by the controller instead of a direct `--ro-bind / /`, so `/` inside the sandbox has the same
+owner as `/` for the controller — a user namespace only maps the controller's uid and would otherwise show a root-owned `/` as
+overflow uid 65534, failing every target-repo "ancestors must be owned by root or the runner" assertion):
 
 - root filesystem read-only; `/home`, `/root`, `/workspace`, `/tmp`, `/mnt`, `/media`, `/srv` replaced by empty tmpfs —
   tests can't see `gh` credentials, `secrets.env`, SSH keys or other agents' files;

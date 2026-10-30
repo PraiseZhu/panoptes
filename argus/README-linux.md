@@ -112,7 +112,10 @@ pinned copy `config/severity.md`, see `../docs/report-schema.md` › *Unified se
 ## Sandbox choice: bubblewrap
 
 Replaces macOS `sandbox-exec`. Every test/install command runs as
-`bwrap --ro-bind / / --tmpfs /home --tmpfs /root --tmpfs /workspace --tmpfs /tmp … --bind <run dir> --bind <argus cache>`:
+`bwrap --tmpfs / --ro-bind-try <each top-level entry of the host /> … --tmpfs /home --tmpfs /root --tmpfs /workspace --tmpfs /tmp … --bind <run dir> --bind <argus cache>`
+(root is a per-run tmpfs owned by the controller rather than a direct `--ro-bind / /`: a user namespace only maps the
+controller's uid, so a directly bound root-owned `/` shows up as overflow uid 65534 and every target-repo "ancestors must
+be owned by root or the runner" assertion fails on both the PR and the base revision):
 
 * root filesystem read-only; `/home`, `/root`, `/workspace`, `/tmp`, `/mnt`, `/media`, `/srv` and the
   agent-infra dirs are replaced by empty tmpfs, so tests cannot read `gh` credentials, `secrets.env`,

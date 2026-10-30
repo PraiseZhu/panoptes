@@ -1,5 +1,5 @@
 // 在隔离 run 目录里检出指定版本并执行项目 profile 的步骤
-import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync, statSync, lstatSync, realpathSync, cpSync } from 'node:fs'
+import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync, readlinkSync, statSync, lstatSync, realpathSync, cpSync } from 'node:fs'
 import { join, dirname, basename, resolve, relative, isAbsolute } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
 import { run, isStopping, overBudget } from './exec.mjs'
@@ -220,7 +220,8 @@ export function sandboxProfile(runDir, home = homedir()) {
 }
 
 // Linux：用 bubblewrap（bwrap，非特权 user namespace）做等价的文件隔离。
-// 根文件系统只读挂载；/home、/root、/workspace、/tmp、/mnt、/media 换成空 tmpfs（读不到 gh 登录、
+// 根目录是本次 run 自己造的 tmpfs，宿主 / 的顶层逐项只读挂回（理由见 bwrapArgs）；
+// /home、/root、/workspace、/tmp、/mnt、/media 换成空 tmpfs（读不到 gh 登录、
 // secrets.env、其它 agent 的数据），再把本次 run 目录、Argus 缓存、短临时目录读写挂回，
 // Node 安装目录（nvm 在 ~ 下）和 Playwright 浏览器目录只读挂回。新的 pid/ipc/uts 命名空间，父进程退出即回收。
 // 网络和 macOS 版一样暂不限制（npm ci 需要）。
@@ -240,13 +241,33 @@ export function sandboxMode(profile = {}) {
 }
 
 export function bwrapArgs(runDir, { extraRo = [], extraRw = [], chdir = null } = {}) {
-  const args = ['--die-with-parent', '--new-session', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup-try',
-    '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp']
+  const args = ['--die-with-parent', '--new-session', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup-try']
+  // 沙箱里的 / 必须和控制器看到的 / 同一个属主，否则目标仓里「祖先必须由 root 或控制器自己拥有」的断言
+  // （mivo run.sh trusted_path、scripts/ops/review-capacity-check/workspace.mjs assertControllerDirectory）在沙箱里恒假：
+  // 非特权 bwrap 的 user namespace 只映射控制器自己的 uid，借宿主的 / 时 root 所有的那层就变成溢出 uid 65534，
+  // 从第一层开始失败，PR 版本和基线版本一起红，nightly 只能记成「also fails on the base revision」
+  // （#1449/#1450/#1454 各 30 条）。宿主 / 对控制器可信时另造根：tmpfs 根归控制器、沙箱 uid 0 就是控制器自己
+  // （映射到控制器的真实 uid，拿不到额外权限），宿主 / 的顶层逐项挂回，可见范围不变。
+  // 宿主 / 本身不可信（容器把 root 压缩成 nobody）时保持直接挂宿主的 /：沙箱里看到的和控制器看到的仍然一致，
+  // 由 nightly 的 checkRootOwnership 记 env_problem，不在这里掩饰。
+  const hostRoot = (() => { try { return statSync('/') } catch { return null } })()
+  if (hostRoot && [0, process.getuid()].includes(hostRoot.uid) && !(hostRoot.mode & 0o022)) {
+    args.push('--unshare-user', '--uid', '0', '--gid', '0', '--tmpfs', '/')
+    for (const entry of readdirSync('/')) {
+      const p = `/${entry}`
+      if (p === '/dev' || p === '/proc' || p === '/tmp' || HIDDEN_ROOTS.includes(p)) continue
+      // usrmerge 的顶层链接（/bin、/lib…）原样复制：只读挂载会把链接摊成目录，悬空链接还会让 bwrap 起不来
+      if (lstatSync(p).isSymbolicLink()) args.push('--symlink', readlinkSync(p), p)
+      else args.push('--ro-bind-try', p, p)
+    }
+  } else args.push('--ro-bind', '/', '/')
+  args.push('--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp')
   for (const d of HIDDEN_ROOTS) if (existsSync(d)) args.push('--tmpfs', d)
   const ro = [NODE_PREFIX, ...extraRo].filter((p) => p && existsSync(p))
   for (const p of ro) args.push('--ro-bind', p, p)
   for (const p of [CACHE_DIR, runDir, shortTmpOf(runDir), ...extraRw]) { mkdirSync(p, { recursive: true }); args.push('--bind', p, p) }
   if (chdir) args.push('--chdir', chdir)
+  args.push('--remount-ro', '/')
   return args
 }
 
