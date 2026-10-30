@@ -112,7 +112,7 @@ pinned copy `config/severity.md`, see `../docs/report-schema.md` › *Unified se
 ## Sandbox choice: bubblewrap
 
 Replaces macOS `sandbox-exec`. Every test/install command runs as
-`bwrap --ro-bind / / --tmpfs /home --tmpfs /root --tmpfs /workspace --tmpfs /tmp … --bind <run dir> --bind <argus cache>`:
+`bwrap --tmpfs / --ro-bind <every host root entry> … --remount-ro / --tmpfs /home --tmpfs /root --tmpfs /workspace --tmpfs /tmp … --bind <run dir> --bind <argus cache>`:
 
 * root filesystem read-only; `/home`, `/root`, `/workspace`, `/tmp`, `/mnt`, `/media`, `/srv` and the
   agent-infra dirs are replaced by empty tmpfs, so tests cannot read `gh` credentials, `secrets.env`,

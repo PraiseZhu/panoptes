@@ -248,7 +248,7 @@ leads, own-tests not run, QA errors — goes to **`prs[].pending_verification[]`
 ## Sandbox / 沙盒: bubblewrap
 
 Every install / test command runs as
-`bwrap --ro-bind / / --tmpfs /home --tmpfs /root --tmpfs /workspace --tmpfs /tmp … --bind <run dir> --bind <argus cache>`:
+`bwrap --tmpfs / --ro-bind <每个宿主根条目> … --remount-ro / --tmpfs /home --tmpfs /root --tmpfs /workspace --tmpfs /tmp … --bind <run dir> --bind <argus cache>`:
 
 - root filesystem read-only; `/home`, `/root`, `/workspace`, `/tmp`, `/mnt`, `/media`, `/srv` replaced by empty tmpfs —
   tests can't see `gh` credentials, `secrets.env`, SSH keys or other agents' files;
