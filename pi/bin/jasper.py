@@ -8,6 +8,13 @@ def age(p):
 def jload_(f, dflt):
     try: return json.load(open(f))
     except Exception: return dflt
+def panoptes_backlog(tickets):
+    """the only channel left for a merge request while Praise's DMs are muted: open panoptes PRs + tickets waiting for a merge"""
+    waiting = sorted(t.get("pr") or 0 for t in tickets.values() if isinstance(t, dict) and t.get("status") == "awaiting_praise")
+    try: prs = gh(["pr", "list", "-R", "PraiseZhu/panoptes", "--state", "open", "--limit", "100", "--json", "number,createdAt"])
+    except Exception as e: return {"awaiting_merge_prs": waiting, "open_prs": f"未核实：{str(e)[:80]}"}
+    return {"awaiting_merge_prs": waiting, "open_prs": len(prs), "oldest_open_at": min((p["createdAt"] for p in prs), default=None),
+            "url": "https://github.com/PraiseZhu/panoptes/pulls"}
 def main():
     d = sys.argv[1] if len(sys.argv) > 1 else today(); y = (dt.date.fromisoformat(d) - dt.timedelta(days=1)).isoformat()
     backfill = d != today()   # 补过去的日子：只写文件，不记外发（不发 DM）
@@ -40,6 +47,7 @@ def main():
             "备份管家": {"last_sync_result": sync[-1] if sync else None, "sync_log_age_h": facts["备份管家"]["sync_log_age_h"]},
             "电脑运维": {"memlog_age_h": facts["电脑运维"]["memlog_age_h"], "watchdog_open_problems": list((wd.get("open") or {}).values())[:8]},
         }
+        facts["pi_line_evidence"]["Praise PR"]["panoptes_backlog"] = panoptes_backlog(jload_(f"{BASE}/out/infrafix/tickets.json", {}).get("tickets", {}))
     ydaily = f"{BASE}/out/daily/{y}.md"
     if os.path.exists(ydaily): facts["pi_daily_headline"] = open(ydaily).read().splitlines()[1]
     pm = f"{BASE}/out/pm/{y}.md"
@@ -54,6 +62,7 @@ def main():
     try:
         txt, tid = pi("work", "/tmp", f"""Write Praise's 9:00 fleet brief in Chinese (<=15 lines) using ONLY facts in {fj} (read it; you may also read files it names, read-only).
 Format: 一句话总览；然后每个 bot 一行：状态 ✓/⚠ + 证据路径；最后「需要你定」(only if facts show something needs a decision; else 无).
+If facts.pi_line_evidence["Praise PR"].panoptes_backlog shows awaiting_merge_prs or more than 3 open_prs, list it under 需要你定 with the count and url (DMs to Praise are muted: this brief is the only way he hears it).
 Never guess; if a fact is missing say 未核实. {RULE} Today {d}, data day {y} (Beijing time).""", f"pi-line-jasper-{d}", timeout=400)
     except Exception as e: txt, tid = f"brief 生成失败：{e}", "?"
     write_atomic(f"{BASE}/out/jasper/{d}.md", f"<!-- Pi line brief, task {tid}, tier work; Slack/邮件/日历部分无法覆盖（需连接器） -->\n{txt.strip()}\n")

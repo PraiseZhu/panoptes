@@ -24,6 +24,20 @@ class T(unittest.TestCase):
             if v is None: os.environ.pop(k, None)
             else: os.environ[k] = v
         shutil.rmtree(self.tmp, ignore_errors=True)
+    def infra(self, *tickets):
+        import datetime as dt
+        d = f"{self.tmp}/out/infrafix"; os.makedirs(d, exist_ok=True); now = dt.datetime(2026, 10, 30, 23, 0, tzinfo=lib.CST)
+        T = {f"inf1-{i:020x}": {"status": "awaiting_praise", "pr": 100 + i, "updated_at": (now - dt.timedelta(hours=h)).isoformat()} for i, h in enumerate(tickets)}
+        with open(f"{d}/tickets.json", "w") as f: json.dump({"tickets": T}, f)
+        saved, watchdog.BASE = watchdog.BASE, self.tmp; p = {}
+        try: watchdog.infra_check(now, p)
+        finally: watchdog.BASE = saved
+        return p
+    def test_awaiting_merge_is_one_aggregate_problem(self):   # 10-30: 18 tickets waited, watchdog saw nothing
+        self.assertEqual(self.infra(1), {})                                 # one fresh ticket: normal
+        for ages in ((25,), (1, 1, 1)):
+            p = self.infra(*ages); self.assertEqual(list(p), ["infra:awaiting-merge"], ages)
+        self.assertIn("#102", self.infra(1, 2, 3)["infra:awaiting-merge"]["what"])
     def ledger(self, **entries):
         with open(watchdog.LEDGER, "w") as f: json.dump(entries, f)
     def probs(self):

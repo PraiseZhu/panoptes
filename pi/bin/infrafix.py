@@ -86,6 +86,10 @@ MIN_MEM_GB = 3
 BUSY = 75
 BACKOFF_MIN = (15, 60, 240)
 MAX_ROUNDS = 2
+INFRA_OPEN_PR_CAP = 3                # breaker: open infra PRs at once. 10-30: one root cause -> 17 conflicting open PRs, nobody merging
+FAMILY_BUSY_ST = ("running", "pr_action_written", "pr_open", "merge_action_written", "awaiting_praise", "ci_red", "merged")
+FAMILY_STOP_ST = ("needs_human", "norepro")   # a sibling stopped for a person: same root cause, a retry per test case only costs model calls
+FAMILY_TEST_RE = re.compile(r"((?:[\w.@-]+/)+)[\w.@-]+\.(?:test|spec)\.\w+")
 QUIET_RUNS, QUIET_H = 8, 24          # >= 8 later panoptes runs over >= 24 h without it -> probably fixed / transient: watch only
 POLL_S = 110                         # gh polls in watch(): at most every ~2 min
 MARK = "Infra-Sig:"
@@ -190,6 +194,12 @@ def normalize(msg):
     s = re.sub(r"\x00([a-j]+)\x00", lambda m: "".join(str(ord(ch) - 97) for ch in m.group(1)), s)
     s = re.sub(r"\s+", " ", s).strip().rstrip("。.;；").lower()
     return s[:240]
+def family_of(c):
+    """root-cause family of a check fault: stage + test directory. A signature is one test case, and one fault in the sandbox fails
+    every case that hits it (10-30: 30 signatures, 30 tickets). None = no directory to group by (a probe name): the signature stands alone."""
+    if c.get("cat") != "check": return None
+    m = FAMILY_TEST_RE.search(c.get("sample") or "")
+    return f"{c.get('stage')}|{m.group(1).rstrip('/')}" if m else None
 def sig_of(cat, stage, norm): return "inf1-" + hashlib.sha1(f"{cat}|{stage}|{norm}".encode()).hexdigest()[:20]
 CR_SIG = sig_of("field", "code-review", normalize(CR_MSG))
 DEFAULT_HOLD = {CR_SIG: CR_HOLD}
@@ -586,8 +596,35 @@ def prio(v):
     c = v["c"]; last = c.get("last_seen") or dt.datetime.min.replace(tzinfo=dt.timezone.utc)
     return (PRIO.get(c["klass"], 5), -last.timestamp(), -c["count"], c["sig"])
 
+def family_block(v, ctx, now, seen):
+    """why this todo ticket must wait for a sibling of its root-cause family (None = go). seen = families already holding a todo this pass."""
+    f = family_of(v["c"])
+    if not f: return None
+    if f in seen: return f"同族（{f}）已有一单排在前面，等它出结果，不按用例重复开单"
+    for s, c in ctx["cands"].items():
+        if s == v["key"] or family_of(c) != f: continue
+        t = ticket_view(ctx["tickets"].get(s), now) or {}; st = t.get("status")
+        if st in FAMILY_BUSY_ST: return f"同族 {sig8(s)} 在处理中（{st}" + (f"，PR #{t['pr']}" if t.get("pr") else "") + "），等它出结果"
+        # failed counts only while it backs off: two due siblings must not wait for each other (seen lets the first one through)
+        if st == "failed" and (ts(t.get("next_retry_at")) or now) > now: return f"同族 {sig8(s)} 失败退避中，等它重试完"
+        at = ts(t.get("updated_at"))
+        if st in FAMILY_STOP_ST and at and now - at < dt.timedelta(days=WINDOW_D): return f"同族 {sig8(s)} 已停下等人（{st}），同一根因不再换用例重试"
+    return None
+
+def backlog_gate(vs, ctx, now):
+    """breaker + family gate over the todo list, in priority order. Only ever turns todo -> skip: claims, holds and watch stay as they are."""
+    open_prs = sum(1 for p in ctx["prs"] or [] if p.get("state") == "OPEN" and MARK in (p.get("body") or ""))
+    seen = set()
+    for v in sorted(vs, key=prio):
+        if v["state"] != "todo": continue
+        why = f"open infra PR 已 {open_prs} 个（上限 {INFRA_OPEN_PR_CAP}），先合并或关闭再开新的" if open_prs >= INFRA_OPEN_PR_CAP else family_block(v, ctx, now, seen)
+        if why: v.update(state="skip", reason=why, skips=[why] + v["skips"])
+        elif family_of(v["c"]): seen.add(family_of(v["c"]))
+
 def evaluate_all(ctx, now=None):
+    now = now or ctx.get("now") or now_cst()
     vs = [evaluate(c, ctx, now) for c in ctx["cands"].values()]
+    backlog_gate(vs, ctx, now)
     seen = {v["key"] for v in vs}
     for k, why in ctx["holds"].items():           # holds without an occurrence in the window still show up
         if SIG_RE.fullmatch(k) and k not in seen:
@@ -777,7 +814,12 @@ def node_tests(wd, files, t=600):
     wait_mem()
     rel = [f[len("argus/"):] for f in files]
     rc, out = run(["timeout", "-k", "20", str(t), "bash", "run-tests.sh", *rel], cwd=f"{wd}/argus", t=t + 60, env=clean_env())
-    return rc, tail(out, 60)
+    return rc, with_summary(out)
+def with_summary(out, n=60):
+    """tail(n) + the node --test summary: the spec reporter prints it BEFORE the failing-test detail, so a long failure cuts it off
+    and node_verdict calls a real result "没有输出摘要" (10-30: 25 wasted runs)"""
+    summ = "\n".join(l for l in (out or "").splitlines() if re.match(r"^(?:ℹ|#) (?:tests|suites|pass|fail|cancelled|skipped|todo|duration_ms) ", l))
+    return f"{summ}\n{tail(out, n)}" if summ else tail(out, n)
 def node_verdict(rc, out):
     if rc == 124: raise Transient(f"测试超时：{tail(out, 3)}")
     if rc == 127: raise Transient(f"测试起不来：{tail(out, 3)}")
@@ -831,7 +873,9 @@ def context_text(c):
             f"likely code: {', '.join(c.get('files') or []) or 'unknown — search argus/src, scripts/, report/, run-nightly.sh'}\n"
             "Tests: node:test files in argus/tests/*.test.mjs; run one with `cd argus && bash run-tests.sh tests/<file>.test.mjs` "
             "(the whole suite takes ~10 s). External things (model gateway, gh, apt, network, clock) are always faked/injected in tests — "
-            "see tests/fake-gh.mjs, tests/bootstrap-apt-lock.test.mjs, tests/llm-network-retry.test.mjs.")
+            "see tests/fake-gh.mjs, tests/bootstrap-apt-lock.test.mjs, tests/llm-network-retry.test.mjs.\n"
+            "Your own shell runs in a bubblewrap user namespace too: a root-owned path shows as uid 65534 there, on the real box it is uid 0. "
+            "That is your sandbox, not evidence about the host: never conclude NOREPRO or \"the host is like this\" from an owner or mode you read here.")
 RULES = ("Rules: no git commit/push/stash/reset/checkout, no network, edit only inside cwd; never modify /workspace/panoptes (the live "
          "checkout), /workspace/mivo-qa (reading the evidence files above is fine), /etc, crontabs or any secrets file; never run "
          "run-nightly.sh or bootstrap-box.sh for real; never kill processes; run only targeted `bash run-tests.sh tests/<file>` "
