@@ -4,7 +4,8 @@ strict trailer block, case-insensitive PROTECTED_RE, naive dates."""
 import datetime as dt, json, os, sys, tempfile, unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin"))
 os.environ.setdefault("PI_TAKEOVER_DIR", tempfile.mkdtemp())
-import lib, outbound
+import lib
+BOX_MERGER = os.path.exists("/workspace/mivo-merger/app/scripts/loops/automerge/policy.json")   # outbound imports merger: box-only data
 
 UTC = dt.timezone.utc
 NOW = dt.datetime(2026, 10, 30, 3, 0, tzinfo=UTC)
@@ -15,8 +16,10 @@ def c(sha, msg, hours_ago=1, naive=False):
     t = NOW - dt.timedelta(hours=hours_ago)
     return {"sha": sha, "commit": {"message": msg, "committer": {"date": t.replace(tzinfo=None).isoformat() if naive else t.isoformat()}}}
 
+@unittest.skipUnless(BOX_MERGER, "needs the box's mivo-merger policy (outbound imports merger)")
 class PushFixFailClosed(unittest.TestCase):
     def setUp(self):
+        global outbound; import outbound
         self.old_gh, self.old_run, self.old_tk = outbound.gh, outbound.run, lib.TAKEOVER
         lib.TAKEOVER = tempfile.mkdtemp(); self.calls = []
         def run(args, *a, **k):
