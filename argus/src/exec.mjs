@@ -58,7 +58,7 @@ export function createFailureParser() {
     else record.type = type
   }
   const flush = (state) => {
-    if (state.current) save(state.current.name, state.current.type)
+    if (state.current) for (const name of [state.current.name, ...state.current.shared]) save(name, state.current.type)
     state.current = null
   }
   const terminal = (reporter, failed) => {
@@ -73,11 +73,14 @@ export function createFailureParser() {
     }
     const name = toFailureName(clean)
     if (name) {
+      // vitest 把同组失败用例连着列成多行 FAIL，随后只打一段共享诊断：还没读到任何诊断的上一条并入同一组，
+      // 共享诊断的类型同时记给组内每条（否则前面的会被当成 unknown 存下）。
+      const shared = state.current?.bytes === 0 ? [state.current.name, ...state.current.shared] : []
       flush(state)
       const reporter = /^\s*FAIL\s/.test(clean) ? 'vitest' : /^FAILED\s/.test(clean) ? 'pytest' : 'node'
       reporters.add(reporter)
       save(name)
-      state.current = { name, type: 'unknown', bytes: 0 }
+      state.current = { name, type: 'unknown', bytes: 0, shared }
       if (reporter === 'pytest') {
         const reason = clean.match(/\s+-\s+(.+)$/)?.[1]
         if (reason) state.current.type = diagnosticType(reason) ?? 'unknown'
