@@ -229,6 +229,8 @@ def claim_expiry(path):
         e = dt.datetime.fromisoformat(first.replace("Z", "+00:00"))
         if e.tzinfo: return e
     except ValueError: pass
+    # anything else -- empty, garbage, or a naive ISO time without offset (ambiguous zone) -- falls back to mtime + CLAIM_TTL_H
+    # (fail closed: a naive claim that "expired" an hour ago may still block until mtime+4h). Write an offset or unix seconds.
     return dt.datetime.fromtimestamp(st.st_mtime, dt.timezone.utc) + dt.timedelta(hours=CLAIM_TTL_H)
 def branch_claim(n, now=None):
     """reason string while takeover/branch-claims/<n> holds a valid claim, else None."""
@@ -238,7 +240,12 @@ def branch_claim(n, now=None):
 # Ownership: a commit on the PR branch in the last OWNER_WINDOW_H hours WITHOUT a Pi trailer (Pi-Open: first commit of a Pi fix PR,
 # Pi-Revise: a --revise fix; Fingerprint alone does not count, a human may keep it) = someone else is working on it.
 OWNER_WINDOW_H = 6
-PI_MARK_RE = re.compile(r"^(Pi-Open|Pi-Revise): \S", re.M)
+# Only the final paragraph (git trailer block) counts, and only key-shaped values Pi's own builders write
+# (prfix fix_one: fixpr:<qa>:<fp>; prfix/outbound revise: revise:<pr>:<head12>[:merge]); a body line "Pi-Revise: x" is foreign.
+PI_MARK_RE = re.compile(r"^(Pi-Revise: revise:\d+:[0-9a-f]{12}(:merge)?|Pi-Open: fixpr:\d+:\S+)$", re.M)
+def has_pi_trailer(msg):
+    paras = [p for p in re.split(r"\n\s*\n", (msg or "").strip()) if p.strip()]
+    return len(paras) > 1 and bool(PI_MARK_RE.search(paras[-1]))
 def foreign_recent_commits(commits, now=None, hours=OWNER_WINDOW_H):
     """commits: GitHub pulls/N/commits items -> short shas of recent commits without a PI_MARK_RE trailer."""
     now = now or dt.datetime.now(dt.timezone.utc); out = []
@@ -247,7 +254,8 @@ def foreign_recent_commits(commits, now=None, hours=OWNER_WINDOW_H):
         when = (cm.get("committer") or {}).get("date") or (cm.get("author") or {}).get("date")
         try: t = dt.datetime.fromisoformat(str(when).replace("Z", "+00:00"))
         except ValueError: t = now   # unreadable date: count it as recent (fail closed)
-        if now - t <= dt.timedelta(hours=hours) and not PI_MARK_RE.search(cm.get("message") or ""): out.append((c.get("sha") or "?")[:9])
+        if t.tzinfo is None: t = now   # naive date (no zone): count it as recent (fail closed)
+        if now - t <= dt.timedelta(hours=hours) and not has_pi_trailer(cm.get("message")): out.append((c.get("sha") or "?")[:9])
     return out
 def ownership_block(n, commits, now=None):
     """reason not to push onto PR n (claim, or recent foreign commits), else None."""
@@ -255,10 +263,13 @@ def ownership_block(n, commits, now=None):
     if why: return why
     f = foreign_recent_commits(commits, now)
     return f"PR 分支最近 {OWNER_WINDOW_H} 小时有不带 Pi-Open / Pi-Revise 标记的提交 {f[:5]}：别人在改，不推送" if f else None
-def pr_commits_args(n): return ["api", "--paginate", f"repos/{REPO}/pulls/{int(n)}/commits?per_page=100"]
+def pr_commits_args(n): return ["api", "--paginate", "--slurp", f"repos/{REPO}/pulls/{int(n)}/commits?per_page=100"]
+def flatten_pages(x):
+    """`gh api --paginate --slurp` -> [[page1...], [page2...]]: one flat list (an already flat list passes through)."""
+    return [i for p in x for i in p] if isinstance(x, list) and x and all(isinstance(p, list) for p in x) else (x or [])
 # Gate files: a planned change touching these is a hard stop; --allow-sensitive does NOT override it.
-PROTECTED_RE = re.compile(r"(^|/)__tests__/(.*/)?[^/]*(Guard|Policy)[^/]*$|^\.githooks/|^scripts/verify")
-def protected_files(files): return sorted(f for f in files if PROTECTED_RE.search(f))
+PROTECTED_RE = re.compile(r"(^|/)__tests__/(.*/)?[^/]*(Guard|Policy)[^/]*$|^\.githooks/|^scripts/verify", re.I)
+def protected_files(files): return sorted(f for f in files if PROTECTED_RE.search(f.replace("\\", "/")))
 def patch_files(path):
     with open(path, errors="replace") as f: return sorted({m.group(1) for m in re.finditer(r"^diff --git a/(\S+) b/", f.read(), re.M)})
 SECRET_FILES = ("~/.pi-fallback-secret/env", "~/.config/mivo-qa/secrets.env")   # both outside every git repo / backup, mode 600

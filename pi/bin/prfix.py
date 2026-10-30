@@ -1896,7 +1896,7 @@ def revise(A):
     try: p = _gh_json(["pr", "view", str(n), "-R", REPO, "--json", PR_VIEW], 120)
     except Exception as e: return finish({"status": "error", "pr": n, "error": f"读 PR #{n} 失败：{str(e)[:250]}"}, 1, A)
     p.setdefault("number", n)
-    try: commits = _gh_json(pr_commits_args(n), 120)
+    try: commits = flatten_pages(_gh_json(pr_commits_args(n), 120))
     except Exception as e: return finish({"status": "error", "pr": n, "error": f"读 PR #{n} 提交失败：{str(e)[:250]}"}, 1, A)
     qa, fp, why = revise_target(p, commits)
     if why:

@@ -19,7 +19,7 @@ class Ownership(unittest.TestCase):
         if mtime is not None: os.utime(p, (mtime, mtime))
 
     def test_foreign_recent_commits(self):
-        cs = [c("51802504aa", "fix\n\nPi-Revise: revise:1444:d45", 1), c("3d4737d0aa", "worker fix", 0.2), c("bbbb153caa", "old", 7)]
+        cs = [c("51802504aa", "fix\n\nPi-Revise: revise:1444:d45c5ffea561", 1), c("3d4737d0aa", "worker fix", 0.2), c("bbbb153caa", "old", 7)]
         self.assertEqual(lib.foreign_recent_commits(cs, NOW), ["3d4737d0a"])
         self.assertEqual(lib.foreign_recent_commits(cs[:1] + cs[2:], NOW), [])
         self.assertEqual(lib.foreign_recent_commits([{"sha": "x", "commit": {"message": "m"}}], NOW), ["x"])   # no date: fail closed

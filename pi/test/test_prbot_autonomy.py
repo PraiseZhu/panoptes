@@ -209,7 +209,7 @@ class TestRevise(GitTmp):
         self.commits = [{"sha": "3d4737d0aa", "commit": {"message": "fix: mine", "committer": {"date": now.isoformat()}}}]
         rc, r = self.revise(); self.assertEqual(r["status"], "skipped"); self.assertIn("Pi-Revise", r["reason"]); self.assertIn("3d4737d0a", r["reason"])
         self.assertFalse([a for a in self.acts if a["type"] == "gh.pr.push-fix"])
-        self.commits = [{"sha": "aa", "commit": {"message": "x\n\nPi-Revise: revise:1301:h", "committer": {"date": now.isoformat()}}},
+        self.commits = [{"sha": "aa", "commit": {"message": "x\n\nPi-Revise: revise:1301:0123456789ab", "committer": {"date": now.isoformat()}}},
                         {"sha": "bb", "commit": {"message": "old human", "committer": {"date": (now - dt.timedelta(hours=7)).isoformat()}}}]
         saved = prfix.lib.TAKEOVER; prfix.lib.TAKEOVER = f"{self.tmp}/takeover"; os.makedirs(f"{self.tmp}/takeover/branch-claims")
         try:
