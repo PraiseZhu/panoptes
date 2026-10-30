@@ -4,11 +4,12 @@ mivo-qa-handoff marker; outbound gh.issue.create adds the `handoff` label (hando
 new outbound gh.handoff.files writes daily/<YYYY>/<MM>/<day>/{feedback,receipts}.md in the route's handoff repo and
 pushes them, fail-closed (handoff repos only, fixed paths, never overwrites a file it did not write). FAKE gh/git only."""
 for _k in [k for k in __import__("os").environ if k.startswith("GIT_")]: del __import__("os").environ[_k]
-import os, sys, json, types, base64, tempfile, unittest, importlib.util
+import os, sys, json, types, base64, shutil, tempfile, unittest, importlib.util
 B = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin"); sys.path.insert(0, B)
 sys.modules.setdefault("merger", types.SimpleNamespace(FIELDS="number,title,headRefOid,state", blockers=lambda p: []))
 spec = importlib.util.spec_from_file_location("ob_b", f"{B}/outbound.py"); O = importlib.util.module_from_spec(spec); spec.loader.exec_module(O)
 import daily as D
+O.BASE = tempfile.mkdtemp(prefix="pi-test-handoff-")   # the HMAC key file lives here, never in the real PI_STATE
 
 F = {"severity": "P2", "file": "cindyplugin/src/a.test.ts", "line": 323, "fingerprint": "mq1-290ea2aeb2f2124988e8",
      "pr_fingerprint": "mq1-290ea2aeb2f2124988e8-pr1454", "title": "用例没有断言守卫确实拒绝", "source": "code-review"}
@@ -89,7 +90,7 @@ class HandoffFiles(unittest.TestCase):
         self.assertEqual(O.handler(self.act())[1](), "done")
     def test_only_changed_file_is_written(self):
         self.g.remote[f"{self.BASEP}/feedback.md"] = open(f"{self.st}/feedback.md").read()
-        self.g.remote[f"{self.BASEP}/receipts.md"] = "旧回执\n"
+        self.g.remote[f"{self.BASEP}/receipts.md"] = O.handoff_owned_text("旧回执\n", REPO, f"{self.BASEP}/receipts.md", self.act()["key"])
         O.handler(self.act())[3]()
         add = next(c for c in self.runs if "add" in c)
         self.assertEqual(add[-1:], [f"{self.BASEP}/receipts.md"])
@@ -112,6 +113,77 @@ class DailyEnqueues(unittest.TestCase):
         acts = D.handoff_files_actions("2026-10-30", {"routes": [{"repo": REPO}, {"repo": "zhongxingtian-ai/handover-mivo"}]})
         self.assertEqual([a["key"] for a in acts], [f"handoff-files:{REPO}:2026-10-30", "handoff-files:zhongxingtian-ai/handover-mivo:2026-10-30"])
         self.assertTrue(all(a["type"] == "gh.handoff.files" and a["day"] == "2026-10-30" and "files" not in a for a in acts))
+
+class Acceptance138(unittest.TestCase):
+    """ops acceptance 10-30 (#138 FAIL items) + PM allowlists: one test per fix."""
+    DAY = "2026-10-30"; BASEP = "daily/2026/10/2026-10-30"
+    def setUp(self):
+        self.d = tempfile.mkdtemp(); O.QA = self.d; self.g = O.gh = Gh(); self.runs = []; self.clone = {}
+        self.st = f"{self.d}/handoff/staging/aj0928-handoff/{self.BASEP}"; os.makedirs(self.st)
+        for n in ("feedback.md", "receipts.md"): open(f"{self.st}/{n}", "w").write(f"# {n}\n内容\n")
+        def fake_run(cmd, **kw):
+            self.runs.append(cmd)
+            if cmd[:3] == ["gh", "repo", "clone"]:
+                for rel, t in {**self.g.remote, **self.clone}.items():
+                    os.makedirs(os.path.dirname(os.path.join(cmd[4], rel)), exist_ok=True); open(os.path.join(cmd[4], rel), "w").write(t)
+                os.makedirs(cmd[4], exist_ok=True)
+            if "diff" in cmd and "--quiet" in cmd: raise RuntimeError("git rc=1: ")
+            return ""
+        O.run = fake_run
+    def act(self, **kw): return {"key": f"handoff-files:{REPO}:{self.DAY}", "type": "gh.handoff.files", "repo": REPO, "day": self.DAY, **kw}
+    def owned(self, text, key=None): return O.handoff_owned_text(text, REPO, f"{self.BASEP}/x", key or self.act()["key"])
+    # 1. staging read guard: ../ and symlinks resolve outside staging -> refused
+    def test_staging_guard_rejects_symlink_out(self):
+        secret = f"{self.d}/outside.txt"; open(secret, "w").write("not staged\n")
+        os.remove(f"{self.st}/receipts.md"); os.symlink(secret, f"{self.st}/receipts.md")
+        with self.assertRaises(RuntimeError) as e: O.handler(self.act())[2]()
+        self.assertIn("outside", str(e.exception))
+    def test_staging_guard_rejects_symlinked_dir_and_dotdot(self):
+        shutil.rmtree(f"{self.d}/handoff/staging/aj0928-handoff"); os.makedirs(f"{self.d}/elsewhere/{self.BASEP}")
+        for n in ("feedback.md", "receipts.md"): open(f"{self.d}/elsewhere/{self.BASEP}/{n}", "w").write("x\n")
+        os.symlink(f"{self.d}/elsewhere", f"{self.d}/handoff/staging/aj0928-handoff")
+        with self.assertRaises(RuntimeError): O.handler(self.act())[2]()
+        with self.assertRaises(RuntimeError): O.staged_path(f"{self.d}/handoff/staging/../elsewhere/{self.BASEP}/feedback.md")
+    # 2. ownership marker: last line, matching key, unforgeable (HMAC with a local key), rechecked in the clone before the write
+    def test_marker_must_be_last_line_with_key_and_valid_mac(self):
+        body = "旧回执\n"; good = self.owned(body)
+        self.assertTrue(O.handoff_owned(good, REPO, f"{self.BASEP}/x", self.act()["key"]))
+        self.assertFalse(O.handoff_owned(good + "追加一行\n", REPO, f"{self.BASEP}/x", self.act()["key"]))      # not last line
+        self.assertFalse(O.handoff_owned(good, REPO, f"{self.BASEP}/x", "handoff-files:other:2026-10-30"))     # other key
+        forged = body + "\n" + good.strip().splitlines()[-1].rsplit("mac=", 1)[0] + "mac=" + "0" * 64 + " -->\n"
+        self.assertFalse(O.handoff_owned(forged, REPO, f"{self.BASEP}/x", self.act()["key"]))                  # forged mac
+        quoted = "引用：" + good.strip().splitlines()[-1] + "\n别的内容\n"
+        self.assertFalse(O.handoff_owned(quoted, REPO, f"{self.BASEP}/x", self.act()["key"]))                  # marker quoted mid-file
+    def test_foreign_remote_file_is_never_overwritten(self):
+        self.g.remote[f"{self.BASEP}/receipts.md"] = "别人写的回执\n"
+        self.assertTrue(O.handler(self.act())[1]().startswith("stale:"))
+    def test_ownership_rechecked_in_clone_before_write(self):
+        # API view said ours/absent, but the clone (main moved) has a foreign file: refuse, no commit, no push
+        self.clone[f"{self.BASEP}/receipts.md"] = "clone 里别人刚写的\n"
+        with self.assertRaises(RuntimeError): O.handler(self.act())[3]()
+        self.assertFalse(any("commit" in c or "push" in c for c in self.runs))
+    # 3. dedupe by content, not key
+    def test_same_content_other_key_is_noop(self):
+        for n in ("feedback.md", "receipts.md"):
+            self.g.remote[f"{self.BASEP}/{n}"] = O.handoff_owned_text(open(f"{self.st}/{n}").read(), REPO, f"{self.BASEP}/{n}", "handoff-files:old-key")
+        self.assertEqual(O.handler(self.act(key="handoff-files:new-key"))[1](), "done")
+        self.assertEqual(O.handler(self.act(key="handoff-files:new-key"))[3](), "no change (remote identical)")
+        self.assertFalse(any("push" in c for c in self.runs))
+    # 4a. handoff allowlist (issues + files): only the two handoff repos; the main repo always refused
+    def test_handoff_allowlist(self):
+        for bad in ("xindong/mivo-canvas-plugin", "PraiseZhu/pr-qa-agent-deploy", "PraiseZhu/panoptes"):
+            with self.assertRaises(RuntimeError): O.check_repo("handoff", bad)
+            with self.assertRaises(RuntimeError): O.handler({**D.handoff_issue_action("2026-10-29", IT, F), "repo": bad})[2]()
+            with self.assertRaises(RuntimeError): O.handler({**D.handoff_issue_action("2026-10-29", IT, F), "repo": bad})[3]()
+        for ok in ("aj0928/aj0928-handoff", "zhongxingtian-ai/handover-mivo"): O.check_repo("handoff", ok)
+    # 4b. dispatch allowlist: infra issues only PraiseZhu/pr-qa-agent-deploy; main repo / handoff repos refused at outbound too
+    def test_dispatch_allowlist(self):
+        O.check_repo("dispatch", "PraiseZhu/pr-qa-agent-deploy")
+        for bad in ("xindong/mivo-canvas-plugin", REPO, "zhongxingtian-ai/handover-mivo"):
+            with self.assertRaises(RuntimeError): O.check_repo("dispatch", bad)
+            h = O.handler({"key": "infra-issue:x", "type": "gh.infra.issue", "repo": bad, "issue": 1, "comment": "c"})
+            with self.assertRaises(RuntimeError): h[1]()
+        with self.assertRaises(RuntimeError): O.check_repo("handoff", O.REPO)
 
 if __name__ == "__main__":
     unittest.main()

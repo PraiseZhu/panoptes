@@ -299,12 +299,14 @@ def h_issue(a):
     fp = a["key"].split(":")[-1]
     labels = list(a.get("labels") or ["handoff"])   # 10-30: every QA handoff issue carries the handoff label
     def state():
+        check_repo("handoff", repo)   # before any gh read
         iss = jload(f"{QA}/handoff/{a.get('route_author')}/issues.json", {})
         if fp in json.dumps(iss): return "done"
         hits = gh(["issue", "list", "-R", repo, "--state", "all", "--search", f"{fp} in:body", "--json", "number"])
         return "done" if hits else "pending"
     def validate():
         if not repo: raise RuntimeError(f"no handoff repo for {a.get('route_author')}")
+        check_repo("handoff", repo)
         v = gh(["repo", "view", repo, "--json", "nameWithOwner,hasIssuesEnabled,viewerPermission"])
         have = {x["name"] for x in gh(["label", "list", "-R", repo, "--limit", "200", "--json", "name"])}
         miss = [x for x in labels if x not in have]   # fail closed: an issue without the handoff label is never tracked (handoff.py)
@@ -559,6 +561,7 @@ def h_issue_state(a):
     def validate():
         if not (repo and n and a.get("comment")): raise RuntimeError("need repo, issue and comment")
         if repo not in HANDOFF_REPO.values(): raise RuntimeError(f"{repo} is not a handoff repo")
+        check_repo("handoff", repo)
         st, ls = cur(); return f"{repo}#{n} {st} labels={sorted(ls)} -> {want} +{add} -{rem}"
     def do():
         validate(); st, ls = cur(); out = []
@@ -623,7 +626,17 @@ def h_update_branch(a):
         return gh(["api", "-X", "PUT", f"repos/{REPO}/pulls/{n}/update-branch"], js=False).strip()[-160:]
     return f"gh update-branch #{n}", state, validate, do
 
+# Repo allowlists (PM 10-30, two separate lists). The tested product repo is never a target of either.
+ALLOWLIST = {"handoff": frozenset(HANDOFF_REPO.values()),               # handoff issues + handoff files
+             "dispatch": frozenset({"PraiseZhu/pr-qa-agent-deploy"})}    # dispatch (infra) issues, bin/infra_outbound.py
+NEVER_TARGET = frozenset({"xindong/mivo-canvas-plugin", REPO})
+def check_repo(kind, repo):
+    if not repo or repo in NEVER_TARGET: raise RuntimeError(f"refused: {repo or '?'} is never a {kind} target")
+    if repo not in ALLOWLIST[kind]: raise RuntimeError(f"refused: {repo} is not in the {kind} allowlist {sorted(ALLOWLIST[kind])}")
+    return repo
+
 HANDOFF_FILES = ("feedback.md", "receipts.md")
+def handoff_staging_root(): return os.path.realpath(f"{QA}/handoff/staging")
 def handoff_staging_dir(repo, day):
     """Where Mivo QA 日报 stages a handoff repo's files for `day` (PM 10-30): $QA/handoff/staging/<repo name>/daily/<YYYY>/<MM>/<day>/,
     a mirror of the handoff repo's own layout (the 10-30 staging dirs aj0928-handoff/, handover-mivo/ already use it). <repo name>
@@ -631,55 +644,112 @@ def handoff_staging_dir(repo, day):
     names = [r.split("/", 1)[1] for r in HANDOFF_REPO.values()]
     if len(set(names)) != len(names): raise RuntimeError(f"handoff repo names are not unique: {names}")
     return f"{QA}/handoff/staging/{repo.split('/', 1)[1]}/daily/{day[:4]}/{day[5:7]}/{day}"
+def staged_path(p):
+    """realpath first (resolves ../ and every symlink, file or directory), then it must sit under the staging root."""
+    root, rp = handoff_staging_root(), os.path.realpath(p)
+    if os.path.commonpath([root, rp]) != root or rp == root: raise RuntimeError(f"refused: {p} resolves outside {root}")
+    return rp
+
+# Ownership marker: the LAST line, naming the action key and an HMAC over (repo, path, key, body) with a box-local key
+# ($PI_STATE/outbound/handoff-files.key, 600, created on first use, never printed). Quoting or hand-writing the marker cannot
+# forge it; a file without a valid one is not ours and is never overwritten.
+MARK_RE = re.compile(r"\n?<!-- pi-line handoff-files key=(\S+) mac=([0-9a-f]{64}) -->\n?\Z")
+def _mac_key():
+    import secrets as _s
+    f = f"{BASE}/outbound/handoff-files.key"
+    if not os.path.exists(f):
+        os.makedirs(os.path.dirname(f), exist_ok=True)
+        try:
+            fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600); os.write(fd, _s.token_hex(32).encode()); os.close(fd)
+        except FileExistsError: pass
+    return open(f, "rb").read().strip()
+def _mac(repo, path, key, body):
+    import hmac, hashlib
+    return hmac.new(_mac_key(), "\0".join([repo, path, key, body]).encode("utf-8"), hashlib.sha256).hexdigest()
+def handoff_owned_text(body, repo, path, key):
+    body = body.rstrip("\n") + "\n"
+    return body + f"\n<!-- pi-line handoff-files key={key} mac={_mac(repo, path, key, body)} -->\n"
+def split_owned(text, repo, path):
+    """(body, key) when the last line is a valid pi-line marker for this repo/path, else None."""
+    import hmac
+    m = MARK_RE.search(text or "")
+    if not m: return None
+    body = text[:m.start()].rstrip("\n") + "\n"
+    return (body, m.group(1)) if hmac.compare_digest(m.group(2), _mac(repo, path, m.group(1), body)) else None
+def handoff_owned(text, repo, path, key):
+    o = split_owned(text, repo, path); return bool(o and o[1] == key)
+def handoff_body(text, repo, path):
+    """the content a remote file carries, for dedupe by content: without our marker when it has a valid one."""
+    o = split_owned(text, repo, path); return o[0] if o else text
+
 def h_handoff_files(a):
     """gh.handoff.files {repo, day} (PM 10-30): push the 日报's staged feedback.md + receipts.md (handoff_staging_dir) to the route's
-    handoff repo at daily/<YYYY>/<MM>/<day>/ (the layout pm_extra.py / compare.py read), byte for byte -- Pi generates no content.
-    Dedupe: a file whose remote bytes are identical is not written; nothing differs -> done, no commit (also re-checked in the clone
-    with git diff --cached). Fail closed: handoff repos only, strict day, both files present and non-empty (missing -> stale, the
-    next run waits for the 日报), plain push to main (rejected if main moved; retried next run)."""
-    repo, day = a.get("repo") or "", str(a.get("day") or "")
+    handoff repo at daily/<YYYY>/<MM>/<day>/ (the layout pm_extra.py / compare.py read). Pi generates no content; it only appends
+    its ownership marker as the last line. Fail closed (ops acceptance 10-30):
+    - repo: handoff allowlist only; day strict; staged files realpath-resolved and under the staging root (no ../, no symlink out)
+    - dedupe by content: remote body (marker removed) == staged -> not written; all equal -> done, no commit, whatever the key
+    - a remote file that differs and has no valid marker for this key is never overwritten; rechecked in the clone, right
+      before each write; plain push to main (rejected if main moved; retried next run)."""
+    repo, day, key = a.get("repo") or "", str(a.get("day") or ""), a.get("key") or ""
     rel = lambda n: f"daily/{day[:4]}/{day[5:7]}/{day}/{n}"
     def check():
-        if repo not in HANDOFF_REPO.values(): raise RuntimeError(f"{repo or '?'} is not a handoff repo")
+        check_repo("handoff", repo)
         if not re.fullmatch(r"\d{4}-\d\d-\d\d", day): raise RuntimeError(f"bad day {day!r}")
+        if not re.fullmatch(r"[\w.:/-]+", key): raise RuntimeError(f"bad key {key!r}")
     def staged(strict=True):
         check(); d = handoff_staging_dir(repo, day); out = {}
         for n in HANDOFF_FILES:
             p = os.path.join(d, n)
-            if not os.path.isfile(p):
+            if not os.path.lexists(p):
                 if strict: raise RuntimeError(f"staged {p} missing")
                 return None
-            b = open(p, "rb").read()
-            if not b.strip(): raise RuntimeError(f"staged {p} is empty")
-            out[n] = b
+            rp = staged_path(p)
+            if not os.path.isfile(rp): raise RuntimeError(f"staged {p} is not a file")
+            t = open(rp, encoding="utf-8").read()
+            if not t.strip(): raise RuntimeError(f"staged {p} is empty")
+            out[n] = t.rstrip("\n") + "\n"
         return out
     def remote(n):
         try: c = gh(["api", f"repos/{repo}/contents/{urllib.parse.quote(rel(n))}?ref=main"])
         except RuntimeError as e:
             if "404" in str(e): return None
             raise
-        return base64.b64decode(c.get("content") or "")
-    def changed(want): return [n for n, b in want.items() if remote(n) != b]
+        return base64.b64decode(c.get("content") or "").decode("utf-8")
+    def plan(want, read):
+        """files to write; raises when one differs and is not ours (foreign content is never overwritten)."""
+        out = []
+        for n, body in want.items():
+            cur = read(n)
+            if cur is not None and handoff_body(cur, repo, rel(n)).rstrip("\n") + "\n" == body: continue   # same content: no write
+            if cur is not None and not handoff_owned(cur, repo, rel(n), key): raise RuntimeError(f"{rel(n)} exists and is not ours (no valid pi-line marker for {key}); not overwriting")
+            out.append(n)
+        return out
     def state():
         want = staged(strict=False)
         if want is None: return f"stale:waiting for the 日报 to stage {handoff_staging_dir(repo, day)}/{{{','.join(HANDOFF_FILES)}}}"
-        return "pending" if changed(want) else "done"
+        try: return "pending" if plan(want, remote) else "done"
+        except RuntimeError as e: return f"stale:{e}"
     def validate():
-        want = staged(); return f"{repo} {day}: would write {changed(want) or 'nothing (identical)'}"
+        want = staged(); return f"{repo} {day}: would write {plan(want, remote) or 'nothing (identical)'}"
     def do():
-        want = staged(); ch = changed(want)
+        want = staged(); ch = plan(want, remote)
         if not ch: return "no change (remote identical)"
         d = W.mkdtemp("pi-handoff-files-")
         try:
             run(["gh", "repo", "clone", repo, d, "--", "--depth", "1", "-q"])
             run(["git", "-C", d, "config", "user.name", GIT_NAME]); run(["git", "-C", d, "config", "user.email", GIT_EMAIL])
+            def local(n):
+                p = os.path.join(d, rel(n)); return open(p, encoding="utf-8").read() if os.path.isfile(p) else None
+            ch = plan(want, local)                     # recheck after the clone (main may have moved since the API read)
+            if not ch: return "no change (clone identical)"
             os.makedirs(os.path.join(d, rel("")), exist_ok=True)
             for n in ch:
-                with open(os.path.join(d, rel(n)), "wb") as fh: fh.write(want[n])
+                plan({n: want[n]}, local)              # and right before this write
+                with open(os.path.join(d, rel(n)), "w", encoding="utf-8") as fh: fh.write(handoff_owned_text(want[n], repo, rel(n), key))
             run(["git", "-C", d, "add", "--"] + [rel(n) for n in ch])
             try: run(["git", "-C", d, "diff", "--cached", "--quiet"]); return "no change (clone identical)"   # rc 0 = nothing staged
             except RuntimeError: pass
-            run(["git", "-C", d, "commit", "-q", "-m", f"QA 交接 {day}: {' '.join(ch)}", "-m", f"Pi-Handoff: {a['key']}"])
+            run(["git", "-C", d, "commit", "-q", "-m", f"QA 交接 {day}: {' '.join(ch)}", "-m", f"Pi-Handoff: {key}"])
             run(["git", "-C", d, "push", "origin", "HEAD:refs/heads/main"])
             return f"pushed {', '.join(rel(n) for n in ch)} to {repo}"
         finally: shutil.rmtree(d, ignore_errors=True)
@@ -702,6 +772,11 @@ def handler(a):
     if t.startswith("gh.pr.create"): return h_fixpr(a)
     if t.startswith("gh.pr.merge"): return h_merge(a)
     if t.startswith("gh.pr.comment"): return h_comment(a)
+    if t.startswith("gh.infra.issue"):   # dispatch issues: outbound's own allowlist check before infra_outbound's (state/validate/do)
+        try: check_repo("dispatch", a.get("repo") or "")
+        except RuntimeError as e:
+            def refuse(*_a, _e=e): raise _e
+            return f"gh infra issue {a.get('repo')}", refuse, refuse, refuse
     if t.startswith("gh.infra."):   # 10-23 infrafix line: panoptes PR / guarded merge / pr-qa-agent-deploy issue (bin/infra_outbound.py)
         import infra_outbound, infrafix
         return infra_outbound.handler(a, gh, lambda text, key: record_muted("outbound", key, text) if praise_dm_blocked(key) else h_slack_dm({"key": key, "type": "slack.dm", "to": "Praise", "text": text})[3](),
