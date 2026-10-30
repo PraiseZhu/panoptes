@@ -95,11 +95,12 @@ const fakeMem = (root, swapGb = 5) => { const f = join(root, 'meminfo'); writeFi
 const fakeVmstat = (root) => { const f = join(root, 'vmstat'); writeFileSync(f, 'balloon_inflate 64896512\nballoon_deflate 63323648\n'); return f }
 test('slot_mem_gate: PI_TEST_MEM_AVAIL_MB 9000 / 6500 / 4000 → normal / degraded / skip; docs-only skips the wait', () => {
   const root = mkdtempSync(join(tmpdir(), 'argus-gate-'))
+  // 10-30: degraded/skip go through GATE_WAIT_S=$(( SECONDS - start )) (qa-slot.sh:148), 0 or 1 s across a whole second
   const gate = (mb, check = '', swap = 5) => sh(root, `slot_mem_gate ${check}; echo "$GATE_MODE|$GATE_WAIT_S|$GATE_SHARDS"`, { PANOPTES_MEMINFO: fakeMem(root, swap), PANOPTES_TEST: '1', PI_TEST_MEM_AVAIL_MB: String(mb), PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '1' }).stdout.trim()
   assert.equal(gate(9000, 'false'), 'normal|0|2')                       // 内存够：不问文档检查
-  assert.equal(gate(6500), 'degraded|0|1')                            // 10-28：<8G、≥6G：不等 30 分钟，马上用 1 片跑
+  assert.match(gate(6500), /^degraded\|[01]\|1$/)                            // 10-28：<8G、≥6G：不等 30 分钟，马上用 1 片跑
   assert.match(gate(4000), /^skip\|[1-9]\d*\|0$/)                     // <6G（不够一片）：照旧等满再跳过
-  assert.equal(gate(9000, '', 3), 'degraded|0|1')                      // 10-28 PM：swap <4G：告警，按内存最多 1 片
+  assert.match(gate(9000, '', 3), /^degraded\|[01]\|1$/)                      // 10-28 PM：swap <4G：告警，按内存最多 1 片
   assert.equal(gate(4000, 'true'), 'docs-only|0|2')                     // 纯文档：不等
   // PI_TEST_MEM_AVAIL_MB 只在 PANOPTES_TEST=1 时生效：真机上设了它也不改读数（这里真读数是假 meminfo 的 1 kB → 跳过，而不是 9000 的正常）
   assert.match(sh(root, 'slot_mem_gate; echo $GATE_MODE', { PANOPTES_MEMINFO: fakeMem(root), PI_TEST_MEM_AVAIL_MB: '9000', PANOPTES_TEST: '', PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '1' }).stdout.trim(), /^skip$/)
@@ -119,10 +120,10 @@ test('no swap (SwapTotal 0): >= 8192 and 6144-8191 -> 1 shard + alert + memory_g
   const root = mkdtempSync(join(tmpdir(), 'argus-noswap-'))
   const f = join(root, 'mi-noswap'); writeFileSync(f, 'MemTotal: 16386368 kB\nMemAvailable: 1 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n')
   const gate = (mb) => sh(root, 'slot_mem_gate; echo "$GATE_MODE|$GATE_SHARDS|$GATE_LOW_SWAP|$GATE_WAIT_S"', { PANOPTES_MEMINFO: f, PANOPTES_TEST: '1', PI_TEST_MEM_AVAIL_MB: String(mb), PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '1' }).stdout.trim()
-  assert.equal(gate(9000), 'degraded|1|1|0')
-  assert.equal(gate(8192), 'degraded|1|1|0')
-  assert.equal(gate(7000), 'degraded|1|1|0')
-  assert.equal(gate(6144), 'degraded|1|1|0')
+  assert.match(gate(9000), /^degraded\|1\|1\|[01]$/)
+  assert.match(gate(8192), /^degraded\|1\|1\|[01]$/)
+  assert.match(gate(7000), /^degraded\|1\|1\|[01]$/)
+  assert.match(gate(6144), /^degraded\|1\|1\|[01]$/)
   assert.match(gate(6143), /^skip\|0\|1\|[1-9]\d*$/)
   // end to end: alert on stderr, 1 shard, no wait
   const nvm = join(root, 'nvm'); mkdirSync(nvm); writeFileSync(join(nvm, 'nvm.sh'), 'nvm() { :; }\n')
@@ -132,7 +133,7 @@ test('no swap (SwapTotal 0): >= 8192 and 6144-8191 -> 1 shard + alert + memory_g
     PANOPTES_MEMINFO: f, PANOPTES_VMSTAT: fakeVmstat(root), PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '1', ARGUS_UNIT_SHARDS: '', ARGUS_MAX_PARALLEL: '' } })
   assert.equal(r.status, 0, r.stderr)
   assert.match(r.stderr, /ALERT SwapFree 0 MiB < 4 GiB: running by memory rules only, max 1 shard \(needs >= 6144 MiB available\)/)
-  assert.match(r.stdout, /gate: mode=degraded wait=0s shards=1 max_parallel=1/)
+  assert.match(r.stdout, /gate: mode=degraded wait=[01]s shards=1 max_parallel=1/)
   const { memoryGate } = await import('../src/nightly.mjs')
   const mg = memoryGate({ PANOPTES_GATE_MODE: 'degraded', PANOPTES_GATE_SHARDS: '1', PANOPTES_GATE_NORMAL_SHARDS: '2', PANOPTES_GATE_MEM_MB: '9000', PANOPTES_GATE_LOW_SWAP: '1', PANOPTES_GATE_SWAP_FREE_MB: '0' })
   assert.equal(mg.low_swap, true); assert.equal(mg.swap_free_mb, 0); assert.equal(mg.shards, 1); assert.match(mg.swap_alert, /SwapFree < 4 GiB/)
@@ -142,8 +143,8 @@ test('no swap (SwapTotal 0): >= 8192 and 6144-8191 -> 1 shard + alert + memory_g
 test('low swap (SwapFree 2 GiB) with 9000 MiB -> 1 shard + alert, no wait', () => {
   const root = mkdtempSync(join(tmpdir(), 'argus-lowswap-'))
   const f = join(root, 'mi'); writeFileSync(f, `MemTotal: 16386368 kB\nMemAvailable: 1 kB\nSwapTotal: 8388604 kB\nSwapFree: ${2 * 1048576} kB\n`)
-  assert.equal(sh(root, 'slot_mem_gate; echo "$GATE_MODE|$GATE_SHARDS|$GATE_LOW_SWAP|$GATE_WAIT_S"', { PANOPTES_MEMINFO: f, PANOPTES_TEST: '1', PI_TEST_MEM_AVAIL_MB: '9000', PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '1' }).stdout.trim(), 'degraded|1|1|0')
-  const w = sh(root, 'slot_mem_gate; echo "$GATE_MODE"', { PANOPTES_MEMINFO: f, PANOPTES_TEST: '1', PI_TEST_MEM_AVAIL_MB: '5000', PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '1' })
+  assert.match(sh(root, 'slot_mem_gate; echo "$GATE_MODE|$GATE_SHARDS|$GATE_LOW_SWAP|$GATE_WAIT_S"', { PANOPTES_MEMINFO: f, PANOPTES_TEST: '1', PI_TEST_MEM_AVAIL_MB: '9000', PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '1' }).stdout.trim(), /^degraded\|1\|1\|[01]$/)
+  const w = sh(root, 'slot_mem_gate; echo "$GATE_MODE"', { PANOPTES_MEMINFO: f, PANOPTES_TEST: '1', PI_TEST_MEM_AVAIL_MB: '5000', PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '2' })  // 10-30: WAIT_S 2, a 1 s SECONDS gain on the first poll must not skip before the waiting line
   assert.equal(w.stdout.trim(), 'skip'); assert.match(w.stderr, /\(>= 6144 MiB available\), waiting/); assert.doesNotMatch(w.stderr, /swap free/)
   const nvm = join(root, 'nvm'); mkdirSync(nvm); writeFileSync(join(nvm, 'nvm.sh'), 'nvm() { :; }\n')
   const secrets = join(root, 'secrets.env'); writeFileSync(secrets, 'GITHUB_TOKEN=x\nQA_LLM_BASE_URL=http://127.0.0.1:9\nQA_LLM_API_KEY=x\n')
@@ -154,7 +155,7 @@ test('low swap (SwapFree 2 GiB) with 9000 MiB -> 1 shard + alert, no wait', () =
   assert.equal(r.status, 0, r.stderr)
   assert.match(r.stderr, /ALERT SwapFree 2048 MiB < 4 GiB/)
   assert.match(r.stderr, /low swap free: SwapFree 2048 MiB < 4096 MiB: degraded run/)
-  assert.match(r.stdout, /gate: mode=degraded wait=0s shards=1 max_parallel=1/)
+  assert.match(r.stdout, /gate: mode=degraded wait=[01]s shards=1 max_parallel=1/)
   const alert = readFileSync(join(qa, 'argus-root', 'logs', 'control.log'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).find((e) => e.msg === 'run-nightly low swap alert')
   assert.equal(alert.level, 'warn')
 })
@@ -169,7 +170,7 @@ test('run-nightly.sh memory gate end to end: 9000 runs normally, 6500 degraded (
     PANOPTES_NVM_DIR: nvm, QA_SECRETS_FILE: secrets, PANOPTES_BOOTSTRAP: '0', PANOPTES_TMP_SWEEP: '0', PANOPTES_TEST: '1', PANOPTES_GATE_DRYRUN: '1', PI_TEST_MEM_AVAIL_MB: String(mb),
     PANOPTES_MEMINFO: fakeMem(root), PANOPTES_VMSTAT: fakeVmstat(root), PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '1', ARGUS_UNIT_SHARDS: '', ARGUS_MAX_PARALLEL: '' } })
   let r = run(9000); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /gate: mode=normal wait=0s shards=auto max_parallel=auto/)
-  r = run(6500); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /gate: mode=degraded wait=0s shards=1 max_parallel=1/)
+  r = run(6500); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /gate: mode=degraded wait=[01]s shards=1 max_parallel=1/)
   assert.match(r.stderr, /low memory: MemAvailable 6500 MiB < 8192 MiB: degraded run/)
   r = run(4000); assert.equal(r.status, 76, r.stdout + r.stderr); assert.doesNotMatch(r.stdout, /gate: mode=/)
   assert.match(r.stderr, /SKIP MemAvailable 4000 MiB, SwapFree 5120 MiB, balloon 6144 MiB after [1-9]\d*s: below one shard/)
@@ -187,6 +188,7 @@ test('run-nightly.sh --pr N: gate wait accumulates across attempts, restarts onc
   const run = () => spawnSync('bash', [script, '--pr', '7', '--date', '2026-10-27'], { encoding: 'utf8', timeout: 60_000, env: { ...process.env, QA_HOME: qa,
     PANOPTES_NVM_DIR: nvm, QA_SECRETS_FILE: secrets, PANOPTES_BOOTSTRAP: '0', PANOPTES_TMP_SWEEP: '0', PANOPTES_TEST: '1', PANOPTES_GATE_DRYRUN: '1', PI_TEST_MEM_AVAIL_MB: '9000',
     PANOPTES_MEMINFO: fakeMem(root), PANOPTES_VMSTAT: fakeVmstat(root), PANOPTES_MEM_POLL_S: '1', PANOPTES_MEM_WAIT_S: '1', ARGUS_UNIT_SHARDS: '', ARGUS_MAX_PARALLEL: '' } })
+  // 10-30: normal mode returns before the SECONDS - start timing (qa-slot.sh:144), so wait here is exact, no 1801/1802 tolerance needed
   // first attempt of a new PR: no gate-wait file yet must not trip set -e (#92 acceptance blocker)
   let r = run(); assert.equal(r.status, 0, r.stdout + r.stderr); assert.match(r.stdout, /gate: mode=normal wait=0s/)
   assert.equal(readFileSync(join(gw, 'PR-7'), 'utf8').trim(), '0')
