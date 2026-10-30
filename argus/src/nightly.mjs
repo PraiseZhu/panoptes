@@ -8,7 +8,7 @@ import { join, resolve, dirname, basename, posix } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { hostname } from 'node:os'
 import { execFileSync } from 'node:child_process'
-import { loadRegistry, loadSecrets } from './config.mjs'
+import { loadRegistry, loadSecrets, matchesSkipBase, DEFAULT_SKIP_BASE_BRANCHES } from './config.mjs'
 import { openDb } from './db.mjs'
 import { listNightlyPrs, getPull, getCommit, getBranchHead, listPullFiles, addFullText, getHandoff, shanghaiDayWindow, findIssuesByMarkerLabel, createIssue, commentIssue, reopenIssue, findCommentByMarker, listPullReviewComments, listPullCommits, listTeamMembers } from './github.mjs'
 import { classifyChange, highRiskFiles, withoutHandoff, isTestPath } from './classify.mjs'
@@ -229,7 +229,9 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   const baseProfile = { ...project.profileData, displayName: project.displayName }
   const pr = await getPull(repo, number)
   // PR 交接文件 docs/pr/** 不参与分级、代码审查、覆盖率和被测文件列表（只算进 changed_files 总数）
-  const allFiles = await addFullText(repo, pr, await listPullFiles(repo, number))
+  // 探针分支（skipBaseBranches）不测：连文件列表也不取（changed_files 记 0）
+  const skipBase = matchesSkipBase(pr.base?.ref, project?.skipBaseBranches ?? DEFAULT_SKIP_BASE_BRANCHES)
+  const allFiles = skipBase ? [] : await addFullText(repo, pr, await listPullFiles(repo, number))
   const files = withoutHandoff(allFiles)
   const merged = Boolean(pr.merged_at)
   const out = {
@@ -247,6 +249,11 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     gate_wait_s: Number(process.env.PANOPTES_GATE_WAIT_S) || 0, memory_gate: memoryGate(), reviewed_sha: null, review_base_sha: null,
     // 因每日模型额度用尽而没做的事（Jev 分诊 / AI 补测 / 代码审查 / 摘要），每项 { kind, pool, cap, used, dimensions, message }
     quota_capped: [],
+  }
+  // 目标分支是临时探针分支（registry.skipBaseBranches，默认 probe-*）：不测，写 skipped 报告，watchdog 不再报缺报告
+  if (skipBase) {
+    Object.assign(out, { tested: false, verdict: 'skipped', outcome_reason: 'non-main-base', skip_reason: 'non-main-base', tested_at: toShanghaiIso() })
+    return out
   }
   // 合并即测（on-merge）已经在同一个 merge commit 上测过：直接引用它的结果，不重测
   if (merged && opts.reuseMerged !== false) {
@@ -1829,7 +1836,7 @@ export function mergedReportFor(report, pr, { kind = 'merged' } = {}) {
 
 // 单 PR 文件的选择规则：merged → 真实测完且非复用；open → 所有开放 PR（未测的也写，带原因）
 const PER_PR_KINDS = {
-  merged: { enabled: writeMergedEnabled, path: (n, opts) => mergedReportPath(n, opts.mergedDir), select: (pr) => pr.state === 'merged' && !pr.reused && REUSABLE_VERDICTS.has(pr.verdict) },
+  merged: { enabled: writeMergedEnabled, path: (n, opts) => mergedReportPath(n, opts.mergedDir), select: (pr) => pr.state === 'merged' && !pr.reused && (REUSABLE_VERDICTS.has(pr.verdict) || (pr.verdict === 'skipped' && pr.skip_reason === 'non-main-base')) },
   open: { enabled: writeOpenEnabled, path: (n, opts) => openReportPath(n, opts.openDir), select: (pr) => pr.state === 'open' && pr.not_tested_code !== 'excluded-by-pr-filter' },
 }
 

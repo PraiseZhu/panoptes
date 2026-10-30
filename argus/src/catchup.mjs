@@ -76,6 +76,7 @@ export function gapOf(pr, mergedDir) {
   try { doc = JSON.parse(readFileSync(file, 'utf8')) } catch { return { reason: 'unreadable', file } }
   const entry = (doc.prs ?? []).find((x) => x.number === pr.number)
   if (!entry) return { reason: 'no-entry', file }
+  if (entry.verdict === 'skipped' && entry.skip_reason === 'non-main-base') return null
   if (UNFINISHED.has(entry.verdict)) return { reason: `unfinished (${entry.verdict})`, file }
   const tested = entry.verdict === 'docs-only' ? (doc.merged_sha ?? entry.merge_sha ?? null) : entry.tested_sha
   if (tested !== pr.merge_sha) return { reason: `stale (tested ${String(tested ?? 'none').slice(0, 12)} ≠ merge ${pr.merge_sha.slice(0, 12)})`, file }
