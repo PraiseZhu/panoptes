@@ -1,5 +1,5 @@
 // 在隔离 run 目录里检出指定版本并执行项目 profile 的步骤
-import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync, statSync, lstatSync, realpathSync, cpSync } from 'node:fs'
+import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync, readlinkSync, statSync, lstatSync, realpathSync, cpSync } from 'node:fs'
 import { join, dirname, basename, resolve, relative, isAbsolute } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
 import { run, isStopping, overBudget } from './exec.mjs'
@@ -220,7 +220,7 @@ export function sandboxProfile(runDir, home = homedir()) {
 }
 
 // Linux：用 bubblewrap（bwrap，非特权 user namespace）做等价的文件隔离。
-// 根文件系统只读挂载；/home、/root、/workspace、/tmp、/mnt、/media 换成空 tmpfs（读不到 gh 登录、
+// 宿主根的每个条目只读挂到新的 tmpfs 根上；/home、/root、/workspace、/tmp、/mnt、/media 换成空 tmpfs（读不到 gh 登录、
 // secrets.env、其它 agent 的数据），再把本次 run 目录、Argus 缓存、短临时目录读写挂回，
 // Node 安装目录（nvm 在 ~ 下）和 Playwright 浏览器目录只读挂回。新的 pid/ipc/uts 命名空间，父进程退出即回收。
 // 网络和 macOS 版一样暂不限制（npm ci 需要）。
@@ -228,6 +228,25 @@ export function sandboxProfile(runDir, home = homedir()) {
 const BWRAP = process.env.ARGUS_BWRAP_BIN ?? '/usr/bin/bwrap'
 const NODE_PREFIX = dirname(dirname(process.execPath))
 const HIDDEN_ROOTS = ['/home', '/root', '/workspace', '/mnt', '/media', '/srv', '/cursor', '/exec-daemon', '/opt/sand', '/opt/sand-managed']
+// 下面三条由 --dev / --proc / --tmpfs 自己提供，不再从宿主根挂
+const OWN_ROOT_MOUNTS = new Set(['/proc', '/dev', '/tmp'])
+// 宿主根的条目逐个只读挂过来，而不是 `--ro-bind / /`：user namespace 里宿主 root 的 inode 没有映射，
+// 沙箱里的 / 会显示成 65534；被测项目的「祖先目录必须由 root 或本人拥有」校验（mivo
+// scripts/ops/review-capacity-check/workspace.mjs 的 assertControllerDirectory）于是先拒绝启动，
+// 产品用例在 PR 版本和基线版本上一起失败，被记成 pre-existing 噪声（inf1-2a243a907acdcdb626a4）。
+// 新 tmpfs 根的属主是沙箱用户、权限 755，祖先链与 CI 同形；符号链接照抄，别让 /bin 变成实体目录。
+function rootBinds() {
+  const out = []
+  for (const name of readdirSync('/')) {
+    const p = `/${name}`
+    if (OWN_ROOT_MOUNTS.has(p)) continue
+    try {
+      if (lstatSync(p).isSymbolicLink()) out.push('--symlink', readlinkSync(p), p)
+      else out.push('--ro-bind', p, p)
+    } catch { /* 宿主根里的条目在枚举和挂载之间消失（或读不到）时跳过：本次 run 用不到它 */ }
+  }
+  return out
+}
 
 export function sandboxMode(profile = {}) {
   if (profile.sandbox === false) return 'disabled-by-profile'
@@ -241,11 +260,13 @@ export function sandboxMode(profile = {}) {
 
 export function bwrapArgs(runDir, { extraRo = [], extraRw = [], chdir = null } = {}) {
   const args = ['--die-with-parent', '--new-session', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup-try',
-    '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp']
+    '--tmpfs', '/', ...rootBinds(), '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp']
   for (const d of HIDDEN_ROOTS) if (existsSync(d)) args.push('--tmpfs', d)
   const ro = [NODE_PREFIX, ...extraRo].filter((p) => p && existsSync(p))
   for (const p of ro) args.push('--ro-bind', p, p)
   for (const p of [CACHE_DIR, runDir, shortTmpOf(runDir), ...extraRw]) { mkdirSync(p, { recursive: true }); args.push('--bind', p, p) }
+  // 挂载点都建完后把根改回只读（旧 `--ro-bind / /` 的根也是只读的），被测项目看不到「沙箱根可写」这种 CI 没有的差异
+  args.push('--remount-ro', '/')
   if (chdir) args.push('--chdir', chdir)
   return args
 }
