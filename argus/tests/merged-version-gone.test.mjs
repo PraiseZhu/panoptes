@@ -62,6 +62,11 @@ function goneVersionFixture(number) {
   writeFileSync(join(src, 'value.mjs'), 'export const v = 2\n'); git('commit', '-qam', `probe (#${number})`)
   const mergeSha = git('rev-parse', 'HEAD')
   git('update-ref', 'refs/heads/main', baseSha)
+  // 上游真的丢了这个对象：mirror 的 origin 就是 source，ensureMirror 现在会按版本向 origin 再要一次（#110），
+  // 不清掉 source 里的悬空提交，按版本 fetch 会把它取回来，fixture 就不再是「版本已经没了」
+  git('reflog', 'expire', '--expire=now', '--all')
+  git('gc', '--prune=now', '-q')
+  assert.throws(() => git('cat-file', '-e', `${mergeSha}^{commit}`), `fixture 前提不成立：source 里还留着 ${mergeSha}，按版本 fetch 会取回它`)
   // 前提自检：镜像里确实没有这个版本（否则断言的不是本缺陷）
   assert.throws(
     () => execFileSync('git', ['-C', join(MIRRORS_DIR, `fixture__pr${number}.git`), 'cat-file', '-e', `${mergeSha}^{commit}`], { stdio: 'ignore' }),
