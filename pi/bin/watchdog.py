@@ -579,6 +579,9 @@ def main():
     def as_item(v, key):
         return v if isinstance(v, dict) else PN.item("action", str(v)[:60], str(v), todo=PN.ask_session(f"Pi 线看门狗报的问题：{v}，查一下"))
     told_gone = [k for k in gone if as_item(prev[k], k)["kind"] == "action"]
+    # 10-30 (ticket E): every recovery is logged, also an fyi one on a quiet round that sends nothing (10-29 sla:merge-to-test closed silently)
+    if not DRY and (new or gone or remind):
+        with open(f"{LOGS}/watchdog-{today()}.log", "a") as f: f.write(f"{now.strftime('%F %T')} new={list(new)} recovered={gone} open={len(probs)}\n")
     if new or told_gone or remind:
         items = [as_item(v, k) for k, v in (probs.items() if remind else new.items())]
         for k in told_gone:
@@ -588,9 +591,6 @@ def main():
         lines = [PN.text(*items, still_open=others)]
         key = f"watchdog:{now.strftime('%Y-%m-%d:%H%M')}"
         bypass = any(k.endswith(":outbound") or k.startswith(("failing:outbound", "stale:outbound")) for k in probs)
-        if not DRY:
-            day_log = f"{LOGS}/watchdog-{today()}.log"
-            with open(day_log, "a") as f: f.write(f"{now.strftime('%F %T')} new={list(new)} recovered={gone} open={len(probs)}\n")
         send("\n".join(lines), key, bypass)
         st["sent_at"] = time.time()
     st["open"] = probs; st["last_run"] = now.isoformat(timespec="seconds")
