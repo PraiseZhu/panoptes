@@ -161,6 +161,22 @@ class TestReap(Base):
         shutil.rmtree(f"{T}/human-wt", ignore_errors=True)
 
 class TestInfraBranches(Base):
+    def test_17_top_level_worktree_is_one_entry_and_manual_hold_is_held(self):   # 10-30 ticket C
+        top = W.path("wt", "base-run"); sh("git", "worktree", "add", "-q", "--detach", top, "main", cwd=self.clone)
+        wf(f"{top}/docs/x.md", "person's\n")
+        held_top = W.path("wt", "verify-6x"); sh("git", "worktree", "add", "-q", "--detach", held_top, "main", cwd=self.clone)
+        hold = {"schema": 1, "owner": "manual-hold", "kind": "manual", "created_at": "2026-10-30T12:00:00+08:00", "pid": dead_pid()}
+        wf(f"{held_top}/{W.MARK}", json.dumps(hold))
+        held_in = W.path("wt", "mivo", "daily-null-cg"); wf(f"{held_in}/{W.MARK}", json.dumps(hold)); wf(f"{held_in}/x", "y\n")
+        other = W.path("wt", "mivo", "pi-wt-7-abcdef12"); wf(f"{other}/{W.MARK}", json.dumps({**hold, "owner": "someone"}))
+        self.assertEqual(self.run_j("run"), 0, self.out)
+        r = self.last()
+        self.assertEqual(sorted(u["path"] for u in r["unmarked"]), sorted([other, top]))                  # the worktree once, not .git/docs/a.txt
+        self.assertEqual(sorted(h["path"] for h in r["held"]), sorted([held_in, held_top]))
+        self.assertTrue(all(h["owner"] == "manual-hold" and h["created_at"] for h in r["held"]))
+        for d in (top, held_top, held_in, other): self.assertTrue(os.path.isdir(d), d)        # never reaped
+        self.assertEqual(self.run_j("run"), 0, self.out); self.assertTrue(os.path.isdir(held_top) and os.path.isdir(held_in))
+
     def test_14_infra_branch_kept_while_its_pr_is_in_flight(self):
         os.environ["JANITOR_INFRA_TICKETS"] = f"{T}/infra-tickets.json"; J.INFRA_TICKETS = os.environ["JANITOR_INFRA_TICKETS"]
         W.REPOS["panoptes"]["url"] = f"{T}/origin.git"; W.REPOS["panoptes"]["filter"] = None; pc = W.ensure_clone("panoptes")
@@ -275,6 +291,13 @@ class TestWatchdog(Base):
         r.update(mode="dry-run", free_gb=50, unmarked=[], trash_oldest_min=0, long_running=[]); json.dump(r, open(f, "w"))
         probs = {}; WD.janitor_check(now, probs); self.assertEqual(probs, {})      # rehearsal: leftovers are expected, nothing to say
         r["ran_at"] = (now - __import__("datetime").timedelta(hours=3)).isoformat(); r["free_gb"] = 1; json.dump(r, open(f, "w"))
+        # 10-30 ticket C: only unmarked counts (held is info) and the alert names the parent dir, not .git / .github
+        r.update(mode="enforce", ran_at=now.isoformat(), free_gb=50, skipped=[], unmarked=[{"path": f"{WD.PI_WORK}/wt/base-run"}],
+                 held=[{"path": f"{WD.PI_WORK}/wt/verify-{i}", "owner": "manual-hold"} for i in range(5)]); json.dump(r, open(f, "w"))
+        probs = {}; WD.janitor_check(now, probs); (k,) = [k for k in probs if k.startswith("janitor:unmarked")]
+        self.assertIn("有 1 个目录", probs[k]["what"]); self.assertIn("wt/base-run", probs[k]["what"])
+        r.update(unmarked=[]); json.dump(r, open(f, "w")); probs = {}; WD.janitor_check(now, probs); self.assertEqual(probs, {})
+        r.update(mode="dry-run", free_gb=1, held=[])
         probs = {}; WD.janitor_check(now, probs); self.assertEqual(probs, {})      # stale report: "janitor stopped" is job_checks' to say
 
 class TestZZIsolation(unittest.TestCase):
