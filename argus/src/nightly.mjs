@@ -469,12 +469,10 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
       why = `${why}; ${baseComparison.note}`
     }
     const baseRun = compareOn(base)
-    // 合并前同检查也失败：显式 pre_existing 给日报读；test_timeout 等无法 fingerprint 对齐时仍标为 pre-existing（P3）
-    if (baseRun === 'fail' && status === 'unverified') {
-      status = 'pre-existing'
-      why = 'also fails on the base revision (base run failed; failure type not fingerprint-comparable, e.g. test_timeout)'
-    }
-    const preExisting = status === 'pre-existing' || baseRun === 'fail'
+    // 2026-10-29：合并前那一轮失败只是粗结果，不是「同一失败合并前就重现」的证据。对照认不出同一失败（runner_error /
+    // 报告不完整 → compareKey=unknown）时保持 unverified：不定级、不宣称基线也失败，交 QA 自查（PR #1391 #1392 #1398）。
+    // pre_existing 只在 compareKey 判定同一失败（status=pre-existing）时置 true，基线轮的粗结果留在 evidence.base_run。
+    const preExisting = status === 'pre-existing'
     // 试运行检查（bench）的用例超时、空闲机器上重跑通过：机器负载（审计 2026-10-18 S3），不算这个 PR 的发现
     const envTimeout = isTrialTimeout(step, r, test, { status, rerun: compareOn(rerun), idle: out.rerun_idle_wait?.idle })
     out.failed_checks.push({
