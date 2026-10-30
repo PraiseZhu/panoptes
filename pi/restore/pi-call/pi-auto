@@ -9,7 +9,7 @@ case "$tier" in
   quick)      m=tap/deepseek/deepseek-flash;       t=low ;;
   work)       m=tap/deepseek/deepseek-flash;       t=high ;;
   heavy)      m=tap/deepseek/deepseek-v4.1-flash;  t=high ;;
-  deep)       m=tap/deepseek/deepseek-v4.1-flash;  t=max ;;
+  deep)       m=tap/deepseek/deepseek-flash:discount;  t=max ;;
   review)     m=tap/openai/gpt-6-luna;             t=max ;;
   judge)      m=tap/anthropic/claude-opus-5-5;     t=medium ;;
   judge-hard) m=tap/anthropic/claude-opus-5-5;     t=high ;;

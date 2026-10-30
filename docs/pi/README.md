@@ -25,7 +25,7 @@
 | | 每小时环境自检（只查） | opsenv.py | 每小时 :25 | 无 | out/ops/env-<日>.md | vs Grok env-guard（无盘上记录→人工） | ✅ |
 | | 10:57 复盘 + P1 校准 | opsreview.py（review-ops collector --out + review tier） | 11:15（排在 10:07 catch-up 之后） | review | out/ops/review-<数据日>.md | vs review-ops/daily/<日>.md 校准条目 | ✅ |
 | Praise PR | 09:41 复盘（含“将转 ready”） | prretro.py | 09:45 | 无 | out/praise-pr/<日>.retro.md、.actions.json | 人工 | ✅ |
-| | 修自己 PR 上测出的问题（规则见文末 10-23 晚 / 10-24） | prfix.py（prwatch 按内存并发派活，一单一个进程；Pi agent + deepseek-v4.1-flash，thinking max） | prwatch 每分钟；11:20 兜底（10-28 由 14:20 挪开 balloon 峰） | deep | out/praise-pr/tickets.json、<日>-<tag>.pr.patch/.md | — | ✅ |
+| | 修自己 PR 上测出的问题（规则见文末 10-23 晚 / 10-24） | prfix.py（prwatch 按内存并发派活，一单一个进程；Pi agent + deepseek-flash:discount（10-30），thinking max） | prwatch 每分钟；11:20 兜底（10-28 由 14:20 挪开 balloon 峰） | deep | out/praise-pr/tickets.json、<日>-<tag>.pr.patch/.md | — | ✅ |
 | | 22:23 清理 | prretro.py 末节（只列） | 09:45 | 无 | 同上 | — | ✅ 只列不删 |
 | Mivo 合并官 | 判定哪些 PR 可合 + 巡检 P0 | merger.py（零模型，8 项必需检查等） | 每小时 :13/:43（不做 5 分钟轮询：Praise 10-22 叫停轮询） | 无 | out/merger/<日>.md、.actions.json | vs audit.log | ✅ |
 | 备份管家 | grokbot-box 每小时推送 | 已是 cron；boxcheck.py 核日志新鲜度、本地=远端 | 每小时 :45 | 无 | out/box/<日>.md | — | ✅ 不需 Grok |
@@ -100,7 +100,7 @@ panoptes catch-up 每 2 小时 :07 + 每次合并（mergewatch）起跑；修 PR
 - 恢复后 prwatch 把 16 条旧问题误当新问题（报告文件时间被改），因 Slack 密钥缺失没发出，已在 outbound 台账标 skipped；根因已修（见下）。
 
 ## 10-24 修 PR bot 升级（Praise：「bot 只是个调度器，让 pi agent 加载 deepseekv4.1flash max 来修，并发数量看内存，不设上限」）
-- **模型**：prfix 每一步（复现、修复、交接文件）走 `pi-auto deep` = `tap/deepseek/deepseek-v4.1-flash`，thinking max（`PRFIX_TIER` 可覆盖）。
+- **模型**：prfix 每一步（复现、修复、交接文件）走 `pi-auto deep` = `tap/deepseek/deepseek-flash:discount`（10-30 由 deepseek-v4.1-flash 换），thinking max（`PRFIX_TIER` 可覆盖）。
 - **并发**：没有固定上限，内存决定。prwatch 每分钟：没有正在挑单的进程、且 余量 ≥ 1.5 GB + 一单的峰值 时，再起一个 `run.sh prfix --next`（每分钟最多起一个）。余量 = MemAvailable − 正在修的每一单还会涨的内存 − 合并测试还会涨的内存（正在跑的算剩余增长；已有修复在跑时，还没开始的合并测试也按整份峰值预留，因为它随时可能开跑）。峰值是学出来的：每分钟记录每单、每次 panoptes 的进程树 RSS，攒够 3 次后取最近 20 次最大值 × 1.3；之前默认一单 2.5 GB、panoptes 6 GB。这台 16 GB 的机器通常是「1 单修复 + 1 个合并测试」，内存大了自然多开。每一单开始前、每个重步骤前仍要 MemAvailable ≥ 3 GB（不够就等）。
 - **并发安全**：没有全局锁；认领在 tickets.json 的锁里原子完成（重读、重判、拿单子锁、标 running）；共享 clone 的 fetch / worktree 增删 / 删分支走 `out/praise-pr/git.lock`（opsfix 复测也走这把锁）；日志每行带单号；PR 列表 60 秒共享缓存（增量刷新，每小时全量，省 GraphQL 配额）。
 - **prwatch 新问题私信**：按报告内容（sha1）判断是否变化，文件被恢复 / 复制不会再误报；第一次运行或状态格式变化只建基线不发。

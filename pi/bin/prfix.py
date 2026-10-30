@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Praise PR fix duty (Pi line, file-only: never pushes; gh is read-only). ONE ticket per process (2026-10-23 rework).
-Model (Praise 10-24): the Pi agent on deepseek-v4.1-flash with thinking max = pi-auto tier `deep` (PRFIX_TIER overrides).
+Model (Praise 10-24): the Pi agent on deepseek-flash:discount with thinking max = pi-auto tier `deep` (PRFIX_TIER overrides).
 Parallel (Praise 10-24, "并发数量看内存 不设上限"): prwatch starts as many prfix processes as memory allows. There is no global
   run lock: each process claims its ticket atomically under tickets.json's flock (re-read + re-evaluate + mark running), holds a
   per-ticket lock while it works, and serialises only the shared clone's metadata ops (fetch, worktree add/remove, branch -D)
@@ -84,7 +84,7 @@ AUTHOR_SELF = "PraiseZhu"       # Praise 10-23: prfix fixes only our own PRs (ot
 BACKOFF_MIN = (15, 60, 240)        # after the 1st/2nd/3rd transient failure; the 4th -> needs_human
 MIN_MEM_GB = 3
 BUSY = 75
-TIER = _E("PRFIX_TIER") or "deep"   # pi-auto: deep = tap/deepseek/deepseek-v4.1-flash, thinking max (Praise 10-24; was heavy = high)
+TIER = _E("PRFIX_TIER") or "deep"   # pi-auto: deep = tap/deepseek/deepseek-flash:discount, thinking max (Praise 10-24, model 10-30; was heavy = high)
 PR_CACHE_TTL = 60                    # s: parallel runs + prwatch share one PR list (10-24: a full 3000-PR list per run ate GraphQL quota)
 PR_CACHE_FULL = 3600                 # s: full re-list at least hourly; in between only PRs updated since the last fetch are re-read
 SEV_RANK = {"P0": 0, "P1": 1, "P2": 2}
