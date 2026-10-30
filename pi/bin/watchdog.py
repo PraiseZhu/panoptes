@@ -413,9 +413,10 @@ def janitor_check(now, probs):
             "磁盘满了测试、修复、外发都会失败。", todo=PN.ask_session(f"Pi 线机器剩余空间只有 {r['free_gb']}G，查一下哪里占的（du -xh /workspace | sort -h | tail），清掉不要的"))
     if r.get("unmarked"):   # 10-30: only unmarked counts; r["held"] (manual-hold) is info only
         paths = sorted(u["path"] for u in r["unmarked"])
-        probs["janitor:unmarked:" + hashlib.sha1("|".join(paths).encode()).hexdigest()[:8]] = PN.item("fyi", "bot 的工作目录里有来路不明的目录（不急）",
-            f"{PI_WORK} 下有 {len(paths)} 个目录没有 bot 的身份标记（{', '.join(os.path.relpath(p, PI_WORK) for p in paths[:3])}）。自动清理不会删它们。",
-            "只是占地方，不影响运行。", todo=f"不急，有空时看一眼：是人放的就挪走，没用就删掉（{paths[0]}）")
+        for p in paths:     # 10-30: one key per dir -- a set-wide hash recovered/re-raised every dir whenever any other one came or went
+            probs["janitor:unmarked:" + hashlib.sha1(p.encode()).hexdigest()[:8]] = PN.item("fyi", "bot 的工作目录里有来路不明的目录（不急）",
+                f"{PI_WORK} 下有 {len(paths)} 个目录没有 bot 的身份标记，这是其中一个：{os.path.relpath(p, PI_WORK)}。自动清理不会删它。",
+                "只是占地方，不影响运行。", todo=f"不急，有空时看一眼：是人放的就挪走，没用就删掉（{p}）")
     if (r.get("trash_oldest_min") or 0) > 60:
         probs["janitor:trash"] = PN.item("fyi", "回收站一直清不掉（不急）", f"bot 用完扔进回收站的目录，最老的已经放了 {r['trash_oldest_min'] // 60} 小时，按理 10 分钟内就会被删掉。",
             "只是占地方。", todo=f"不急，有空时{PN.ask_session('Pi 线 janitor 的回收站一直清不掉，看 out/logs/janitor-*.log 的 purge 行')}")
