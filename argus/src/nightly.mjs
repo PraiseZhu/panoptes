@@ -13,7 +13,7 @@ import { openDb } from './db.mjs'
 import { listNightlyPrs, getPull, getCommit, getBranchHead, listPullFiles, addFullText, getHandoff, shanghaiDayWindow, findIssuesByMarkerLabel, createIssue, commentIssue, reopenIssue, findCommentByMarker, listPullReviewComments, listPullCommits, listTeamMembers } from './github.mjs'
 import { classifyChange, highRiskFiles, withoutHandoff, isTestPath } from './classify.mjs'
 import { parseHandoff, splitHandoffCases, toHandoffReport, settleHandoff } from './handoff.mjs'
-import { executeOnSha, ensureMirror, mergeBase, sandboxMode, janitor, mirrorPath, currentUmask, INHERITED_UMASK, PINNED_UMASK, fmtUmask } from './runner.mjs'
+import { executeOnSha, ensureMirror, mergeBase, sandboxMode, janitor, mirrorPath, currentUmask, INHERITED_UMASK, PINNED_UMASK, fmtUmask, isVersionMissingError } from './runner.mjs'
 import { decideOutcome, failedIds, setupFailed, failureKeys, compareKey } from './decide.mjs'
 import { analyzePr } from './ai.mjs'
 import { evaluateJev } from './jev.mjs'
@@ -1613,12 +1613,20 @@ export async function processTargets(targets, { opts = {}, health, startedAt = n
       result = await processOne(t)
     } catch (err) {
       if (!overBudget()) {
-        health.qa_tool_failures.push({ pr: t.number, stage: 'pipeline', message: redact(err.message).slice(0, 800) })
         const msg = redact(err.message).slice(0, 800)
-        const fp = fingerprintOf(repo ?? '', ['qa-error', 'pipeline', msg])
-        // 测试系统自己出错：PR 本身没测到，不是作者的问题 → 不定级（untested），待核实（QA 自查）
-        result = { number: t.number, ...(t.meta ?? {}), discovery_reason: t.reason, verdict: 'qa-error', severity: 'untested', tested: false, error: msg, memory_gate: memoryGate(), failed_checks: [], checks: [], coverage_gate: null, test_started_at: beat.started_at, tested_at: null,
-          findings: [], pending_verification: [toPending('qa-error', { source: 'qa-error', check_id: 'pipeline', dimension: null, severity: null, title: 'QA pipeline error (the PR itself was not verified)', fingerprint: fp, pr_fingerprint: prFingerprint(fp, t.number), evidence: { error: msg } }, { reason: 'QA pipeline error', reasonZh: '测试系统自己出错，PR 本身没测到' })] }
+        // 版本被上游弄没了（合并后 main 被回退 / 合并分支合并后删掉）：这是输入事实，这个 PR 永远没法按 merge commit 测。
+        // 记 not-tested（带版本号）并在 notes 里点名，不记 qa-error / stage=pipeline —— 否则一条永久事实每轮都让整轮 failed + incomplete。
+        if (isVersionMissingError(err)) {
+          result = notTestedEntry(t, 'version-gone', `这个版本没法测：${msg}`)
+          health.notes ??= []
+          health.notes.push(`PR #${t.number}: not tested, the version is gone from the mirror — ${msg}`)
+        } else {
+          health.qa_tool_failures.push({ pr: t.number, stage: 'pipeline', message: msg })
+          const fp = fingerprintOf(repo ?? '', ['qa-error', 'pipeline', msg])
+          // 测试系统自己出错：PR 本身没测到，不是作者的问题 → 不定级（untested），待核实（QA 自查）
+          result = { number: t.number, ...(t.meta ?? {}), discovery_reason: t.reason, verdict: 'qa-error', severity: 'untested', tested: false, error: msg, memory_gate: memoryGate(), failed_checks: [], checks: [], coverage_gate: null, test_started_at: beat.started_at, tested_at: null,
+            findings: [], pending_verification: [toPending('qa-error', { source: 'qa-error', check_id: 'pipeline', dimension: null, severity: null, title: 'QA pipeline error (the PR itself was not verified)', fingerprint: fp, pr_fingerprint: prFingerprint(fp, t.number), evidence: { error: msg } }, { reason: 'QA pipeline error', reasonZh: '测试系统自己出错，PR 本身没测到' })] }
+        }
       }
     }
     if (overBudget()) {
