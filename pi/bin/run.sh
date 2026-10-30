@@ -1,6 +1,8 @@
 #!/bin/bash
 # Pi line job runner. Usage: run.sh daily|pm|p2 [YYYY-MM-DD data day]
 set -u
+# 10-30: pin umask (cron gave jobs 0002 → fixture dirs 0775, false RUNNER_OWNER_MISMATCH; env_problems "inherited umask was 0002")
+umask 022
 JOB=${1:?job}; shift
 # code = this pi/ directory; state (out/, takeover/, outbound-*) = PI_STATE (lib.py has the same three roots)
 CODE=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
