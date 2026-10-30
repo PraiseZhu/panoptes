@@ -112,9 +112,12 @@ pinned copy `config/severity.md`, see `../docs/report-schema.md` › *Unified se
 ## Sandbox choice: bubblewrap
 
 Replaces macOS `sandbox-exec`. Every test/install command runs as
-`bwrap --ro-bind / / --tmpfs /home --tmpfs /root --tmpfs /workspace --tmpfs /tmp … --bind <run dir> --bind <argus cache>`:
+`bwrap --tmpfs / --ro-bind /usr /usr … --ro-bind <each host top-level dir> --tmpfs /home --tmpfs /root --tmpfs /workspace --tmpfs /tmp … --bind <run dir> --bind <argus cache>`:
 
-* root filesystem read-only; `/home`, `/root`, `/workspace`, `/tmp`, `/mnt`, `/media`, `/srv` and the
+* sandbox root is a tmpfs owned by the run user, not a `--ro-bind / /` of the host root: bwrap's user namespace
+  maps only the run user, so host root reads as overflow uid 65534 and checks that walk parents from `/` (mivo's
+  `assertControllerDirectory`, `run.sh` startup path) reject the chain (`inf1-98572bf8`);
+* host top-level dirs are read-only; `/home`, `/root`, `/workspace`, `/tmp`, `/mnt`, `/media`, `/srv` and the
   agent-infra dirs are replaced by empty tmpfs, so tests cannot read `gh` credentials, `secrets.env`,
   SSH keys or other agents' data;
 * only the run directory, Argus cache (mirrors / npm cache) and a short per-run tmp dir are writable;

@@ -248,10 +248,13 @@ leads, own-tests not run, QA errors — goes to **`prs[].pending_verification[]`
 ## Sandbox / 沙盒: bubblewrap
 
 Every install / test command runs as
-`bwrap --ro-bind / / --tmpfs /home --tmpfs /root --tmpfs /workspace --tmpfs /tmp … --bind <run dir> --bind <argus cache>`:
+`bwrap --tmpfs / --ro-bind /usr /usr … --ro-bind <each host top-level dir> --tmpfs /home --tmpfs /root --tmpfs /workspace --tmpfs /tmp … --bind <run dir> --bind <argus cache>`:
 
-- root filesystem read-only; `/home`, `/root`, `/workspace`, `/tmp`, `/mnt`, `/media`, `/srv` replaced by empty tmpfs —
-  tests can't see `gh` credentials, `secrets.env`, SSH keys or other agents' files;
+- sandbox root is a tmpfs **owned by the run user**, not a `--ro-bind / /` of the host root: bwrap's user namespace
+  maps only the run user, so host root reads as overflow uid 65534 and any check that walks parents from `/`
+  (mivo's `assertControllerDirectory`, `run.sh` startup path) rejects the whole chain;
+- host top-level dirs are read-only; `/home`, `/root`, `/workspace`, `/tmp`, `/mnt`, `/media`, `/srv` replaced by
+  empty tmpfs — tests can't see `gh` credentials, `secrets.env`, SSH keys or other agents' files;
 - only the run dir, the Argus cache and a per-run tmp are writable; Node, Playwright browsers and `argus/node_modules`
   are re-mounted read-only;
 - new pid / ipc / uts (+ cgroup) namespaces, `--die-with-parent`, `--new-session`; minimal env with no tokens;

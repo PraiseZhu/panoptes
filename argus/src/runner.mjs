@@ -228,6 +228,14 @@ export function sandboxProfile(runDir, home = homedir()) {
 const BWRAP = process.env.ARGUS_BWRAP_BIN ?? '/usr/bin/bwrap'
 const NODE_PREFIX = dirname(dirname(process.execPath))
 const HIDDEN_ROOTS = ['/home', '/root', '/workspace', '/mnt', '/media', '/srv', '/cursor', '/exec-daemon', '/opt/sand', '/opt/sand-managed']
+// 沙箱的根不能直接 --ro-bind 宿主根：bwrap 的用户命名空间只映射运行用户（/proc/self/uid_map 只有一行），
+// 宿主 root(0) 在沙箱里读成溢出 uid 65534。mivo scripts/ops/review-capacity-check 的 assertControllerDirectory
+// 和 run.sh 的启动路径检查都从 / 起逐层要求属主是 root 或运行用户，第一层就判「父链不可信」：openWorkspace
+// 抛错 → created=false、launcher 报「控制器启动路径不可信」，workspace-creation/launcher 一族 30+ 例在沙箱里假失败
+// （inf1-98572bf8，5 次夜间运行）。改成 tmpfs 根（属主是运行用户）再逐个只读挂宿主顶层目录，可见范围不变。
+const ROOT_OWNED_BY_SANDBOX = ['/dev', '/proc', '/tmp']
+const hostTopLevel = () => readdirSync('/').map((name) => `/${name}`)
+  .filter((p) => !ROOT_OWNED_BY_SANDBOX.includes(p) && !HIDDEN_ROOTS.includes(p) && existsSync(p))
 
 export function sandboxMode(profile = {}) {
   if (profile.sandbox === false) return 'disabled-by-profile'
@@ -241,7 +249,9 @@ export function sandboxMode(profile = {}) {
 
 export function bwrapArgs(runDir, { extraRo = [], extraRw = [], chdir = null } = {}) {
   const args = ['--die-with-parent', '--new-session', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup-try',
-    '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp']
+    '--tmpfs', '/']
+  for (const p of hostTopLevel()) args.push('--ro-bind', p, p)
+  args.push('--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp')
   for (const d of HIDDEN_ROOTS) if (existsSync(d)) args.push('--tmpfs', d)
   const ro = [NODE_PREFIX, ...extraRo].filter((p) => p && existsSync(p))
   for (const p of ro) args.push('--ro-bind', p, p)
