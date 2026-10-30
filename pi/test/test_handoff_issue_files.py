@@ -224,6 +224,8 @@ class MacKeyFile(unittest.TestCase):
         self.assertNotIn(data.strip(), str(e.exception))
         err = [l for l in self.logs if "handoff-files.key" in l]
         self.assertEqual(len(err), 1, self.logs); self.assertIn("ERROR", err[0]); self.assertNotIn(data.strip(), err[0])
+        self.assertIn(f"delete this file (rm {self.f})", err[0])                    # what the operator must do (10-30)
+        self.assertNotIn("a new one is created on the next run", err[0])           # old, wrong: nothing regenerates a bad file
     def test_short_key_refused(self):
         self.put("abcdef0123456789abcdef012345678", 0o600)          # 31 bytes
         self.refused("abcdef0123456789abcdef012345678")

@@ -666,11 +666,12 @@ def _mac_key():
     import stat as _st
     if not _st.S_ISREG(st.st_mode) or st.st_size < 32 or (st.st_mode & 0o777) != 0o600:
         why = f"not a regular file" if not _st.S_ISREG(st.st_mode) else f"size {st.st_size} < 32" if st.st_size < 32 else f"mode {oct(st.st_mode & 0o777)} != 0o600"
-        log(f"ERROR handoff-files.key refused ({why}): {f}; fix or remove it, a new one is created on the next run")
+        log(f"ERROR handoff-files.key refused ({why}): {f}. Operator: delete this file (rm {f}); outbound then creates a new 0600 key on its next run. "
+            "Handoff files pushed under the old key then count as not ours and are skipped (logged) until resolved by hand.")
         raise RuntimeError(f"handoff-files.key refused ({why})")
     k = open(f, "rb").read().strip()
     if len(k) < 32:
-        log(f"ERROR handoff-files.key refused (content shorter than 32 bytes): {f}"); raise RuntimeError("handoff-files.key refused (too short)")
+        log(f"ERROR handoff-files.key refused (content shorter than 32 bytes): {f}. Operator: delete this file (rm {f}); outbound then creates a new 0600 key on its next run."); raise RuntimeError("handoff-files.key refused (too short)")
     return k
 def _mac(repo, path, key, body):
     import hmac, hashlib
