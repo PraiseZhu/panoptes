@@ -16,7 +16,8 @@
 #                 given up and recorded in system_health (reports/catch-up/run-*.json and the next daily report).
 #                 Only one catch-up at a time (catch-up.lock; a second one exits 0 with one '[catch-up] … skipped' line).
 #                 With --create-issues (and ARGUS_ALLOW_ISSUES=1 exported) the children get --create-issues instead.
-#                 Installed by scripts/bootstrap-box.sh as an hourly cron job at :07 (scripts/catch-up.cron) that runs only on even Beijing hours (PANOPTES_CATCHUP_GATE=even).
+#                 Installed by scripts/bootstrap-box.sh as an hourly cron job at :07 (scripts/catch-up.cron), every Beijing hour since 10-30
+#                 (odd hours skip at once when memory is low; PANOPTES_CATCHUP_GATE=even still restores the old even-hours-only gate).
 #   --trigger     who started this run, recorded as run.trigger: event (on-merge trigger) | catch-up | manual.
 #                 Default: manual; --catch-up defaults to catch-up (its children get --trigger catch-up).
 #   --date        Asia/Shanghai calendar day to report on (default: yesterday in Shanghai)
@@ -145,6 +146,28 @@ if [[ -n "$CATCH_UP" && "${PANOPTES_CATCHUP_GATE:-}" == "even" ]]; then
   if (( 10#$BJ_HOUR % 2 != 0 )); then
     printf '[catch-up] %s trigger=%s: Beijing hour %s is odd; catch-up runs on even Beijing hours only, skipped\n' "$(TZ=Asia/Shanghai date +%Y-%m-%dT%H:%M:%S+08:00)" "$TRIGGER" "$BJ_HOUR"
     exit 0
+  fi
+fi
+
+# Hourly catch-up (10-30, ops; /workspace/pi-work/diag-1030/catchup-hourly-mem.md): the cron tick no longer sets
+# PANOPTES_CATCHUP_GATE=even, so it runs every Beijing hour. The odd-hour ticks are the new, extra ones: they check memory
+# BEFORE any lock or memory wait and skip at once (exit 0, one line) below the one-shard row (MemAvailable < 6144 MB) or with
+# SwapFree < 4096 MB; deferring one costs at most an hour. Even hours, mergewatch (event) and manual runs keep the existing gate.
+if [[ -n "$CATCH_UP" && "$TRIGGER" == "catch-up" && -z "${PANOPTES_CATCHUP_GATE:-}" ]]; then
+  BJ_HOUR="${PANOPTES_FAKE_BJ_HOUR:-$(TZ=Asia/Shanghai date +%H)}"
+  if (( 10#$BJ_HOUR % 2 != 0 )); then
+    MI="${PANOPTES_MEMINFO:-/proc/meminfo}"
+    ODD_MEM_KB=$(awk '/^MemAvailable:/{print $2; exit}' "$MI" 2>/dev/null || true)
+    ODD_SWAP_KB=$(awk '/^SwapFree:/{print $2; exit}' "$MI" 2>/dev/null || true)
+    # unreadable / missing field: treat as low memory (skip, exit 0) -- never an arithmetic error, never a blind run
+    [[ "$ODD_MEM_KB" =~ ^[0-9]+$ ]] && ODD_MEM_MB=$(( ODD_MEM_KB / 1024 )) || ODD_MEM_MB=unknown
+    [[ "$ODD_SWAP_KB" =~ ^[0-9]+$ ]] && ODD_SWAP_MB=$(( ODD_SWAP_KB / 1024 )) || ODD_SWAP_MB=unknown
+    if [[ "$ODD_MEM_MB" == unknown || "$ODD_SWAP_MB" == unknown ]] \
+       || (( ODD_MEM_MB < ${PANOPTES_ODD_MIN_MEM_MB:-6144} || ODD_SWAP_MB < ${PANOPTES_ODD_MIN_SWAP_MB:-4096} )); then
+      printf '[catch-up] %s trigger=%s: Beijing hour %s (odd): low memory (MemAvailable %s MiB, SwapFree %s MiB; needs >= %s / %s): skipped\n' \
+        "$(TZ=Asia/Shanghai date +%Y-%m-%dT%H:%M:%S+08:00)" "$TRIGGER" "$BJ_HOUR" "$ODD_MEM_MB" "$ODD_SWAP_MB" "${PANOPTES_ODD_MIN_MEM_MB:-6144}" "${PANOPTES_ODD_MIN_SWAP_MB:-4096}"
+      exit 0
+    fi
   fi
 fi
 

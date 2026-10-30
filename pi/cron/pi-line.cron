@@ -3,7 +3,7 @@
 # /etc/cron.d/pi-fallback). State: /workspace/mivo-qa/pi. Docs: pi/README.md, docs/pi/. History before 10-24: ~/.pi-fallback.git
 # The platform may switch the box time zone at any time (seen 10-23: Asia/Shanghai, Asia/Taipei, America/Los_Angeles), so
 # nothing here depends on it: entries fire hourly at a fixed minute and run.sh gates on the Beijing hour (@HH[,HH]).
-# panoptes catch-up fires hourly at :07 and run-nightly.sh itself skips odd Beijing hours (PANOPTES_CATCHUP_GATE=even); heavy work coordinates through
+# panoptes catch-up fires hourly at :07 and runs every Beijing hour (10-30; odd hours skip at once on low memory, run-nightly.sh); heavy work coordinates through
 # /workspace/mivo-qa/argus-root/nightly.lock instead of clock slots.
 SHELL=/bin/bash
 PATH=/usr/local/bin:/usr/bin:/bin

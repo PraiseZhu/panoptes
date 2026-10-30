@@ -224,17 +224,20 @@ def merge_report_check(now, probs, st):
         for k, v in st.get("merged_probs", {}).items(): probs[k] = v
         return
     since = (now - dt.timedelta(hours=26)).astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    try: prs = gh(["pr", "list", "-R", REPO, "--state", "merged", "--search", f"merged:>={since}", "--json", "number,mergedAt", "--limit", "100"])
+    try: prs = gh(["pr", "list", "-R", REPO, "--state", "merged", "--search", f"merged:>={since}", "--json", "number,mergedAt,baseRefName", "--limit", "100"])
     except Exception as e: log("gh pr list failed:", str(e)[:120]); return
+    # 10-30: panoptes tests only PRs merged into main (catchup.mjs the same); other bases are skipped, never "not tested"
+    skipped = [{"pr": p["number"], "base": p["baseRefName"]} for p in prs if p.get("baseRefName") not in (None, "main")]
+    prs = [p for p in prs if p.get("baseRefName") in (None, "main")]
     active = subprocess.run(["pgrep", "-af", "run-nightly.sh"], capture_output=True, text=True).stdout
     mp = {}
     for p in prs:
         n = p["number"]; age = (now - parse_ts(p["mergedAt"]).astimezone(CST)).total_seconds() / 60
         if age < 90 or os.path.exists(f"{RPT}/PR-{n}.json") or re.search(rf"--pr {n}\b", active): continue
         mp[f"noreport:{n}"] = PN.item("auto", f"PR #{n} 合并 {int(age)} 分钟了还没测", f"#{n} 已经合并 {int(age)} 分钟，还没有测试报告，现在也没有在测它。",
-            "这个 PR 的问题要晚一点才知道。", auto="每 2 小时一次的兜底会补测它；24 小时后还没测上会再提醒你",
+            "这个 PR 的问题要晚一点才知道。", auto="每小时一次的兜底会补测它；24 小时后还没测上会再提醒你",
             link=f"https://github.com/{REPO}/pull/{n}")
-    st["merged_checked_at"] = time.time(); st["merged_probs"] = mp; probs.update(mp)
+    st["merged_checked_at"] = time.time(); st["merged_probs"] = mp; st["merged_skipped"] = skipped; probs.update(mp)
 
 
 SYNC_LOG = "/workspace/grokbot-box-check/sync.log"

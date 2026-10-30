@@ -48,7 +48,7 @@ export function listMergedPrs(repo, days, { gh = process.env.ARGUS_GH_BIN ?? 'gh
     log(`[catch-up] ${first.split('\n')[0]} → listed ${rows.length} merged PR(s) via REST instead`)
   }
   return rows
-    .map((p) => ({ number: p.number, title: p.title, merged_at: p.mergedAt, merge_sha: p.mergeCommit?.oid ?? null, day: windows.find((w) => { const t = Date.parse(p.mergedAt); return t >= w.startMs && t < w.endMs })?.day ?? null }))
+    .map((p) => ({ number: p.number, title: p.title, merged_at: p.mergedAt, merge_sha: p.mergeCommit?.oid ?? null, base_ref: p.baseRefName ?? null, day: windows.find((w) => { const t = Date.parse(p.mergedAt); return t >= w.startMs && t < w.endMs })?.day ?? null }))
     .filter((p) => p.day && p.merge_sha)
     .sort((a, b) => Date.parse(a.merged_at) - Date.parse(b.merged_at) || a.number - b.number)
 }
@@ -125,7 +125,11 @@ export function catchUp({ repo, now = new Date(), reportsDir = REPORTS_DIR, merg
   const gaps = []
   const running = active()
   const inProgress = []
+  const skipped = []
   for (const pr of merged) {
+    // 10-30: only PRs merged into main are tested; any other base (probe-*, release/*) is skipped, not a gap.
+    // base_ref null (list without the field) counts as main: never drop a test on missing data.
+    if (pr.base_ref != null && pr.base_ref !== 'main') { skipped.push({ number: pr.number, base_ref: pr.base_ref, reason: 'non-main-base' }); delete state.prs[String(pr.number)]; continue }
     const gap = gapOf(pr, mergedDir)
     const key = String(pr.number)
     const prev = state.prs[key]
@@ -140,9 +144,9 @@ export function catchUp({ repo, now = new Date(), reportsDir = REPORTS_DIR, merg
   // 先看 diff 再排队（10-26 #1298 纯文档等了 40 分钟）：纯文档的缺口插到最前面，几秒就出报告，不排在长测试后面
   for (const g of gaps) { try { g.docs_only = !!docsOnly(g) } catch { g.docs_only = false } }
   gaps.sort((a, b) => Number(b.docs_only) - Number(a.docs_only))
-  if (!gaps.length) { if (existsSync(sFile)) saveState(sFile, state); return { status: 'nothing-to-do', days, gaps: [], in_progress: inProgress } }
+  if (!gaps.length) { if (existsSync(sFile)) saveState(sFile, state); return { status: 'nothing-to-do', days, gaps: [], in_progress: inProgress, skipped } }
 
-  const result = { schema: 'mivo-qa-catch-up/v1', repo, days, started_at: toShanghaiIso(now), gaps: gaps.map((g) => ({ number: g.number, day: g.day, merge_sha: g.merge_sha, reason: g.gap.reason, docs_only: g.docs_only })), in_progress: inProgress, runs: [],
+  const result = { schema: 'mivo-qa-catch-up/v1', repo, days, started_at: toShanghaiIso(now), gaps: gaps.map((g) => ({ number: g.number, day: g.day, merge_sha: g.merge_sha, reason: g.gap.reason, docs_only: g.docs_only })), in_progress: inProgress, skipped, runs: [],
     system_health: { status: 'ok', gave_up: [], qa_tool_failures: [] } }
   for (const g of gaps) {
     const key = String(g.number)
