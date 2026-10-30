@@ -15,6 +15,11 @@ AUTHOR = "PraiseZhu"; NOTES = "/workspace/praise-pr/notes"; GIT = "/workspace/mi
 DRY = "--dry-run" in sys.argv
 OKB = ("pass", "skipping")
 
+def jload(f, d):   # 10-30: used by the turn-ready check but never defined (NameError, failed:prretro:0945)
+    try:
+        with open(f) as fh: return json.load(fh)
+    except Exception: return d
+
 def git(*a, cwd=GIT):
     r = subprocess.run(["git", "-C", cwd, *a], capture_output=True, text=True); return r.returncode, r.stdout.strip()
 
