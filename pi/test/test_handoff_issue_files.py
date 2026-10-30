@@ -59,38 +59,59 @@ class IssueLabel(unittest.TestCase):
         with self.assertRaises(RuntimeError): O.handler(a)[2]()
 
 class HandoffFiles(unittest.TestCase):
+    """PM 10-30: 日报 writes the files to $QA/handoff/staging/<repo name>/daily/<YYYY>/<MM>/<day>/{feedback,receipts}.md;
+    gh.handoff.files only reads them and pushes, byte for byte; identical remote = no-op, never an empty commit."""
     DAY = "2026-10-30"; BASEP = "daily/2026/10/2026-10-30"
     def setUp(self):
-        self.d = tempfile.mkdtemp(); O.QA = self.d; self.g = O.gh = Gh(); self.runs = []
-        for n in ("feedback.md", "receipts.md"): open(f"{self.d}/{n}", "w").write(f"# {n}\n内容\n")
+        self.d = tempfile.mkdtemp(); O.QA = self.d; self.g = O.gh = Gh(); self.runs = []; self.cached_diff = 1
+        self.st = f"{self.d}/handoff/staging/aj0928-handoff/{self.BASEP}"; os.makedirs(self.st)
+        for n in ("feedback.md", "receipts.md"): open(f"{self.st}/{n}", "w").write(f"# {n}\n内容\n")
         def fake_run(cmd, **kw):
             self.runs.append(cmd)
             if cmd[:3] == ["gh", "repo", "clone"]: os.makedirs(cmd[4], exist_ok=True)
+            if "diff" in cmd and "--quiet" in cmd and self.cached_diff == 0: return ""
+            if "diff" in cmd and "--quiet" in cmd: raise RuntimeError("git rc=1: ")
             return ""
         O.run = fake_run
     def act(self, **kw):
-        return {"key": f"handoff-files:{REPO}:{self.DAY}", "type": "gh.handoff.files", "repo": REPO, "day": self.DAY,
-                "files": {"feedback.md": f"{self.d}/feedback.md", "receipts.md": f"{self.d}/receipts.md"}, **kw}
-    def test_writes_both_files_and_pushes_plain(self):
+        return {"key": f"handoff-files:{REPO}:{self.DAY}", "type": "gh.handoff.files", "repo": REPO, "day": self.DAY, **kw}
+    def test_staging_path_contract(self):
+        self.assertEqual(O.handoff_staging_dir(REPO, self.DAY), self.st)
+    def test_pushes_staged_files_verbatim_plain_push(self):
         who, state, validate, do = O.handler(self.act())
         self.assertEqual(state(), "pending"); validate(); do()
         push = [c for c in self.runs if "push" in c]
         self.assertEqual(len(push), 1); self.assertFalse(any(x in push[0] for x in ("-f", "--force", "--no-verify")))
-        self.assertTrue(any(c[-1].startswith("HEAD:refs/heads/") for c in push))
-    def test_done_when_remote_equals_local(self):
-        for n in ("feedback.md", "receipts.md"):
-            self.g.remote[f"{self.BASEP}/{n}"] = O.handoff_file_text(open(f"{self.d}/{n}").read(), self.act()["key"])
+        self.assertEqual(push[0][-1], "HEAD:refs/heads/main")
+        self.assertTrue(any("commit" in c for c in self.runs))
+    def test_identical_remote_is_noop_no_commit(self):
+        for n in ("feedback.md", "receipts.md"): self.g.remote[f"{self.BASEP}/{n}"] = open(f"{self.st}/{n}").read()
         self.assertEqual(O.handler(self.act())[1](), "done")
-    def test_never_overwrites_a_file_it_did_not_write(self):
-        self.g.remote[f"{self.BASEP}/receipts.md"] = "Grok 写的回执\n"
+    def test_only_changed_file_is_written(self):
+        self.g.remote[f"{self.BASEP}/feedback.md"] = open(f"{self.st}/feedback.md").read()
+        self.g.remote[f"{self.BASEP}/receipts.md"] = "旧回执\n"
+        O.handler(self.act())[3]()
+        add = next(c for c in self.runs if "add" in c)
+        self.assertEqual(add[-1:], [f"{self.BASEP}/receipts.md"])
+    def test_clone_already_identical_makes_no_commit(self):
+        self.cached_diff = 0   # e.g. someone pushed the same bytes between state() and the clone
+        out = O.handler(self.act())[3]()
+        self.assertFalse(any("commit" in c or "push" in c for c in self.runs)); self.assertIn("no change", out)
+    def test_missing_staging_waits(self):
+        os.remove(f"{self.st}/receipts.md")
         self.assertTrue(O.handler(self.act())[1]().startswith("stale:"))
         self.assertTrue(O.state_error_skips("gh.handoff.files"))
-    def test_refuses_non_handoff_repo_bad_name_or_empty_file(self):
-        for bad in (self.act(repo="xindong/mivo-canvas-plugin"), self.act(files={"../x.md": f"{self.d}/feedback.md"}),
-                    self.act(day="2026/10/30"), self.act(files={"feedback.md": f"{self.d}/nope.md"})):
+    def test_refuses_non_handoff_repo_bad_day_or_empty_file(self):
+        for bad in (self.act(repo="xindong/mivo-canvas-plugin"), self.act(day="2026/10/30"), self.act(day="../x")):
             with self.assertRaises(RuntimeError): O.handler(bad)[2]()
-        open(f"{self.d}/feedback.md", "w").write("")
+        open(f"{self.st}/feedback.md", "w").write("")
         with self.assertRaises(RuntimeError): O.handler(self.act())[2]()
+
+class DailyEnqueues(unittest.TestCase):
+    def test_one_action_per_route_for_report_day(self):
+        acts = D.handoff_files_actions("2026-10-30", {"routes": [{"repo": REPO}, {"repo": "zhongxingtian-ai/handover-mivo"}]})
+        self.assertEqual([a["key"] for a in acts], [f"handoff-files:{REPO}:2026-10-30", "handoff-files:zhongxingtian-ai/handover-mivo:2026-10-30"])
+        self.assertTrue(all(a["type"] == "gh.handoff.files" and a["day"] == "2026-10-30" and "files" not in a for a in acts))
 
 if __name__ == "__main__":
     unittest.main()

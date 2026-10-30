@@ -624,58 +624,64 @@ def h_update_branch(a):
     return f"gh update-branch #{n}", state, validate, do
 
 HANDOFF_FILES = ("feedback.md", "receipts.md")
-HANDOFF_FILES_MARK = "<!-- pi-line handoff-files key={} -->"
-def handoff_file_text(text, key):
-    """what gh.handoff.files writes: the local file + our ownership marker (the only files it will ever overwrite)."""
-    return text.rstrip("\n") + "\n\n" + HANDOFF_FILES_MARK.format(key) + "\n"
+def handoff_staging_dir(repo, day):
+    """Where Mivo QA 日报 stages a handoff repo's files for `day` (PM 10-30): $QA/handoff/staging/<repo name>/daily/<YYYY>/<MM>/<day>/,
+    a mirror of the handoff repo's own layout (the 10-30 staging dirs aj0928-handoff/, handover-mivo/ already use it). <repo name>
+    is the part after the owner; names are unique across HANDOFF_REPO (checked)."""
+    names = [r.split("/", 1)[1] for r in HANDOFF_REPO.values()]
+    if len(set(names)) != len(names): raise RuntimeError(f"handoff repo names are not unique: {names}")
+    return f"{QA}/handoff/staging/{repo.split('/', 1)[1]}/daily/{day[:4]}/{day[5:7]}/{day}"
 def h_handoff_files(a):
-    """gh.handoff.files {repo, day, files:{feedback.md|receipts.md: local path}} (10-30): write the day's feedback / receipts into
-    the route's handoff repo at daily/<YYYY>/<MM>/<day>/<name> (the layout pm_extra.py and compare.py read) and push, plain.
-    Fail closed: handoff repos only, only those two names, non-empty local files without draft markers; a file already there that
-    does not carry our marker (Grok / a person wrote it) is never overwritten (state stale -> skipped, never pushed blind)."""
-    repo, day, key = a.get("repo") or "", str(a.get("day") or ""), a["key"]
-    files = dict(a.get("files") or {})
+    """gh.handoff.files {repo, day} (PM 10-30): push the 日报's staged feedback.md + receipts.md (handoff_staging_dir) to the route's
+    handoff repo at daily/<YYYY>/<MM>/<day>/ (the layout pm_extra.py / compare.py read), byte for byte -- Pi generates no content.
+    Dedupe: a file whose remote bytes are identical is not written; nothing differs -> done, no commit (also re-checked in the clone
+    with git diff --cached). Fail closed: handoff repos only, strict day, both files present and non-empty (missing -> stale, the
+    next run waits for the 日报), plain push to main (rejected if main moved; retried next run)."""
+    repo, day = a.get("repo") or "", str(a.get("day") or "")
     rel = lambda n: f"daily/{day[:4]}/{day[5:7]}/{day}/{n}"
     def check():
         if repo not in HANDOFF_REPO.values(): raise RuntimeError(f"{repo or '?'} is not a handoff repo")
         if not re.fullmatch(r"\d{4}-\d\d-\d\d", day): raise RuntimeError(f"bad day {day!r}")
-        if not files or any(n not in HANDOFF_FILES for n in files): raise RuntimeError(f"files must be among {HANDOFF_FILES}: {sorted(files)}")
-        out = {}
-        for n, p in files.items():
-            if not (p and os.path.isfile(p) and os.path.getsize(p) > 0): raise RuntimeError(f"{n}: local file missing or empty ({p})")
-            out[n] = handoff_file_text(open(clean_body(p)).read(), key)
+    def staged(strict=True):
+        check(); d = handoff_staging_dir(repo, day); out = {}
+        for n in HANDOFF_FILES:
+            p = os.path.join(d, n)
+            if not os.path.isfile(p):
+                if strict: raise RuntimeError(f"staged {p} missing")
+                return None
+            b = open(p, "rb").read()
+            if not b.strip(): raise RuntimeError(f"staged {p} is empty")
+            out[n] = b
         return out
     def remote(n):
         try: c = gh(["api", f"repos/{repo}/contents/{urllib.parse.quote(rel(n))}?ref=main"])
         except RuntimeError as e:
             if "404" in str(e): return None
             raise
-        return base64.b64decode(c.get("content") or "").decode("utf-8")
+        return base64.b64decode(c.get("content") or "")
+    def changed(want): return [n for n, b in want.items() if remote(n) != b]
     def state():
-        want = check(); same = 0
-        for n, t in want.items():
-            r = remote(n)
-            if r is None: continue
-            if HANDOFF_FILES_MARK.format("").split("key=")[0] not in r: return f"stale:{rel(n)} exists and was not written by pi-line"
-            same += r == t
-        return "done" if same == len(want) else "pending"
+        want = staged(strict=False)
+        if want is None: return f"stale:waiting for the 日报 to stage {handoff_staging_dir(repo, day)}/{{{','.join(HANDOFF_FILES)}}}"
+        return "pending" if changed(want) else "done"
     def validate():
-        want = check(); return f"{repo} {', '.join(rel(n) for n in want)}"
+        want = staged(); return f"{repo} {day}: would write {changed(want) or 'nothing (identical)'}"
     def do():
-        want = check()
-        st = state()
-        if st != "pending": raise RuntimeError(f"refusing to push: {st}")
+        want = staged(); ch = changed(want)
+        if not ch: return "no change (remote identical)"
         d = W.mkdtemp("pi-handoff-files-")
         try:
             run(["gh", "repo", "clone", repo, d, "--", "--depth", "1", "-q"])
             run(["git", "-C", d, "config", "user.name", GIT_NAME]); run(["git", "-C", d, "config", "user.email", GIT_EMAIL])
             os.makedirs(os.path.join(d, rel("")), exist_ok=True)
-            for n, t in want.items():
-                with open(os.path.join(d, rel(n)), "w", encoding="utf-8") as fh: fh.write(t)
-            run(["git", "-C", d, "add", "--"] + [rel(n) for n in want])
-            run(["git", "-C", d, "commit", "-q", "-m", f"QA 交接 {day}: {' '.join(sorted(want))}", "-m", f"Pi-Handoff: {key}"])
-            run(["git", "-C", d, "push", "origin", "HEAD:refs/heads/main"])   # plain push: rejected if main moved; retried next run
-            return f"pushed {', '.join(rel(n) for n in want)} to {repo}"
+            for n in ch:
+                with open(os.path.join(d, rel(n)), "wb") as fh: fh.write(want[n])
+            run(["git", "-C", d, "add", "--"] + [rel(n) for n in ch])
+            try: run(["git", "-C", d, "diff", "--cached", "--quiet"]); return "no change (clone identical)"   # rc 0 = nothing staged
+            except RuntimeError: pass
+            run(["git", "-C", d, "commit", "-q", "-m", f"QA 交接 {day}: {' '.join(ch)}", "-m", f"Pi-Handoff: {a['key']}"])
+            run(["git", "-C", d, "push", "origin", "HEAD:refs/heads/main"])
+            return f"pushed {', '.join(rel(n) for n in ch)} to {repo}"
         finally: shutil.rmtree(d, ignore_errors=True)
     return f"gh handoff files {repo}", state, validate, do
 

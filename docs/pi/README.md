@@ -154,4 +154,4 @@ panoptes catch-up 每 2 小时 :07 + 每次合并（mergewatch）起跑；修 PR
 
 ## 10-30 交接 issue 正文 + handoff 标签 + 交接文件外发
 - daily.py 开交接 issue 时正文写级别、file:line、测试的合并提交、指纹，标题带 `[P级]`；outbound 加 `handoff` 标签和 `mivo-qa-handoff` 标记（handoff.py 只跟踪带这两样的 issue），仓里没有该标签时不开（fail closed）。
-- 新外发类型 `gh.handoff.files`：把 feedback.md / receipts.md 写到交接仓 `daily/<YYYY>/<MM>/<日>/`（pm_extra.py、compare.py 读的位置）并普通 push；只认 handoff 仓和这两个文件名，远端已有且不是 pi-line 写的文件一律不覆盖。目前还没有作业产出这个动作。
+- 新外发类型 `gh.handoff.files {repo, day}`（PM 10-30 定）：内容由 Mivo QA 日报写，Pi 不生成。日报每天把两个文件放到 `/workspace/mivo-qa/handoff/staging/<仓名>/daily/<YYYY>/<MM>/<日>/feedback.md`、`receipts.md`，其中 `<仓名>` 取交接仓 owner/ 后面那段（`aj0928-handoff`、`handover-mivo`），`<日>` 是日报发出那天（数据日 +1）。outbound 原样推到交接仓同一路径（`daily/<YYYY>/<MM>/<日>/`，pm_extra.py、compare.py 读这里），普通 push 到 main。远端内容完全相同的文件不写；两份都相同就算 done，不产生空提交。文件没放好时标 stale，下一轮再看。daily.py 每天给每个交接仓排一条（key `handoff-files:<repo>:<日>`）。

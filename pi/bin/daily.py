@@ -248,6 +248,12 @@ def handoff_issue_action(day, i, f):
     return {"key": f"handoff:{n}:{pfp or fp}", "type": "gh.issue.create", "pr": n, "title": f"[{f.get('severity')}] {title}" if f.get("severity") else title,
             "text": body, "labels": ["handoff"], "handoff_key": pfp}
 
+def handoff_files_actions(day, routes):
+    """one gh.handoff.files per handoff repo for the report day (PM 10-30): outbound pushes what the 日报 staged under
+    $QA/handoff/staging/<repo name>/daily/<YYYY>/<MM>/<day>/; Pi writes no content. Until the files are staged it waits (stale)."""
+    return [{"key": f"handoff-files:{r['repo']}:{day}", "type": "gh.handoff.files", "repo": r["repo"], "day": day}
+            for r in (routes or {}).get("routes", []) if r.get("repo")]
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]; fl = {a for a in sys.argv[1:] if a.startswith("--")}
     day = args[0] if args else data_day([0]); ro = "--render-only" in fl
@@ -276,6 +282,8 @@ def main():
         for f in i["real"]:
             acts.append({**handoff_issue_action(day, i, f), "route_author": i["login"],
                          "dedupe_against": [f"{QA}/handoff/<owner>/issues.json", f"{SENT}/{day}/created.tsv"]})
+    rday = (dt.date.fromisoformat(day) + dt.timedelta(days=1)).isoformat()   # report day = data day + 1 (pm_extra.py: feedback of nxt)
+    acts += handoff_files_actions(rday, routes)
     sick = [{"pr": i["n"], "what": i["health"]} for i in items if i.get("health")]
     if fault or sick:   # 日报标准 §4: 报告缺失/无效/非 1.0 或 system_health 异常 = QA 系统故障，告诉 Praise 并转运维
         acts.append({"key": f"daily-health:{day}", "type": "grokbot.chat-to-Praise", "to": "Praise", "at": now_cst().isoformat(timespec="seconds"),
