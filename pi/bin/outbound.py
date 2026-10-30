@@ -375,7 +375,7 @@ def apply_fix_patch(d, patch, base=None, br=None):
         return "main-3way"
     subprocess.run(["git", "-C", d, "reset", "-q", "--hard", "HEAD"], capture_output=True)
     raise GiveUp(f"patch no longer applies on main (verified base {str(base or '?')[:9]}): {(r.stderr or '').strip()[-160:]}")
-def h_push_fix(a):
+def h_push_fix(a, now=None):
     """gh.pr.push-fix {pr, branch, head, patch, title, message}: prfix --revise fixed red CI on our own draft fix PR (10-24). Plain
     push (never force) onto the PR's qa-fix/* branch, only while the PR is still our open draft and its head is the one that was fixed."""
     n, br, head, patch, key = a["pr"], a.get("branch") or "", a.get("head") or "", a.get("patch"), a["key"]
@@ -387,7 +387,7 @@ def h_push_fix(a):
                 or "<!-- pi-line fixpr:" not in (p.get("body") or ""): return "stale:not our bot fix PR"
         if p["headRefOid"] == head:
             if not p.get("isDraft"): return "stale:no longer a draft"
-            try: why = ownership_block(n, flatten_pages(gh(pr_commits_args(n))))
+            try: why = ownership_block(n, flatten_pages(gh(pr_commits_args(n))), now)
             except Exception as e: return f"stale:ownership unknown ({str(e)[:80]})"   # fail closed: never push blind
             return f"stale:{why}" if why else "pending"
         msg = gh(["api", f"repos/{REPO}/commits/{p['headRefOid']}", "-q", ".commit.message"], js=False)
