@@ -1,11 +1,22 @@
 """opsdeploy 只在 deploy 无错且 HEAD == origin/main 时才同步 pi-call / cron；picall_sync 复制保留可执行位、不带 mtime。"""
 import os, sys, time, types, tempfile, importlib
 B = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin"); sys.path.insert(0, B)
-import pytest
 
 
-@pytest.fixture
-def od(monkeypatch):
+class _MP:
+    def __init__(self): self.undo = []
+    def setattr(self, o, n, v): self.undo.append((setattr, o, n, getattr(o, n))); setattr(o, n, v)
+    def setitem(self, d, k, v): self.undo.append(("item", d, k, d.get(k, _MP))); d[k] = v
+    def restore(self):
+        for f, o, n, v in reversed(self.undo):
+            if f == "item":
+                if v is _MP: o.pop(n, None)
+                else: o[n] = v
+            else: setattr(o, n, v)
+
+
+def _od():
+    monkeypatch = _MP()
     import opsdeploy, opsenv
     calls = []
     monkeypatch.setattr(opsdeploy, "mode", lambda: "pi")
@@ -19,22 +30,25 @@ def od(monkeypatch):
         if "rev-parse origin/main" in c: return 0, state["tgt"]
         return 0, ""
     monkeypatch.setattr(opsenv, "sh", sh)
-    return opsdeploy, state, calls
+    return opsdeploy, state, calls, monkeypatch
 
 
-def test_deploy_error_no_sync(od):
-    m, st, calls = od; st["err"] = "panoptes fetch failed"
-    m.main(); assert calls == []
+def test_deploy_error_no_sync():
+    m, st, calls, mp = _od(); st["err"] = "panoptes fetch failed"
+    try: m.main(); assert calls == []
+    finally: mp.restore()
 
 
-def test_head_behind_origin_no_sync(od):
-    m, st, calls = od; st["tgt"] = "b" * 40
-    m.main(); assert calls == []
+def test_head_behind_origin_no_sync():
+    m, st, calls, mp = _od(); st["tgt"] = "b" * 40
+    try: m.main(); assert calls == []
+    finally: mp.restore()
 
 
-def test_success_syncs(od):
-    m, st, calls = od
-    m.main(); assert calls == ["picall", "cron"]
+def test_success_syncs():
+    m, st, calls, mp = _od()
+    try: m.main(); assert calls == ["picall", "cron"]
+    finally: mp.restore()
 
 
 def test_copy_keeps_exec_bit_not_mtime():
@@ -45,3 +59,9 @@ def test_copy_keeps_exec_bit_not_mtime():
     st = os.stat(f"{live}/pi-auto")
     assert st.st_mode & 0o777 == 0o755
     assert abs(st.st_mtime - time.time()) < 60
+
+
+if __name__ == "__main__":
+    for k, f in list(globals().items()):
+        if k.startswith("test_"): f()
+    print("ok test_opsdeploy_sync_guard")
