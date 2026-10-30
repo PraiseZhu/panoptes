@@ -23,7 +23,7 @@ def sync(repo=REPO, live=LIVE):
     os.makedirs(live, exist_ok=True); bak = f"{live}.bak-{time.strftime('%Y%m%d-%H%M%S')}"
     for f in d:
         if os.path.exists(os.path.join(live, f)): os.makedirs(bak, exist_ok=True); shutil.copy2(os.path.join(live, f), os.path.join(bak, f))
-        t = os.path.join(live, f + ".tmp"); shutil.copy2(os.path.join(repo, f), t); os.chmod(t, 0o755); os.replace(t, os.path.join(live, f))
+        t = os.path.join(live, f + ".tmp"); shutil.copyfile(os.path.join(repo, f), t); os.chmod(t, 0o755); os.replace(t, os.path.join(live, f))
     return d
 
 
