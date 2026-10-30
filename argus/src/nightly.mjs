@@ -13,7 +13,7 @@ import { openDb } from './db.mjs'
 import { listNightlyPrs, getPull, getCommit, getBranchHead, listPullFiles, addFullText, getHandoff, shanghaiDayWindow, findIssuesByMarkerLabel, createIssue, commentIssue, reopenIssue, findCommentByMarker, listPullReviewComments, listPullCommits, listTeamMembers } from './github.mjs'
 import { classifyChange, highRiskFiles, withoutHandoff, isTestPath } from './classify.mjs'
 import { parseHandoff, splitHandoffCases, toHandoffReport, settleHandoff } from './handoff.mjs'
-import { executeOnSha, ensureMirror, mergeBase, sandboxMode, janitor, mirrorPath, currentUmask, INHERITED_UMASK, PINNED_UMASK, fmtUmask } from './runner.mjs'
+import { executeOnSha, ensureMirror, mergeBase, sandboxMode, sandboxRootUid, janitor, mirrorPath, currentUmask, INHERITED_UMASK, PINNED_UMASK, fmtUmask } from './runner.mjs'
 import { decideOutcome, failedIds, setupFailed, failureKeys, compareKey } from './decide.mjs'
 import { analyzePr } from './ai.mjs'
 import { evaluateJev } from './jev.mjs'
@@ -221,6 +221,17 @@ function evidenceTail(r, name) {
   let idx = name ? lines.findIndex((l) => l.includes(String(name).split(' > ').pop())) : -1
   const slice = idx >= 0 ? lines.slice(Math.max(0, idx - 3), idx + 25) : lines.slice(-30)
   return redact(slice.join('\n')).slice(-3000)
+}
+
+// 沙箱改写属主：宿主 root 在 bwrap 里读回 overflow uid（见 runner.sandboxRootUid），断言「路径属于宿主 root / 控制器」
+// 的用例在沙箱里必然失败，base 上同样失败。这类失败是 QA 环境问题，不能记成「仓库在基线版本上也失败」（infrafix 按
+// pre_existing 每轮开单）。只对失败证据里提到属主（或直接印出沙箱里那个 uid）的失败这样判，其它 base 失败仍然算数。
+const HOST_OWNER_RE = /\b[ug]ids?\b|own(?:er|ed|ership)\b|属主|所有者|所有权/i
+export function sandboxOwnerFailure({ test = null, tail = null, sandboxUid = sandboxRootUid() } = {}) {
+  if (!sandboxUid) return null
+  const text = `${test ?? ''}\n${tail ?? ''}`
+  if (!HOST_OWNER_RE.test(text) && !text.includes(String(sandboxUid))) return null
+  return { sandbox_uid: sandboxUid }
 }
 
 // ── 单个 PR ───────────────────────────────────────────
@@ -469,12 +480,18 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
       why = `${why}; ${baseComparison.note}`
     }
     const baseRun = compareOn(base)
+    const evTail = evidenceTail(r, named ? test : null)
     // 合并前同检查也失败：显式 pre_existing 给日报读；test_timeout 等无法 fingerprint 对齐时仍标为 pre-existing（P3）
-    if (baseRun === 'fail' && status === 'unverified') {
+    // 例外：失败与宿主属主有关、而沙箱改写了属主 → 环境问题（见 sandboxOwnerFailure），不写成 pre_existing
+    const ownerEnv = baseRun === 'fail' && sandboxMode(profile) === 'bwrap' && ['pre-existing', 'unverified'].includes(status) ? sandboxOwnerFailure({ test: named ? test : null, tail: evTail }) : null
+    if (ownerEnv) {
+      status = 'unverified'
+      why = `fails on host file ownership, which the bwrap step sandbox rewrites (the host root reads back as uid ${ownerEnv.sandbox_uid}): the base revision fails the same way inside the sandbox, so this is an environment problem, not a repository pre-existing failure`
+    } else if (baseRun === 'fail' && status === 'unverified') {
       status = 'pre-existing'
       why = 'also fails on the base revision (base run failed; failure type not fingerprint-comparable, e.g. test_timeout)'
     }
-    const preExisting = status === 'pre-existing' || baseRun === 'fail'
+    const preExisting = !ownerEnv && (status === 'pre-existing' || baseRun === 'fail')
     // 试运行检查（bench）的用例超时、空闲机器上重跑通过：机器负载（审计 2026-10-18 S3），不算这个 PR 的发现
     const envTimeout = isTrialTimeout(step, r, test, { status, rerun: compareOn(rerun), idle: out.rerun_idle_wait?.idle })
     out.failed_checks.push({
@@ -483,13 +500,14 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
       pre_existing: preExisting,
       severity: envTimeout ? 'P3' : severityFor({ status, step, merged }), attribution: envTimeout ? `${why}; test timed out in a trial-only check and passed on the idle-machine rerun: treated as environment load, not a PR finding` : why,
       ...(envTimeout ? { not_a_pr_finding: true, env_suspected: 'trial-timeout' } : {}),
+      ...(ownerEnv ? { env_suspected: 'sandbox-owner' } : {}),
       // 统一分级 P0 要人工或裁决确认：已合并、产品类、本 PR 引入且（复查过的）最新主干仍失败 → 只标 p0_candidate，等级仍是 P1
       ...(!envTimeout && p0Candidate({ status, step, merged }) ? { p0_candidate: true, p0_note: p0NoteFor({ step, latestSha: out.latest_main_sha ?? null, latestIsSame, latestRun: latest ? compareOn(latest) : null }) } : {}),
       fingerprint: fp, pr_fingerprint: prFingerprint(fp, number),
       evidence: {
         tested_sha: sha, base_sha: baseSha, exit_code: r?.exitCode, signal: r?.signal ?? null, ended_at: r?.endedAt ?? null, timed_out: Boolean(r?.timedOut),
         first_run: 'fail', rerun: compareOn(rerun), base_run: baseRun, ...(latest ? { latest_main_run: compareOn(latest) } : {}),
-        command: (step.cmd ?? []).join(' '), log_tail: evidenceTail(r, named ? test : null), log_file: join(evDir, 'h1/logs', `${stepId}.log`),
+        command: (step.cmd ?? []).join(' '), log_tail: evTail, log_file: join(evDir, 'h1/logs', `${stepId}.log`),
         ...(step.trialOnly ? { machine_load: { first_run: r?.machine ?? null, rerun_wait: out.rerun_idle_wait ?? null, rerun: rerun?.find((y) => y.id === stepId)?.machine ?? null } } : {}),
         ...(baseComparison?.compared ? { base_log_file: join(evDir, 'b/logs', `${stepId}.log`) } : {}),
       },
@@ -534,6 +552,8 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   const stated = statedAcceptanceFinding({ gate: out.coverage_gate, body: pr.body, qaMd: handoffRaw.qa, repo, number, sha, baseSha })
   if (stated) out.findings.push(stated)
   for (const c of out.failed_checks.filter((x) => x.not_a_pr_finding)) health.env_problems.push({ pr: number, message: `trial check '${c.check_id}' timed out${c.test ? ` (${c.test})` : ''} and passed on the idle-machine rerun: treated as environment load, not a PR finding` })
+  // 沙箱改写属主造成的基线失败：记环境问题（坏的是 QA 的沙箱，不是仓库），不写成 pre_existing（否则 infrafix 每轮开单）
+  for (const c of out.failed_checks.filter((x) => x.env_suspected === 'sandbox-owner')) health.env_problems.push({ pr: number, message: `check '${c.check_id}'${c.test ? ` (${c.test})` : ''}: the bwrap step sandbox rewrites file ownership (the host root reads back as uid ${sandboxRootUid()}), so host-ownership assertions fail there exactly as they do on the base revision; environment problem, not an old repository failure` })
   // 失败检查：unverified / setup-failed / timeout / flaky 不是作者的问题 → 待核实（QA 自查）；其余按 severityFor 进 findings
   const asCheck = (c) => ({ source: 'check', test_backed: checkIsTestBacked(c), ...c })
   for (const c of out.failed_checks.filter((x) => !x.not_a_pr_finding && !x.low_memory && QA_SELF_CHECK_STATUSES.includes(x.status))) {

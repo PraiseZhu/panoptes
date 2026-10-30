@@ -121,7 +121,11 @@ Replaces macOS `sandbox-exec`. Every test/install command runs as
   the Node install (nvm), Playwright browsers and Argus' `node_modules` are re-mounted read-only;
 * new pid / ipc / uts (and cgroup when available) namespaces, `--die-with-parent`, `--new-session`;
 * environment is the existing Argus minimal env (no tokens, `HOME`/`TMPDIR` inside the run dir);
-* network is not restricted (same as the Mac deployment; `npm ci` needs it).
+* network is not restricted (same as the Mac deployment; `npm ci` needs it);
+* the user namespace maps only the runner's own uid, so every other owner — the host root included — reads back as the
+  overflow uid (65534): tests that assert host file ownership (`review-capacity-check/workspace.mjs`
+  `assertControllerDirectory`) fail here and pass in GitHub CI. Such checks are not recorded as a repository
+  `pre_existing` failure; they get `env_suspected: "sandbox-owner"` and a `system_health.env_problems` entry.
 
 Chromium's own sandbox works nested inside bwrap (no `--no-sandbox` needed).
 If bwrap is missing the run refuses to test; `ARGUS_ALLOW_UNSANDBOXED=1` explicitly falls back to

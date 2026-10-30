@@ -1,5 +1,6 @@
 // 在隔离 run 目录里检出指定版本并执行项目 profile 的步骤
-import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync, statSync, lstatSync, realpathSync, cpSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync, statSync, lstatSync, realpathSync, cpSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { join, dirname, basename, resolve, relative, isAbsolute } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
 import { run, isStopping, overBudget } from './exec.mjs'
@@ -248,6 +249,32 @@ export function bwrapArgs(runDir, { extraRo = [], extraRw = [], chdir = null } =
   for (const p of [CACHE_DIR, runDir, shortTmpOf(runDir), ...extraRw]) { mkdirSync(p, { recursive: true }); args.push('--bind', p, p) }
   if (chdir) args.push('--chdir', chdir)
   return args
+}
+
+// bwrap 的 user namespace 只映射 runner 自己的 uid：宿主上属于其它 uid 的路径（包括 / 的 root）在沙箱里一律读回
+// overflow uid（65534）。所以「这个路径属于宿主 root」在步骤沙箱里根本没法核对 —— mivo review-capacity-check 的
+// workspace.mjs assertControllerDirectory（「父目录必须由控制器独占管理」）就是这样每轮都失败，同一份代码在
+// GitHub CI 上却通过。返回沙箱里 / 的属主 uid（每个进程探测一次）；非 bwrap 或探测失败返回 null。
+let sandboxRootUidProbed = false
+let sandboxRootUidValue = null
+export function sandboxRootUid() {
+  if (sandboxRootUidProbed) return sandboxRootUidValue
+  sandboxRootUidProbed = true
+  if (sandboxMode({}) !== 'bwrap') return null
+  let runDir = null
+  try {
+    runDir = mkdtempSync(join(tmpdir(), 'argus-owner-probe-'))
+    const res = spawnSync(BWRAP, [...bwrapArgs(runDir), '--', 'stat', '-c', '%u', '/'], { encoding: 'utf8', timeout: 60_000 })
+    const uid = res.status === 0 ? Number(String(res.stdout).trim()) : NaN
+    if (Number.isInteger(uid)) sandboxRootUidValue = uid
+  } catch { /* 探测失败按未知处理：判定保持原样 */ }
+  finally {
+    if (runDir) {
+      rmSync(runDir, { recursive: true, force: true })
+      rmSync(shortTmpOf(runDir), { recursive: true, force: true })
+    }
+  }
+  return sandboxRootUidValue
 }
 
 function sandboxed(argv, runDir, profile, stepRo = []) {
