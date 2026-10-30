@@ -25,3 +25,20 @@ def assert_inside(root, *paths):
     r = os.path.realpath(root) + os.sep
     for p in paths:
         if not (os.path.realpath(p) + os.sep).startswith(r): raise AssertionError(f"{p} is not inside {root}: refusing to touch real paths")
+
+
+def live_state():
+    """the box's live state root (PI_TEST_LIVE_STATE: test-only override, so a fake live dir can be used to prove isolation)"""
+    return os.environ.get("PI_TEST_LIVE_STATE") or "/workspace/mivo-qa/pi"
+
+def sandbox_state():
+    """call BEFORE importing pi/bin modules in a test file that may be run directly (python3 test/x.py): when PI_STATE is unset
+    or is the live root, point PI_STATE / PI_WORK / PI_WORK_ROOT at a fresh temp dir, so lib.BASE and every path derived from it
+    are scratch. Under pytest (conftest) and selftest (env -i PI_STATE=tmp) PI_STATE is already a temp dir: no-op. Returns BASE."""
+    import tempfile
+    cur = os.environ.get("PI_STATE")
+    if not cur or os.path.realpath(cur) == os.path.realpath(live_state()):
+        t = tempfile.mkdtemp(prefix="pi-test-state-")
+        os.environ.update(PI_STATE=f"{t}/state", PI_WORK=f"{t}/work", PI_WORK_ROOT=f"{t}/work")
+        for d in ("state", "work"): os.makedirs(f"{t}/{d}", exist_ok=True)
+    return os.environ["PI_STATE"]

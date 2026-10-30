@@ -210,5 +210,32 @@ class FinalRules138(Acceptance138):
         self.assertEqual(len(hits), 3, logs)                                        # one line per skip, every time
         self.assertIn(f"repo={REPO} path={self.BASEP}/receipts.md", hits[0]); self.assertIn(f"path={self.BASEP}/feedback.md", hits[2])
 
+class MacKeyFile(unittest.TestCase):
+    """an existing handoff-files.key that is shorter than 32 bytes or not mode 0600 is refused (fail closed) with one error log
+    line that never contains key material (10-30)."""
+    def setUp(self):
+        self.base = tempfile.mkdtemp(); self.saved = O.BASE; O.BASE = self.base; self.addCleanup(setattr, O, "BASE", self.saved)
+        self.f = f"{self.base}/outbound/handoff-files.key"; os.makedirs(os.path.dirname(self.f))
+        self.logs = []; orig = O.log; O.log = lambda *a: self.logs.append(" ".join(map(str, a))); self.addCleanup(setattr, O, "log", orig)
+    def put(self, data, mode):
+        open(self.f, "w").write(data); os.chmod(self.f, mode)
+    def refused(self, data):
+        with self.assertRaises(RuntimeError) as e: O._mac("r", "p", "k", "b")
+        self.assertNotIn(data.strip(), str(e.exception))
+        err = [l for l in self.logs if "handoff-files.key" in l]
+        self.assertEqual(len(err), 1, self.logs); self.assertIn("ERROR", err[0]); self.assertNotIn(data.strip(), err[0])
+    def test_short_key_refused(self):
+        self.put("abcdef0123456789abcdef012345678", 0o600)          # 31 bytes
+        self.refused("abcdef0123456789abcdef012345678")
+    def test_wrong_mode_refused(self):
+        k = "f" * 64
+        for mode in (0o644, 0o640, 0o400):
+            self.logs.clear(); self.put(k, mode); self.refused(k)
+    def test_good_key_used_and_new_key_created_600(self):
+        self.put("a" * 64, 0o600); self.assertEqual(len(O._mac("r", "p", "k", "b")), 64)
+        os.remove(self.f); O._mac("r", "p", "k", "b")
+        st = os.stat(self.f); self.assertEqual(st.st_mode & 0o777, 0o600); self.assertGreaterEqual(st.st_size, 32)
+        self.assertEqual([l for l in self.logs if "ERROR" in l], [])
+
 if __name__ == "__main__":
     unittest.main()
