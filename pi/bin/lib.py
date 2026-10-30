@@ -211,6 +211,54 @@ def panoptes_busy():
 
 TAKEOVER = os.environ.get("PI_TAKEOVER_DIR") or f"{BASE}/takeover"  # env override for tests only
 def takeover(name): return os.path.exists(f"{TAKEOVER}/{name}")
+
+# --- PR ownership guards (10-30: prfix pushed 51802504 onto #1444 while another worker owned it) ---------------------------
+# Branch claim: takeover/branch-claims/<PR number>. A human or bot worker writes it and renews it; while it is valid prfix
+# (--revise and outbound gh.pr.push-fix) leaves that PR alone, so it is also a per-PR off switch. Format: first line = expiry,
+# ISO 8601 with offset ("2026-10-30T18:00:00+08:00") or Unix seconds; anything after the first line is a free-form note
+# (who / why). Empty or unparsable first line: expiry = file mtime + CLAIM_TTL_H hours (so `touch` claims and renews).
+CLAIM_TTL_H = 4
+def claim_expiry(path):
+    """expiry (aware datetime) of the claim file at path, or None when there is no file."""
+    try:
+        st = os.stat(path)
+        with open(path, errors="replace") as f: first = (f.readline() or "").strip()
+    except FileNotFoundError: return None
+    try:
+        if re.fullmatch(r"\d{9,11}", first): return dt.datetime.fromtimestamp(int(first), dt.timezone.utc)
+        e = dt.datetime.fromisoformat(first.replace("Z", "+00:00"))
+        if e.tzinfo: return e
+    except ValueError: pass
+    return dt.datetime.fromtimestamp(st.st_mtime, dt.timezone.utc) + dt.timedelta(hours=CLAIM_TTL_H)
+def branch_claim(n, now=None):
+    """reason string while takeover/branch-claims/<n> holds a valid claim, else None."""
+    e = claim_expiry(f"{TAKEOVER}/branch-claims/{int(n)}")
+    now = now or dt.datetime.now(dt.timezone.utc)
+    return f"takeover/branch-claims/{int(n)} 有效到 {e.isoformat(timespec='seconds')}：别的 worker 认领了这个 PR，不碰" if e and e > now else None
+# Ownership: a commit on the PR branch in the last OWNER_WINDOW_H hours WITHOUT the Pi-Revise trailer = someone else is working on it.
+OWNER_WINDOW_H = 6
+def foreign_recent_commits(commits, now=None, hours=OWNER_WINDOW_H):
+    """commits: GitHub pulls/N/commits items -> short shas of recent commits without 'Pi-Revise:'."""
+    now = now or dt.datetime.now(dt.timezone.utc); out = []
+    for c in commits or []:
+        cm = c.get("commit") or {}
+        when = (cm.get("committer") or {}).get("date") or (cm.get("author") or {}).get("date")
+        try: t = dt.datetime.fromisoformat(str(when).replace("Z", "+00:00"))
+        except ValueError: t = now   # unreadable date: count it as recent (fail closed)
+        if now - t <= dt.timedelta(hours=hours) and "Pi-Revise:" not in (cm.get("message") or ""): out.append((c.get("sha") or "?")[:9])
+    return out
+def ownership_block(n, commits, now=None):
+    """reason not to push onto PR n (claim, or recent foreign commits), else None."""
+    why = branch_claim(n, now)
+    if why: return why
+    f = foreign_recent_commits(commits, now)
+    return f"PR 分支最近 {OWNER_WINDOW_H} 小时有不带 Pi-Revise 标记的提交 {f[:5]}：别人在改，不推送" if f else None
+def pr_commits_args(n): return ["api", "--paginate", f"repos/{REPO}/pulls/{int(n)}/commits?per_page=100"]
+# Gate files: a planned change touching these is a hard stop; --allow-sensitive does NOT override it.
+PROTECTED_RE = re.compile(r"(^|/)__tests__/(.*/)?[^/]*(Guard|Policy)[^/]*$|^\.githooks/|^scripts/verify")
+def protected_files(files): return sorted(f for f in files if PROTECTED_RE.search(f))
+def patch_files(path):
+    with open(path, errors="replace") as f: return sorted({m.group(1) for m in re.finditer(r"^diff --git a/(\S+) b/", f.read(), re.M)})
 SECRET_FILES = ("~/.pi-fallback-secret/env", "~/.config/mivo-qa/secrets.env")   # both outside every git repo / backup, mode 600
 def secret_env_dict():
     """KEY=VALUE pairs of SECRET_FILES (an `export ` prefix and quotes allowed; the earlier file wins); never logs values.

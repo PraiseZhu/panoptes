@@ -385,13 +385,18 @@ def h_push_fix(a):
         if p["state"] != "OPEN": return f"stale:{p['state'].lower()}"
         if (p.get("author") or {}).get("login") != "PraiseZhu" or p.get("headRefName") != br or not br.startswith("qa-fix/") \
                 or "<!-- pi-line fixpr:" not in (p.get("body") or ""): return "stale:not our bot fix PR"
-        if p["headRefOid"] == head: return "pending" if p.get("isDraft") else "stale:no longer a draft"
+        if p["headRefOid"] == head:
+            if not p.get("isDraft"): return "stale:no longer a draft"
+            why = ownership_block(n, gh(pr_commits_args(n)))
+            return f"stale:{why}" if why else "pending"
         msg = gh(["api", f"repos/{REPO}/commits/{p['headRefOid']}", "-q", ".commit.message"], js=False)
         return "done" if f"Pi-Revise: {key}" in msg else "stale:head moved"
     merge = a.get("mode") == "merge"   # prfix --revise merged main into the draft (conflicts): push that merge commit from the bundle
     def validate():
         f = a.get("bundle") if merge else patch
         if not (f and os.path.exists(f)): raise RuntimeError(f"{'bundle' if merge else 'patch'} missing")
+        prot = [] if merge else protected_files(patch_files(f))
+        if prot: raise RuntimeError(f"patch touches gate files (PROTECTED_RE), hard stop: {prot[:5]}")
         return f"#{n} {br}@{head[:9]} + {os.path.getsize(f)}B{' merge ' + str(a.get('new_head'))[:9] if merge else ''}"
     def do():
         d = W.mkdtemp("pi-pushfix-")   # PI_WORK/tmp: janitor removes what a killed run leaves

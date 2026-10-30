@@ -1516,6 +1516,8 @@ def fix_one(c, A, d):
             files = chg()
             return files, [f for f in files if is_test(f)], [f for f in files if not is_test(f) and not f.startswith(ddir)]
         files, tests, src = split_files()
+        prot = protected_files(files)   # gate files: hard stop, --allow-sensitive does not apply
+        if prot: raise Deterministic(f"修复要改闸门文件（PROTECTED_RE），硬停不开 PR：{prot[:5]}")
         res["sensitive"] = sensitive_files(files)
         if res["sensitive"]: step(f"修复改了 CI 配置 / 仓库规则 / 密钥相关的文件（放行，PR 里标出交审查机把关）：{', '.join(res['sensitive'][:4])}", True)
         ptype = "docs" if src and all(f.endswith(".md") or f.startswith("docs/") for f in src) else "fix"
@@ -1843,13 +1845,16 @@ def red_checks(p):
     return [c for c in p.get("statusCheckRollup") or [] if "review-pr" not in (c.get("name") or c.get("context") or "")
             and (c.get("conclusion") or c.get("state") or "").upper() in BAD_CONCL]
 
-def revise_target(p):
-    """-> (qa, fp, why_not). Only our own open DRAFT fix PRs that the Pi line opened (pi-line marker, qa-fix/* branch)."""
+def revise_target(p, commits=()):
+    """-> (qa, fp, why_not). Only our own open DRAFT fix PRs that the Pi line opened (pi-line marker, qa-fix/* branch),
+    with no valid branch claim and no recent commit by someone else (lib.ownership_block)."""
     m = PILINE_MARK.search(p.get("body") or "")
     if p.get("state") != "OPEN": return None, None, "PR 不是 open"
     if not p.get("isDraft"): return None, None, "PR 已经转正式（之后由 Mac mini 盯梢跟进）"
     if author_of(p) != AUTHOR_SELF: return None, None, "不是我们的 PR"
     if not (p.get("headRefName") or "").startswith("qa-fix/") or not m: return None, None, "不是 Pi 线开的修复 PR"
+    why = ownership_block(p.get("number"), commits)
+    if why: return None, None, why
     return int(m.group(1)), m.group(2), None
 
 def failed_check_logs(checks, cap=12000):
@@ -1890,8 +1895,13 @@ def revise(A):
         return finish({"status": "off", "pr": n, "error": f"takeover/{REVISE_FLAG} 不存在：修草稿 CI 关着"}, 1, A)
     try: p = _gh_json(["pr", "view", str(n), "-R", REPO, "--json", PR_VIEW], 120)
     except Exception as e: return finish({"status": "error", "pr": n, "error": f"读 PR #{n} 失败：{str(e)[:250]}"}, 1, A)
-    qa, fp, why = revise_target(p)
-    if why: return finish({"status": "skipped", "pr": n, "reason": why}, 0, A)
+    p.setdefault("number", n)
+    try: commits = _gh_json(pr_commits_args(n), 120)
+    except Exception as e: return finish({"status": "error", "pr": n, "error": f"读 PR #{n} 提交失败：{str(e)[:250]}"}, 1, A)
+    qa, fp, why = revise_target(p, commits)
+    if why:
+        log(f"skip: {why}")
+        return finish({"status": "skipped", "pr": n, "reason": why}, 0, A)
     head, br, red = p["headRefOid"], p["headRefName"], red_checks(p)
     conflict = (p.get("mergeStateStatus") or "").upper() == "DIRTY"   # 10-24: a draft that conflicts with main gets main merged in
     cnt_key, cap = ("merges", MAX_MERGES) if conflict else ("revisions", MAX_REVISIONS)
@@ -2144,6 +2154,8 @@ def revise_one(A, d, n, qa, fp, p, red):
         if not files: raise Deterministic("改完后相对 PR 当前 head 没有任何改动")
         stray = sorted(set(files) - touched)
         if stray: raise Deterministic(f"相对 PR head 改动了模型没碰过的文件，拒绝推送：{stray[:5]}")
+        prot = protected_files(files)   # gate files: hard stop, --allow-sensitive does not apply
+        if prot: raise Deterministic(f"CI 修正要改闸门文件（PROTECTED_RE），硬停不推送：{prot[:5]}")
         sens = sensitive_files(files)   # 10-25: no longer a stop (see A_ALLOW); the commit message names them for the reviewer
         if sens: step(f"CI 修正改了 CI 配置 / 仓库规则 / 密钥相关的文件（放行，交审查机把关）：{', '.join(sens[:4])}", True)
         title = f"fix: CI 没过的修正（{', '.join(names[:3])}）"[:120]

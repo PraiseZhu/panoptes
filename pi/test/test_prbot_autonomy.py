@@ -137,7 +137,8 @@ class TestRevise(GitTmp):
                    "headRefOid": self.head, "title": "fix: x (QA #1178)", "body": f"QA: #1178\n{A}\n<!-- pi-line fixpr:1178:{A} -->",
                    "statusCheckRollup": [{"name": "unit (windows, 2)", "conclusion": "FAILURE", "detailsUrl": "https://github.com/x/y/actions/runs/9/job/1"},
                                          {"name": "review-pr", "conclusion": "FAILURE"}]}
-        prfix._gh_json = lambda args, t: self.pr
+        self.commits = []
+        prfix._gh_json = lambda args, t: self.commits if args[0] == "api" else self.pr
         self.model = "winfix"; self.prompts = []
         def fake_pi(tier, cwd, prompt, session, **kw):
             self.prompts.append(prompt)
@@ -201,6 +202,31 @@ class TestRevise(GitTmp):
         self.assertEqual(len(push), 1, r); self.assertEqual(r["status"], "pr_action_written")
         self.assertIn("Sensitive-Files: .github/workflows/ci.yml", push[0]["message"])   # the old path is seen, not only ci.yml
         self.assertFalse([a for a in self.acts if a["type"] == "slack.dm"])
+
+    def test_ownership_foreign_commit_or_claim_skips_and_gate_files_hard_stop(self):
+        # 10-30 #1444: someone else's recent commit on the branch, or a valid branch claim -> skipped with the reason, nothing pushed
+        now = dt.datetime.now(dt.timezone.utc)
+        self.commits = [{"sha": "3d4737d0aa", "commit": {"message": "fix: mine", "committer": {"date": now.isoformat()}}}]
+        rc, r = self.revise(); self.assertEqual(r["status"], "skipped"); self.assertIn("Pi-Revise", r["reason"]); self.assertIn("3d4737d0a", r["reason"])
+        self.assertFalse([a for a in self.acts if a["type"] == "gh.pr.push-fix"])
+        self.commits = [{"sha": "aa", "commit": {"message": "x\n\nPi-Revise: revise:1301:h", "committer": {"date": now.isoformat()}}},
+                        {"sha": "bb", "commit": {"message": "old human", "committer": {"date": (now - dt.timedelta(hours=7)).isoformat()}}}]
+        saved = prfix.lib.TAKEOVER; prfix.lib.TAKEOVER = f"{self.tmp}/takeover"; os.makedirs(f"{self.tmp}/takeover/branch-claims")
+        try:
+            wf(f"{self.tmp}/takeover/branch-claims/1301", (now + dt.timedelta(hours=1)).isoformat() + "\nworker-b\n")
+            rc, r = self.revise(); self.assertEqual(r["status"], "skipped"); self.assertIn("branch-claims/1301", r["reason"])
+            wf(f"{self.tmp}/takeover/branch-claims/1301", str(int((now - dt.timedelta(minutes=1)).timestamp())) + "\n")   # expired
+            inner = prfix.pi
+            def gate(tier, cwd, *a, **k):
+                r = inner(tier, cwd, *a, **k); os.makedirs(f"{cwd}/src/__tests__", exist_ok=True)
+                wf(f"{cwd}/src/__tests__/mergeBaseGuard.test.js", "x\n"); return r
+            prfix.pi = gate; A_ALLOW = prfix.A_ALLOW; A_ALLOW["sensitive"] = True   # --allow-sensitive does not override
+            try: rc, r = self.revise()
+            finally: A_ALLOW["sensitive"] = False
+            self.assertNotEqual(r["status"], "pr_action_written", r)
+            self.assertIn("PROTECTED_RE", json.dumps(r, ensure_ascii=False))
+            self.assertFalse([a for a in self.acts if a["type"] == "gh.pr.push-fix"])
+        finally: prfix.lib.TAKEOVER = saved
 
     def test_weakening_the_regression_test_never_lands(self):
         self.model = "weaken"
@@ -311,6 +337,20 @@ class TestOutboundPush(GitTmp):
             p["headRefOid"] = "h1"; p["isDraft"] = False; self.assertEqual(state(), "stale:no longer a draft")
             p["isDraft"] = True; p["body"] = "QA: #1"; self.assertEqual(state(), "stale:not our bot fix PR")
             self.assertIs(OB.handler({"type": "gh.pr.push-fix", **a})[0].startswith("gh push fix"), True)
+            # 10-30: a recent commit without Pi-Revise, or a valid branch claim -> stale (never pushed)
+            now = dt.datetime.now(dt.timezone.utc); p["body"] = "<!-- pi-line fixpr:1:mq1-x -->"
+            calls["msg"] = [{"sha": "3d4737d0aa", "commit": {"message": "human", "committer": {"date": now.isoformat()}}}]
+            self.assertTrue(state().startswith("stale:") and "Pi-Revise" in state(), state())
+            calls["msg"] = []
+            import lib as L; old = L.TAKEOVER; L.TAKEOVER = f"{self.tmp}/tk"; os.makedirs(f"{self.tmp}/tk/branch-claims")
+            try:
+                wf(f"{self.tmp}/tk/branch-claims/1301", "")          # empty: mtime + CLAIM_TTL_H
+                self.assertIn("branch-claims/1301", state())
+                os.utime(f"{self.tmp}/tk/branch-claims/1301", (0, 0)); self.assertEqual(state(), "pending")   # expired claim
+            finally: L.TAKEOVER = old
+            # a patch touching a gate file is refused at validate, --allow-sensitive or not
+            pf = f"{self.tmp}/gate.patch"; wf(pf, "diff --git a/.githooks/pre-push b/.githooks/pre-push\n--- a/x\n+++ b/x\n")
+            with self.assertRaisesRegex(RuntimeError, "PROTECTED_RE"): OB.h_push_fix({**a, "patch": pf})[2]()
         finally: OB.gh = saved
 
 
