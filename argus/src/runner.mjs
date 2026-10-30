@@ -1,5 +1,5 @@
 // 在隔离 run 目录里检出指定版本并执行项目 profile 的步骤
-import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync, statSync, lstatSync, realpathSync, cpSync } from 'node:fs'
+import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync, statSync, lstatSync, readlinkSync, realpathSync, cpSync } from 'node:fs'
 import { join, dirname, basename, resolve, relative, isAbsolute } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
 import { run, isStopping, overBudget } from './exec.mjs'
@@ -220,7 +220,8 @@ export function sandboxProfile(runDir, home = homedir()) {
 }
 
 // Linux：用 bubblewrap（bwrap，非特权 user namespace）做等价的文件隔离。
-// 根文件系统只读挂载；/home、/root、/workspace、/tmp、/mnt、/media 换成空 tmpfs（读不到 gh 登录、
+// 根是本次沙箱自己的 tmpfs（宿主顶层条目逐项只读挂回），末尾再把根 remount 成只读；
+// /home、/root、/workspace、/tmp、/mnt、/media 换成空 tmpfs（读不到 gh 登录、
 // secrets.env、其它 agent 的数据），再把本次 run 目录、Argus 缓存、短临时目录读写挂回，
 // Node 安装目录（nvm 在 ~ 下）和 Playwright 浏览器目录只读挂回。新的 pid/ipc/uts 命名空间，父进程退出即回收。
 // 网络和 macOS 版一样暂不限制（npm ci 需要）。
@@ -239,13 +240,32 @@ export function sandboxMode(profile = {}) {
   return 'missing'
 }
 
+// 根不能直接 `--ro-bind / /`：非特权 user namespace 里宿主 root(0) 不映射进来，沙箱里 `stat /` 读成 65534(nobody)，
+// 而被测项目的信任链检查（mivo review-capacity-check 的 trusted_path、workspace.mjs 的 assertControllerDirectory）
+// 要求从 / 起每一层属主 ∈ {0, 当前用户}——真 CI（GitHub runner）的 / 属主是 0，于是那些用例在任何版本上都失败，
+// catch-up 把这 30 个用例记成 pre-existing（reports/catch-up PR-1449/1450/1454）。
+// 改成「根是本次沙箱自己的 tmpfs，宿主顶层条目逐项只读挂回」：根属主就是沙箱里的当前用户，和真 CI 的 0 同解，
+// 宿主内容一份不少，每个顶层目录仍是只读挂载，末尾把根 remount 成只读。
+const ROOT_SKIP = new Set(['/dev', '/proc', '/tmp', ...HIDDEN_ROOTS])
+function bindHostRoot(args) {
+  for (const name of readdirSync('/')) {
+    const p = join('/', name)
+    if (ROOT_SKIP.has(p)) continue // 自建（--dev/--proc/--tmpfs）或由下面的 --tmpfs 遮住
+    // /bin -> usr/bin 这类顶层符号链接必须重建：ELF 解释器按 /lib64/ld-linux-*.so 的路径找，缺了任何命令都 execvp 失败
+    if (lstatSync(p).isSymbolicLink()) args.push('--symlink', readlinkSync(p), p)
+    else args.push('--ro-bind', p, p)
+  }
+}
+
 export function bwrapArgs(runDir, { extraRo = [], extraRw = [], chdir = null } = {}) {
-  const args = ['--die-with-parent', '--new-session', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup-try',
-    '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp']
+  const args = ['--die-with-parent', '--new-session', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup-try', '--tmpfs', '/']
+  bindHostRoot(args)
+  args.push('--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp')
   for (const d of HIDDEN_ROOTS) if (existsSync(d)) args.push('--tmpfs', d)
   const ro = [NODE_PREFIX, ...extraRo].filter((p) => p && existsSync(p))
   for (const p of ro) args.push('--ro-bind', p, p)
   for (const p of [CACHE_DIR, runDir, shortTmpOf(runDir), ...extraRw]) { mkdirSync(p, { recursive: true }); args.push('--bind', p, p) }
+  args.push('--remount-ro', '/') // 挂点都建好之后再收紧：根 tmpfs 只读
   if (chdir) args.push('--chdir', chdir)
   return args
 }

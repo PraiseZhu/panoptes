@@ -248,9 +248,13 @@ leads, own-tests not run, QA errors — goes to **`prs[].pending_verification[]`
 ## Sandbox / 沙盒: bubblewrap
 
 Every install / test command runs as
-`bwrap --ro-bind / / --tmpfs /home --tmpfs /root --tmpfs /workspace --tmpfs /tmp … --bind <run dir> --bind <argus cache>`:
+`bwrap --tmpfs / --ro-bind /usr /usr … --tmpfs /home --tmpfs /root --tmpfs /workspace --tmpfs /tmp … --bind <run dir> --bind <argus cache> --remount-ro /`:
 
-- root filesystem read-only; `/home`, `/root`, `/workspace`, `/tmp`, `/mnt`, `/media`, `/srv` replaced by empty tmpfs —
+- the root is the sandbox's own tmpfs, with the host's top-level entries re-mounted read-only inside it and the
+  root remounted read-only at the end. `--ro-bind / /` cannot be used: the unprivileged user namespace doesn't
+  map host root, so `stat /` reads 65534 (nobody) while real CI shows `/` owned by root — project "trusted path"
+  checks (mivo `review-capacity-check`) then reject every revision, recorded as pre-existing;
+- `/home`, `/root`, `/workspace`, `/tmp`, `/mnt`, `/media`, `/srv` replaced by empty tmpfs —
   tests can't see `gh` credentials, `secrets.env`, SSH keys or other agents' files;
 - only the run dir, the Argus cache and a per-run tmp are writable; Node, Playwright browsers and `argus/node_modules`
   are re-mounted read-only;
