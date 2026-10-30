@@ -662,7 +662,16 @@ def _mac_key():
         try:
             fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600); os.write(fd, _s.token_hex(32).encode()); os.close(fd)
         except FileExistsError: pass
-    return open(f, "rb").read().strip()
+    st = os.lstat(f)   # an existing key must be a regular 0600 file of >= 32 bytes; else fail closed (never log its content)
+    import stat as _st
+    if not _st.S_ISREG(st.st_mode) or st.st_size < 32 or (st.st_mode & 0o777) != 0o600:
+        why = f"not a regular file" if not _st.S_ISREG(st.st_mode) else f"size {st.st_size} < 32" if st.st_size < 32 else f"mode {oct(st.st_mode & 0o777)} != 0o600"
+        log(f"ERROR handoff-files.key refused ({why}): {f}; fix or remove it, a new one is created on the next run")
+        raise RuntimeError(f"handoff-files.key refused ({why})")
+    k = open(f, "rb").read().strip()
+    if len(k) < 32:
+        log(f"ERROR handoff-files.key refused (content shorter than 32 bytes): {f}"); raise RuntimeError("handoff-files.key refused (too short)")
+    return k
 def _mac(repo, path, key, body):
     import hmac, hashlib
     return hmac.new(_mac_key(), "\0".join([repo, path, key, body]).encode("utf-8"), hashlib.sha256).hexdigest()

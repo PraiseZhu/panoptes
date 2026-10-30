@@ -6,11 +6,15 @@ temp BASE/ledger/sent.json, fake Slack and fake sender. No network, no sends. Ru
 import datetime as dt, json, os, shutil, sys, tempfile, types, unittest
 from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bin"))
+sys.path.insert(0, HERE); import isolation  # noqa: E402
+isolation.sandbox_state()   # 10-30: lib.BASE (and everything derived from it) is a temp dir before any pi/bin import
 sys.modules.setdefault("merger", types.SimpleNamespace(FIELDS="number", blockers=lambda p: []))
 import hashlib  # noqa: E402
 import outbound as O  # noqa: E402
 import lib as L  # noqa: E402
-REAL_MUTED = f"/workspace/mivo-qa/pi/out/outbound/muted-{dt.datetime.now(O.CST).date().isoformat()}.md"   # box state: must stay untouched
+# the import-time state dir's muted file (a sandbox, never the live box file: live outbound appends there broke 33-37 tests)
+assert os.path.realpath(L.BASE) != os.path.realpath(isolation.live_state()), f"refusing to run against live state {L.BASE}"
+REAL_MUTED = f"{L.BASE}/out/outbound/muted-{dt.datetime.now(O.CST).date().isoformat()}.md"   # must stay untouched by the tests
 def fingerprint(p): return (os.path.getmtime(p), hashlib.sha256(open(p, "rb").read()).hexdigest()) if os.path.exists(p) else None
 REAL_BEFORE = fingerprint(REAL_MUTED)
 

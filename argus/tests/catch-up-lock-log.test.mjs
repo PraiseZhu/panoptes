@@ -17,7 +17,9 @@ test('catch-up lock busy → one log line, exit 0, node never started', () => {
   const lock = join(qa, 'argus-root', 'catch-up.lock')
   // 假 nvm（同 qa-slot.test.mjs）：CI 上没有 nvm，脚本只需 node >= 24 在 PATH 里
   const nvm = join(qa, 'nvm'); mkdirSync(nvm); writeFileSync(join(nvm, 'nvm.sh'), 'nvm() { :; }\n')
-  const env = { ...process.env, PANOPTES_NVM_DIR: nvm, QA_HOME: qa, QA_SECRETS_FILE: secrets, PANOPTES_BOOTSTRAP: '0', PANOPTES_TMP_SWEEP: '0', PANOPTES_SEVERITY_PIN_CHECK: '0' }
+  const env = { ...process.env, PANOPTES_NVM_DIR: nvm, QA_HOME: qa, QA_SECRETS_FILE: secrets, PANOPTES_BOOTSTRAP: '0', PANOPTES_TMP_SWEEP: '0', PANOPTES_SEVERITY_PIN_CHECK: '0',
+    // even Beijing hour: the odd-hour memory pre-check (run-nightly.sh, 10-30) must not depend on the runner's clock / memory
+    PANOPTES_FAKE_BJ_HOUR: '12' }
   // flock 持锁再跑脚本：脚本内 flock -n 8 必然失败
   const r = spawnSync('flock', [lock, SCRIPT, '--catch-up', '--trigger', 'catch-up'], { env, encoding: 'utf8', timeout: 60_000 })
   assert.equal(r.status, 0, r.stderr)
