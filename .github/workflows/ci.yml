@@ -64,6 +64,10 @@ jobs:
           PI_SELFTEST_TAIL: '120'
         run: bash pi/bin/selftest.sh
 
+      # push-fix fail-closed gate: list each test so the log proves the class runs here (it used to be skipped off-box)
+      - name: Pi push-fix gate tests (verbose)
+        run: cd pi/bin && python3 ../test/test_pr_ownership_accept.py -v
+
       # infrafix (fix/infra-* branches) fixes panoptes itself and must never change the Pi line that runs it.
       # --no-renames: a file moved out of pi/ counts as a pi/ deletion; -z: names come raw (no "\346..." quoting of non-ASCII);
       # a diff that cannot be computed fails the step (set -e), it never passes as "no pi/ files"

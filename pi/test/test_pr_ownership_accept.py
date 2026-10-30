@@ -5,7 +5,8 @@ import datetime as dt, json, os, sys, tempfile, unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin"))
 os.environ.setdefault("PI_TAKEOVER_DIR", tempfile.mkdtemp())
 import lib
-BOX_MERGER = os.path.exists("/workspace/mivo-merger/app/scripts/loops/automerge/policy.json")   # outbound imports merger: box-only data
+if not os.path.exists("/workspace/mivo-merger/app/scripts/loops/automerge/policy.json"):   # CI: no box merger data; h_push_fix never uses merger
+    import types; sys.modules.setdefault("merger", types.ModuleType("merger"))
 
 UTC = dt.timezone.utc
 NOW = dt.datetime(2026, 10, 30, 3, 0, tzinfo=UTC)
@@ -16,7 +17,6 @@ def c(sha, msg, hours_ago=1, naive=False):
     t = NOW - dt.timedelta(hours=hours_ago)
     return {"sha": sha, "commit": {"message": msg, "committer": {"date": t.replace(tzinfo=None).isoformat() if naive else t.isoformat()}}}
 
-@unittest.skipUnless(BOX_MERGER, "needs the box's mivo-merger policy (outbound imports merger)")
 class PushFixFailClosed(unittest.TestCase):
     def setUp(self):
         global outbound; import outbound
@@ -29,7 +29,7 @@ class PushFixFailClosed(unittest.TestCase):
         outbound.run = run
     def tearDown(self): outbound.gh, outbound.run, lib.TAKEOVER = self.old_gh, self.old_run, self.old_tk
     def h(self, patch="/nonexistent"):
-        return outbound.h_push_fix({"key": "revise:1444:51802504f8da", "pr": 1444, "branch": PV["headRefName"], "head": HEAD, "patch": patch})
+        return outbound.h_push_fix({"key": "revise:1444:51802504f8da", "pr": 1444, "branch": PV["headRefName"], "head": HEAD, "patch": patch}, now=NOW)
     def test_commits_api_error_is_stale(self):   # item 1
         def gh(args, js=True):
             if args[0] == "pr": return dict(PV)
