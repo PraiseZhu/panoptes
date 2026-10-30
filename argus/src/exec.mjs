@@ -58,7 +58,7 @@ export function createFailureParser() {
     else record.type = type
   }
   const flush = (state) => {
-    if (state.current) save(state.current.name, state.current.type)
+    if (state.current) for (const name of state.current.names) save(name, state.current.type)
     state.current = null
   }
   const terminal = (reporter, failed) => {
@@ -73,11 +73,16 @@ export function createFailureParser() {
     }
     const name = toFailureName(clean)
     if (name) {
-      flush(state)
       const reporter = /^\s*FAIL\s/.test(clean) ? 'vitest' : /^FAILED\s/.test(clean) ? 'pytest' : 'node'
       reporters.add(reporter)
+      // vitest 把同一行断言的多个 it.each 用例合成一个诊断块：块内连打 N 个失败头，再给一份共同诊断。
+      // 头部之后还没读到诊断正文时，名字并进同一块，块内每个用例都拿到这份诊断的类型。
+      if (state.current && state.current.reporter === reporter && state.current.bytes === 0) state.current.names.push(name)
+      else {
+        flush(state)
+        state.current = { names: [name], reporter, type: 'unknown', bytes: 0 }
+      }
       save(name)
-      state.current = { name, type: 'unknown', bytes: 0 }
       if (reporter === 'pytest') {
         const reason = clean.match(/\s+-\s+(.+)$/)?.[1]
         if (reason) state.current.type = diagnosticType(reason) ?? 'unknown'
