@@ -8,12 +8,22 @@ const PROFILES_DIR = process.env.ARGUS_PROFILES_DIR ?? join(CODE_DIR, 'config/pr
 
 const STEP_KINDS = new Set(['setup', 'product', 'quality'])
 
+// 目标分支匹配这些 glob（* 可跨 /）的 PR 不测，只写 skipped（reason non-main-base）报告；registry.skipBaseBranches 可覆盖
+export const DEFAULT_SKIP_BASE_BRANCHES = ['probe-*']
+export function matchesSkipBase(baseRef, patterns = DEFAULT_SKIP_BASE_BRANCHES) {
+  if (typeof baseRef !== 'string' || !baseRef) return false
+  return patterns.some((g) => new RegExp('^' + g.split('*').map((x) => x.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$').test(baseRef))
+}
+
 export function loadRegistry() {
   const reg = JSON.parse(readFileSync(REGISTRY_PATH, 'utf8'))
   if (!reg.owner?.login || !Number.isInteger(reg.owner?.id)) throw new Error(`registry.owner 需要 login 和数字 id，实际 ${JSON.stringify(reg.owner)}`)
   if (!reg.issueRepo) throw new Error('registry.issueRepo 缺失')
   if (Number.isNaN(Date.parse(reg.enabledSince))) throw new Error(`registry.enabledSince 不是合法时间：${reg.enabledSince}`)
+  reg.skipBaseBranches ??= DEFAULT_SKIP_BASE_BRANCHES
+  if (!Array.isArray(reg.skipBaseBranches) || reg.skipBaseBranches.some((g) => typeof g !== 'string' || !g)) throw new Error(`registry.skipBaseBranches 需要非空字符串的 glob 列表，实际 ${JSON.stringify(reg.skipBaseBranches)}`)
   for (const p of reg.projects ?? []) {
+    p.skipBaseBranches = reg.skipBaseBranches
     if (!/^[\w.-]+\/[\w.-]+$/.test(p.repo)) throw new Error(`项目 repo 格式错误：${p.repo}`)
     if (p.profile) p.profileData = loadProfile(p.profile)
   }

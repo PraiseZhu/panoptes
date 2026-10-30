@@ -8,7 +8,7 @@ import { join, resolve, dirname, basename, posix } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { hostname } from 'node:os'
 import { execFileSync } from 'node:child_process'
-import { loadRegistry, loadSecrets } from './config.mjs'
+import { loadRegistry, loadSecrets, matchesSkipBase, DEFAULT_SKIP_BASE_BRANCHES } from './config.mjs'
 import { openDb } from './db.mjs'
 import { listNightlyPrs, getPull, getCommit, getBranchHead, listPullFiles, addFullText, getHandoff, shanghaiDayWindow, findIssuesByMarkerLabel, createIssue, commentIssue, reopenIssue, findCommentByMarker, listPullReviewComments, listPullCommits, listTeamMembers } from './github.mjs'
 import { classifyChange, highRiskFiles, withoutHandoff, isTestPath } from './classify.mjs'
@@ -247,6 +247,11 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     gate_wait_s: Number(process.env.PANOPTES_GATE_WAIT_S) || 0, memory_gate: memoryGate(), reviewed_sha: null, review_base_sha: null,
     // 因每日模型额度用尽而没做的事（Jev 分诊 / AI 补测 / 代码审查 / 摘要），每项 { kind, pool, cap, used, dimensions, message }
     quota_capped: [],
+  }
+  // 目标分支是临时探针分支（registry.skipBaseBranches，默认 probe-*）：不测，写 skipped 报告，watchdog 不再报缺报告
+  if (matchesSkipBase(out.base_ref, project?.skipBaseBranches ?? DEFAULT_SKIP_BASE_BRANCHES)) {
+    Object.assign(out, { tested: false, verdict: 'skipped', outcome_reason: 'non-main-base', skip_reason: 'non-main-base', tested_at: toShanghaiIso() })
+    return out
   }
   // 合并即测（on-merge）已经在同一个 merge commit 上测过：直接引用它的结果，不重测
   if (merged && opts.reuseMerged !== false) {
