@@ -56,6 +56,8 @@ main.push(...dmBlocks.splice(0));
 const mainHasGrade = secs.some(s => s.title.startsWith("分级说明"));
 if (!mainHasGrade) main.push(ctx("P0 合进去后代码还在出错，要先修；P1 这个 PR 带来的严重问题，请作者看看；P2 测试补得不够、测试不稳定或一般问题，也需要修，可排在 P1 之后；P3 只是提醒或没问题。"));
 main.push(ctx("🧵 P3、补测结果、覆盖率和系统状态见楼层回复"));
-const left = JSON.stringify({ main, thread }).replace(/<@U[A-Z0-9]+>/g, "").match(/@[\u4e00-\u9fa5A-Za-z][\w\u4e00-\u9fa5.-]*/g);
-if (left) { console.error("unresolved mentions: " + [...new Set(left)].join(", ")); process.exit(2); }
+// An @ we cannot resolve to a Slack id stays plain text; warn, never refuse the whole report.
+// @scope/pkg (npm package names) are not people: no warning for them.
+const left = JSON.stringify({ main, thread }).replace(/<@U[A-Z0-9]+>/g, "").replace(/@[a-z0-9][\w.-]*\/[\w.-]+/gi, "").match(/@[\u4e00-\u9fa5A-Za-z][\w\u4e00-\u9fa5.-]*/g);
+if (left) console.error("warning: unresolved mentions sent as plain text: " + [...new Set(left)].join(", "));
 console.log(JSON.stringify({ text: summary, main, thread }));
