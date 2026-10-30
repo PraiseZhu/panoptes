@@ -19,7 +19,7 @@
           "id": "deepseek/deepseek-flash",
           "reasoning": true,
           "contextWindow": 1000000,
-          "maxTokens": 65536,
+          "maxTokens": 131072,
           "thinkingLevelMap": {
             "xhigh": "max",
             "max": "max"
@@ -29,7 +29,7 @@
           "id": "deepseek/deepseek-v4.1-flash",
           "reasoning": true,
           "contextWindow": 1000000,
-          "maxTokens": 65536,
+          "maxTokens": 131072,
           "thinkingLevelMap": {
             "xhigh": "max",
             "max": "max"
