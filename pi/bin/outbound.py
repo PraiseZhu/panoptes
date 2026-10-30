@@ -10,7 +10,7 @@ Usage: outbound.py [--dry-run] [--days N (default 2)] [--job JOB] [--key KEY ...
     is in more than one) and the relay staleness TTL, and the Slack channel-history check for a 【补发】 daily body. Still refuses
     a key the ledger has as done/sending/uncertain/gave_up, or skipped for any reason but staleness; records done after the send,
     so a second run is a no-op."""
-import argparse, urllib.request, urllib.parse, tempfile, shutil
+import argparse, urllib.request, urllib.parse, tempfile, shutil, base64
 from lib import *
 import merger
 import dm_compat, jsonrec
@@ -297,6 +297,7 @@ def h_feishu_group(a):
 def h_issue(a):
     repo = a.get("repo") or HANDOFF_REPO.get(a.get("route_author", ""), "")
     fp = a["key"].split(":")[-1]
+    labels = list(a.get("labels") or ["handoff"])   # 10-30: every QA handoff issue carries the handoff label
     def state():
         iss = jload(f"{QA}/handoff/{a.get('route_author')}/issues.json", {})
         if fp in json.dumps(iss): return "done"
@@ -305,11 +306,21 @@ def h_issue(a):
     def validate():
         if not repo: raise RuntimeError(f"no handoff repo for {a.get('route_author')}")
         v = gh(["repo", "view", repo, "--json", "nameWithOwner,hasIssuesEnabled,viewerPermission"])
-        return f"{v['nameWithOwner']} issues={v['hasIssuesEnabled']} perm={v['viewerPermission']}"
+        have = {x["name"] for x in gh(["label", "list", "-R", repo, "--limit", "200", "--json", "name"])}
+        miss = [x for x in labels if x not in have]   # fail closed: an issue without the handoff label is never tracked (handoff.py)
+        if miss: raise RuntimeError(f"{repo} has no label(s) {miss}; create them first")
+        return f"{v['nameWithOwner']} issues={v['hasIssuesEnabled']} perm={v['viewerPermission']} labels={labels}"
     def do():
-        body = (open(a["body_file"]).read() if a.get("body_file") and os.path.exists(a["body_file"]) else f"QA 报告 PR #{a.get('pr')}: https://github.com/{REPO}/pull/{a.get('pr')}")
+        validate()
+        body = (open(a["body_file"]).read() if a.get("body_file") and os.path.exists(a["body_file"]) else a.get("text")
+                or f"QA 报告 PR #{a.get('pr')}: https://github.com/{REPO}/pull/{a.get('pr')}")
         body = open(clean_body(body_of({"text": body}))).read() + f"\n\n<!-- pi-line {a['key']} fingerprint={fp} -->"
-        return gh(["issue", "create", "-R", repo, "--title", a.get("title", f"PR #{a.get('pr')} QA 交接"), "--body", body], js=False).strip()
+        hk = a.get("handoff_key")
+        if hk:   # handoff.py / handoff-receipts.mjs MARKER_RE: match receipts back to the PR's problem
+            if not (re.fullmatch(r"[\w.-]+", str(hk)) and str(a.get("pr", "")).isdigit()): raise RuntimeError(f"bad handoff_key/pr {hk!r}/{a.get('pr')!r}")
+            body += f"\n<!-- mivo-qa-handoff: key={hk} pr={a['pr']} -->"
+        return gh(["issue", "create", "-R", repo, "--title", a.get("title", f"PR #{a.get('pr')} QA 交接"), "--body", body]
+                  + sum([["--label", x] for x in labels], []), js=False).strip()
     return f"gh issue {repo}", state, validate, do
 def h_ready(a):
     n = a["pr"]
@@ -424,7 +435,7 @@ def h_push_fix(a, now=None):
     return f"gh push fix onto #{n}", state, validate, do
 def state_error_skips(t):
     """action types whose state() error means skip, not send (push-fix: unknown ownership must never push)."""
-    return t == "gh.pr.push-fix"
+    return t in ("gh.pr.push-fix", "gh.handoff.files")
 def fixpr_gate_reason(a):
     """Reason string if this gh.pr.create action targets a gated report PR, else None. Fail closed on an unreadable file."""
     path = globals().get("GATES") or f"{PI_CODE}/conf/gates.json"
@@ -612,6 +623,62 @@ def h_update_branch(a):
         return gh(["api", "-X", "PUT", f"repos/{REPO}/pulls/{n}/update-branch"], js=False).strip()[-160:]
     return f"gh update-branch #{n}", state, validate, do
 
+HANDOFF_FILES = ("feedback.md", "receipts.md")
+HANDOFF_FILES_MARK = "<!-- pi-line handoff-files key={} -->"
+def handoff_file_text(text, key):
+    """what gh.handoff.files writes: the local file + our ownership marker (the only files it will ever overwrite)."""
+    return text.rstrip("\n") + "\n\n" + HANDOFF_FILES_MARK.format(key) + "\n"
+def h_handoff_files(a):
+    """gh.handoff.files {repo, day, files:{feedback.md|receipts.md: local path}} (10-30): write the day's feedback / receipts into
+    the route's handoff repo at daily/<YYYY>/<MM>/<day>/<name> (the layout pm_extra.py and compare.py read) and push, plain.
+    Fail closed: handoff repos only, only those two names, non-empty local files without draft markers; a file already there that
+    does not carry our marker (Grok / a person wrote it) is never overwritten (state stale -> skipped, never pushed blind)."""
+    repo, day, key = a.get("repo") or "", str(a.get("day") or ""), a["key"]
+    files = dict(a.get("files") or {})
+    rel = lambda n: f"daily/{day[:4]}/{day[5:7]}/{day}/{n}"
+    def check():
+        if repo not in HANDOFF_REPO.values(): raise RuntimeError(f"{repo or '?'} is not a handoff repo")
+        if not re.fullmatch(r"\d{4}-\d\d-\d\d", day): raise RuntimeError(f"bad day {day!r}")
+        if not files or any(n not in HANDOFF_FILES for n in files): raise RuntimeError(f"files must be among {HANDOFF_FILES}: {sorted(files)}")
+        out = {}
+        for n, p in files.items():
+            if not (p and os.path.isfile(p) and os.path.getsize(p) > 0): raise RuntimeError(f"{n}: local file missing or empty ({p})")
+            out[n] = handoff_file_text(open(clean_body(p)).read(), key)
+        return out
+    def remote(n):
+        try: c = gh(["api", f"repos/{repo}/contents/{urllib.parse.quote(rel(n))}?ref=main"])
+        except RuntimeError as e:
+            if "404" in str(e): return None
+            raise
+        return base64.b64decode(c.get("content") or "").decode("utf-8")
+    def state():
+        want = check(); same = 0
+        for n, t in want.items():
+            r = remote(n)
+            if r is None: continue
+            if HANDOFF_FILES_MARK.format("").split("key=")[0] not in r: return f"stale:{rel(n)} exists and was not written by pi-line"
+            same += r == t
+        return "done" if same == len(want) else "pending"
+    def validate():
+        want = check(); return f"{repo} {', '.join(rel(n) for n in want)}"
+    def do():
+        want = check()
+        st = state()
+        if st != "pending": raise RuntimeError(f"refusing to push: {st}")
+        d = W.mkdtemp("pi-handoff-files-")
+        try:
+            run(["gh", "repo", "clone", repo, d, "--", "--depth", "1", "-q"])
+            run(["git", "-C", d, "config", "user.name", GIT_NAME]); run(["git", "-C", d, "config", "user.email", GIT_EMAIL])
+            os.makedirs(os.path.join(d, rel("")), exist_ok=True)
+            for n, t in want.items():
+                with open(os.path.join(d, rel(n)), "w", encoding="utf-8") as fh: fh.write(t)
+            run(["git", "-C", d, "add", "--"] + [rel(n) for n in want])
+            run(["git", "-C", d, "commit", "-q", "-m", f"QA 交接 {day}: {' '.join(sorted(want))}", "-m", f"Pi-Handoff: {key}"])
+            run(["git", "-C", d, "push", "origin", "HEAD:refs/heads/main"])   # plain push: rejected if main moved; retried next run
+            return f"pushed {', '.join(rel(n) for n in want)} to {repo}"
+        finally: shutil.rmtree(d, ignore_errors=True)
+    return f"gh handoff files {repo}", state, validate, do
+
 def handler(a):
     t = a.get("type", "")
     if t == "slack.post": return h_slack_post(a)
@@ -620,6 +687,7 @@ def handler(a):
     if t == "feishu.group": return h_feishu_group(a)
     if t.startswith("gh.issue.create"): return h_issue(a)
     if t.startswith(("gh.issue.close", "gh.issue.reopen")): return h_issue_state(a)
+    if t == "gh.handoff.files": return h_handoff_files(a)
     if t.startswith("gh.run.rerun-failed"): return h_rerun_failed(a)
     if t.startswith("gh.pr.update-branch"): return h_update_branch(a)
     if t.startswith("gh.pr.push-fix"): return h_push_fix(a)

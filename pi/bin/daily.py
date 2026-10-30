@@ -70,7 +70,8 @@ def classify(n, r, cal):
     hc = {s: sum(1 for c in cases if c.get("qa_status") == s) for s in ("verified", "failed", "capped", "not-run")}
     # 覆盖率没拿到（results/values 为空或 status=unavailable）= 「未测」：记部分核实，不当通过
     cov_untested = bool(pr.get("coverage_gate") is not None and (not cg.get("results") or cg.get("status") == "unavailable"))
-    return dict(sev=sev, cov_untested=cov_untested, verify="partial" if cov_untested else "full", real=real, leads=leads, lead_only=lead_only, newcode=nc, base_fn=base, hc=hc, manual=len(man),
+    sha = pr.get("tested_sha") or pr.get("merge_sha") or r["doc"].get("merged_sha")
+    return dict(sev=sev, tested_sha=sha, merge_sha=pr.get("merge_sha") or r["doc"].get("merged_sha"), cov_untested=cov_untested, verify="partial" if cov_untested else "full", real=real, leads=leads, lead_only=lead_only, newcode=nc, base_fn=base, hc=hc, manual=len(man),
                 stated=[f for f in real if f.get("source") == "stated-acceptance"],
                 docs=pr.get("outcome") == "docs_only", failed_checks=pr.get("failed_checks") or [],
                 code_review_p3=[f for f in fs if f.get("source") == "code-review" and f.get("severity") == "P3"])
@@ -227,6 +228,26 @@ def send_own(day, keys, run=subprocess.run):
         r = run(cmd, timeout=900); log(f"outbound (own keys {len(keys)}) rc={r.returncode}"); return r.returncode
     except Exception as e: log(f"outbound (own keys) failed: {type(e).__name__} -> left to the */10 run"); return None
 
+def handoff_issue_action(day, i, f):
+    """gh.issue.create for one author problem (10-30): the body says what was found where, on which tested commit, under which
+    fingerprint, and gets (via handoff_key, appended by outbound) the mivo-qa-handoff marker that handoff.py / handoff-receipts.mjs match receipts against
+    (with the `handoff` label outbound adds). Unknown values are written as 未知, never guessed."""
+    n = i["n"]; fp = f.get("fingerprint") or ""; pfp = f.get("pr_fingerprint") or (f"{fp}-pr{n}" if fp else "")
+    loc = f.get("file") or "未知"
+    if f.get("file") and f.get("line") is not None: loc += f":{f['line']}"
+    sha = i.get("tested_sha") or i.get("merge_sha")
+    title = f.get("title") or f.get("test") or f"PR #{n} QA 交接"
+    body = "\n".join([
+        f"QA 日报（数据日 {day}）在 PR #{n} 上测出的问题，请处理：https://github.com/{REPO}/pull/{n}", "",
+        f"- 级别：{f.get('severity') or '未知'}",
+        f"- 问题：{title}",
+        f"- 位置：{loc}",
+        f"- 测试的合并提交：{sha or '未知'}",
+        f"- 指纹：{fp or '未知'}" + (f"（本 PR：{pfp}）" if pfp and pfp != fp else ""),
+        ])   # outbound appends the mivo-qa-handoff marker from handoff_key (comments in a body are stripped as draft marks)
+    return {"key": f"handoff:{n}:{pfp or fp}", "type": "gh.issue.create", "pr": n, "title": f"[{f.get('severity')}] {title}" if f.get("severity") else title,
+            "text": body, "labels": ["handoff"], "handoff_key": pfp}
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]; fl = {a for a in sys.argv[1:] if a.startswith("--")}
     day = args[0] if args else data_day([0]); ro = "--render-only" in fl
@@ -253,8 +274,7 @@ def main():
     for i in P0 + P1 + P2:
         if not i.get("real") or f'"{i["login"]}"' not in rjs: continue
         for f in i["real"]:
-            acts.append({"key": f"handoff:{i['n']}:{f.get('pr_fingerprint') or f.get('fingerprint')}", "type": "gh.issue.create",
-                         "route_author": i["login"], "pr": i["n"], "title": f.get("title") or f.get("test"),
+            acts.append({**handoff_issue_action(day, i, f), "route_author": i["login"],
                          "dedupe_against": [f"{QA}/handoff/<owner>/issues.json", f"{SENT}/{day}/created.tsv"]})
     sick = [{"pr": i["n"], "what": i["health"]} for i in items if i.get("health")]
     if fault or sick:   # 日报标准 §4: 报告缺失/无效/非 1.0 或 system_health 异常 = QA 系统故障，告诉 Praise 并转运维

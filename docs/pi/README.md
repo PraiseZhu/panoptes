@@ -151,3 +151,7 @@ panoptes catch-up 每 2 小时 :07 + 每次合并（mergewatch）起跑；修 PR
   - **以后**：别从会话里直接跑 prfix / infrafix 的修复模式；要跑，先 `env -i` 或等 prfix 自己清环境（已交给负责修 PR bot 的会话）。
 - **看门狗又加了两项**：测试系统某次运行超过 5 小时（2 小时兜底补测没有单 PR 超时，卡住会挡住所有合并测试）；Cindy 挂了且内存不够、暂时不拉起时私信一次。
 - **盯梢那边 PR 卡住怎么办**：看门狗报「Mac mini 盯梢那边有 PR 卡了很久」时，先在 Mac mini 上看盯梢还在不在跑。上次停摆是 Keel 插件换了命名空间，台账目录从 `ghost-fs/keel` 变成 `ghost-fs/_ns__xd__keel`；解法见 vigil 仓 `docs/operations.md`：改 profile 的 `keelLedgerRoot`、`keelNamespace` 后重新部署。盯梢正常但 PR 一直没人处理的，在 Cindy 里让 Mac mini 的会话直接处理。
+
+## 10-30 交接 issue 正文 + handoff 标签 + 交接文件外发
+- daily.py 开交接 issue 时正文写级别、file:line、测试的合并提交、指纹，标题带 `[P级]`；outbound 加 `handoff` 标签和 `mivo-qa-handoff` 标记（handoff.py 只跟踪带这两样的 issue），仓里没有该标签时不开（fail closed）。
+- 新外发类型 `gh.handoff.files`：把 feedback.md / receipts.md 写到交接仓 `daily/<YYYY>/<MM>/<日>/`（pm_extra.py、compare.py 读的位置）并普通 push；只认 handoff 仓和这两个文件名，远端已有且不是 pi-line 写的文件一律不覆盖。目前还没有作业产出这个动作。
