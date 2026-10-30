@@ -87,7 +87,7 @@ class Run:
         self.c, self.enforce, self.aggr, self.event = conf, enforce, aggressive, event
         self.r = {"ran_at": now_cst().isoformat(timespec="seconds"), "mode": "enforce" if enforce else "dry-run", "event": event,
                   "aggressive": aggressive, "reaped": [], "skipped": [], "unmarked": [], "pruned": [], "branches_deleted": [],
-                  "remote_deleted": [], "remote_kept": [], "deleted": [], "trash_purged": [], "errors": [], "long_running": []}
+                  "remote_deleted": [], "remote_kept": [], "deleted": [], "trash_purged": [], "errors": [], "long_running": [], "held": []}
         self.opened = open_paths()
     def say(self, verb, what, why=""):
         print(f"{now_cst():%H:%M:%S} {'' if self.enforce else '[dry] '}{verb} {what}{('  -- ' + why) if why else ''}", flush=True)
@@ -106,17 +106,30 @@ class Run:
             if t.get("status") == "running" and W.pid_alive(t.get("pid")): return f"单子 {key} 正在运行（pid {t.get('pid')}）"
         if in_use(wd, self.opened): return "有进程正在用这个目录"
         return None
+    def held(self, wd):
+        """10-30: a person's hold (.pi-owned.json owner manual-hold, schema 1) -> listed in r["held"], never reaped. -> True when held"""
+        p = os.path.join(wd, W.MARK)
+        try:
+            if os.path.islink(p) or not os.path.isfile(p): return False
+            with open(p) as f: m = json.load(f)
+        except (OSError, ValueError): return False
+        if not (isinstance(m, dict) and m.get("owner") == "manual-hold" and m.get("schema") == 1): return False
+        self.r["held"].append({"path": wd, "owner": m["owner"], "created_at": m.get("created_at")}); self.say("keep", wd, "manual-hold，不删"); return True
     def worktrees(self):
         for kind in sorted(_ls(W.path("wt"))):
             kd = W.path("wt", kind)
             if os.path.islink(kd) or not os.path.isdir(kd):
                 self.r["unmarked"].append({"path": kd, "why": "wt/ 下不是普通目录"}); continue
+            if os.path.exists(os.path.join(kd, ".git")):   # 10-30: a worktree put at wt/<name>, not a kind dir: one entry, never descend
+                if not self.held(kd): self.r["unmarked"].append({"path": kd, "why": "worktree 放在 wt/ 顶层（不是 wt/<kind>/<name>）"})
+                continue
             for name in sorted(_ls(kd)):
                 wd = os.path.join(kd, name)
                 if name.startswith(".pi-trash"): continue
                 if os.path.islink(wd) or not os.path.isdir(wd):
                     self.r["unmarked"].append({"path": wd, "why": "符号链接或文件（不跟随、不删）"}); continue
                 m = W.marker(wd)
+                if m is None and self.held(wd): continue
                 if m is None:
                     self.r["unmarked"].append({"path": wd, "why": "没有 .pi-owned.json"}); self.say("keep", wd, "没有标记，不删"); continue
                 why = self.busy(wd, m)
