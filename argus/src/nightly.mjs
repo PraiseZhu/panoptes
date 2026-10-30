@@ -229,7 +229,9 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   const baseProfile = { ...project.profileData, displayName: project.displayName }
   const pr = await getPull(repo, number)
   // PR 交接文件 docs/pr/** 不参与分级、代码审查、覆盖率和被测文件列表（只算进 changed_files 总数）
-  const allFiles = await addFullText(repo, pr, await listPullFiles(repo, number))
+  // 探针分支（skipBaseBranches）不测：连文件列表也不取（changed_files 记 0）
+  const skipBase = matchesSkipBase(pr.base?.ref, project?.skipBaseBranches ?? DEFAULT_SKIP_BASE_BRANCHES)
+  const allFiles = skipBase ? [] : await addFullText(repo, pr, await listPullFiles(repo, number))
   const files = withoutHandoff(allFiles)
   const merged = Boolean(pr.merged_at)
   const out = {
@@ -249,7 +251,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     quota_capped: [],
   }
   // 目标分支是临时探针分支（registry.skipBaseBranches，默认 probe-*）：不测，写 skipped 报告，watchdog 不再报缺报告
-  if (matchesSkipBase(out.base_ref, project?.skipBaseBranches ?? DEFAULT_SKIP_BASE_BRANCHES)) {
+  if (skipBase) {
     Object.assign(out, { tested: false, verdict: 'skipped', outcome_reason: 'non-main-base', skip_reason: 'non-main-base', tested_at: toShanghaiIso() })
     return out
   }
@@ -1834,7 +1836,7 @@ export function mergedReportFor(report, pr, { kind = 'merged' } = {}) {
 
 // 单 PR 文件的选择规则：merged → 真实测完且非复用；open → 所有开放 PR（未测的也写，带原因）
 const PER_PR_KINDS = {
-  merged: { enabled: writeMergedEnabled, path: (n, opts) => mergedReportPath(n, opts.mergedDir), select: (pr) => pr.state === 'merged' && !pr.reused && REUSABLE_VERDICTS.has(pr.verdict) },
+  merged: { enabled: writeMergedEnabled, path: (n, opts) => mergedReportPath(n, opts.mergedDir), select: (pr) => pr.state === 'merged' && !pr.reused && (REUSABLE_VERDICTS.has(pr.verdict) || (pr.verdict === 'skipped' && pr.skip_reason === 'non-main-base')) },
   open: { enabled: writeOpenEnabled, path: (n, opts) => openReportPath(n, opts.openDir), select: (pr) => pr.state === 'open' && pr.not_tested_code !== 'excluded-by-pr-filter' },
 }
 

@@ -8,7 +8,7 @@ const PROFILES_DIR = process.env.ARGUS_PROFILES_DIR ?? join(CODE_DIR, 'config/pr
 
 const STEP_KINDS = new Set(['setup', 'product', 'quality'])
 
-// 目标分支匹配这些 glob（* 可跨 /）的 PR 不测，只写 skipped（reason non-main-base）报告；registry.skipBaseBranches 可覆盖
+// 目标分支匹配这些 glob（* 可跨 /）的 PR 不测，只写 skipped（reason non-main-base）报告；registry.skipBaseBranches 可覆盖；设成 [] 就关闭跳过（所有目标分支都测）
 export const DEFAULT_SKIP_BASE_BRANCHES = ['probe-*']
 export function matchesSkipBase(baseRef, patterns = DEFAULT_SKIP_BASE_BRANCHES) {
   if (typeof baseRef !== 'string' || !baseRef) return false
