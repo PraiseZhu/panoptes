@@ -152,7 +152,7 @@ def job_checks(now, probs, since):
         if rs and rs[-1][3] and "syntax-error" in rs[-1][3]: probs[f"syntax:{job}"] = job_item(job, "它的程序被改坏了，启动不起来", f"的程序 {job}.py 编译失败（{rs[-1][3][:80]}）")
 
 
-SLA_P95_MIN = 2   # 合并 → 开测 p95 ≤ 2 分钟（Praise 10-26）
+SLA_P95_MIN = 120   # G1：合并后 2 小时内出报告（测试项目经理 10-30）
 SLA_MIN_N = 5
 SLA_P95_N = 20   # 10-29：样本 < 20 时 p95 就是最大值（7 个样本 p95=最慢那一个），改报最大值 + 中位数
 
@@ -187,6 +187,8 @@ def merge_sla_check(now, probs, rdir=f"{QA}/reports/merged"):
         if (time.time() - os.path.getmtime(f)) > 3 * 86400: continue
         try: pr = (json.load(open(f)).get("prs") or [{}])[0]
         except Exception: continue
+        # 10-30：跳过的报告（non-main-base 等）和 probe-* 基线的 PR 不算合并即测
+        if "skipped" in (pr.get("status"), pr.get("verdict")) or pr.get("skip_reason") or str(pr.get("base_ref") or "").startswith("probe-"): continue
         if pr.get("merged_at") and pr.get("test_started_at"): rows.append((pr["merged_at"], pr["test_started_at"], pr.get("gate_wait_s") or 0))
     n, p95 = merge_sla([r[:2] for r in rows], now)
     # 10-27：test_started_at 在内存门之后；减掉 gate_wait_s 就是不含等内存的排队时间，两段分开看

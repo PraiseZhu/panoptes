@@ -28,7 +28,7 @@ test('apt lock held → waits and retries, succeeds once the lock is released', 
 })
 
 test('apt lock held past PANOPTES_APT_LOCK_WAIT → gives up with apt-get exit code', () => {
-  const r = run({ failTimes: 1000, wait: 1 })
+  const r = run({ failTimes: 1000, wait: 3 })
   assert.match(r.out, /rc=100/)
   assert.ok(r.calls.length >= 2 && r.calls.length < 20, String(r.calls.length))
 })
