@@ -791,7 +791,10 @@ def handler(a):
             return f"gh infra issue {a.get('repo')}", refuse, refuse, refuse
     if t.startswith("gh.infra."):   # 10-23 infrafix line: panoptes PR / guarded merge / pr-qa-agent-deploy issue (bin/infra_outbound.py)
         import infra_outbound, infrafix
-        return infra_outbound.handler(a, gh, lambda text, key: record_muted("outbound", key, text) if praise_dm_blocked(key) else h_slack_dm({"key": key, "type": "slack.dm", "to": "Praise", "text": text})[3](),
+        def infra_dm(text, key):
+            if praise_dm_blocked(key): record_muted("outbound", key, text); return False
+            h_slack_dm({"key": key, "type": "slack.dm", "to": "Praise", "text": text})[3](); return True
+        return infra_outbound.handler(a, gh, infra_dm,
                                       sensitive=(infrafix.files_from_diff, infrafix.sensitive))
     return None
 

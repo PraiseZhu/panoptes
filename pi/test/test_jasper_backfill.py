@@ -35,4 +35,11 @@ for f, t in (("2026-10-27.md", "已发出的 brief\n"), ("2026-10-27.facts.json"
 run("2026-10-27"); assert open(f"{tmp}/out/jasper/2026-10-27.md").read() == "已发出的 brief\n" and open(f"{tmp}/out/jasper/2026-10-27.facts.json").read() == "{}" and prompts == []
 reset(); open(f"{tmp}/out/jasper/2026-10-27.actions.json", "w").write(json.dumps({"actions": [{"key": "brief:2026-10-27"}]}))
 run("2026-10-27"); assert open(f"{tmp}/out/jasper/2026-10-27.md").read() == "已发出的 brief\n" and prompts == [] and acts == []   # 待发清单里有也一样
+# 10-30: 私信静音期间，简报是 panoptes 待合并 PR 唯一能到人的出口
+J.gh = lambda a: [{"number": 1, "createdAt": "2026-10-30T07:00:00Z"}, {"number": 2, "createdAt": "2026-10-28T07:00:00Z"}]
+b = J.panoptes_backlog({"inf1-a": {"status": "awaiting_praise", "pr": 121}, "inf1-b": {"status": "verified", "pr": 9}})
+assert b["awaiting_merge_prs"] == [121] and b["open_prs"] == 2 and b["oldest_open_at"] == "2026-10-28T07:00:00Z", b
+def nogh(a): raise RuntimeError("gh down")
+J.gh = nogh; b = J.panoptes_backlog({}); assert "未核实" in b["open_prs"], b   # 读不到不能写成 0
+assert 'panoptes_backlog' in open(f"{B}/jasper.py").read().split("Write Praise's")[1]
 print("ok test_jasper_backfill")

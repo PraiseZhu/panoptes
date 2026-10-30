@@ -360,14 +360,22 @@ def hung_test_check(probs, runs=None):
                             "卡死了就结束它，合并即测会自动补测"))
 
 
+INFRA_WAIT_H, INFRA_WAIT_N = 24, 3     # awaiting_praise: alarm at the oldest > 24 h or at 3 tickets (the open-PR cap in infrafix.py)
 def infra_check(now, probs):
     """10-23 infrafix line: a ticket stuck in running > 2 h; a ticket waiting for Praise (needs_human / deploy_unhealthy / ci_red)
-    untouched > 12 h; a PR action not turned into a PR after 2 h (outbound?); a merged infra PR not deployed+checked after 6 h.
+    untouched > 12 h; tickets waiting for a merge (awaiting_praise), as one item; a PR action not turned into a PR after 2 h (outbound?); a merged infra PR not deployed+checked after 6 h.
     Clear a needs_human ticket with `infrafix.py --reset <sig8>` (or hold it in conf/gates.json infra_hold)."""
     T = jload(f"{BASE}/out/infrafix/tickets.json", {}).get("tickets", {})
     def age_h(t, field):
         try: return (now - dt.datetime.fromisoformat(t[field])).total_seconds() / 3600
         except Exception: return 0.0
+    # one aggregate item, not one per ticket: Jasper's brief reads the first 8 open problems, and this is the only way a muted merge request gets out
+    waiting = sorted((age_h(t, "updated_at"), t.get("pr")) for t in T.values() if t.get("status") == "awaiting_praise")
+    if waiting and (waiting[-1][0] > INFRA_WAIT_H or len(waiting) >= INFRA_WAIT_N):
+        prs = " ".join(f"#{p}" for _, p in waiting[-8:] if p)
+        probs["infra:awaiting-merge"] = PN.item("action", "测试系统的修复 PR 在等人合并", f"有 {len(waiting)} 个工单在等合并（{prs}），最久 {waiting[-1][0]:.0f} 小时。这类 PR 不会自动合并，私信又是静音的。",
+            "这些故障一直在，新问题的 PR 也会被开单上限挡住。", todo="打开 PR 看一下：同根因的合一个，其余关闭（关闭后这个签名不再自动修）",
+            link="https://github.com/PraiseZhu/panoptes/pulls")
     for k, t in T.items():
         s8, st = k[5:13], t.get("status")
         what = f"测试系统的一个故障（{(t.get('title') or '')[:40]}，编号 {s8}）"

@@ -56,6 +56,7 @@ bot 建的、用完就扔的东西只放在 `/workspace/pi-work/`（`bin/workroo
 
 - **只走 PR**（PraiseZhu/panoptes）。合并后由 `opsdeploy`（每 10 分钟）/ `opsenv`（每小时）按原有保护条件快进部署，下一轮 cron 就用上新代码。
 - 提交前跑 `bash pi/bin/selftest.sh`（CI 也跑同一个）：全部 .py 能编译、.sh 能解析、`pi/test/test_*.py` 全过；测试在 `env -i` 白名单环境里跑，看不到真密钥。
+- **infrafix 不按用例堆 PR**（10-30：一个沙箱缺陷打挂 30 条用例，开出 17 个互相冲突的 PR）：`check` 类故障按「stage + 测试目录」成族，同族有单在路上（或 7 天内停下等人）时其余用例不开单；全局 open infra PR 到 `INFRA_OPEN_PR_CAP`（3）就停开新单。`--sig` 人工指定不受限。这类 PR 不自动合并，等合并的工单走 watchdog 的 `infra:awaiting-merge` 和 Jasper 09:00 简报（私信静音期间这是唯一出口）。
 - **infrafix / opsfix 不许改 `pi/`**（bot 不改自己）：infrafix 提交前检查，改到 `pi/` 就放弃这一单；外发合并前按 PR 真实 diff 再查一次；CI 对 `fix/infra-*` 分支的 PR 也会拦。三道都把「挪走」算成「从原处删掉 + 在新处加上」，挪出 `pi/` 也拦得住；中文等非 ASCII 文件名照样认得。
 - 定时表源文件是 `cron/pi-line.cron`，装到 `/etc/cron.d/pi-fallback`（`sudo install -o root -g root -m 644 cron/pi-line.cron /etc/cron.d/pi-fallback`）。
 - 开关（值不变，只换了位置）：`/workspace/fleet-mode`；`$PI_STATE/outbound-enabled`；`$PI_STATE/outbound-disabled-types`；`$PI_STATE/takeover/<作业>`。切换用 `bin/switch.sh pi|grok [--with-outbound] [--dry-run]`。

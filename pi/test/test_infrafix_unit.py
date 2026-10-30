@@ -564,6 +564,66 @@ class FakeGh:
         if args[:2] == ["pr", "merge"]: return "merged"
         raise AssertionError(args)
 GREEN = [{"name": "CI", "status": "completed", "conclusion": "success"}]
+class TestBacklogGuard(Tmp):
+    """10-30: one sandbox fault failed 30 test cases -> 30 signatures -> 17 conflicting open PRs, nobody merging."""
+    D = "scripts/ops/review-capacity-check"
+    def occs(self, *names, run="r", d=None):
+        return [occ("check", "unit", f"单元测试「{d or self.D}/{n}.test.mjs > case」在基线版本上也失败", NOW - dt.timedelta(hours=1), f"{run}{i}")
+                for n in names for i in range(3)]
+    def ctx(self, occs, **kw): return ctx_of(occs, **kw)
+    def todo(self, ctx): return [v["c"]["sig8"] for v in X.evaluate_all(ctx, NOW) if v["state"] == "todo"]
+    def sigs(self, ctx): return {c["sample"].split("/")[-1].split(".")[0]: s for s, c in ctx["cands"].items()}
+    def test_one_family_opens_one_ticket(self):
+        ctx = self.ctx(self.occs("launcher", "batch", "isolation"))
+        self.assertEqual(len(ctx["cands"]), 3)            # the signatures stay per test case
+        self.assertEqual(len(self.todo(ctx)), 1)
+    def test_other_directory_is_another_family(self):
+        ctx = self.ctx(self.occs("a") + self.occs("b", d="scripts/ops/other"))
+        self.assertEqual(len(self.todo(ctx)), 2)
+    def test_no_directory_stands_alone(self):
+        o = [occ("check", "api-probe", f"探针「{n}」在基线版本上也失败", NOW - dt.timedelta(hours=1), f"r{i}") for n in ("甲", "乙") for i in range(3)]
+        self.assertEqual(len(self.todo(self.ctx(o))), 2)
+    def test_sibling_in_flight_waits(self):
+        ctx = self.ctx(self.occs("a", "b")); s = self.sigs(ctx)
+        for st in ("pr_open", "awaiting_praise", "merged"):
+            ctx["tickets"] = {s["a"]: {"status": st, "pr": 7}}
+            ctx["prs"] = [{"number": 7, "state": "OPEN" if st != "merged" else "MERGED", "body": f"{X.MARK} {s['a']}"}]   # a is claimed, b asks
+            vs = {v["key"]: v for v in X.evaluate_all(ctx, NOW)}
+            self.assertEqual(vs[s["b"]]["state"], "skip", st); self.assertIn(s["a"][5:13], vs[s["b"]]["reason"])
+    def test_sibling_stopped_for_a_person_waits_until_the_window_ends(self):
+        ctx = self.ctx(self.occs("a", "b")); s = self.sigs(ctx)
+        ctx["tickets"] = {s["a"]: {"status": "needs_human", "updated_at": (NOW - dt.timedelta(days=1)).isoformat()}}
+        self.assertEqual({v["key"]: v["state"] for v in X.evaluate_all(ctx, NOW)}[s["b"]], "skip")
+        ctx["tickets"] = {s["a"]: {"status": "needs_human", "updated_at": (NOW - dt.timedelta(days=8)).isoformat()}}
+        self.assertEqual({v["key"]: v["state"] for v in X.evaluate_all(ctx, NOW)}[s["b"]], "todo")
+    def test_rejected_or_verified_sibling_does_not_block(self):
+        ctx = self.ctx(self.occs("a", "b")); s = self.sigs(ctx)
+        for st in ("rejected", "verified"):
+            ctx["tickets"] = {s["a"]: {"status": st}}
+            self.assertEqual({v["key"]: v["state"] for v in X.evaluate_all(ctx, NOW)}[s["b"]], "todo", st)
+    def test_two_due_failed_siblings_do_not_deadlock(self):
+        ctx = self.ctx(self.occs("a", "b")); s = self.sigs(ctx)
+        due = {"status": "failed", "next_retry_at": (NOW - dt.timedelta(minutes=1)).isoformat()}
+        ctx["tickets"] = {s["a"]: dict(due), s["b"]: dict(due)}
+        self.assertEqual(len(self.todo(ctx)), 1)
+        ctx["tickets"] = {s["a"]: {"status": "queued"}, s["b"]: {"status": "queued"}}
+        self.assertEqual(len(self.todo(ctx)), 1)
+        ctx["tickets"] = {s["a"]: {**due, "next_retry_at": (NOW + dt.timedelta(minutes=9)).isoformat()}}
+        self.assertEqual(self.todo(ctx), [])
+    def test_open_pr_cap_stops_every_signature(self):
+        o = [occ("qa_tool_failures", "janitor", f"EACCES {n}", NOW - dt.timedelta(hours=1), "r") for n in ("a", "b")]
+        pr = lambda i, st="OPEN": {"number": i, "state": st, "body": f"{X.MARK} inf1-{'0' * 19}{i}"}
+        at_cap = [pr(i) for i in range(X.INFRA_OPEN_PR_CAP)]
+        self.assertEqual(self.todo(self.ctx(o, prs=at_cap)), [])
+        self.assertEqual(len(self.todo(self.ctx(o, prs=at_cap[1:] + [pr(9, "MERGED"), {"number": 8, "state": "OPEN", "body": "by a person"}]))), 2)
+    def test_long_failure_keeps_the_node_summary(self):
+        out = "ℹ tests 216\nℹ pass 215\nℹ fail 1\n" + "\n".join(f"detail {i}" for i in range(200))
+        self.assertEqual(X.node_verdict(1, X.with_summary(out)), "fail")
+        self.assertEqual(X.with_summary("a\nb"), "a\nb")
+    def test_the_model_is_told_its_sandbox_hides_root(self):
+        c = X.aggregate(self.occs("a"))
+        self.assertIn("65534", X.context_text(next(iter(c.values()))))
+
 class TestOutboundMerge(Tmp):
     def act(self, **kw):
         a = {"key": "inframerge:inf1-" + "a" * 20 + ":7:hhhh", "type": "gh.infra.merge", "repo": "PraiseZhu/panoptes", "sig": "inf1-" + "a" * 20,
@@ -593,6 +653,12 @@ class TestOutboundMerge(Tmp):
         wf(X.GATES, json.dumps({"infra_automerge": False}))
         g = FakeGh(pr_view(), GREEN); st, r, dms = self.run_do(self.act(), g)
         self.assertEqual(self.merged(g), []); self.assertIn("infra_automerge", dms[0][1])
+    def test_a_muted_dm_is_not_recorded_as_sent(self):   # 10-30: 18 merge requests went to a muted file, the ledger said "DM sent"
+        g = FakeGh(pr_view(), GREEN)
+        r = O.handler(self.act(auto_merge=False), g, lambda t, k: False, sensitive=(X.files_from_diff, X.sensitive), now=NOW)[3]()
+        self.assertIn("muted", r); self.assertNotIn("DM sent", r)
+        r = O.handler(self.act(auto_merge=False), g, lambda t, k: True, sensitive=(X.files_from_diff, X.sensitive), now=NOW)[3]()
+        self.assertIn("DM sent", r)
     def test_a_move_out_of_a_sensitive_path_blocks(self):   # 10-24 review: the PR diff's rename shows the old path too
         mv = "diff --git a/.github/workflows/ci.yml b/ci.yml\nsimilarity index 100%\nrename from .github/workflows/ci.yml\nrename to ci.yml\n"
         g = FakeGh(pr_view(), GREEN, mv); st, r, dms = self.run_do(self.act(), g)

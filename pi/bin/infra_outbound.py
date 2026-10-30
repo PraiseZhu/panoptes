@@ -155,9 +155,10 @@ def h_merge(a, gh, dm, sensitive, now):
         why = merge_blockers(a, p, ci, gh, sensitive, now)
         url = p.get("url") or f"https://github.com/{repo}/pull/{n}"
         if why:
-            dm(PN.text(PN.item("action", f"测试系统的修复 PR #{n} 要你看一眼再合", f"「测试系统自修」给测试系统自己的一个故障开了修复 PR，自动测试已经跑完，但有几处不满足自动合并的条件：{'；'.join(why)[:200]}。",
+            sent = dm(PN.text(PN.item("action", f"测试系统的修复 PR #{n} 要你看一眼再合", f"「测试系统自修」给测试系统自己的一个故障开了修复 PR，自动测试已经跑完，但有几处不满足自动合并的条件：{'；'.join(why)[:200]}。",
                                 "不合并的话这个故障一直在。", todo="打开 PR 看一下：没问题就合并（合并后每小时 25 分自动上线），有问题就在 PR 下说", link=url)), f"infra-review:{a['key']}")
-            return "not merged; DM sent: " + "；".join(why)[:150]
+            # False = muted (praise-dm-mute): nobody was told. Say so in the ledger; watchdog + Jasper's brief carry awaiting_praise from here
+            return ("not merged; DM muted, waiting in Jasper brief: " if sent is False else "not merged; DM sent: ") + "；".join(why)[:150]
         return gh(["pr", "merge", str(n), "-R", repo, "--squash", "--match-head-commit", p["headRefOid"]], js=False).strip() or f"merged #{n}"
     return f"gh infra merge #{n}@{head[:7]}", state, validate, do
 
