@@ -721,7 +721,9 @@ def h_handoff_files(a):
         for n, body in want.items():
             cur = read(n)
             if cur is not None and handoff_body(cur, repo, rel(n)).rstrip("\n") + "\n" == body: continue   # same content: no write
-            if cur is not None and not handoff_owned(cur, repo, rel(n), key): raise RuntimeError(f"{rel(n)} exists and is not ours (no valid pi-line marker for {key}); not overwriting")
+            if cur is not None and not handoff_owned(cur, repo, rel(n), key):
+                log(f"handoff-files skip: not ours repo={repo} path={rel(n)} key={key}")   # one line per skip, for the 日报 (PM 10-30)
+                raise RuntimeError(f"{rel(n)} exists and is not ours (no valid pi-line marker for {key}); not overwriting")
             out.append(n)
         return out
     def state():

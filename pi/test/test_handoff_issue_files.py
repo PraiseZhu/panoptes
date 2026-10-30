@@ -185,5 +185,30 @@ class Acceptance138(unittest.TestCase):
             with self.assertRaises(RuntimeError): h[1]()
         with self.assertRaises(RuntimeError): O.check_repo("handoff", O.REPO)
 
+class FinalRules138(Acceptance138):
+    """PM final rules 10-30: marker is an invisible HTML comment with no secret / local path; every skip of a non-owned
+    remote file writes one log line with repo and path."""
+    def test_marker_is_html_comment_without_paths_or_key_material(self):
+        text = self.owned("回执\n")
+        last = text.rstrip("\n").splitlines()[-1]
+        self.assertRegex(last, r"^<!--[^>]*-->$")                                   # HTML comment: not rendered
+        self.assertTrue(last.startswith("<!-- ") and last.endswith(" -->") and "--" not in last[4:-3])
+        key_material = open(f"{O.BASE}/outbound/handoff-files.key").read().strip()
+        for bad in ("/workspace", O.BASE, os.environ.get("PI_STATE") or "/workspace/mivo-qa/pi", self.d, key_material, "handoff-files.key"):
+            self.assertNotIn(bad, text, bad)
+        self.assertEqual(text[:-len(last) - 1].rstrip("\n") + "\n", "回执\n")    # body untouched above the marker
+    def test_every_non_owned_skip_logs_repo_and_path(self):
+        logs = []; orig = O.log; O.log = lambda *a: logs.append(" ".join(map(str, a)))
+        try:
+            self.g.remote[f"{self.BASEP}/receipts.md"] = "别人写的回执\n"
+            self.assertTrue(O.handler(self.act())[1]().startswith("stale:"))
+            O.handler(self.act())[1]()
+            self.clone[f"{self.BASEP}/feedback.md"] = "clone 里别人写的\n"; self.g.remote.clear()
+            with self.assertRaises(RuntimeError): O.handler(self.act())[3]()
+        finally: O.log = orig
+        hits = [l for l in logs if "not ours" in l]
+        self.assertEqual(len(hits), 3, logs)                                        # one line per skip, every time
+        self.assertIn(f"repo={REPO} path={self.BASEP}/receipts.md", hits[0]); self.assertIn(f"path={self.BASEP}/feedback.md", hits[2])
+
 if __name__ == "__main__":
     unittest.main()
