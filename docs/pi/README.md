@@ -151,3 +151,7 @@ panoptes catch-up 每 2 小时 :07 + 每次合并（mergewatch）起跑；修 PR
   - **以后**：别从会话里直接跑 prfix / infrafix 的修复模式；要跑，先 `env -i` 或等 prfix 自己清环境（已交给负责修 PR bot 的会话）。
 - **看门狗又加了两项**：测试系统某次运行超过 5 小时（2 小时兜底补测没有单 PR 超时，卡住会挡住所有合并测试）；Cindy 挂了且内存不够、暂时不拉起时私信一次。
 - **盯梢那边 PR 卡住怎么办**：看门狗报「Mac mini 盯梢那边有 PR 卡了很久」时，先在 Mac mini 上看盯梢还在不在跑。上次停摆是 Keel 插件换了命名空间，台账目录从 `ghost-fs/keel` 变成 `ghost-fs/_ns__xd__keel`；解法见 vigil 仓 `docs/operations.md`：改 profile 的 `keelLedgerRoot`、`keelNamespace` 后重新部署。盯梢正常但 PR 一直没人处理的，在 Cindy 里让 Mac mini 的会话直接处理。
+
+## 10-30 catch-up 每小时 + 只算 main
+- scripts/catch-up.cron 去掉 PANOPTES_CATCHUP_GATE=even，:07 每个北京小时都跑；奇数点在拿锁前先看内存，MemAvailable < 6144 MB 或 SwapFree < 4096 MB 就写一行 skipped、exit 0（不等 30 分钟）。偶数点内存门不变（依据 /workspace/pi-work/diag-1030/catchup-hourly-mem.md）。
+- catchup.mjs 和 watchdog 的 noreport 只算 baseRefName == main 的已合并 PR，其他分支记 skipped（catch-up 结果 `skipped[]`，watchdog 状态 `merged_skipped`）。

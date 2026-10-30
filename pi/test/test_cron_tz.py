@@ -1,5 +1,5 @@
 """python3 test/test_cron_tz.py — catch-up 北京偶数点门控（Debian cron 不支持按文件设时区，盒子时区又会被平台切换）：
-cron 每小时 :07 触发（'7 * * * *'，crontab 里没有字面 %），run-nightly.sh --catch-up 在 PANOPTES_CATCHUP_GATE=even 时用
+cron 每小时 :07 触发（"7 * * * *"，crontab 里没有字面 %）。10-30 起 cron 不再设 PANOPTES_CATCHUP_GATE=even（每小时跑，见 test_catchup_hourly_gate.py）；设了该变量时 run-nightly.sh --catch-up 仍用
 TZ=Asia/Shanghai date +%H 判小时，奇数点写一行日志 exit 0。在 TZ=America/Los_Angeles 与 TZ=Asia/Taipei 下各测一遍（伪造北京小时）。"""
 import os, sys, subprocess, tempfile, importlib.util
 R = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -13,7 +13,7 @@ for f in ("pi/cron/pi-line.cron", "scripts/catch-up.cron"):
     assert not C.validate(t.replace("@USER@", "box").replace("@QA_HOME@", "/q").replace("@PANOPTES_DIR@", "/p")), f
 cu = jobs(open(f"{R}/scripts/catch-up.cron").read())
 assert len(cu) == 1 and cu[0].split()[:5] == ["7", "*", "*", "*", "*"], cu
-assert "PANOPTES_CATCHUP_GATE=even" in cu[0] and "--catch-up" in cu[0] and "%" not in cu[0], cu
+assert "PANOPTES_CATCHUP_GATE" not in cu[0] and "--catch-up" in cu[0] and "%" not in cu[0], cu   # 10-30: hourly (test_catchup_hourly_gate.py)
 assert all(l.split()[1] == "*" for l in jobs(open(f"{R}/pi/cron/pi-line.cron").read()))
 
 # 2) 门控：奇数北京小时 → 一行 skipped、exit 0、不往下走（catch-up.lock 都不建）；偶数 → 继续往下（锁被占时打 lock 日志）
