@@ -57,8 +57,9 @@ export function createFailureParser() {
     if (record.type !== 'unknown' && record.type !== type) { record.type = 'unknown'; record.conflict = true }
     else record.type = type
   }
+  // 一个诊断块可能属于多个相邻的 FAIL 头（vitest 把错误文本相同的失败合并打印），块内每个用例都要拿到同一类型
   const flush = (state) => {
-    if (state.current) save(state.current.name, state.current.type)
+    if (state.current) for (const name of state.current.names) save(name, state.current.type)
     state.current = null
   }
   const terminal = (reporter, failed) => {
@@ -73,11 +74,18 @@ export function createFailureParser() {
     }
     const name = toFailureName(clean)
     if (name) {
-      flush(state)
       const reporter = /^\s*FAIL\s/.test(clean) ? 'vitest' : /^FAILED\s/.test(clean) ? 'pytest' : 'node'
+      // 当前块还没有任何诊断内容时，相邻的 vitest FAIL 头共用随后的一段诊断，不提前把前一个存成 unknown
+      if (reporter === 'vitest' && state.current?.type === 'unknown' && state.current.bytes === 0) {
+        state.current.names.push(name)
+        reporters.add(reporter)
+        save(name)
+        return
+      }
+      flush(state)
       reporters.add(reporter)
       save(name)
-      state.current = { name, type: 'unknown', bytes: 0 }
+      state.current = { names: [name], type: 'unknown', bytes: 0 }
       if (reporter === 'pytest') {
         const reason = clean.match(/\s+-\s+(.+)$/)?.[1]
         if (reason) state.current.type = diagnosticType(reason) ?? 'unknown'

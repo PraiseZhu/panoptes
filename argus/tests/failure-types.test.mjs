@@ -83,6 +83,41 @@ test('真实 Node spec 子进程的断言与内部超时都有类型；外层未
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
+// 2026-10-30（签名 inf1-f98b64539096e93a3b54）：vitest 会把同一文件里错误文本完全相同的失败合并打印 ——
+// N 个 FAIL 头 + 一段共用诊断（真实证据 PR-1454/PR-1450 的 unit.log：「非帮助入口实际启动Node且拒绝继承环境注入」
+// 的 path-node / path-utils / node-loader / bash-env 四行 FAIL 后只跟一段 AssertionError）。
+// 解析器只保留「当前一条」，于是只有最后一个拿到诊断类型，其余留在 unknown；unknown 不可 fingerprint 对齐，
+// 基线对照只能给 unknown，最终落成「基线也失败（failure type not fingerprint-comparable）」的 P3。
+test('同组多个 FAIL 头共用一段诊断时组里每个用例都要拿到诊断类型，基线对照才能对齐', async () => {
+  const file = 'scripts/ops/review-capacity-check/launcher.native.test.mjs'
+  const title = '非帮助入口实际启动Node且拒绝继承环境注入'
+  const ids = ['path-node', 'path-utils', 'node-loader', 'bash-env']
+  const log = [
+    ' RUN  v3.2.4 /workspace/x',
+    ` ❯ ${file} (8 tests | 4 failed) 900ms`,
+    ...ids.map((id) => `   × ${title}：${id} 185ms`),
+    '⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/30]⎯',
+    '',
+    ...ids.map((id) => ` FAIL  ${file} > ${title}：${id}`),
+    'AssertionError: 控制器启动路径不可信，拒绝加载模块',
+    ': expected 1 to be +0 // Object.is equality',
+    '',
+    ` ❯ ${file}:72:40`,
+    '⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[8/30]⎯',
+    '',
+    ' Test Files  1 failed | 3 passed (4)',
+    '      Tests  4 failed | 30 passed (34)',
+    '   Duration  1.20s',
+    '',
+  ].join('\n')
+  const head = parse(log)
+  assert.equal(head.failureParseStatus, 'complete')
+  for (const id of ids) assert.equal(head.failureDetails.find((f) => f.name === `${file} > ${title}：${id}`)?.type, 'assertion', `组内用例 ${id} 没拿到共用诊断的类型`)
+  const { compareKey } = await import('../src/decide.mjs')
+  const step = (parsed) => [{ id: 'unit', kind: 'check', ok: false, exitCode: 1, timedOut: false, unavailable: false, ...parsed }]
+  assert.equal(compareKey(`unit::${file} > ${title}：path-utils`, step(parse(log)), step(head)), 'same', '基线上同名用例失败类型一致时必须能判成 same，不能退回 unknown')
+})
+
 test('完整流式解析不依赖 tail 保留前面的失败诊断', async () => {
   const output = vitest('Error: Test timed out in 5000ms.') + 'irrelevant output\n'.repeat(7000)
   const r = await run(process.execPath, ['-e', 'process.stdout.write(process.argv[1]); process.exitCode=1', output], { env: { PATH: process.env.PATH } })
