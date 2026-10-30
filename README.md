@@ -248,10 +248,12 @@ leads, own-tests not run, QA errors — goes to **`prs[].pending_verification[]`
 ## Sandbox / 沙盒: bubblewrap
 
 Every install / test command runs as
-`bwrap --ro-bind / / --tmpfs /home --tmpfs /root --tmpfs /workspace --tmpfs /tmp … --bind <run dir> --bind <argus cache>`:
+`bwrap --tmpfs / --ro-bind <宿主根各目录> --remount-ro / --tmpfs /home --tmpfs /root --tmpfs /workspace --tmpfs /tmp … --bind <run dir> --bind <argus cache>`:
 
 - root filesystem read-only; `/home`, `/root`, `/workspace`, `/tmp`, `/mnt`, `/media`, `/srv` replaced by empty tmpfs —
-  tests can't see `gh` credentials, `secrets.env`, SSH keys or other agents' files;
+  tests can't see `gh` credentials, `secrets.env`, SSH keys or other agents' files; the root itself is a tmpfs owned by
+  the sandbox user (bwrap's user namespace maps only that uid, so `--ro-bind / /` would show `/` as nobody/65534 and
+  trip ownership checks in the code under test);
 - only the run dir, the Argus cache and a per-run tmp are writable; Node, Playwright browsers and `argus/node_modules`
   are re-mounted read-only;
 - new pid / ipc / uts (+ cgroup) namespaces, `--die-with-parent`, `--new-session`; minimal env with no tokens;
