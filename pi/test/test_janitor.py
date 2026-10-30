@@ -36,7 +36,13 @@ os.environ.clear(); os.environ.update(_ENV_BEFORE)
 # real dirs (one did: test_10 with enforce=true removed the real /tmp/opsfix-retest/nm-* cache before this line existed)
 J.DEFAULTS.update(legacy_tmp=[f"{T}/data/legacy"], evidence={**J.DEFAULTS["evidence"], "dir": f"{T}/data/evidence"},
                   step_results={**J.DEFAULTS["step_results"], "dir": f"{T}/data/steps"})
-REAL = ["/tmp/opsfix-retest", "/tmp/pi-prfix", "/workspace/mivo-qa/argus-root/app/evidence/nightly", "/workspace/mivo-qa/argus-root/cache/step-results", "/workspace/pi-work"]
+# 10-30 (#142 follow-up): the "nothing outside the sandbox was deleted" guard watches decoys in T, never the live
+# /workspace/pi-work, /tmp/opsfix-retest, /tmp/pi-prfix or argus-root dirs (other sessions change those mid-run: false failures).
+# Every fallback janitor/workroot could reach without a test conf points at a decoy with a sentinel entry that must survive.
+DECOY = {n: f"{T}/decoy/{n}" for n in ("opsfix-retest", "pi-prfix", "evidence", "step-results", "pi-work")}
+for _d in DECOY.values(): os.makedirs(f"{_d}/keep-me", exist_ok=True)
+W.PI_WORK = DECOY["pi-work"]   # workroot.root() fallback when PI_WORK_ROOT is unset
+REAL = list(DECOY.values())
 def real_state(): return {p: (sorted(os.listdir(p)) if os.path.isdir(p) else None) for p in REAL}
 REAL_BEFORE = real_state()
 
@@ -301,6 +307,9 @@ class TestWatchdog(Base):
         probs = {}; WD.janitor_check(now, probs); self.assertEqual(probs, {})      # stale report: "janitor stopped" is job_checks' to say
 
 class TestZZIsolation(unittest.TestCase):
+    def test_00_guard_reads_no_live_path(self):
+        for p in REAL: self.assertTrue(os.path.realpath(p).startswith(os.path.realpath(T) + os.sep), p)
+        self.assertTrue(os.path.realpath(W.PI_WORK).startswith(os.path.realpath(T) + os.sep), W.PI_WORK)
     def test_99_nothing_outside_the_sandbox_was_deleted(self):   # production jobs may add entries meanwhile; none may go
         now = real_state()
         for p, before in REAL_BEFORE.items():
