@@ -1,5 +1,5 @@
 // 在隔离 run 目录里检出指定版本并执行项目 profile 的步骤
-import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync, statSync, lstatSync, realpathSync, cpSync } from 'node:fs'
+import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync, statSync, lstatSync, readlinkSync, realpathSync, cpSync } from 'node:fs'
 import { join, dirname, basename, resolve, relative, isAbsolute } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
 import { run, isStopping, overBudget } from './exec.mjs'
@@ -229,6 +229,23 @@ const BWRAP = process.env.ARGUS_BWRAP_BIN ?? '/usr/bin/bwrap'
 const NODE_PREFIX = dirname(dirname(process.execPath))
 const HIDDEN_ROOTS = ['/home', '/root', '/workspace', '/mnt', '/media', '/srv', '/cursor', '/exec-daemon', '/opt/sand', '/opt/sand-managed']
 
+// 沙箱的 `/` 用新 tmpfs（属主就是沙箱用户），再把宿主顶层条目按原样只读挂进来。
+// 不能用 `--ro-bind / /`：那样 `/` 保留宿主的根 inode，而 bwrap 的非特权 user namespace 里宿主 root(0)
+// 没有映射，沙箱内 stat('/') 读成 65534(nobody)、EUID 是 1000 → 被测仓的父目录信任链（mivo
+// scripts/ops/review-capacity-check 的 assertControllerDirectory / trusted_path：从 cwd 逐层 stat 到 `/`，
+// 每层 uid 必须是 0 或当前用户且不带组/其他写位）在 `/` 这一层就被拒，合并轮次与基线轮次一起失败
+// （PR-1449/1450/1454：workspace-creation.native.test.mjs「目录创建后异常清理原空目录并允许重试：mode」）。
+// 符号链接要按链接本身重建：/bin、/lib64 等指到 /usr 下，缺了解释器 exec 直接 ENOENT。
+function rootMounts() {
+  const args = ['--tmpfs', '/']
+  for (const name of readdirSync('/').sort()) {
+    const p = `/${name}`
+    if (lstatSync(p).isSymbolicLink()) args.push('--symlink', readlinkSync(p), p)
+    else args.push('--ro-bind', p, p)
+  }
+  return args
+}
+
 export function sandboxMode(profile = {}) {
   if (profile.sandbox === false) return 'disabled-by-profile'
   if (process.platform === 'darwin') return existsSync(SANDBOX_EXEC) ? 'sandbox-exec' : 'missing'
@@ -241,11 +258,13 @@ export function sandboxMode(profile = {}) {
 
 export function bwrapArgs(runDir, { extraRo = [], extraRw = [], chdir = null } = {}) {
   const args = ['--die-with-parent', '--new-session', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup-try',
-    '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp']
+    ...rootMounts(), '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp']
   for (const d of HIDDEN_ROOTS) if (existsSync(d)) args.push('--tmpfs', d)
   const ro = [NODE_PREFIX, ...extraRo].filter((p) => p && existsSync(p))
   for (const p of ro) args.push('--ro-bind', p, p)
   for (const p of [CACHE_DIR, runDir, shortTmpOf(runDir), ...extraRw]) { mkdirSync(p, { recursive: true }); args.push('--bind', p, p) }
+  // 根仍是只读的（tmpfs 根只用来放挂载点；写进去的东西也不落盘）
+  args.push('--remount-ro', '/')
   if (chdir) args.push('--chdir', chdir)
   return args
 }
