@@ -3,17 +3,17 @@
 // ARGUS_ALLOW_ISSUES=1 时才可能发生。
 import { yieldToPriority } from './priority.mjs'
 import { memAvailableGb, machineLoad, isIdle, startMemLowWater, lowMemoryHit, lowMemMb } from './memory.mjs'
-import { mkdirSync, writeFileSync, renameSync, existsSync, readFileSync, statfsSync, readdirSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, renameSync, existsSync, readFileSync, statfsSync, readdirSync } from 'node:fs'
 import { join, resolve, dirname, basename, posix } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
-import { hostname } from 'node:os'
-import { execFileSync } from 'node:child_process'
+import { hostname, tmpdir } from 'node:os'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { loadRegistry, loadSecrets, matchesSkipBase, DEFAULT_SKIP_BASE_BRANCHES } from './config.mjs'
 import { openDb } from './db.mjs'
 import { listNightlyPrs, getPull, getCommit, getBranchHead, listPullFiles, addFullText, getHandoff, shanghaiDayWindow, findIssuesByMarkerLabel, createIssue, commentIssue, reopenIssue, findCommentByMarker, listPullReviewComments, listPullCommits, listTeamMembers } from './github.mjs'
 import { classifyChange, highRiskFiles, withoutHandoff, isTestPath } from './classify.mjs'
 import { parseHandoff, splitHandoffCases, toHandoffReport, settleHandoff } from './handoff.mjs'
-import { executeOnSha, ensureMirror, mergeBase, sandboxMode, janitor, mirrorPath, currentUmask, INHERITED_UMASK, PINNED_UMASK, fmtUmask } from './runner.mjs'
+import { executeOnSha, ensureMirror, mergeBase, sandboxMode, bwrapArgs, janitor, mirrorPath, currentUmask, INHERITED_UMASK, PINNED_UMASK, fmtUmask } from './runner.mjs'
 import { decideOutcome, failedIds, setupFailed, failureKeys, compareKey } from './decide.mjs'
 import { analyzePr } from './ai.mjs'
 import { evaluateJev } from './jev.mjs'
@@ -1185,6 +1185,37 @@ export function checkUmask(health) {
   if (inh != null && inh !== want) health.env_problems.push({ message: `inherited umask was ${inh} (expected ${want}); panoptes pinned it to ${want} for this run, but the QA environment should be fixed (umask 002 caused false RUNNER_OWNER_MISMATCH on mivo #1385)` })
 }
 
+// 沙箱内的 uid 视图：非特权 bwrap 只映射调用者自己的 uid，宿主 root（uid 0）在沙箱里读成未映射的
+// overflowuid（65534）。目标仓里按属主把门、从 / 开始逐级 fstat 的断言（mivo
+// scripts/ops/review-capacity-check/workspace.mjs:28-31「父目录必须由控制器独占管理」）因此在沙箱内必然失败，
+// 基线版本在同一个沙箱里也一样失败，于是被记成「在基线版本上也失败」的 pre-existing。
+// 判据不能拿宿主 / 的属主和沙箱 / 的属主比：这台 QA 机自己就在 userns 里（宿主视角 / 也是 65534），
+// 两边一比相等就漏了；能区分的是「按属主把门的那条断言在沙箱里能不能过」，所以连进程 uid 一起量。
+const SANDBOX_BWRAP = process.env.ARGUS_BWRAP_BIN ?? '/usr/bin/bwrap'
+export function sandboxUidView() {
+  const runDir = mkdtempSync(join(tmpdir(), 'argus-uid-probe-'))
+  try {
+    mkdirSync(join(runDir, 'src'), { recursive: true })
+    const probe = 'const fs = require("node:fs"); process.stdout.write(`${process.getuid()} ${fs.statSync("/").uid}`)'
+    const r = spawnSync(SANDBOX_BWRAP, [...bwrapArgs(runDir, { chdir: runDir }), '--', process.execPath, '-e', probe], { encoding: 'utf8', timeout: 30_000 })
+    if (r.error || r.status !== 0) return null
+    const [uid, rootUid] = String(r.stdout).trim().split(/\s+/).map(Number)
+    return Number.isInteger(uid) && Number.isInteger(rootUid) ? { uid, rootUid } : null
+  } catch { return null } finally {
+    rmSync(runDir, { recursive: true, force: true })
+    rmSync(join(tmpdir(), `argus-${basename(runDir)}`), { recursive: true, force: true })
+  }
+}
+
+// 沙箱里 / 的属主既不是 0 也不是沙箱内进程 uid → 按属主把门的断言必然失败，记 env_problem 点名它，
+// 别让日报只写「单元测试在基线版本上也失败」（做法对齐 checkUmask）
+export function checkUidMapping(health) {
+  if (health.environment?.sandbox !== 'bwrap') return
+  const view = sandboxUidView()
+  if (!view || [0, view.uid].includes(view.rootUid)) return
+  health.env_problems.push({ message: `sandbox: / is owned by uid ${view.rootUid}, neither 0 nor the in-sandbox process uid ${view.uid}: owner-gated assertions that fstat from / down (mivo scripts/ops/review-capacity-check/workspace.mjs「父目录必须由控制器独占管理」) cannot pass inside the sandbox, so the same unit tests fail on the base revision too and are recorded as pre-existing「在基线版本上也失败」rather than as a problem in the PR` })
+}
+
 
 // ── 合并即测结果的复用 / 输出路径 ─────────────────────────
 export const mergedReportsDir = () => process.env.ARGUS_MERGED_REPORTS_DIR ?? join(REPORTS_DIR, 'merged')
@@ -1699,6 +1730,7 @@ export async function runNightly(opts = {}) {
   if (!env.chromium) health.env_problems.push({ message: `${LINUX_CHROMIUM} missing: browser E2E will be unavailable` })
   if (env.disk_free_gb != null && env.disk_free_gb < 12) health.env_problems.push({ message: `low disk: ${env.disk_free_gb} GB free` })
   checkUmask(health)
+  checkUidMapping(health)
   recordBootstrap(health, readBootstrapStatus())
   recordSeverityPin(health)
   const db = openDb()
