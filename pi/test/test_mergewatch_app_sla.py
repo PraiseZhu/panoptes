@@ -9,6 +9,7 @@ def load(n):
 assert not os.path.exists(f"{B}/ghapp.py") and "ghapp" not in open(f"{B}/mergewatch.py").read()   # 10-26: App 不再用，回原凭证
 # SLA
 W = load("watchdog"); now = dt.datetime(2026, 10, 26, 12, tzinfo=dt.timezone.utc)
+G1 = W.SLA_P95_MIN; W.SLA_P95_MIN = 2   # 下面的老用例按 2 分钟阈值写的，只测告警逻辑；10-30 段恢复真实阈值
 iso = lambda m: (now - dt.timedelta(minutes=m)).isoformat()
 fast = [(iso(60 + i), iso(60 + i - 1)) for i in range(10)]
 assert W.merge_sla(fast, now) == (10, 1.0)
@@ -33,4 +34,13 @@ assert "不含等内存 1 分钟" in probs["sla:merge-to-test"]["todo"] or "1 �
 for i in range(20, 30): json.dump({"prs": [{"merged_at": iso(60 + i), "test_started_at": iso(60 + i - 1)}]}, open(f"{rd}/PR-{i}.json", "w"))
 probs = {}; W.merge_sla_check(now, probs, rd); w = probs["sla:merge-to-test"]["what"]
 assert "p95 40 分钟" in w and "中位数" not in w, w
+# 10-30（B）：阈值 = G1 120 分钟；skipped / probe-* 基线的报告不进样本
+W.SLA_P95_MIN = G1; assert W.SLA_P95_MIN == 120, W.SLA_P95_MIN
+rd2 = tempfile.mkdtemp()
+for i in range(6): json.dump({"prs": [{"merged_at": iso(200 + i), "test_started_at": iso(200 + i - 60)}]}, open(f"{rd2}/PR-{i}.json", "w"))
+probs = {}; n, p = W.merge_sla_check(now, probs, rd2); assert n == 6 and p == 60 and not probs, (n, p, probs)   # p95 60 < 120：不告警
+json.dump({"prs": [{"merged_at": iso(1000), "test_started_at": iso(30), "verdict": "skipped", "skip_reason": "non-main-base", "base_ref": "probe-1410/strict/base-t"}]}, open(f"{rd2}/PR-s1.json", "w"))
+json.dump({"prs": [{"merged_at": iso(1000), "test_started_at": iso(825), "base_ref": "probe-1410/b"}]}, open(f"{rd2}/PR-s2.json", "w"))
+json.dump({"prs": [{"merged_at": iso(1000), "test_started_at": iso(30), "skip_reason": "non-main-base"}]}, open(f"{rd2}/PR-s3.json", "w"))
+probs = {}; n, p = W.merge_sla_check(now, probs, rd2); assert n == 6 and p == 60 and not probs, (n, p, probs)
 print("ok test_mergewatch_app_sla")
