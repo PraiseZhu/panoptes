@@ -3,17 +3,17 @@
 // ARGUS_ALLOW_ISSUES=1 时才可能发生。
 import { yieldToPriority } from './priority.mjs'
 import { memAvailableGb, machineLoad, isIdle, startMemLowWater, lowMemoryHit, lowMemMb } from './memory.mjs'
-import { mkdirSync, writeFileSync, renameSync, existsSync, readFileSync, statfsSync, readdirSync } from 'node:fs'
+import { mkdirSync, writeFileSync, renameSync, existsSync, readFileSync, statfsSync, readdirSync, mkdtempSync, rmSync, statSync } from 'node:fs'
 import { join, resolve, dirname, basename, posix } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
-import { hostname } from 'node:os'
+import { hostname, tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { loadRegistry, loadSecrets, matchesSkipBase, DEFAULT_SKIP_BASE_BRANCHES } from './config.mjs'
 import { openDb } from './db.mjs'
 import { listNightlyPrs, getPull, getCommit, getBranchHead, listPullFiles, addFullText, getHandoff, shanghaiDayWindow, findIssuesByMarkerLabel, createIssue, commentIssue, reopenIssue, findCommentByMarker, listPullReviewComments, listPullCommits, listTeamMembers } from './github.mjs'
 import { classifyChange, highRiskFiles, withoutHandoff, isTestPath } from './classify.mjs'
 import { parseHandoff, splitHandoffCases, toHandoffReport, settleHandoff } from './handoff.mjs'
-import { executeOnSha, ensureMirror, mergeBase, sandboxMode, janitor, mirrorPath, currentUmask, INHERITED_UMASK, PINNED_UMASK, fmtUmask } from './runner.mjs'
+import { executeOnSha, ensureMirror, mergeBase, sandboxMode, bwrapArgs, janitor, mirrorPath, currentUmask, INHERITED_UMASK, PINNED_UMASK, fmtUmask } from './runner.mjs'
 import { decideOutcome, failedIds, setupFailed, failureKeys, compareKey } from './decide.mjs'
 import { analyzePr } from './ai.mjs'
 import { evaluateJev } from './jev.mjs'
@@ -1162,6 +1162,28 @@ export function verdictOf(pr) {
 // otherwise Debian's launcher. Must match the profile's linux BD2_CHROME.
 const LINUX_CHROMIUM = existsSync('/usr/local/bin/chromium') ? '/usr/local/bin/chromium' : '/usr/bin/chromium'
 
+// 路径属主判据与 mivo 的 run.sh trusted_path、scripts/ops/review-capacity-check/workspace.mjs assertControllerDirectory 一致：
+// 属主 ∈ {0, EUID}，且组/他人不可写（root 所有且带 sticky 位时放行，例如 /tmp 的 1777）。
+// 属主不可信时这些检查会在 PR 版本和基线版本上一起失败（#1449 #1424 #1447）。
+const PATH_TRUST_PATHS = ['/']
+const pathTrusted = (p) => (p.uid === 0 || p.uid === process.getuid()) && ((p.mode & 0o022) === 0 || (p.uid === 0 && (p.mode & 0o1000) !== 0))
+
+// 沙箱里的属主才是被测检查看到的属主：非特权 bwrap 的 user namespace 只映射调用者自己的 uid，
+// 宿主上 root 所有的 / 在沙箱里显示成溢出 uid 65534；父进程看到的是宿主值，不能代表它，必须进沙箱读。
+function probePathTrust(paths = PATH_TRUST_PATHS) {
+  let runDir = null
+  try {
+    if (sandboxMode({}) === 'bwrap') {
+      runDir = mkdtempSync(join(tmpdir(), 'argus-pathtrust-'))
+      mkdirSync(join(runDir, 'home'), { recursive: true })
+      const out = execFileSync('/usr/bin/bwrap', [...bwrapArgs(runDir, {}), '--', '/usr/bin/stat', '-c', '%n %u %a', '--', ...paths], { encoding: 'utf8', timeout: 30_000 })
+      return out.split('\n').map((l) => l.trim().split(/\s+/)).filter((c) => c.length === 3)
+        .map(([path, uid, mode]) => ({ path, uid: Number(uid), mode: parseInt(mode, 8) }))
+    }
+  } catch { /* 沙箱探测失败：退回本进程视图 */ } finally { if (runDir) rmSync(runDir, { recursive: true, force: true }) }
+  return paths.flatMap((path) => { try { const s = statSync(path); return [{ path, uid: s.uid, mode: s.mode & 0o777 }] } catch { return [] } })
+}
+
 export function envSnapshot() {
   const ver = (cmd, args) => { try { return execFileSync(cmd, args, { encoding: 'utf8', timeout: 15_000 }).trim().split('\n')[0] } catch { return null } }
   let free = null
@@ -1172,6 +1194,7 @@ export function envSnapshot() {
     playwright: (() => { try { return JSON.parse(readFileSync(join(CODE_DIR, 'node_modules/playwright/package.json'), 'utf8')).version } catch { return null } })(),
     python: ver(process.env.ARGUS_PYTHON ?? 'python3', ['--version']), disk_free_gb: free,
     umask: currentUmask(), umask_inherited: process.env.PANOPTES_INHERITED_UMASK || INHERITED_UMASK,
+    path_trust: probePathTrust(),
   }
 }
 
@@ -1183,6 +1206,17 @@ export function checkUmask(health) {
   // 固定后的值总是 0022：真正反映 QA 环境的是固定前继承到的值，不是 0022 也记一条（已被固定，但环境本身该修）
   const inh = health.environment?.umask_inherited
   if (inh != null && inh !== want) health.env_problems.push({ message: `inherited umask was ${inh} (expected ${want}); panoptes pinned it to ${want} for this run, but the QA environment should be fixed (umask 002 caused false RUNNER_OWNER_MISMATCH on mivo #1385)` })
+}
+
+// 沙箱内的祖先路径属主不可信 → env_problem（带路径、实际 uid 和模式）：不记的话 mivo 的启动器/工作目录属主检查
+// 在 head 与 base 上一起失败，nightly 只能按「also fails on the base revision」记成 pre-existing，真实回归会被这批噪声盖住
+export function checkPathTrust(health) {
+  const me = process.getuid()
+  for (const p of health.environment?.path_trust ?? []) {
+    if (pathTrusted(p)) continue
+    const why = p.uid === 0 || p.uid === me ? 'is group/world writable' : `is owned by uid ${p.uid} (neither root nor uid ${me})`
+    health.env_problems.push({ message: `path ${p.path} ${why} (mode ${fmtUmask(p.mode)}): owner checks such as mivo run.sh trusted_path / workspace.mjs assertControllerDirectory fail on every revision, including the base` })
+  }
 }
 
 
@@ -1699,6 +1733,7 @@ export async function runNightly(opts = {}) {
   if (!env.chromium) health.env_problems.push({ message: `${LINUX_CHROMIUM} missing: browser E2E will be unavailable` })
   if (env.disk_free_gb != null && env.disk_free_gb < 12) health.env_problems.push({ message: `low disk: ${env.disk_free_gb} GB free` })
   checkUmask(health)
+  checkPathTrust(health)
   recordBootstrap(health, readBootstrapStatus())
   recordSeverityPin(health)
   const db = openDb()
