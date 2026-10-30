@@ -157,9 +157,13 @@ if [[ -n "$CATCH_UP" && "$TRIGGER" == "catch-up" && -z "${PANOPTES_CATCHUP_GATE:
   BJ_HOUR="${PANOPTES_FAKE_BJ_HOUR:-$(TZ=Asia/Shanghai date +%H)}"
   if (( 10#$BJ_HOUR % 2 != 0 )); then
     MI="${PANOPTES_MEMINFO:-/proc/meminfo}"
-    ODD_MEM_MB=$(( $(awk '/^MemAvailable:/{print $2}' "$MI" 2>/dev/null || echo 0) / 1024 ))
-    ODD_SWAP_MB=$(( $(awk '/^SwapFree:/{print $2}' "$MI" 2>/dev/null || echo 0) / 1024 ))
-    if (( ODD_MEM_MB < ${PANOPTES_ODD_MIN_MEM_MB:-6144} || ODD_SWAP_MB < ${PANOPTES_ODD_MIN_SWAP_MB:-4096} )); then
+    ODD_MEM_KB=$(awk '/^MemAvailable:/{print $2; exit}' "$MI" 2>/dev/null || true)
+    ODD_SWAP_KB=$(awk '/^SwapFree:/{print $2; exit}' "$MI" 2>/dev/null || true)
+    # unreadable / missing field: treat as low memory (skip, exit 0) -- never an arithmetic error, never a blind run
+    [[ "$ODD_MEM_KB" =~ ^[0-9]+$ ]] && ODD_MEM_MB=$(( ODD_MEM_KB / 1024 )) || ODD_MEM_MB=unknown
+    [[ "$ODD_SWAP_KB" =~ ^[0-9]+$ ]] && ODD_SWAP_MB=$(( ODD_SWAP_KB / 1024 )) || ODD_SWAP_MB=unknown
+    if [[ "$ODD_MEM_MB" == unknown || "$ODD_SWAP_MB" == unknown ]] \
+       || (( ODD_MEM_MB < ${PANOPTES_ODD_MIN_MEM_MB:-6144} || ODD_SWAP_MB < ${PANOPTES_ODD_MIN_SWAP_MB:-4096} )); then
       printf '[catch-up] %s trigger=%s: Beijing hour %s (odd): low memory (MemAvailable %s MiB, SwapFree %s MiB; needs >= %s / %s): skipped\n' \
         "$(TZ=Asia/Shanghai date +%Y-%m-%dT%H:%M:%S+08:00)" "$TRIGGER" "$BJ_HOUR" "$ODD_MEM_MB" "$ODD_SWAP_MB" "${PANOPTES_ODD_MIN_MEM_MB:-6144}" "${PANOPTES_ODD_MIN_SWAP_MB:-4096}"
       exit 0

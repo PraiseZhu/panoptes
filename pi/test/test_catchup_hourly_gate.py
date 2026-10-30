@@ -8,7 +8,10 @@ import os, re, shutil, subprocess, tempfile, unittest
 R = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def meminfo(d, avail_mb, swap_mb):
-    p = f"{d}/meminfo"; open(p, "w").write(f"MemTotal: 16386000 kB\nMemAvailable: {avail_mb * 1024} kB\nSwapTotal: 8388604 kB\nSwapFree: {swap_mb * 1024} kB\n"); return p
+    p = f"{d}/meminfo"; L = ["MemTotal: 16386000 kB", "SwapTotal: 8388604 kB"]
+    if avail_mb is not None: L.append(f"MemAvailable: {avail_mb * 1024} kB")
+    if swap_mb is not None: L.append(f"SwapFree: {swap_mb * 1024} kB")
+    open(p, "w").write("\n".join(L) + "\n"); return p
 
 class T(unittest.TestCase):
     def setUp(self):
@@ -37,6 +40,12 @@ class T(unittest.TestCase):
             self.assertRegex(ls[0], r"^\[catch-up\] \S+\+08:00 trigger=catch-up: Beijing hour 13 \(odd\): .*low memory.*skipped$")
             self.assertIn(f"MemAvailable {avail} MiB", ls[0]); self.assertIn(f"SwapFree {swap} MiB", ls[0])
             self.assertNotIn("catch-up.lock held", r.stdout)   # decided before the lock
+    def test_odd_hour_unreadable_meminfo_is_a_skip(self):
+        for avail, swap in ((None, 8000), (9000, None), (None, None)):
+            r = self.run_cu("13", avail, swap)
+            self.assertEqual(r.returncode, 0, r.stderr); ls = self.lines(r)
+            self.assertEqual(len(ls), 1, r.stdout + r.stderr); self.assertIn("unknown", ls[0]); self.assertIn("skipped", ls[0])
+            self.assertNotIn("catch-up.lock held", r.stdout)
     def test_odd_hour_enough_memory_goes_on(self):
         r = self.run_cu("13", 6144, 4096)
         self.assertNotIn("low memory", r.stdout); self.assertIn("catch-up.lock held by another catch-up", r.stdout)
