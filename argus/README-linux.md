@@ -112,9 +112,11 @@ pinned copy `config/severity.md`, see `../docs/report-schema.md` › *Unified se
 ## Sandbox choice: bubblewrap
 
 Replaces macOS `sandbox-exec`. Every test/install command runs as
-`bwrap --ro-bind / / --tmpfs /home --tmpfs /root --tmpfs /workspace --tmpfs /tmp … --bind <run dir> --bind <argus cache>`:
+`bwrap --tmpfs / --ro-bind <each host / entry> … --remount-ro / --tmpfs /home --tmpfs /root --tmpfs /workspace --tmpfs /tmp … --bind <run dir> --bind <argus cache>`:
 
-* root filesystem read-only; `/home`, `/root`, `/workspace`, `/tmp`, `/mnt`, `/media`, `/srv` and the
+* root filesystem read-only; the root inode is a fresh tmpfs owned by the run user (bwrap maps only that user, so
+  reusing the host `/` shows up as overflow uid 65534 and trips tested repos' controller-ownership checks);
+  `/home`, `/root`, `/workspace`, `/tmp`, `/mnt`, `/media`, `/srv` and the
   agent-infra dirs are replaced by empty tmpfs, so tests cannot read `gh` credentials, `secrets.env`,
   SSH keys or other agents' data;
 * only the run directory, Argus cache (mirrors / npm cache) and a short per-run tmp dir are writable;

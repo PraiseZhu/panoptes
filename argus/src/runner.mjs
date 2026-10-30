@@ -1,5 +1,5 @@
 // 在隔离 run 目录里检出指定版本并执行项目 profile 的步骤
-import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync, statSync, lstatSync, realpathSync, cpSync } from 'node:fs'
+import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync, statSync, lstatSync, readlinkSync, realpathSync, cpSync } from 'node:fs'
 import { join, dirname, basename, resolve, relative, isAbsolute } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
 import { run, isStopping, overBudget } from './exec.mjs'
@@ -239,9 +239,24 @@ export function sandboxMode(profile = {}) {
   return 'missing'
 }
 
+// 沙箱的根不能直接借宿主的 /：bwrap 的用户命名空间只映射运行用户，宿主 root（以及本机这样 / 的属主被换成
+// nobody 的容器）在沙箱里是溢出 uid 65534，被测仓「父目录必须由控制器独占管理」这类判据（例如 mivo
+// workspace.mjs 的 assertControllerDirectory 从 / 开始逐层核对）第一层就拒绝，tmp-open 一族用例假失败。
+// 改为本次 run 自己造一个 tmpfs 根（归运行用户），宿主 / 的顶层条目逐项只读挂回；符号链接（/bin、/lib 等）
+// 用 --symlink 保留，否则 --tmpfs / 之后动态链接器会找不到。
+function rootMountArgs() {
+  const args = []
+  for (const name of readdirSync('/')) {
+    const p = `/${name}`
+    if (lstatSync(p).isSymbolicLink()) args.push('--symlink', readlinkSync(p), p)
+    else args.push('--ro-bind', p, p)
+  }
+  return args
+}
+
 export function bwrapArgs(runDir, { extraRo = [], extraRw = [], chdir = null } = {}) {
   const args = ['--die-with-parent', '--new-session', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup-try',
-    '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp']
+    '--tmpfs', '/', ...rootMountArgs(), '--remount-ro', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp']
   for (const d of HIDDEN_ROOTS) if (existsSync(d)) args.push('--tmpfs', d)
   const ro = [NODE_PREFIX, ...extraRo].filter((p) => p && existsSync(p))
   for (const p of ro) args.push('--ro-bind', p, p)
