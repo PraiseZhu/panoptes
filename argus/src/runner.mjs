@@ -220,7 +220,10 @@ export function sandboxProfile(runDir, home = homedir()) {
 }
 
 // Linux：用 bubblewrap（bwrap，非特权 user namespace）做等价的文件隔离。
-// 根文件系统只读挂载；/home、/root、/workspace、/tmp、/mnt、/media 换成空 tmpfs（读不到 gh 登录、
+// 根是沙箱自己的 tmpfs（属主是沙箱用户），宿主的每个顶层条目只读挂回、根再挂成只读：宿主 / 的属主可能是
+// nobody（rootless 容器里是 65534），`--ro-bind / /` 会把它原样带进沙箱，被测仓库「父目录必须由控制器独占管理」
+// 的属主校验从第一级就拒绝，cleanup-identity 一族用例在 head 和 base 上一起假失败；
+// /home、/root、/workspace、/tmp、/mnt、/media 换成空 tmpfs（读不到 gh 登录、
 // secrets.env、其它 agent 的数据），再把本次 run 目录、Argus 缓存、短临时目录读写挂回，
 // Node 安装目录（nvm 在 ~ 下）和 Playwright 浏览器目录只读挂回。新的 pid/ipc/uts 命名空间，父进程退出即回收。
 // 网络和 macOS 版一样暂不限制（npm ci 需要）。
@@ -239,13 +242,22 @@ export function sandboxMode(profile = {}) {
   return 'missing'
 }
 
+// 下面这几个顶层目录紧接着就换成新的（--dev / --proc / --tmpfs /tmp），不重复只读挂一遍
+const ROOT_REPLACED = ['proc', 'dev', 'tmp']
+
 export function bwrapArgs(runDir, { extraRo = [], extraRw = [], chdir = null } = {}) {
-  const args = ['--die-with-parent', '--new-session', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup-try',
-    '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp']
+  const args = ['--die-with-parent', '--new-session', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup-try', '--tmpfs', '/']
+  for (const name of readdirSync('/')) {
+    if (ROOT_REPLACED.includes(name)) continue
+    const p = `/${name}`
+    if (existsSync(p)) args.push('--ro-bind', p, p)
+  }
+  args.push('--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp')
   for (const d of HIDDEN_ROOTS) if (existsSync(d)) args.push('--tmpfs', d)
   const ro = [NODE_PREFIX, ...extraRo].filter((p) => p && existsSync(p))
   for (const p of ro) args.push('--ro-bind', p, p)
   for (const p of [CACHE_DIR, runDir, shortTmpOf(runDir), ...extraRw]) { mkdirSync(p, { recursive: true }); args.push('--bind', p, p) }
+  args.push('--remount-ro', '/') // 只重挂根这一层：/tmp 和 run 目录仍可写
   if (chdir) args.push('--chdir', chdir)
   return args
 }
