@@ -46,7 +46,12 @@ DISABLED_TYPES = f"{BASE}/outbound-disabled-types"   # one action type per line 
 GIT_NAME, GIT_EMAIL = "PraiseZhu", NOREPLY_EMAIL   # matches PraiseZhu commits in mivo-canvas-plugin
 MERGER_MARK = "<!-- mivo-merger -->"
 MERGE_DAY_CAP, MERGE_ROUND_CAP = 2, 1                  # policy maxMergesPerDay (canary) / maxMergesPerRound
-TERMINAL = ("done", "skipped", "gave_up", "uncertain")  # ledger statuses never retried (uncertain = a send was interrupted:
+# 11-02 audit: while praise-dm-mute is on, these went to "skipped" and nobody got them. They go to the queue that jasper.py
+# puts in the 09:05 brief (brief: is the one key the mute lets through) and are recorded "briefed". Rollback: touch BRIEF_ROUTE_OFF.
+BRIEF_ROUTED = ("nudge:", "pm-retro:", "pm-cos:", "ops-review:", "overdue:")
+def BRIEF_QUEUE(): return f"{BASE}/out/outbound/brief-queue.jsonl"
+def BRIEF_ROUTE_OFF(): return f"{BASE}/outbound-brief-route-off"
+TERMINAL = ("done", "skipped", "gave_up", "uncertain", "briefed")  # ledger statuses never retried (uncertain = a send was interrupted:
                                                        # Slack/Feishu cannot be checked remotely, so never re-sent blindly)
 def backoff_left(e):
     """all jobs (10-23; was merger only): after n failures wait 10min*2^(n-1) (cap 6h) from last failure. Minutes left (0 = go)."""
@@ -893,6 +898,14 @@ def main():
                     if not o.dry_run: setk(k, {"status": "skipped", "reason": f"gated: {gates()[qa]}", "at": now_cst().isoformat(timespec="seconds")})
                     rows.append((job, k, t, "-", "skipped(gated)", gates()[qa])); continue
             if (t in RELAY_TYPES or (t == "slack.dm" and (a.get("to") == "Praise" or a.get("user") == PRAISE_SLACK))) and praise_dm_blocked(k):
+                if k.startswith(BRIEF_ROUTED) and not os.path.exists(BRIEF_ROUTE_OFF()):
+                    if not o.dry_run:
+                        text = relay_text(a) if t in RELAY_TYPES else (a.get("text") or "")
+                        os.makedirs(os.path.dirname(BRIEF_QUEUE()), exist_ok=True)
+                        with open(BRIEF_QUEUE(), "a") as q:
+                            q.write(json.dumps({"at": now_cst().isoformat(timespec="seconds"), "key": k, "job": job, "type": t, "to": a.get("to"), "text": text}, ensure_ascii=False) + "\n")
+                        setk(k, {"status": "briefed", "reason": "praise-dm-mute -> jasper brief", "at": now_cst().isoformat(timespec="seconds")})
+                    rows.append((job, k, t, "Jasper brief", "BRIEFED", f"queued in {os.path.basename(BRIEF_QUEUE())}")); continue
                 if not o.dry_run:
                     setk(k, {"status": "skipped", "reason": "praise-dm-mute", "at": now_cst().isoformat(timespec="seconds")})
                     try: record_muted("outbound", k, relay_text(a) if t in RELAY_TYPES else (a.get("text") or ""))
