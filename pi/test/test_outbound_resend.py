@@ -112,8 +112,9 @@ class T(unittest.TestCase):
         open(L.PRAISE_DM_MUTE, "w").write("# test\nbrief:\n")
         self.assertTrue(L.praise_dm_blocked(OVERDUE)); self.assertFalse(L.praise_dm_blocked("brief:2026-10-27"))
         self.assertEqual(self.main("--resend-key", OVERDUE), 0)
-        self.assertEqual(self.ledger()[OVERDUE]["reason"], "praise-dm-mute"); self.assertEqual(self.sends, [])
-        self.assertIn(OVERDUE, open(f"{self.tmp}/out/outbound/muted-{dt.datetime.now(O.CST).date().isoformat()}.md").read())   # file-only copy lands in scratch
+        # 11-02: a muted overdue reminder goes to the Jasper brief queue (scratch BASE), not skipped
+        self.assertEqual(self.ledger()[OVERDUE]["status"], "briefed"); self.assertEqual(self.sends, [])
+        self.assertIn(OVERDUE, open(f"{self.tmp}/out/outbound/brief-queue.jsonl").read())
 
     # ---- head check ----
     def test_daily_head_accepts_bufa_and_still_refuses_other_bodies(self):

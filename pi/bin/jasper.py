@@ -15,6 +15,13 @@ def panoptes_backlog(tickets):
     except Exception as e: return {"awaiting_merge_prs": waiting, "open_prs": f"未核实：{str(e)[:80]}"}
     return {"awaiting_merge_prs": waiting, "open_prs": len(prs), "oldest_open_at": min((p["createdAt"] for p in prs), default=None),
             "url": "https://github.com/PraiseZhu/panoptes/pulls"}
+def muted_for_brief(d, y):
+    """outbound.py BRIEF_QUEUE: muted nudge/pm-retro/pm-cos/ops-review/overdue messages from y 09:00 to d 09:00 (Beijing time),
+    so each one is in exactly one brief"""
+    try: rows = [json.loads(l) for l in open(f"{BASE}/out/outbound/brief-queue.jsonl") if l.strip()]
+    except FileNotFoundError: rows = []
+    rows = [r for r in rows if f"{y}T09:00" <= str(r.get("at", "")) < f"{d}T09:00"]
+    return {"count": len(rows), "items": [{"key": r.get("key"), "to": r.get("to"), "text": str(r.get("text", ""))[:300]} for r in rows[:40]]}
 def main():
     d = sys.argv[1] if len(sys.argv) > 1 else today(); y = (dt.date.fromisoformat(d) - dt.timedelta(days=1)).isoformat()
     backfill = d != today()   # 补过去的日子：只写文件，不记外发（不发 DM）
@@ -48,6 +55,7 @@ def main():
             "电脑运维": {"memlog_age_h": facts["电脑运维"]["memlog_age_h"], "watchdog_open_problems": list((wd.get("open") or {}).values())[:8]},
         }
         facts["pi_line_evidence"]["Praise PR"]["panoptes_backlog"] = panoptes_backlog(jload_(f"{BASE}/out/infrafix/tickets.json", {}).get("tickets", {}))
+    facts["muted_for_brief"] = muted_for_brief(d, y)
     ydaily = f"{BASE}/out/daily/{y}.md"
     if os.path.exists(ydaily): facts["pi_daily_headline"] = open(ydaily).read().splitlines()[1]
     pm = f"{BASE}/out/pm/{y}.md"
@@ -63,6 +71,7 @@ def main():
         txt, tid = pi("work", "/tmp", f"""Write Praise's 9:00 fleet brief in Chinese (<=15 lines) using ONLY facts in {fj} (read it; you may also read files it names, read-only).
 Format: 一句话总览；然后每个 bot 一行：状态 ✓/⚠ + 证据路径；最后「需要你定」(only if facts show something needs a decision; else 无).
 If facts.pi_line_evidence["Praise PR"].panoptes_backlog shows awaiting_merge_prs or more than 3 open_prs, list it under 需要你定 with the count and url (DMs to Praise are muted: this brief is the only way he hears it).
+If facts.muted_for_brief.count > 0, add a section 「静音期间的催办和汇总」: the count, then one short line per item (key + gist of text); this section may go past the 15-line limit.
 Never guess; if a fact is missing say 未核实. {RULE} Today {d}, data day {y} (Beijing time).""", f"pi-line-jasper-{d}", timeout=400)
     except Exception as e: txt, tid = f"brief 生成失败：{e}", "?"
     write_atomic(f"{BASE}/out/jasper/{d}.md", f"<!-- Pi line brief, task {tid}, tier work; Slack/邮件/日历部分无法覆盖（需连接器） -->\n{txt.strip()}\n")
