@@ -2208,8 +2208,24 @@ def scrub_env():
     authenticate from ~/.config/gh, not from the environment."""
     keep = model_env(); os.environ.clear(); os.environ.update(keep)
 
+OOM_ADJ = 800                                  # DESIGN.md (concurrency-plan): fixes die before tests when memory runs out
+OOM_ADJ_OFF = f"{BASE}/prfix-oom-adj-off"      # rollback: touch this file (re-read every run); rm it to turn +800 back on
+
+def raise_oom_score(path="/proc/self/oom_score_adj", off=None):
+    """Raise this process's oom_score_adj to +800 (children inherit it) unless the off-file exists. Never lowers it.
+    Returns the value now in effect, or None when skipped or unwritable. Errors go to stderr (stdout may carry JSON)."""
+    if os.path.exists(off or OOM_ADJ_OFF): return None
+    try:
+        cur = int(open(path).read().strip())
+        if cur >= OOM_ADJ: return cur
+        with open(path, "w") as f: f.write(str(OOM_ADJ))
+        return OOM_ADJ
+    except (OSError, ValueError) as e:
+        print(f"prfix: oom_score_adj not raised: {e}", file=sys.stderr); return None
+
 def main(argv=None):
     scrub_env()
+    raise_oom_score()
     ap = argparse.ArgumentParser(description="Praise PR fix duty (Pi line): one QA finding per run")
     ap.add_argument("--next", action="store_true", help="highest-priority unclaimed ticket (default)")
     ap.add_argument("--qa", type=int); ap.add_argument("--fp")
