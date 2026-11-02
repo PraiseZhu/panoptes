@@ -1,5 +1,6 @@
-import os, sys, unittest
+import os, sys, types, unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin"))
+sys.modules.setdefault("merger", types.SimpleNamespace(FIELDS="number", blockers=lambda p: []))   # as test_outbound_resend
 import git_identity, outbound, prfix, infra_outbound, infrafix  # noqa: E402
 
 class T(unittest.TestCase):

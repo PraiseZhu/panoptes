@@ -8,8 +8,9 @@ Usage: python3 pi/bin/reset_abandoned.py [--dry-run] [--ledger PATH]
 """
 import argparse, fcntl, json, os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from lib import write_atomic, log
-import outbound
+from lib import BASE, write_atomic, log
+
+LEDGER = f"{BASE}/out/outbound/ledger.json"   # = outbound.LEDGER (not imported: outbound pulls in merger's live policy file)
 
 ALLOWLIST = ("fixpr:1570:mq1-90423772d9d8fa0d7e62", "revise:1559:cb9fac0a764f", "revise:1563:d39839610b20")
 
@@ -29,7 +30,7 @@ def reset(path, dry_run=False):
 
 
 def main():
-    ap = argparse.ArgumentParser(); ap.add_argument("--dry-run", action="store_true"); ap.add_argument("--ledger", default=outbound.LEDGER)
+    ap = argparse.ArgumentParser(); ap.add_argument("--dry-run", action="store_true"); ap.add_argument("--ledger", default=LEDGER)
     o = ap.parse_args()
     lk = open(f'{os.environ.get("PI_LOCK_DIR") or "/tmp"}/pi-fallback-outbound.exec.lock', "w")   # same lock as outbound.main
     for _ in range(60):
