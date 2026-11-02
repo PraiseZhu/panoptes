@@ -17,6 +17,7 @@ import dm_compat, jsonrec
 import praise_notice as PN
 import ready_guard as RG
 import workroot as W
+from git_identity import NOREPLY_EMAIL
 QA_SLACK = f"{QA}/report/slack"
 SLACK_CHANNEL = "C0CAH3W61N2"           # Mivo QA channel; the only channel send-slack-report.mjs allows
 PRAISE_SLACK = "U01D851JXL7"
@@ -42,7 +43,7 @@ FAIL_GIVE_UP = 5                      # failures (with backoff) before an action
 GATES = f"{PI_CODE}/conf/gates.json"     # {"no_fix_pr": {"923": "reason"}} -- shared with prfix.py
 GROK_SENT = f"{QA}/report/sent"          # Grok 日报 line per-day send records: slack-sent.json, run-notes.txt, created.tsv
 DISABLED_TYPES = f"{BASE}/outbound-disabled-types"   # one action type per line (e.g. feishu.dm) -> never sent
-GIT_NAME, GIT_EMAIL = "PraiseZhu", "zhuzan@xd.com"   # matches PraiseZhu commits in mivo-canvas-plugin
+GIT_NAME, GIT_EMAIL = "PraiseZhu", NOREPLY_EMAIL   # matches PraiseZhu commits in mivo-canvas-plugin
 MERGER_MARK = "<!-- mivo-merger -->"
 MERGE_DAY_CAP, MERGE_ROUND_CAP = 2, 1                  # policy maxMergesPerDay (canary) / maxMergesPerRound
 TERMINAL = ("done", "skipped", "gave_up", "uncertain")  # ledger statuses never retried (uncertain = a send was interrupted:

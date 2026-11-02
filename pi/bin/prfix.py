@@ -51,6 +51,7 @@ from lib import *
 import lib
 import praise_notice as PN
 import workroot as W
+from git_identity import NOREPLY_EMAIL
 from finding_policy import notifiable, own_pr_ticket, no_fix_rulings
 os.environ["PATH"] = "/usr/local/bin:" + os.environ.get("PATH", "")
 
@@ -70,7 +71,7 @@ CI_RULES = _E("PRFIX_CI_RULES") or f"{PI_CODE}/conf/ci-rules"   # <repo name>.md
 def _QA_LOCK(): return globals()["QA_LOCK"] if "QA_LOCK" in globals() else (_E("PRFIX_QA_LOCK") or f"{QA}/argus-root/nightly.lock")   # read at call time; a test may set QA_LOCK   # the flock panoptes run-nightly.sh takes (exec 9>)
 RULINGS = "/workspace/fleet-standards/p2-rulings.md"
 LEDGER_DIR = f"{QA}/ledger/daily"
-GIT_ID = ["-c", "user.name=Praise", "-c", "user.email=zhuzan@xd.com"]   # = repo-local config of /workspace/mivo-canvas-plugin
+GIT_ID = ["-c", "user.name=Praise", "-c", f"user.email={NOREPLY_EMAIL}"]   # = repo-local config of /workspace/mivo-canvas-plugin
 DEFAULT_GATES = {923: "Praise 闸：#923 修复 PR 不得创建"}               # used only while conf/gates.json does not exist
 MAX_ROUNDS = 2
 # Praise 10-24 ("让 deepseek 能充分利用模型能力自主把修复 PR 推进到正式"): every check the harness runs feeds its failure back to the
