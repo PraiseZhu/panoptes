@@ -815,7 +815,7 @@ class TestFixOneEndToEnd(GitTmp):
         self.assertEqual(out["status"], "pr_action_written", out)
         self.assertTrue(os.path.isdir(self.wd)); self.assertTrue(prfix.branch_exists(self.br))
         log = sh("git", "-C", self.wd, "log", "-1", "--format=%an <%ae>|%s")
-        self.assertEqual(log.split("|")[0], "Praise <zhuzan@xd.com>")
+        self.assertEqual(log.split("|")[0], "Praise <290989140+PraiseZhu@users.noreply.github.com>")
         files = sh("git", "-C", self.wd, "show", "--name-only", "--format=", "HEAD").split()
         self.assertEqual(sorted(files), ["docs/pr/4242/qa.md", "docs/pr/4242/review.md", "src/foo.js", "src/foo.test.js"])
         self.assertIn("test('bug'", rf(f"{self.wd}/src/foo.test.js"))          # weakened test was restored

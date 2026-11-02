@@ -53,7 +53,7 @@
 | 禁止 force / push main / --no-verify | 禁止 | prfix 不用 --no-verify、不 force；h_fixpr 推 `qa-fix/...` 新分支，`git push -u` 不带 force | 一致 |
 | **prfix 的 action 和 outbound 处理器的衔接** | — | prfix.py:138 写的类型是 `git.push+gh.pr.create(draft)`，但 outbound.handler（outbound.py:263-273）只认 `startswith("gh.pr.create")` → 返回 **unsupported**。另外 h_fixpr 要求 `patch` 字段，并在临时 clone 里另建 `qa-fix/` 分支，prfix 给的是 `branch`/`worktree`/`cmds` | **不一致·待修（阻断）**：切到 pi 并打开外发后，新的修复 PR 一个也开不出来。改法二选一：①prfix 额外导出 `.patch` 并把类型改成 `gh.pr.create(draft)`；②outbound 新增 `git.push+gh.pr.create` 处理器，推 prfix 已提交的本地分支（不 force），再开草稿 PR。两个文件都是 Pi 线自己的脚本，本次按只读要求没动 |
 | 撞号 | 有问题时人工处理 | 只在 action 的 note 里提醒：撞号就改目录名再 push 一次，不 force | **不一致**：outbound 不会自动处理 |
-| 身份 | PraiseZhu | outbound `GIT_NAME/EMAIL=PraiseZhu/zhuzan@xd.com`（outbound.py:19）；本地仓 user.name=`Praise` | 要核实：prfix 在本地 commit 时用的是 `Praise` |
+| 身份 | PraiseZhu | outbound `GIT_NAME/EMAIL=PraiseZhu/<noreply>`（outbound.py:19）；本地仓 user.name=`Praise` | 要核实：prfix 在本地 commit 时用的是 `Praise` |
 | 失败重试 | 人工跟进 | 失败记进台账 `failed`，下一个 10 分钟周期重试；只有 merger 有退避（outbound.py:24），praise-pr 没有退避也没有次数上限 | **不一致·待修**：建议 fixpr 失败 1 次就停，转人工 |
 | 交接 | ready 后交给 Mac mini 盯梢 / Cindy watcher | 不涉及（Pi 不碰正式 PR） | 一致 |
 

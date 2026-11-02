@@ -373,6 +373,6 @@ test('redact: scp-style git remotes stay, real emails (incl. bare git@) still re
   assert.equal(redact('mail git@github.com now'), 'mail <email> now')
   assert.equal(redact('to: git@github.com.'), 'to: <email>.')
   assert.equal(redact('contact git@example.com: please'), 'contact <email>: please')
-  assert.equal(redact('alice.bob+qa@xd.com and x@y.io'), '<email> and <email>')
+  assert.equal(redact('alice.bob+qa@example.com and x@y.io'), '<email> and <email>')
   assert.equal(redact('mygit@github.com:owner/repo'), '<email>:owner/repo')
 })

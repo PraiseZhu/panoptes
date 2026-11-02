@@ -22,11 +22,12 @@ Env for tests: INFRA_GATES (gates file)."""
 import json, os, re, shutil, subprocess, tempfile, datetime as dt
 import praise_notice as PN
 import workroot as W
+from git_identity import NOREPLY_EMAIL
 
 PANOPTES_REPO = "PraiseZhu/panoptes"
 ISSUE_REPO = "PraiseZhu/pr-qa-agent-deploy"
 INFRA_MERGE_DAY_CAP = 3
-GIT_NAME, GIT_EMAIL = "Praise", "zhuzan@xd.com"      # committer for `git am` (= panoptes repo-local config / history)
+GIT_NAME, GIT_EMAIL = "Praise", NOREPLY_EMAIL      # committer for `git am` (= panoptes repo-local config / history)
 CST = dt.timezone(dt.timedelta(hours=8))
 OK = ("SUCCESS", "SKIPPED", "NEUTRAL")
 

@@ -405,10 +405,10 @@ class TestFixOne(GitTmp):
         a = self.actions[-1]
         self.assertEqual((a["type"], a["key"], a["repo"]), ("gh.infra.pr", f"infrapr:{self.c['sig']}", "PraiseZhu/panoptes"))
         self.assertIn(f"Infra-Sig: {self.c['sig']}", rf(a["body_file"]))
-        p = rf(a["patch"]); self.assertIn("From: Praise <zhuzan@xd.com>", p); self.assertIn("Infra-Sig:", p)
+        p = rf(a["patch"]); self.assertIn("From: Praise <290989140+PraiseZhu@users.noreply.github.com>", p); self.assertIn("Infra-Sig:", p)
         self.assertEqual(sorted(a["files"]), ["argus/src/clamp.mjs", "argus/tests/delay.test.mjs"])
         log = sh(["git", "-C", X.PANOPTES, "log", "-1", "--format=%an <%ae>|%B", f"fix/infra-{self.c['sig8']}"])
-        self.assertTrue(log.startswith("Praise <zhuzan@xd.com>|fix(ai-tests):"))
+        self.assertTrue(log.startswith("Praise <290989140+PraiseZhu@users.noreply.github.com>|fix(ai-tests):"))
         self.assertEqual(sh(["git", "-C", X.PANOPTES, "status", "--porcelain"]).strip(), "")     # the main checkout untouched
 
     def test_patch_applies_with_git_am_in_outbound(self):

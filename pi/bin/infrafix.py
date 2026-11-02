@@ -37,7 +37,7 @@ panoptes' locks — Praise: memory is enough to run side by side; never touches 
   2 Pi writes the minimal fix (one retry) -> test PASS; source reverted -> FAIL; restored -> PASS
   3 the CI steps of .github/workflows/ci.yml locally (bash -n / sh -n / shellcheck if installed / node --check /
     py_compile / npm ci / npm test) must pass
-  4 local commit (repo identity Praise <zhuzan@xd.com>, = panoptes repo config and history), git format-patch,
+  4 local commit (repo identity Praise <290989140+PraiseZhu@users.noreply.github.com>, = panoptes repo config and history), git format-patch,
     PR body, action gh.infra.pr (outbound: push branch + non-draft PR). auto_merge=true only with a red-then-green test +
     green local CI + no sensitive path (SENSITIVE_* below) + small diff + no deleted assertions in existing tests.
   Anything but success removes the worktree + branch in `finally`; on success the worktree goes, the branch stays until
@@ -62,6 +62,7 @@ from lib import *
 import lib
 import praise_notice as PN
 import workroot as W
+from git_identity import NOREPLY_EMAIL
 os.environ["PATH"] = "/usr/local/bin:" + os.environ.get("PATH", "")
 
 _E = os.environ.get
@@ -80,7 +81,7 @@ LOGDIR = _E("INFRA_LOGS") or f"{QA}/argus-root/logs"
 PANOPTES_REPO = "PraiseZhu/panoptes"
 ISSUE_REPO = "PraiseZhu/pr-qa-agent-deploy"
 JOB = "infrafix"
-GIT_ID = ["-c", f"user.name={_E('INFRA_GIT_NAME') or 'Praise'}", "-c", f"user.email={_E('INFRA_GIT_EMAIL') or 'zhuzan@xd.com'}"]
+GIT_ID = ["-c", f"user.name={_E('INFRA_GIT_NAME') or 'Praise'}", "-c", f"user.email={_E('INFRA_GIT_EMAIL') or NOREPLY_EMAIL}"]
 WINDOW_D = 7
 MIN_MEM_GB = 3
 BUSY = 75
