@@ -15,6 +15,7 @@ from lib import *
 import merger
 import dm_compat, jsonrec
 import praise_notice as PN
+from finding_policy import fix_authors, author_findings, no_fix_rulings
 import ready_guard as RG
 import workroot as W
 from git_identity import NOREPLY_EMAIL
@@ -64,7 +65,8 @@ def BRIEF_ROUTE_OFF(): return f"{BASE}/outbound-brief-route-off"
 # 11-03 step 11: conflict reminders (prwatch dirty:<pr>:<head> slack.dm, pmnudge nudge:<pr>:merge:<since> DIRTY/BEHIND) never DM Praise,
 # with or without praise-dm-mute: they go to the brief queue (or, with BRIEF_ROUTE_OFF, a muted-*.md file bots read). Before, they
 # reached his Slack DM whenever the mute file was absent. Rollback: touch CONFLICT_BRIEF_OFF (re-read every run) -> they follow the mute again.
-CONFLICT_KEY = re.compile(r"^(dirty:|nudge:\d+:merge:)")
+# Step 11 ③: prwatch's 🟢 for a resolved conflict (resolved:dirty:<sha>) follows the same route.
+CONFLICT_KEY = re.compile(r"^(dirty:|nudge:\d+:merge:|resolved:dirty:)")
 def CONFLICT_BRIEF_OFF(): return f"{BASE}/conflict-brief-off"
 def conflict_brief(k): return bool(CONFLICT_KEY.match(str(k))) and not os.path.exists(CONFLICT_BRIEF_OFF())
 TERMINAL = ("done", "skipped", "gave_up", "uncertain", "briefed", "superseded")  # ledger statuses never retried (uncertain = a send was interrupted:
@@ -165,7 +167,28 @@ def feishu_text(a):
     t = f"【Mivo QA】你的 PR #{n} 在合并后测试里有 {lvl} 问题，请查看：https://github.com/{REPO}/pull/{n}"
     if a.get("handoff_url"): t += f"\n交接 issue：{a['handoff_url']}"
     t += "\n\n" + feedback_block(n)
+    au = ((r or {}).get("pr") or {}).get("author")
+    au = au.get("login") if isinstance(au, dict) else au
+    if au in fix_authors(): t += "\n\n" + bot_followup_block(n, (r or {}).get("pr"))
     tmp = tempfile.NamedTemporaryFile("w", delete=False, suffix=".txt"); tmp.write(t); tmp.close(); return tmp.name
+
+P2_RULINGS = "/workspace/fleet-standards/p2-rulings.md"
+# Praise 11-02（kiro 私信结尾）：每条问题一句「是否已有 bot 跟进」，状态读台账 / prfix 工单 / p2-rulings，不写死
+def bot_followup(n, fp, rows, tickets, nofix):
+    r = rows.get((n, fp)) or {}
+    if r.get("fix_pr"): return f"已由 Praise PR 跟进，修复 PR #{r['fix_pr']}"
+    if r.get("status") == "concluded" or n in nofix: return "判定不修"
+    t = tickets.get(f"{n}:{fp}")
+    if t and t.get("status") != "parked": return "已派单待认领"
+    return "暂无 bot 跟进"
+def bot_followup_block(n, pr):
+    lf = (sorted(glob.glob(f"{QA}/ledger/daily/*.json")) or [None])[-1]
+    rows = {(x.get("pr"), x.get("fingerprint")): x for x in jload(lf, {}).get("rows", [])} if lf else {}
+    tickets = jload(f"{BASE}/out/praise-pr/tickets.json", {}).get("tickets", {})
+    nofix = no_fix_rulings(open(P2_RULINGS).read()) if os.path.exists(P2_RULINGS) else set()
+    xs = author_findings(pr or {}, new_notice=True)
+    L = ["bot 跟进情况："] + [f"· {(x.get('title') or x.get('check_id') or '')[:60]}（{x['severity']}）：{bot_followup(n, x.get('fingerprint'), rows, tickets, nofix)}" for x in xs]
+    return "\n".join(L) if xs else "bot 跟进情况：暂无 bot 跟进"
 
 # 私信 / 提醒固定结尾（2026-10-23 回执统一成一种；和 panoptes report/REPORT-STYLE.md、track-followups.mjs feedbackBlock 同文）
 def feedback_block(n):

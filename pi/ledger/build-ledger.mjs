@@ -147,9 +147,14 @@ for (const v of Object.values(state)) for (const fp of v.fingerprints || []) {
 //  1 feishu-sent.json "<repo>#<pr>:<fp>" (+ covered_fingerprints) — Grok-line DM records
 //  2 feishu-sent.json "dm:<day>:<pr>" — Pi line / send-dm-recorded.mjs records: one DM per PR → the P0–P2 that DM stood for
 //    when it was sent (dmStandsFor: unified rule from 10-24, the rule of the time before)
-//  3 reports/merged for OWNERS (PraiseZhu, never DM'd by rule) — their P0–P2 must still be tracked for prfix/retest
-//    (env MIVO_QA_LEDGER_OWNERS="login,login"; empty string disables)
-const OWNERS = (process.env.MIVO_QA_LEDGER_OWNERS ?? 'PraiseZhu').split(',').map(s => s.trim()).filter(Boolean);
+//  3 reports/merged for OWNERS = the Pi fix authors (same as pi/bin/finding_policy.py FIX_AUTHORS, Praise 11-02: PraiseZhu +
+//    kirozeng) — their P0–P2 must be tracked for prfix/retest even with no DM record (PraiseZhu is never DM'd by rule; a kirozeng
+//    finding that was DM'd is already a row from 1/2, first source wins). Rollback, same flag as fix_authors(), re-read every run:
+//    touch $PI_STATE/fix-authors-praise-only (default /workspace/mivo-qa/pi/) -> PraiseZhu only.
+//    (env MIVO_QA_LEDGER_OWNERS="login,login" overrides; empty string disables)
+const FIX_AUTHORS = ['PraiseZhu', 'kirozeng'];
+const praiseOnly = fs.existsSync(path.join(process.env.PI_STATE || path.join(QA, 'pi'), 'fix-authors-praise-only'));
+const OWNERS = (process.env.MIVO_QA_LEDGER_OWNERS ?? (praiseOnly ? FIX_AUTHORS.slice(0, 1) : FIX_AUTHORS).join(',')).split(',').map(s => s.trim()).filter(Boolean);
 const loginOf = p => (p?.author && typeof p.author === 'object' ? p.author.login : p?.author) || null;
 // a finding a PR-level DM sent from 10-24 (newNotice) / an owner row stands for — unified severity (Praise 2026-10-23), the
 // same rule as panoptes report/finding-policy.mjs notifiable() and pi-fallback bin/finding_policy.py (DMs sent before 10-24:
@@ -418,11 +423,11 @@ fs.mkdirSync(OUT, { recursive: true });
 fs.writeFileSync(path.join(OUT, `${today}.json`), JSON.stringify(doc, null, 2) + '\n');
 
 const esc = s => String(s).replace(/\|/g, '\\|').replace(/ou_[0-9a-f]+|oc_[0-9a-f]+/g, '[id]');
-const ch = r => r.notice.channels.includes('dm') ? (r.notice.channels.includes('group') ? '私信+群' : '私信') : (r.notice.channels.includes('group') ? '群（本人不私信）' : '报告（本人不私信）');
+const ch = r => r.notice.channels.includes('dm') ? (r.notice.channels.includes('group') ? '私信+群' : '私信') : (r.notice.channels.includes('group') ? '群（未私信）' : '报告（未私信）');
 let md = `# Mivo QA 飞书通知台账 ${today}（北京时间）\n\n生成于 ${shTime(lastChecked)}（北京时间）。共 ${out.length} 条已通知问题：已修复（复测通过）${counts.fixed}，修复已合并待复测 ${counts.fix_merged_pending_retest}，修复 PR 未合并 ${counts.fix_pr_open}，有结论 ${counts.concluded}，未修无结论 ${counts.open}。\n\n`;
 md += `未修无结论按级别：P0 ${openBy.P0} / P1 ${openBy.P1} / P2 ${openBy.P2} / P3 ${openBy.P3}${openBy.unknown ? ` / 未知 ${openBy.unknown}` : ''}。`;
 const ownerRows = out.filter(r => r.notice.via === 'owner-report').length;
-if (ownerRows) md += `其中 ${ownerRows} 条是 ${OWNERS.join('、')} 本人 PR 的 P0–P2（按规则不私信，直接从合并报告入账）。`;
+if (ownerRows) md += `其中 ${ownerRows} 条是 Pi 修复范围（${OWNERS.join('、')}）PR 的 P0–P2，没有私信记录，直接从合并报告入账（PraiseZhu 本人按规则不私信）。`;
 md += ghErr ? `\n\n⚠️ GitHub 查询失败，修复 PR 未能核对（标为未知）。\n` : `\n`;
 const sect = (title, st, cols, fn) => { const rs = out.filter(r => r.status === st);
   md += `\n## ${title}（${rs.length} 条）\n\n`; if (!rs.length) { md += '无\n'; return; }

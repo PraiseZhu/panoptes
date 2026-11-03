@@ -160,6 +160,11 @@ class TestNewFindings(T):
         st = {}; prwatch.scan_reports(st)
         wf(f"{prwatch.RPT}/PR-5.json", json.dumps({"prs": [{"number": 5, "author": "aj0928", "findings": [{"fingerprint": "mq1-z", "severity": "P0"}]}]}))
         prwatch.scan_reports(st); self.assertEqual(self.acts, [])
+        self.assertFalse(any("#5" in l for l in self.logs))
+    def test_kiro_prs_are_ours(self):   # Praise 11-02: FIX_AUTHORS = PraiseZhu + kirozeng
+        st = {}; prwatch.scan_reports(st)
+        wf(f"{prwatch.RPT}/PR-6.json", json.dumps({"prs": [{"number": 6, "author": "kirozeng", "findings": [{"fingerprint": "mq1-k", "severity": "P1"}]}]}))
+        prwatch.scan_reports(st); self.assertIn("mq1-k", st["notified_fps"]); self.assertTrue(any("new findings #6: 1" in l for l in self.logs))
 
 class TestDraftCI(T):
     """Our own draft fix PRs (10-24): green -> ready; whole-PR gate races -> update-branch when behind main, else one rerun; a real
@@ -347,6 +352,29 @@ class TestResolved(T):
         self.assertIn("🟢 已恢复", txt); self.assertIn("#1264", txt); self.assertIn("已转正式", txt); self.assertIn("#1263", txt); self.assertIn("已合并", txt)
         self.assertNotIn("#1301", txt); self.assertNotIn("1179", txt)                # still a draft / never asked him
         st["resolved_at"] = 0; prwatch.resolved(st); self.assertEqual(len(self.acts), 1)   # once
+
+class TestResolvedConflictBrief(TestResolved):
+    """step 11 ③ (11-03): the 🟢 for a conflict (dirty) DM gets its own resolved:dirty:<sha> key (outbound #177 conflict_brief -> brief
+    queue only); the CI-red 🟢 keeps resolved:<sha>. touch <state>/conflict-brief-off -> the old single resolved:<sha> bundle."""
+    def setUp(self):
+        super().setUp()
+        self.view = {1641: {"state": "MERGED"}, 1650: {"state": "OPEN", "isDraft": False, "mergeStateStatus": "CLEAN"}}
+        self.st = {"alerted_backfilled": True, "alerted": {"1641": "dirty", "1650": "red"}}
+    def test_conflict_green_split_to_its_own_key(self):
+        prwatch.resolved(self.st)
+        keys = sorted(a["key"] for a in self.acts); self.assertEqual(len(keys), 2, keys)
+        c = next(a for a in self.acts if a["key"].startswith("resolved:dirty:")); r = next(a for a in self.acts if not a["key"].startswith("resolved:dirty:"))
+        self.assertIn("#1641", c["text"]); self.assertNotIn("#1650", c["text"]); self.assertIn("#1650", r["text"]); self.assertNotIn("#1641", r["text"])
+        self.assertTrue(r["key"].startswith("resolved:"))
+        self.assertEqual(sorted(self.st["resolved_sent"]), ["pr:1641", "pr:1650"])
+        self.st["resolved_at"] = 0; prwatch.resolved(self.st); self.assertEqual(len(self.acts), 2)   # once
+    def test_only_conflict_green(self):
+        del self.st["alerted"]["1650"]; prwatch.resolved(self.st)
+        self.assertEqual([a["key"][:15] for a in self.acts], ["resolved:dirty:"])
+    def test_flag_restores_single_bundle(self):
+        wf(prwatch.CONFLICT_BRIEF_OFF(), ""); prwatch.resolved(self.st)
+        self.assertEqual(len(self.acts), 1); a = self.acts[0]
+        self.assertFalse(a["key"].startswith("resolved:dirty:")); self.assertIn("#1641", a["text"]); self.assertIn("#1650", a["text"])
 
 class TestNoSecretsInEnv(T):
     def test_kick_gives_outbound_the_secrets_without_touching_os_environ(self):   # 10-24 security

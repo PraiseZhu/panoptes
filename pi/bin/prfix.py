@@ -52,7 +52,7 @@ import lib
 import praise_notice as PN
 import workroot as W
 from git_identity import NOREPLY_EMAIL
-from finding_policy import notifiable, own_pr_ticket, no_fix_rulings
+from finding_policy import notifiable, own_pr_ticket, no_fix_rulings, fix_authors
 os.environ["PATH"] = "/usr/local/bin:" + os.environ.get("PATH", "")
 
 _E = os.environ.get
@@ -561,13 +561,14 @@ def dm_assignments(sent):
 # own_sev = finding_policy.own_pr_ticket (moved there 2026-10-23 so build-ledger.mjs keeps the same owner rows; body unchanged)
 own_sev = own_pr_ticket
 def owners():
-    """PR authors whose findings prfix fixes (Praise 10-23: only our own PRs; others go to their handoff repos). '*' = all (tests)."""
-    o = os.environ.get("PRFIX_OWNERS", AUTHOR_SELF)
+    """PR authors whose findings prfix fixes: finding_policy.fix_authors() (Praise 11-02: PraiseZhu + kirozeng; others go to
+    their handoff repos). PRFIX_OWNERS overrides; '*' = all (tests)."""
+    o = os.environ.get("PRFIX_OWNERS") or ",".join(fix_authors())
     return None if o.strip() == "*" else {x.strip() for x in o.split(",") if x.strip()}
 
 def collect(reps, ledger, fix2, nofix=frozenset()):
     """current report ∪ ledger open rows (fp absent from the current report) ∪ history-only (listed, never auto-picked).
-    Only PRs authored by owners() (default PraiseZhu)."""
+    Only PRs authored by owners() (default fix_authors())."""
     out, cur_fps = {}, {}; own = owners()
     mine = lambda a: own is None or (a or "") in own
     def add(n, x, source, author, row=None):
@@ -1276,6 +1277,15 @@ def scope_of(files):
             if part not in gen and re.fullmatch(r"[A-Za-z][\w-]{1,24}", part): return part
     return None
 
+def platform_for(ev, src, tests):
+    """Platform block lines for the fix PR body. ev = platform_eval result (None = evaluator unavailable -> conservative path rule).
+    Product #1387 (313e6517): requiresWindowsEvidence is a deprecated always-false field; requiresDisclosure carries the
+    obligation (platform-risk.mjs evaluatePlatformRisk), so the block is keyed on requiresDisclosure (old field still honoured)."""
+    if ev is None:
+        need = any(re.match(r"^(?:src|shared|cindyplugin|server)/|^scripts/(?!ci/|ops/)", f) for f in src)
+        return platform_block([], tests) if need else []
+    return platform_block(ev.get("risks") or [], tests) if (ev.get("requiresDisclosure") or ev.get("requiresWindowsEvidence")) else []
+
 def platform_eval(wd, base, head, body, committed):
     """Ask the repo's own evaluator (scripts/ci/platform-risk.mjs, pure, no network) which platform risks the diff has."""
     script = f"{wd}/scripts/ci/platform-risk.mjs"
@@ -1636,11 +1646,8 @@ def fix_one(c, A, d):
         body0 = pr_body(c, res, tests, src, pf, dok, issue, [])
         ev_ = platform_eval(wd, base, head, body0, not A.dry_run)
         warn = []
-        if ev_ is None:
-            need = any(re.match(r"^(?:src|shared|cindyplugin|server)/|^scripts/(?!ci/|ops/)", f) for f in src)
-            plat = platform_block([], tests) if need else []; warn.append("platform-risk 评估器不可用，Windows 平台证据按保守规则生成")
-        else:
-            plat = platform_block(ev_.get("risks") or [], tests) if ev_.get("requiresWindowsEvidence") else []
+        plat = platform_for(ev_, src, tests)
+        if ev_ is None: warn.append("platform-risk 评估器不可用，Windows 平台证据按保守规则生成")
         body = pr_body(c, res, tests, src, pf, dok, issue, plat)
         if ev_ is not None:
             chk = platform_eval(wd, base, head, body, not A.dry_run) or {}

@@ -19,6 +19,13 @@ import os, re, datetime as _dt
 AUTHOR_SEV = ("P0", "P1", "P2")
 SEV_RANK = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
 
+# Praise 2026-11-02: Pi fixes QA findings on PraiseZhu's AND kirozeng's PRs. Self-PR detection (prfix AUTHOR_SELF, outbound,
+# prwatch draft list) stays PraiseZhu-only. Rollback: touch $PI_STATE/fix-authors-praise-only (re-read on every call).
+FIX_AUTHORS = ("PraiseZhu", "kirozeng")
+def fix_authors():
+    off = os.path.join(os.environ.get("PI_STATE") or "/workspace/mivo-qa/pi", "fix-authors-praise-only")
+    return FIX_AUTHORS[:1] if os.path.exists(off) else FIX_AUTHORS
+
 # Same instant as panoptes report/finding-policy.mjs UNIFIED_SINCE; MIVO_QA_UNIFIED_SINCE is for tests only.
 UNIFIED_SINCE = os.environ.get("MIVO_QA_UNIFIED_SINCE") or "2026-10-23T16:00:00Z"
 

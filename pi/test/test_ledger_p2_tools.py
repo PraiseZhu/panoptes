@@ -93,6 +93,40 @@ class BuildLedger(Base):
         self.assertEqual(row["fix_round"], 3); self.assertFalse(row["needs_human"])
         self.assertEqual((doc["summary"]["needs_you"], doc["needs_you"]), (0, []))
 
+class LedgerOwners(Base):
+    """#155: OWNERS = finding_policy FIX_AUTHORS (PraiseZhu + kirozeng); flag fix-authors-praise-only -> PraiseZhu only."""
+    KFP = "mq1-kkkkkkkkkkkkkkkkkkkk"
+
+    def setUp(self):
+        super().setUp()
+        json.dump(report(400, "kirozeng", [{"fingerprint": self.KFP, "severity": "P1", "source": "check", "status": "introduced",
+                                            "test_backed": True, "title": "kiro p1"}]), open(f"{self.qa}/reports/merged/PR-400.json", "w"))
+        os.environ["PI_STATE"] = self.pis = f"{self.t}/pistate"; os.makedirs(self.pis)
+        os.environ.pop("MIVO_QA_LEDGER_OWNERS", None)
+
+    def run_ledger(self):
+        r = self.build(DAY); self.assertEqual(r.returncode, 0, r.stderr)
+        doc = json.load(open(f"{self.qa}/ledger/daily/{DAY}.json"))
+        return {x["key"]: x for x in doc["rows"]}, open(f"{self.qa}/ledger/daily/{DAY}.md").read()
+
+    def test_kiro_owner_rows_and_wording(self):
+        import finding_policy as FP_
+        self.assertEqual(list(FP_.FIX_AUTHORS), ["PraiseZhu", "kirozeng"])
+        rows, md = self.run_ledger()
+        row = rows[f"{REPO}#400:{self.KFP}"]
+        self.assertEqual((row["notice"]["via"], row["level"]), ("owner-report", "P1"))
+        self.assertIn(f"{REPO}#100:{FP}", rows)
+        self.assertIn("Pi 修复范围（PraiseZhu、kirozeng）PR 的 P0–P2", md)
+        self.assertNotIn("本人 PR 的 P0–P2", md); self.assertNotIn("报告（本人不私信）", md)
+
+    def test_praise_only_flag(self):
+        open(f"{self.pis}/fix-authors-praise-only", "w").close()
+        rows, md = self.run_ledger()
+        self.assertNotIn(400, {x["pr"] for x in rows.values()})
+        self.assertIn(f"{REPO}#100:{FP}", rows)
+        self.assertIn("Pi 修复范围（PraiseZhu）PR", md)
+
+
 class LedgerPy(Base):
     def lg(self):
         os.environ["PI_QA_HOME"] = self.qa
