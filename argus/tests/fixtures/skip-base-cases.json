@@ -1,0 +1,15 @@
+{
+  "_doc": "Shared contract for which merged-PR base branches panoptes tests (pi/bin/basegate.py and argus/src/config.mjs matchesSkipBase/shouldTestBase read this same file). skip = base matches registry.skipBaseBranches; main_only = PANOPTES_MAIN_ONLY=1 rollback.",
+  "cases": [
+    {"base": "main", "globs": ["probe-*"], "skip": false, "test": true, "test_main_only": true},
+    {"base": "integration/canvas-s2", "globs": ["probe-*"], "skip": false, "test": true, "test_main_only": false},
+    {"base": "feat/video-in-canvas", "globs": ["probe-*"], "skip": false, "test": true, "test_main_only": false},
+    {"base": "release/1.2", "globs": ["probe-*"], "skip": false, "test": true, "test_main_only": false},
+    {"base": "probe-1410/status/base", "globs": ["probe-*"], "skip": true, "test": false, "test_main_only": false},
+    {"base": "probe-x", "globs": ["probe-*"], "skip": true, "test": false, "test_main_only": false},
+    {"base": "probe-x", "globs": [], "skip": false, "test": true, "test_main_only": false},
+    {"base": "feat/a.b", "globs": ["feat/*"], "skip": true, "test": false, "test_main_only": false},
+    {"base": "featXa", "globs": ["feat.a"], "skip": false, "test": true, "test_main_only": false},
+    {"base": null, "globs": ["probe-*"], "skip": false, "test": true, "test_main_only": true}
+  ]
+}

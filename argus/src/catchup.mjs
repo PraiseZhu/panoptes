@@ -1,5 +1,5 @@
 // 补测（catch-up）：纯脚本，不靠人盯。
-//   1. 用 gh 列出昨天和今天（上海时区）合并进主干的 PR，按合并时间从早到晚；
+//   1. 用 gh 列出昨天和今天（上海时区）合并的 PR（目标分支不在 registry.skipBaseBranches 里的都算，11-03 起不再只认 main），按合并时间从早到晚；
 //   2. 与 reports/merged/PR-N.json 比对：缺文件、读不了、或测的不是这个 merge commit（tested_sha ≠ merge commit；
 //      docs-only 看 merged_sha）、或上次没有结论（qa-error / not-tested）都算缺口；
 //   3. 逐个缺口调用 run-nightly.sh --pr N --date <合并日> --write-merged --wait-lock S --no-issues|--create-issues --trigger catch-up
@@ -14,7 +14,7 @@ import { REPORTS_DIR } from './paths.mjs'
 import { toShanghaiDay, toShanghaiIso } from './util.mjs'
 import { shanghaiDayWindow } from './github.mjs'
 import { classifyChange } from './classify.mjs'
-import { loadRegistry } from './config.mjs'
+import { loadRegistry, shouldTestBase, mainOnly, DEFAULT_SKIP_BASE_BRANCHES } from './config.mjs'
 
 export const MAX_ATTEMPTS = 3
 export const LOCK_TIMEOUT_EXIT = 75
@@ -67,16 +67,20 @@ export function listMergedViaRest(repo, since, { gh = 'gh', run = spawnSync, max
   return rows
 }
 
+function registrySkip() { try { return loadRegistry().skipBaseBranches } catch { return DEFAULT_SKIP_BASE_BRANCHES } }
+
 const UNFINISHED = new Set(['qa-error', 'not-tested'])
 // 一个已合并 PR 是否有缺口：返回 null（没缺口）或 { reason }
-export function gapOf(pr, mergedDir) {
+export function gapOf(pr, mergedDir, { testBase = () => false } = {}) {
   const file = join(mergedDir, `PR-${pr.number}.json`)
   if (!existsSync(file)) return { reason: 'missing', file }
   let doc
   try { doc = JSON.parse(readFileSync(file, 'utf8')) } catch { return { reason: 'unreadable', file } }
   const entry = (doc.prs ?? []).find((x) => x.number === pr.number)
   if (!entry) return { reason: 'no-entry', file }
-  if (entry.verdict === 'skipped' && entry.skip_reason === 'non-main-base') return null
+  // a skipped/non-main-base report is "no gap" only while its base is still out of scope; one written under the old main-only
+  // rule (10-30 #139, e.g. integration/canvas-s1) is a gap again (11-03 stale-skip)
+  if (entry.verdict === 'skipped' && entry.skip_reason === 'non-main-base') return testBase(pr.base_ref ?? entry.base_ref ?? null) ? { reason: 'stale-skip', file } : null
   if (UNFINISHED.has(entry.verdict)) return { reason: `unfinished (${entry.verdict})`, file }
   const tested = entry.verdict === 'docs-only' ? (doc.merged_sha ?? entry.merge_sha ?? null) : entry.tested_sha
   if (tested !== pr.merge_sha) return { reason: `stale (tested ${String(tested ?? 'none').slice(0, 12)} ≠ merge ${pr.merge_sha.slice(0, 12)})`, file }
@@ -116,21 +120,22 @@ function saveState(file, state) {
 }
 
 // 主流程。runOne(pr) 返回子进程退出码；gh / 时钟 / 目录都可注入，便于测试。
-export function catchUp({ repo, now = new Date(), reportsDir = REPORTS_DIR, mergedDir = join(reportsDir, 'merged'), list = (r, d) => listMergedPrs(r, d), runOne, maxAttempts = MAX_ATTEMPTS, active = () => activeRunPrs(), docsOnly = () => false }) {
+export function catchUp({ repo, skipBaseBranches = registrySkip(), mainOnly: mo = mainOnly(), now = new Date(), reportsDir = REPORTS_DIR, mergedDir = join(reportsDir, 'merged'), list = (r, d) => listMergedPrs(r, d), runOne, maxAttempts = MAX_ATTEMPTS, active = () => activeRunPrs(), docsOnly = () => false }) {
   const days = catchUpDays(now)
   const merged = list(repo, days)
   const sFile = statePath(reportsDir)
   const state = loadState(sFile)
   state.prs ??= {}
+  const testBase = (ref) => shouldTestBase(ref, skipBaseBranches, { mainOnly: mo })
   const gaps = []
   const running = active()
   const inProgress = []
   const skipped = []
   for (const pr of merged) {
-    // 10-30: only PRs merged into main are tested; any other base (probe-*, release/*) is skipped, not a gap.
-    // base_ref null (list without the field) counts as main: never drop a test on missing data.
-    if (pr.base_ref != null && pr.base_ref !== 'main') { skipped.push({ number: pr.number, base_ref: pr.base_ref, reason: 'non-main-base' }); delete state.prs[String(pr.number)]; continue }
-    const gap = gapOf(pr, mergedDir)
+    // 11-03: every base is tested except registry.skipBaseBranches (probe-*), same rule as nightly.mjs / mergewatch / watchdog.
+    // PANOPTES_MAIN_ONLY=1 (or the flag file) restores the 10-30 main-only rule. base_ref null counts as main.
+    if (!testBase(pr.base_ref)) { skipped.push({ number: pr.number, base_ref: pr.base_ref, reason: 'non-main-base' }); delete state.prs[String(pr.number)]; continue }
+    const gap = gapOf(pr, mergedDir, { testBase })
     const key = String(pr.number)
     const prev = state.prs[key]
     if (!gap) { if (prev && !prev.gave_up_at) delete state.prs[key]; continue }
@@ -143,10 +148,12 @@ export function catchUp({ repo, now = new Date(), reportsDir = REPORTS_DIR, merg
   }
   // 先看 diff 再排队（10-26 #1298 纯文档等了 40 分钟）：纯文档的缺口插到最前面，几秒就出报告，不排在长测试后面
   for (const g of gaps) { try { g.docs_only = !!docsOnly(g) } catch { g.docs_only = false } }
-  gaps.sort((a, b) => Number(b.docs_only) - Number(a.docs_only))
+  // 11-03: then main before integration / feature branches, so a burst of branch merges never delays main
+  const isMain = (g) => Number(g.base_ref == null || g.base_ref === 'main')
+  gaps.sort((a, b) => Number(b.docs_only) - Number(a.docs_only) || isMain(b) - isMain(a))
   if (!gaps.length) { if (existsSync(sFile)) saveState(sFile, state); return { status: 'nothing-to-do', days, gaps: [], in_progress: inProgress, skipped } }
 
-  const result = { schema: 'mivo-qa-catch-up/v1', repo, days, started_at: toShanghaiIso(now), gaps: gaps.map((g) => ({ number: g.number, day: g.day, merge_sha: g.merge_sha, reason: g.gap.reason, docs_only: g.docs_only })), in_progress: inProgress, skipped, runs: [],
+  const result = { schema: 'mivo-qa-catch-up/v1', repo, days, started_at: toShanghaiIso(now), gaps: gaps.map((g) => ({ number: g.number, day: g.day, merge_sha: g.merge_sha, reason: g.gap.reason, docs_only: g.docs_only, base_ref: g.base_ref ?? null })), in_progress: inProgress, skipped, runs: [],
     system_health: { status: 'ok', gave_up: [], qa_tool_failures: [] } }
   for (const g of gaps) {
     const key = String(g.number)
@@ -159,7 +166,7 @@ export function catchUp({ repo, now = new Date(), reportsDir = REPORTS_DIR, merg
       result.runs.push({ number: g.number, attempt: st.attempts, exit_code: code, duration_s: Math.round((Date.now() - t0) / 1000), filled: false, remaining_gap: g.gap.reason, memory_skip: true })
       result.stopped = 'memory-skip'; break
     }
-    const still = gapOf(g, mergedDir)
+    const still = gapOf(g, mergedDir, { testBase })
     // pipeline 失败没开测（exit 3）：撤回这次计数、不放弃，接着试下一个缺口（工具修好后照样会补上）
     if (code === PIPELINE_ERROR_EXIT && still) {
       st.attempts--; st.last_reason = 'pipeline-error'
