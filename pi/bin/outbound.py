@@ -50,6 +50,16 @@ MERGE_DAY_CAP, MERGE_ROUND_CAP = 2, 1                  # policy maxMergesPerDay 
 # puts in the 09:05 brief (brief: is the one key the mute lets through) and are recorded "briefed". Rollback: touch BRIEF_ROUTE_OFF.
 BRIEF_ROUTED = ("nudge:", "pm-retro:", "pm-cos:", "ops-review:", "overdue:")
 def BRIEF_QUEUE(): return f"{BASE}/out/outbound/brief-queue.jsonl"
+def brief_queued(k):   # several writers append here: a torn / bad line is skipped, never crashes the run
+    try:
+        with open(BRIEF_QUEUE(), errors="replace") as f: lines = f.read().splitlines()   # torn multi-byte char -> U+FFFD, not a crash
+    except FileNotFoundError: return False
+    except (OSError, ValueError) as e: log(f"brief-queue unreadable ({e.__class__.__name__}) -> treated as not queued"); return False
+    for l in lines:
+        try: r = json.loads(l)
+        except ValueError: continue
+        if isinstance(r, dict) and r.get("key") == k: return True
+    return False
 def BRIEF_ROUTE_OFF(): return f"{BASE}/outbound-brief-route-off"
 TERMINAL = ("done", "skipped", "gave_up", "uncertain", "briefed", "superseded")  # ledger statuses never retried (uncertain = a send was interrupted:
                                                        # Slack/Feishu cannot be checked remotely, so never re-sent blindly)
@@ -287,8 +297,11 @@ def h_feishu_group(a):
         if post:   # panoptes' own group sender: report/allowed-chats.json allowlist + feishu-sent.json dedupe on the same key
             out = run(["node", f"{QA}/report/send-feishu-report.mjs", "--chat-id", chat, "--msg-type", "post", "--content-file", post_file(),
                        "--dedupe-key", a["key"]])
-            try: r = json.loads(out.strip().splitlines()[-1])
-            except (ValueError, IndexError): raise RuntimeError(f"group post: unparseable sender output {out[-160:]}")
+            ls = out.strip().splitlines(); r = None   # sender pretty-prints (JSON.stringify(obj, null, 2)), maybe after log lines:
+            for i in (i for i, l in enumerate(ls) if l.startswith("{")):   # the first "{" line from which the rest parses
+                try: r = json.loads("\n".join(ls[i:])); break
+                except ValueError: continue
+            if not isinstance(r, dict): raise RuntimeError(f"group post: unparseable sender output {out[-160:]}")
             if not r.get("ok"): raise RuntimeError(f"group post: {r.get('error') or r}")
             return "skipped (already sent)" if r.get("skipped") else "sent"
         tok = feishu_token(); text = open(clean_body(body_of(a))).read()
@@ -870,16 +883,20 @@ def main():
         if cur is None: cur = dict(ledger)
         cur.update(changes); write_atomic(LEDGER, json.dumps(cur, ensure_ascii=False, indent=1))
     def setk(k, v): ledger[k] = v; changes[k] = v; persist()
+    picked = {}   # one row per key: a key re-emitted on a later day (overdue:) is handled once, from the newest file
     for f in sorted(glob.glob(f"{BASE}/out/*/*.actions.json")):
         job = f.split("/")[-2]; day = os.path.basename(f)[:10]
         if day not in days or (o.job and job != o.job): continue
-        for a in jload(f, {}).get("actions", []):
+        for a in jload(f, {}).get("actions", []): picked.pop(a["key"], None); picked[a["key"]] = (f, job, a)
+    for f, job, a in picked.values():
             k, t = a["key"], a.get("type", "")
             if o.key and k not in o.key: continue
             if resend:
                 if k != resend: continue
                 a = {**a, "_resend": True}
-            if ledger.get(k, {}).get("status") in TERMINAL and not (resend and not resend_blocker(ledger.get(k))) or a.get("status") == "done":
+            legacy_mute = (ledger.get(k) == {**ledger.get(k, {}), "status": "skipped", "reason": "praise-dm-mute"}   # pre-#153 record:
+                           and k.startswith(BRIEF_ROUTED) and not os.path.exists(BRIEF_ROUTE_OFF()) and praise_dm_blocked(k))   # -> briefed branch below
+            if ledger.get(k, {}).get("status") in TERMINAL and not legacy_mute and not (resend and not resend_blocker(ledger.get(k))) or a.get("status") == "done":
                 rows.append((job, k, t, "-", f"{ledger.get(k, {}).get('status', 'done')}(ledger)", ledger.get(k, {}).get("reason", ""))); continue
             is_merge = t.startswith("gh.pr.merge"); prev = ledger.get(k, {})
             if prev.get("status") == "sending":   # the previous run died mid-send (crash or VM snapshot fork)
@@ -914,8 +931,8 @@ def main():
                     if not o.dry_run:
                         text = relay_text(a) if t in RELAY_TYPES else (a.get("text") or "")
                         os.makedirs(os.path.dirname(BRIEF_QUEUE()), exist_ok=True)
-                        with open(BRIEF_QUEUE(), "a") as q:
-                            q.write(json.dumps({"at": now_cst().isoformat(timespec="seconds"), "key": k, "job": job, "type": t, "to": a.get("to"), "text": text}, ensure_ascii=False) + "\n")
+                        if not brief_queued(k):
+                            with open(BRIEF_QUEUE(), "a") as q: q.write(json.dumps({"at": now_cst().isoformat(timespec="seconds"), "key": k, "job": job, "type": t, "to": a.get("to"), "text": text}, ensure_ascii=False) + "\n")
                         setk(k, {"status": "briefed", "reason": "praise-dm-mute -> jasper brief", "at": now_cst().isoformat(timespec="seconds")})
                     rows.append((job, k, t, "Jasper brief", "BRIEFED", f"queued in {os.path.basename(BRIEF_QUEUE())}")); continue
                 if not o.dry_run:
