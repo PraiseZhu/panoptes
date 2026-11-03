@@ -12,7 +12,8 @@ os.environ.setdefault("PRFIX_OWNERS", "*")
 import json, shutil, tempfile, types, unittest  # noqa: E402
 import prwatch, prfix  # noqa: E402
 
-PY = b"python3\0/workspace/panoptes/pi/bin/prfix.py\0--next\0"
+PY = b"python3\0" + os.fsencode(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin", "prfix.py")) + b"\0--next\0"
+FOREIGN = b"python3\0/workspace/pi-work/other/pi/bin/prfix.py\0--next\0"
 PAN = b"bash\0/workspace/panoptes/run-nightly.sh\0--pr\0001188\0"
 DEAD = 4194305   # above any pid_max: never a live pid
 # the box numbers in the plan (DESIGN.md §1): learned peaks 5894*1.3 = 7662 (merge test), 2158*1.3 = 2805 (fix)
@@ -121,6 +122,25 @@ class EmergKill(T):
         self.assertEqual(sorted({p for p, _ in self.killed}), [21, 22])
         with open(prwatch.emerg_mark(20)) as f: mark = json.load(f)
         self.assertEqual(sorted(mark["pids"]), [21, 22]); self.assertEqual(st["emerg_kills"][-1]["prfix"], 20)
+
+    def test_foreign_path_prfix_is_never_selected(self):
+        # the biggest "fix" is another checkout's prfix.py (pid 30 -> step 31): only this repo's fix B may be hit
+        self.t.update({30: (1, 100, FOREIGN), 31: (30, 5000, b"node\0vitest\0")})
+        prwatch.emerg_kill({})
+        self.assertNotIn(31, [p for p, _ in self.killed]); self.assertEqual(sorted({p for p, _ in self.killed}), [21, 22])
+        self.t = {30: (1, 100, FOREIGN), 31: (30, 5000, b"node\0vitest\0")}; self.killed.clear()
+        prwatch.emerg_kill({}); self.assertEqual(self.killed, [])
+
+    def test_sigkill_reverifies_victims(self):
+        # during the SIGTERM grace 21 exits and its pid is reused by an unrelated process; 22 is gone: SIGKILL hits neither
+        def sleep(s):
+            self.clock["t"] += s
+            if s == prwatch.EMERG_GRACE_S:
+                self.t = {k: v for k, v in self.t.items() if k not in (21, 22)}; self.t[21] = (1, 50, b"sshd\0")
+        prwatch.time = types.SimpleNamespace(time=lambda: self.clock["t"], sleep=sleep)
+        prwatch.emerg_kill({})
+        self.assertEqual([p for p, s in self.killed if s == prwatch.signal.SIGKILL], [])
+        self.assertEqual(sorted(p for p, s in self.killed if s == prwatch.signal.SIGTERM), [21, 22])
 
     def test_memory_back_within_30s_kills_nothing(self):
         orig = prwatch.time.sleep

@@ -224,6 +224,28 @@ def prfix_runs(t):
     return pys, [w for w in t if is_wrap(w) and not set(tree(t, w)) & set(pys)]
 
 
+OWN_PRFIX = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "prfix.py"))
+
+
+def own_prfix(t, p):
+    """True when pid p runs this checkout's prfix.py (realpath, relative paths resolved against /proc/p/cwd): emerg_kill must
+    never pick another copy of prfix.py on the shared box (other worktrees, other bots)."""
+    v = t[p][2].split(b"\0")
+    if len(v) < 2: return False
+    s = os.fsdecode(v[1])
+    if not os.path.isabs(s):
+        try: s = os.path.join(os.readlink(f"/proc/{p}/cwd"), s)
+        except OSError: return False
+    return os.path.realpath(s) == OWN_PRFIX
+
+
+def proc_start(p):
+    """start time (clock ticks since boot) of pid p, or None: with the cmdline, tells a reused pid from the original process"""
+    try:
+        with open(f"/proc/{p}/stat") as f: return f.read().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError): return None
+
+
 TASK_PEAK_MB = int(os.environ.get("PI_DISPATCH_PEAK_MB") or 1536)   # one pi_dispatch.py task (pi agent + whatever it runs; 10-27 guess)
 
 
@@ -292,12 +314,12 @@ def emerg_kill(st):
     d = os.path.dirname(emerg_mark(0))
     for n in (os.listdir(d) if os.path.isdir(d) else []):   # marks of prfix runs that ended before reading them
         if not DRY and not (n.isdigit() and pid_exists(int(n))): os.remove(f"{d}/{n}")
-    if not flag_on(EMERG_KILL_OFF) or mem_mb() >= EMERG_MB or not prfix_runs(proc_table())[0]: return
+    if not flag_on(EMERG_KILL_OFF) or mem_mb() >= EMERG_MB or not (lambda t: [p for p in prfix_runs(t)[0] if own_prfix(t, p)])(proc_table()): return
     t0 = time.time()
     while time.time() - t0 < EMERG_S:
         time.sleep(EMERG_POLL_S)
         if mem_mb() >= EMERG_MB: return
-    t = proc_table(); pys = prfix_runs(t)[0]
+    t = proc_table(); pys = [p for p in prfix_runs(t)[0] if own_prfix(t, p)]
     if not pys: return
     p = max(pys, key=lambda x: sum(t[q][1] for q in tree(t, x)))
     victims = [q for k in t if t[k][0] == p for q in tree(t, k)]
@@ -306,7 +328,12 @@ def emerg_kill(st):
     if DRY: qlog(f"DRY: would kill the current step of prfix {p} ({len(victims)} procs, MemAvailable {mem} MB)"); return
     os.makedirs(os.path.dirname(emerg_mark(p)), exist_ok=True)
     with open(emerg_mark(p), "w") as f: json.dump({"at": now_cst().isoformat(timespec="seconds"), "mem_mb": mem, "pids": victims}, f)
+    ident = {q: (t[q][2], proc_start(q)) for q in victims}
     for sig in (signal.SIGTERM, signal.SIGKILL):
+        if sig == signal.SIGKILL:   # re-read: only pids still in p's step with the same cmdline + start time (no reused pid)
+            t2 = proc_table()
+            now = set(q for k in t2 if t2[k][0] == p for q in tree(t2, k)) if p in t2 and own_prfix(t2, p) else set()
+            victims = [q for q in victims if q in now and (t2[q][2], proc_start(q)) == ident[q]]
         for q in victims:
             try: os.kill(q, sig)
             except OSError: pass
