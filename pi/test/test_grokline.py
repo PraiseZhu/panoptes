@@ -208,6 +208,25 @@ class TestFollowup(Grok):
         open(g.usage_path(), "w").write("{not json")
         r = g.gate_dry_run(now=NOW)
         self.assertEqual((r["gate"], r["may_open"]), ("hold", False))
+    def test_grok_cap_two_held_blocks_claim(self):
+        self.switch(); f1, f2 = "mq1-" + "a" * 20, "mq1-" + "b" * 20
+        self.put(tickets(**self.both_pi_slots(), **{f"1180:{f1}": self.grok_owned(1180, f1), f"1181:{f2}": self.grok_owned(1181, f2)}))
+        g = G(); r = g.claim(5.0, now=NOW)                       # C is a qualifying todo, but Grok already holds 2
+        self.assertEqual(r["status"], "no", r); self.assertNotIn("owner", self.tk(f"1179:{C}"))
+        self.assertFalse(g.gate_dry_run(now=NOW)["may_open"])
+        self.put(tickets(**self.both_pi_slots(), **{f"1180:{f1}": self.grok_owned(1180, f1)}))   # 1 held -> may claim the 2nd
+        self.assertEqual(g.claim(5.0, now=NOW)["ticket"], f"1179:{C}")
+    def test_gate_dry_run_parseable_bad_day_is_hold(self):
+        self.switch(); self.put(tickets(**self.both_pi_slots())); g = G(); day = NOW.date().isoformat()
+        for bad in ({"baseline": "x", "samples": []}, {"baseline": None, "samples": [["t", "5"]]}, {"baseline": 5.0, "samples": "no"}):
+            with open(g.usage_path(), "w") as f: json.dump({"days": {day: bad}}, f)
+            before = open(g.usage_path()).read()
+            r = g.gate_dry_run(now=NOW)
+            self.assertEqual((r["gate"], r["may_open"], r["would_claim"]), ("hold", False, None), bad)
+            self.assertEqual(open(g.usage_path()).read(), before)
+        with open(g.usage_path(), "w") as f: f.write('{"days": {"%s": {"baseline": NaN, "samples": []}}}' % day)
+        self.assertEqual(g.gate_dry_run(now=NOW)["gate"], "hold")
+
 class TestBadValues(Grok):
     def test_gate_rejects_bad_values(self):
         g = G().gate
