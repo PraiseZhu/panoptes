@@ -1861,6 +1861,8 @@ export function mergedReportFor(report, pr, { kind = 'merged' } = {}) {
       test_backed_findings_by_severity: Object.fromEntries(['P0', 'P1', 'P2', 'P3'].map((s) => [s, findings.filter((f) => f.test_backed && f.severity === s).length])),
       prs_test_backed: pr.test_backed ? [pr.number] : [],
       pending_verification: pendingSummary(pr.pending_verification ?? []),
+      // 运行报告有 test_script_failures 时，单 PR 文件保留本 PR 参与的组（回滚开关关闭时运行报告没有该键，这里也不写）
+      ...(Array.isArray(report.summary?.test_script_failures) ? { test_script_failures: report.summary.test_script_failures.filter((g) => (g.prs ?? []).includes(pr.number)) } : {}),
     },
     prs: [pr],
     issues: { enabled: false, reason: 'written from a nightly run; issues are only handled by the run itself' },

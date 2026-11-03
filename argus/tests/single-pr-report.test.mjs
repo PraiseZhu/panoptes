@@ -73,3 +73,14 @@ test('store-merged from the current PR-N.json itself: original kept as history/P
   assert.deepEqual(now.prs.map((p) => p.number), [905])
   assert.equal(now.written_by, 'nightly')
 })
+
+test('mergedReportFor keeps summary.test_script_failures, filtered to this PR', () => {
+  const g1 = { fingerprint: 'f1', check_id: 'c', test: 't', first_seen: { pr: 1, sha: 'a' }, prs: [1, 2] }
+  const g2 = { fingerprint: 'f2', check_id: 'c', test: 't', first_seen: { pr: 3, sha: 'b' }, prs: [3] }
+  const report = { date: '2026-11-03', run: { args: {} }, summary: { test_script_failures: [g1, g2] }, system_health: {} }
+  const pr = { number: 2, state: 'merged', verdict: 'pass', merged_at: '2026-11-03T01:00:00Z' }
+  assert.deepEqual(mergedReportFor(report, pr).summary.test_script_failures, [g1])
+  assert.deepEqual(mergedReportFor({ ...report, summary: { test_script_failures: [] } }, pr).summary.test_script_failures, [])
+  // rollback switch on: the run report has no key → the per-PR file has none either
+  assert.equal('test_script_failures' in mergedReportFor({ ...report, summary: {} }, pr).summary, false)
+})
