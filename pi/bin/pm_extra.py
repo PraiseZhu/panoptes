@@ -2,6 +2,7 @@
 规则：Mivo 测试项目经理.md「交接仓验收」「修复 PR 的测试规则」§3 复查；daily-runbook.md B/C。"""
 import json, os, re, glob, base64, difflib, datetime as dt
 from lib import gh, QA, RPT, BASE, CST, parse_ts, now_cst, REPO
+from handoff import author_receipts
 
 ROUTES = "/workspace/panoptes/report/handoff-routes.json"
 SAME_FILES = [".github/ISSUE_TEMPLATE/config.yml", ".github/ISSUE_TEMPLATE/qa-finding.md", "AGENTS.md", "CLAUDE.md", "README.md", "templates/issue.md", "templates/receipt.md"]
@@ -59,6 +60,10 @@ def handoff(day, prs, p01, p2s, miss, unv):
         for i in its:
             if i["state"] == "OPEN" and re.match(r"\[P[0-2]\]", i["title"]) and (now_cst() - parse_ts(i["createdAt"])).total_seconds() > 72 * 3600:
                 rc_all = "".join(_file(repo, f"daily/{d[:4]}/{d[5:7]}/{d}/receipts.md") or "" for d in (day, nxt))
+                # AGENTS.md「逾期」：72h 内没有任何回执才通告。issue 下已有作者「结论：…」回执（handoff.py 同一判定，QA 自己的留言不算）
+                # 就不是逾期，只列出来等日报对齐后关 issue（§14 11-02：aj0928-handoff #2 #5 #6 #7、handover-mivo #1 #3 都有回执）
+                rec = author_receipts(i)
+                if rec: od.append(f"{repo}#{i['number']}已回执「{rec[-1]}」（issue 未关）"); continue
                 warned = bool(re.search(rf"#{i['number']}\b[^\n]*逾期|逾期[^\n]*#{i['number']}\b", rc_all)) or any("逾期" in (c.get("body") or "") for c in i.get("comments") or [])
                 due = parse_ts(i["createdAt"]).astimezone(CST) + dt.timedelta(hours=72)
                 scan = due.replace(hour=15, minute=30, second=0)
@@ -69,8 +74,10 @@ def handoff(day, prs, p01, p2s, miss, unv):
                 if not warned: miss.append(f"交接 {repo}#{i['number']} 超 72h 未见逾期提醒")
     L.append("4. 逾期（>72h 仍开）：" + ("、".join(od) or "无（不适用）"))
     # 5 两仓规则文件一致（替换人名/账号/仓名后逐个比）
+    # 路由里 owner 以外的作者（lubinyu-lab 由 aj0928 负责）记成 <A>：只在一个仓出现、带 <A> 的整段条款是路由本来就不同，不算不一致（§14）
+    extra = {a for r in rt for a in r["authors"] if a != r["owner"]}
     toks = sorted({t for r in rt for t in [r["repo"], r["owner"], r["repo"].split("/")[1]] + r["authors"]}, key=len, reverse=True)
-    norm = lambda s: re.sub("|".join(map(re.escape, toks)), "<X>", s or "")
+    norm = lambda s: re.sub("|".join(map(re.escape, toks)), lambda m: "<A>" if m.group(0) in extra else "<X>", s or "")
     a, b = rt[0]["repo"], rt[1]["repo"]; diff = []
     for f in SAME_FILES:
         fa, fb2 = _file(a, f), _file(b, f)
@@ -79,7 +86,8 @@ def handoff(day, prs, p01, p2s, miss, unv):
             la, lb = norm(fa).splitlines(), norm(fb2).splitlines()
             def name_only(x, y):  # 差异段都很短（人名，如 严健/钟行天、"并抄送 @ 严健"）才算只差人名
                 ops = difflib.SequenceMatcher(None, x, y).get_opcodes()
-                return all(t == "equal" or max(i2 - i1, j2 - j1) <= 40 for t, i1, i2, j1, j2 in ops)
+                return all(t == "equal" or max(i2 - i1, j2 - j1) <= 40 or (t in ("delete", "insert") and "<A>" in (x[i1:i2] + y[j1:j2]))
+                           for t, i1, i2, j1, j2 in ops)
             sm = difflib.SequenceMatcher(None, la, lb, autojunk=False)
             real = []
             for t, i1, i2, j1, j2 in sm.get_opcodes():
