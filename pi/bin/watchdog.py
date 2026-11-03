@@ -14,7 +14,7 @@ Checks (all from files already on disk, plus one `gh pr list` every 30 min):
   * infrafix tickets: stuck in running > 2 h, waiting for Praise > 12 h, PR action not executed > 2 h, merged not deployed > 6 h
   * outbound: when outbound itself is failing, the alert bypasses it (same sender script, own dedupe key)
   * 修 PR bot (10-24; nothing watched it): a run stuck > 90 min; a fix-PR action not executed after 2 h; a ticket waiting for
-    Praise (needs_praise: kind 5, sensitive files) 12-36 h old = one reminder; prwatch errors in the last 15 min; fixes queued behind memory > 3 h
+    Praise (needs_praise: kind 5, sensitive files) 12-36 h old = one reminder; prwatch errors (3 failures in a row, last one in the 15 min); fixes queued behind memory > 3 h
   * Mac mini 盯梢 (10-24: it was down 21:54-03:20 and nobody noticed): a ready (non-draft) PraiseZhu PR with a failing check and
     no GitHub activity for 4 h (one gh call per 30 min). GitHub cannot see a watcher session working locally, hence "可能"
   * outbound keys and ledger (10-24): a Slack / Feishu key missing from the secret files; actions failing on a key / login
@@ -509,6 +509,8 @@ CRED_ERR = re.compile(r"not set|invalid_auth|not_authed|token_revoked|token_expi
 
 PRFIX_TICKETS = f"{BASE}/out/praise-pr/tickets.json"
 PRWATCH_STATE = f"{BASE}/out/prwatch/state.json"
+PRWATCH_ERR_STREAK = 3   # prwatch.run_step 记的 error_counts[name]（连续失败次数，成功一次清零）
+PRWATCH_ERR_ALERT_ONCE = f"{BASE}/prwatch-error-alert-once"   # touch = 旧行为：15 分钟内出错一次就报；rm = 连续 3 次才报
 
 
 def prfix_check(now, probs):
@@ -537,10 +539,11 @@ def prfix_check(now, probs):
                 "你不点头，这个修复就不开 PR。",
                 todo=f"同意就跟会话说「跑 bin/run.sh prfix --qa {t.get('qa')} --fp {(t.get('fp') or '')[:12]} --allow-sensitive」；不同意不用管")
     st = jload(PRWATCH_STATE, {})
+    once = os.path.exists(PRWATCH_ERR_ALERT_ONCE); cnt = st.get("error_counts") or {}
     for name, e in (st.get("errors") or {}).items():
         try: at = dt.datetime.strptime(e[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=CST)
         except ValueError: continue
-        if (now - at).total_seconds() < 900:
+        if (now - at).total_seconds() < 900 and (once or cnt.get(name, 0) >= PRWATCH_ERR_STREAK):   # 11-04 ④：连续 3 次失败才报
             probs[f"prwatch:error:{name}"] = PN.item("action", "「修 PR 的接单哨兵」出错了", f"每分钟盯你 PR 新问题、派修 PR bot 的接单哨兵，「{name}」这一步在出错。",
                 "你的 PR 上测出的问题可能没人接、不会自动修。", todo=PN.ask_session(f"prwatch 的 {name} 步骤出错：{e[20:140]}，看 out/logs/prwatch-*.log 修一下"))
     w = st.get("fix_wait_since")

@@ -148,7 +148,7 @@ class TestPrBotAndVigil(unittest.TestCase):
         self.put(watchdog.LEDGER, {"fixpr:3": {"status": "done"}, "fixpr:2": {"status": "failed", "fails": 1}})
         fresh = (self.now - watchdog.dt.timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
         old = (self.now - watchdog.dt.timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
-        self.put(watchdog.PRWATCH_STATE, {"errors": {"fix": f"{fresh} boom", "drafts": f"{old} gone"}, "fix_wait_since": watchdog.time.time() - 4 * 3600,
+        self.put(watchdog.PRWATCH_STATE, {"errors": {"fix": f"{fresh} boom", "drafts": f"{old} gone"}, "error_counts": {"fix": 3, "drafts": 5}, "fix_wait_since": watchdog.time.time() - 4 * 3600,
                                           "fix_pending": 3})
         p = {}; watchdog.prfix_check(self.now, p)
         self.assertEqual(sorted(p), ["prfix:human:4:mq1-dddddddd", "prfix:memwait", "prfix:nopr:2:mq1-bbbbbbbb", "prfix:stuck:1:mq1-aaaaaaaa",
