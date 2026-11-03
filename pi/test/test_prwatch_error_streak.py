@@ -52,7 +52,7 @@ class T(unittest.TestCase):
         self.assertEqual(self.alerts(st), ["prwatch:error:fix"])
         prwatch.run_step(st, "fix", ok)
         self.assertNotIn("fix", st.get("errors") or {}); self.assertNotIn("fix", st.get("error_counts") or {})
-        self.assertEqual(self.alerts(st), [])
+        self.assertEqual(self.alerts(st), ["prwatch:error:fix"])   # 11-04: the streak stays latched until a watchdog run reports it
 
     def test_throttled_skip_neither_clears_nor_breaks_the_streak(self):
         st = {}
@@ -63,6 +63,26 @@ class T(unittest.TestCase):
         self.assertEqual(self.alerts(st), ["prwatch:error:drafts"])
         prwatch.run_step(st, "drafts", drafts_real(False))         # 真跑成功
         self.assertEqual((st["errors"], st["error_counts"]), ({}, {}))
+
+    def test_streak_latched_survives_success_reset(self):
+        # 11-04 03:05:02 3rd drafts failure, watchdog sampled 03:05:01, 03:07 success reset the count -> never alerted
+        st = {}
+        for _ in range(3): prwatch.run_step(st, "drafts", drafts_real(True))
+        prwatch.run_step(st, "drafts", drafts_real(False))                     # success before the next watchdog run
+        self.assertEqual((st["errors"], st["error_counts"]), ({}, {}))
+        json.dump(st, open(watchdog.PRWATCH_STATE, "w")); wst = {}
+        def run():                                                                # watchdog.main: report after 2 runs, then st["open"]
+            p = {}; watchdog.prfix_check(self.now, p, wst)
+            got = sorted(k for k in p if k.startswith("prwatch:error:"))
+            last = wst.get("last_seen", {}); wst["last_seen"] = dict(p)
+            wst["open"] = {k: v for k, v in p.items() if k in last or k in wst.get("open", {})}
+            return got, sorted(k for k in wst["open"] if k.startswith("prwatch:error:"))
+        self.assertEqual(run(), (["prwatch:error:drafts"], []))                  # seen once (debounce)
+        self.assertEqual(run(), (["prwatch:error:drafts"], ["prwatch:error:drafts"]))   # reported
+        self.assertEqual(run(), ([], []))                                          # consumed: no repeat
+        for _ in range(3): prwatch.run_step(st, "drafts", drafts_real(True))     # a new streak latches again
+        json.dump(st, open(watchdog.PRWATCH_STATE, "w"))
+        self.assertEqual(run()[0], ["prwatch:error:drafts"])
 
     def test_flag_restores_old_behaviour(self):
         open(self.flag, "w").close(); st = {}

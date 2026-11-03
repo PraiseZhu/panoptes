@@ -513,7 +513,7 @@ PRWATCH_ERR_STREAK = 3   # prwatch.run_step 记的 error_counts[name]（连续�
 PRWATCH_ERR_ALERT_ONCE = f"{BASE}/prwatch-error-alert-once"   # touch = 旧行为：15 分钟内出错一次就报；rm = 连续 3 次才报
 
 
-def prfix_check(now, probs):
+def prfix_check(now, probs, wst=None):
     T = jload(PRFIX_TICKETS, {}).get("tickets", {}); L = jload(LEDGER, {})
     def age_h(t):
         try: return (now - dt.datetime.fromisoformat(t.get("updated_at"))).total_seconds() / 3600
@@ -546,6 +546,15 @@ def prfix_check(now, probs):
         if (now - at).total_seconds() < 900 and (once or cnt.get(name, 0) >= PRWATCH_ERR_STREAK):   # 11-04 ④：连续 3 次失败才报
             probs[f"prwatch:error:{name}"] = PN.item("action", "「修 PR 的接单哨兵」出错了", f"每分钟盯你 PR 新问题、派修 PR bot 的接单哨兵，「{name}」这一步在出错。",
                 "你的 PR 上测出的问题可能没人接、不会自动修。", todo=PN.ask_session(f"prwatch 的 {name} 步骤出错：{e[20:140]}，看 out/logs/prwatch-*.log 修一下"))
+    # 11-04: latched streaks (prwatch error_alerts) report even after a success reset the count; acked in the watchdog's own state
+    # (never written back to prwatch's file) once a previous run reported it (key in wst["open"], i.e. past the 2-run debounce)
+    acked = (wst if wst is not None else {}).setdefault("prwatch_alerts_acked", {})
+    for name, e in (st.get("error_alerts") or {}).items():
+        k = f"prwatch:error:{name}"
+        if acked.get(name) == e: continue
+        if k in ((wst or {}).get("open") or {}): acked[name] = e; continue
+        probs.setdefault(k, PN.item("action", "「修 PR 的接单哨兵」出错了", f"每分钟盯你 PR 新问题、派修 PR bot 的接单哨兵，「{name}」这一步连续 {PRWATCH_ERR_STREAK} 次出错（之后可能已恢复）。",
+            "你的 PR 上测出的问题可能没人接、不会自动修。", todo=PN.ask_session(f"prwatch 的 {name} 步骤连续出错：{e[20:140]}，看 out/logs/prwatch-*.log 修一下")))
     w = st.get("fix_wait_since")
     if w and time.time() - w > 3 * 3600:
         probs["prfix:memwait"] = PN.item("fyi", "「修 PR bot」排队等内存", f"有 {st.get('fix_pending') or '几'} 个问题等着修，但机器内存不够再开一单，已经等了 {(time.time() - w) / 3600:.1f} 小时。",
@@ -631,7 +640,7 @@ def main():
     since = dt.datetime.fromisoformat(st.setdefault("installed_at", now.isoformat(timespec="seconds")))
     for fn in (lambda: job_checks(now, probs, since), lambda: mergewatch_check(now, probs), lambda: merge_sla_check(now, probs), lambda: merge_report_check(now, probs, st),
                lambda: backup_check(now, probs), lambda: backup_rules_check(now, probs), lambda: panoptes_check(now, probs, st),
-               lambda: infra_check(now, probs), lambda: prfix_check(now, probs), lambda: vigil_check(now, probs, st),
+               lambda: infra_check(now, probs), lambda: prfix_check(now, probs, st), lambda: vigil_check(now, probs, st),
                lambda: outbound_health_check(now, probs), lambda: janitor_check(now, probs)):
         try: fn()
         except Exception as e: probs[f"watchdog:{getattr(fn, '__name__', 'check')}"] = PN.item("action", "「看门狗」自己出错了",

@@ -761,6 +761,7 @@ def cleanup(st):
 # error_counts[name] 记连续失败次数，watchdog 满 ERR_STREAK 次才报；这一步真跑成功一次，两者都清掉（节流跳过不算成功）。
 # touch $PI_STATE/prwatch-error-alert-once = 回到旧行为（出错一次就报、成功不清 errors、不计数）；rm 恢复新行为。每轮重读。
 ERR_ALERT_ONCE = f"{BASE}/prwatch-error-alert-once"
+ERR_STREAK = 3   # = watchdog.PRWATCH_ERR_STREAK
 THROTTLE_KEY = {"drafts": "drafts_at", "resolved": "resolved_at", "cleanup": "cleanup_at", "digest": "digest_day"}   # 没变 = 这轮被节流跳过
 
 
@@ -770,7 +771,11 @@ def run_step(st, name, fn):
     try: fn(st)
     except Exception as e:
         st.setdefault("errors", {})[name] = f"{now_cst().strftime('%F %T')} {str(e)[:200]}"; qlog(f"{name} error: {str(e)[:200]}")
-        if not old: c = st.setdefault("error_counts", {}); c[name] = c.get(name, 0) + 1
+        if not old:
+            c = st.setdefault("error_counts", {}); c[name] = c.get(name, 0) + 1
+            # 11-04: latch the alert the moment the streak hits ERR_STREAK; a later success clears errors/error_counts but NOT this
+            # (03:05:02 3rd drafts failure, watchdog sampled 03:05:01, 03:07 success reset the count -> never alerted). watchdog acks it.
+            if c[name] == ERR_STREAK: st.setdefault("error_alerts", {})[name] = st["errors"][name]
         return
     if old or (tk and st.get(tk) == before): return
     for k in ("errors", "error_counts"):
