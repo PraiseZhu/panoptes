@@ -1944,7 +1944,7 @@ def revise(A):
             if t.get("status") == "needs_praise" and t.get("head") == head:
                 stop = ({"status": "needs_praise", "pr": n, "error": t.get("last_error")}, 1)
             elif paused: stop = ({"status": "skipped", "pr": n, "reason": f"暂停中，{cst(t['next_retry_at'])} 北京后自动再试：{(t.get('last_error') or '')[:100]}"}, 0)
-            elif t.get("status") == "pushed" and t.get("last_head") == head: stop = ({"status": "skipped", "pr": n, "reason": "这个 head 已经修过、等推送"}, 0)
+            elif t.get("status") == "pushed" and t.get("last_head") == head and ((t.get("last_cnt") or "revisions") == cnt_key or not b_on()): stop = ({"status": "skipped", "pr": n, "reason": "这个 head 已经修过、等推送"}, 0)
             elif int(t.get(cnt_key) or 0) >= cap and t.get("status") != "parked":
                 # kind 4, no DM: pause, then try again by itself with a fresh budget (10-24 evening)
                 park(t, "修不动", (f"跟 main 的冲突已经合了 {t.get(cnt_key)} 轮，又冲突了" if conflict else
@@ -1964,7 +1964,7 @@ def revise(A):
             with tickets_locked() as T:
                 t = dict(T["tickets"].get(key) or {}); stamp = now_cst().isoformat(timespec="seconds")
                 if out["status"] == "pr_action_written":
-                    t.update(status="pushed", action_key=out["action_key"], last_head=head, rerun_only=bool(out.get("rerun_only")),
+                    t.update(status="pushed", action_key=out["action_key"], last_head=head, rerun_only=bool(out.get("rerun_only")), last_cnt=cnt_key,
                              **{cnt_key: int(t.get(cnt_key) or 0) + 1},
                              last_error=None, next_retry_at=None, transient_failures=0, pid=None, updated_at=stamp)
                     t["history"] = (list(t.get("history") or []) + [{"at": stamp, "status": "pushed", "error": ""}])[-20:]

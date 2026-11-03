@@ -51,7 +51,7 @@ MERGE_DAY_CAP, MERGE_ROUND_CAP = 2, 1                  # policy maxMergesPerDay 
 BRIEF_ROUTED = ("nudge:", "pm-retro:", "pm-cos:", "ops-review:", "overdue:")
 def BRIEF_QUEUE(): return f"{BASE}/out/outbound/brief-queue.jsonl"
 def BRIEF_ROUTE_OFF(): return f"{BASE}/outbound-brief-route-off"
-TERMINAL = ("done", "skipped", "gave_up", "uncertain", "briefed")  # ledger statuses never retried (uncertain = a send was interrupted:
+TERMINAL = ("done", "skipped", "gave_up", "uncertain", "briefed", "superseded")  # ledger statuses never retried (uncertain = a send was interrupted:
                                                        # Slack/Feishu cannot be checked remotely, so never re-sent blindly)
 def backoff_left(e):
     """all jobs (10-23; was merger only): after n failures wait 10min*2^(n-1) (cap 6h) from last failure. Minutes left (0 = go)."""
@@ -351,7 +351,13 @@ def h_fixpr(a):
     patch, must = a.get("patch"), a.get("body_must_contain", "")
     def state():
         hits = gh(["pr", "list", "-R", REPO, "--state", "all", "--search", f"\"{must}\" in:body author:@me", "--json", "number,body"]) if must else []
-        return "done" if any(must in (h.get("body") or "") for h in hits) else "pending"
+        if any(must in (h.get("body") or "") for h in hits): return "done"
+        fp = a.get("fingerprint")
+        if fp and fp != must and b_on():   # 11-03 B: round N of a finding whose earlier fix PR is still open -> do not open a second one
+            op = gh(["pr", "list", "-R", REPO, "--state", "open", "--search", f"\"{fp}\" in:body author:@me", "--json", "number,body"])
+            n = next((h["number"] for h in op if fp in (h.get("body") or "")), None)
+            if n: return f"superseded:open fix PR #{n} already carries {fp}"
+        return "pending"
     def validate():
         why = fixpr_gate_reason(a)                                                  # (1) gate
         if why: raise RuntimeError(f"gated: {why}")
@@ -369,7 +375,7 @@ def h_fixpr(a):
             run(["git", "-C", d, "checkout", "-b", br]); apply_fix_patch(d, patch, a.get("base"), br)
             md = patch[:-6] + ".md" if patch.endswith(".patch") else None
             title = a.get("title") or f"fix: QA follow-up ({must})"
-            run(["git", "-C", d, "commit", "-m", title]); run(["git", "-C", d, "push", "-u", "origin", br])
+            run(["git", "-C", d, "commit", "-m", title, "-m", pi_open_trailer(a["key"])]); run(["git", "-C", d, "push", "-u", "origin", br])
             body = (open(md).read() if md and os.path.exists(md) else "") + f"\n\n{must}\n<!-- pi-line {a['key']} -->"
             created = gh(["pr", "create", "-R", REPO, "--draft", "--head", br, "--title", title, "--body", body], js=False).strip()
             real = fixpr_real_number(created)                                       # (2) docs/pr/<pred> -> docs/pr/<real>
@@ -469,6 +475,12 @@ def _fx_git(d, *args):
     if r.returncode != 0: raise RuntimeError(f"git {args[0]} rc={r.returncode}: {(r.stderr or r.stdout).strip()[-300:]}")
     return r.stdout
 
+def pi_open_trailer(key):
+    """fixpr:<qa>:<fp> -> the trailer prfix fix_one writes (lib.PI_MARK_RE). Without it the fix PR's own first commits count as
+    someone else's for OWNER_WINDOW_H, and prfix --revise skips the PR (prfix-2026-11-02.log:29,39: #1563 d39839610, #1559 cb9fac0a7)."""
+    _, qa, fp = key.split(":", 2)
+    return f"QA: #{qa}\nFingerprint: {fp}\nPi-Open: {key}"
+
 def fixpr_docs_rename(d, br, a, real, push=True):
     """In clone d (branch br checked out): docs/pr/<pred> -> docs/pr/<real> + front matter, commit, plain push. Idempotent."""
     pred_dir = (a.get("docs_dir_predicted") or (f"docs/pr/{a['pred_pr']}" if a.get("pred_pr") else "")).strip().rstrip("/")
@@ -490,7 +502,7 @@ def fixpr_docs_rename(d, br, a, real, push=True):
         if t2 != t:
             with open(p, "w", encoding="utf-8") as f: f.write(t2)
             _fx_git(d, "add", f"docs/pr/{real}/{kind}")
-    _fx_git(d, "commit", "-q", "-m", f"docs(pr): 交接目录改为实际 PR 号 #{real}（预测 #{pred}）")
+    _fx_git(d, "commit", "-q", "-m", f"docs(pr): 交接目录改为实际 PR 号 #{real}（预测 #{pred}）", *(["-m", pi_open_trailer(a.get("from") or a["key"])] if (a.get("from") or a.get("key")) else []))
     if push: _fx_git(d, "push", "origin", f"HEAD:refs/heads/{br}")     # plain push, never --force
     return f"docs/pr/{pred} -> docs/pr/{real} committed{' and pushed' if push else ''}"
 
@@ -935,6 +947,9 @@ def main():
                 if not o.dry_run: setk(k, {"status": "done", "at": now_cst().isoformat(timespec="seconds"), "by": "target-state"})
                 rows.append((job, k, t, who, "done(target)", ""))
                 continue
+            if st.startswith("superseded:"):   # a real ledger status (11-03 B), not a stale row that is re-read every run
+                if not o.dry_run: setk(k, {"status": "superseded", "reason": st.split(":", 1)[1], "at": now_cst().isoformat(timespec="seconds")})
+                rows.append((job, k, t, who, "superseded", st.split(":", 1)[1])); continue
             if is_merge and merged_run >= MERGE_ROUND_CAP: rows.append((job, k, t, who, "round-cap", f"本轮已合 {merged_run}")); continue
             if is_merge and merges_today(ledger) >= MERGE_DAY_CAP: rows.append((job, k, t, who, "daily-cap", f"今日已合 {merges_today(ledger)}")); continue
             if st.startswith("stale"): rows.append((job, k, t, who, st, "")); continue

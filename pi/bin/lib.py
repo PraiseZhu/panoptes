@@ -237,6 +237,10 @@ def branch_claim(n, now=None):
     e = claim_expiry(f"{TAKEOVER}/branch-claims/{int(n)}")
     now = now or dt.datetime.now(dt.timezone.utc)
     return f"takeover/branch-claims/{int(n)} 有效到 {e.isoformat(timespec='seconds')}：别的 worker 认领了这个 PR，不碰" if e and e > now else None
+# 11-03 B rollback: touch PI_STATE/pmnudge-b-off (re-read every run) -> pmnudge exempts the bot's own fix PRs again and skips the
+# dirty / blocked / main-CI / kiro rules; prwatch + prfix --revise treat a red / readied / re-run head that turns DIRTY as handled.
+B_OFF = f"{BASE}/pmnudge-b-off"
+def b_on(): return not os.path.exists(B_OFF)
 # Ownership: a commit on the PR branch in the last OWNER_WINDOW_H hours WITHOUT a Pi trailer (Pi-Open: first commit of a Pi fix PR,
 # Pi-Revise: a --revise fix; Fingerprint alone does not count, a human may keep it) = someone else is working on it.
 OWNER_WINDOW_H = 6
