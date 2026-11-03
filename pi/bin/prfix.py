@@ -84,6 +84,11 @@ MAX_REVISIONS = 2       # --revise rounds per bot draft fix PR (red GitHub CI fe
 AUTHOR_SELF = "PraiseZhu"       # Praise 10-23: prfix fixes only our own PRs (others: daily bot -> their handoff repos)
 BACKOFF_MIN = (15, 60, 240)        # after the 1st/2nd/3rd transient failure; the 4th -> needs_human
 MIN_MEM_GB = 3
+# Grok line (11-03, plan §3/§5, grokline.py): switch takeover/prfix-grok-overflow (present = on, re-read every call). Pi never takes an
+# owner=grok ticket; with the switch on, a ticket emergency-killed more than KILLS_TO_GROK times in a Beijing day waits for Grok that day.
+KILLS_TO_GROK = 3
+GROK_HANDOVER = f"今天被紧急杀超过 {KILLS_TO_GROK} 次，交给 Grok 线"
+def grok_on(): return lib.takeover("prfix-grok-overflow")
 BUSY = 75
 TIER = _E("PRFIX_TIER") or "deep"   # pi-auto: deep = tap/deepseek/deepseek-flash:discount, thinking max (Praise 10-24, model 10-30; was heavy = high)
 PR_CACHE_TTL = 60                    # s: parallel runs + prwatch share one PR list (10-24: a full 3000-PR list per run ate GraphQL quota)
@@ -100,6 +105,7 @@ CONTRIB = "贡献流程见 [CONTRIBUTING.md](https://github.com/xindong/mivo-can
 
 class Transient(Exception): """npm / network / model rc / timeout: back off and retry"""
 class Waiting(Transient): """the box had no memory for us: retry later without spending one of the transient retries"""
+class EmergKilled(Waiting): """prwatch.emerg_kill killed the current step; counted per ticket per day (> KILLS_TO_GROK -> Grok line)"""
 class Deterministic(Exception): """the fix itself is not good enough (yet): parked, retried later by itself"""
 class PraiseNeeded(Exception): """category 5 (the only things the bot asks Praise about): the fix touches CI config / repo rules / secrets"""
 class GateFileError(Exception): pass
@@ -224,7 +230,7 @@ def emerg_check():
     import prwatch
     m = prwatch.emerg_mark(os.getpid())
     if os.path.exists(m):
-        os.remove(m); raise Waiting("内存低于 2G 持续 30 秒，prwatch 杀了当前步骤，本单回到队列")
+        os.remove(m); raise EmergKilled("内存低于 2G 持续 30 秒，prwatch 杀了当前步骤，本单回到队列")
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]")
 def clean(s):
     """Tool output without terminal colour codes (10-24: the fix2 prompt for QA1198 quoted vitest as `31m1 failed?[39m`)."""
@@ -619,10 +625,11 @@ def qa_ref_re(n):
 def fmt_prs(ps): return " ".join(f"#{p['number']}({(p.get('state') or '?').lower()})" for p in ps)
 
 def ticket_view(t, now):
-    """A ticket as --next would see it after normalising a dead 'running' entry into a transient failure."""
+    """A ticket as --next would see it after normalising a dead 'running' entry into a transient failure (a Grok-line claim has
+    no box pid: grokline.sweep is what takes it back)."""
     if not t: return None
     t = dict(t)
-    if t.get("status") == "running" and not pid_alive(t.get("pid")):
+    if t.get("status") == "running" and t.get("owner") != "grok" and not pid_alive(t.get("pid")):
         t = apply_outcome(t, {"status": "failed", "kind": "transient", "error": "上次运行中断（进程已不在）"}, now)[0]
     return t
 
@@ -732,6 +739,8 @@ def evaluate(c, ctx, now=None):
     if st == "failed" and tk.get("next_retry_at") and (ts(tk["next_retry_at"]) or now) > now:
         skips.append(f"退避中，{cst(tk['next_retry_at'])} 北京后重试（已失败 {tk.get('transient_failures', 0)} 次：{(tk.get('last_error') or '')[:80]}）")
     if st == "running" and pid_alive(tk.get("pid")): skips.append(f"运行中（pid {tk.get('pid')}，{tk.get('started_at')} 开始）")
+    if tk.get("owner") == "grok": skips.append(f"Grok 线在修（{tk.get('started_at')} 认领）")
+    elif tk.get("grok_wanted") == now.astimezone(CST).date().isoformat() and grok_on(): skips.append(GROK_HANDOVER)
     fs, dl, _ = times(c, ctx["reports"])
     if manual and c["source"] != "history" and not gate: skips.insert(0, manual)
     else: manual = None
@@ -820,8 +829,13 @@ def apply_outcome(tk, out, now):
     elif kind == "deterministic": park(tk, "修不动", err, now)
     elif kind == "praise":
         tk.update(status="needs_praise", last_error=err, next_retry_at=None); notify = "needs_praise"
-    elif kind == "waiting":   # no memory for us: not the ticket's fault, so it does not use up a transient retry
+    elif kind in ("waiting", "killed"):   # no memory for us: not the ticket's fault, so it does not use up a transient retry
         tk.update(status="failed", last_error=err, next_retry_at=(now + dt.timedelta(minutes=BACKOFF_MIN[0])).isoformat(timespec="seconds"))
+        if kind == "killed":   # plan §5: more than KILLS_TO_GROK emergency kills in one Beijing day -> handed to the Grok line
+            day = now.astimezone(CST).date().isoformat()
+            k = int(tk.get("kills") or 0) + 1 if tk.get("kill_day") == day else 1
+            tk.update(kill_day=day, kills=k)
+            if k > KILLS_TO_GROK: tk["grok_wanted"] = day
     else:
         tf = int(tk.get("transient_failures") or 0) + 1; tk["transient_failures"] = tf
         if tf > len(BACKOFF_MIN):
@@ -1654,7 +1668,7 @@ def fix_one(c, A, d):
         out = {"status": "norepro", "kind": "norepro", "error": str(e), "action_key": None, "confirmed": e.confirmed}
         res["norepro"] = (str(e), e.text); res["judge"] = e.judge; res["norepro_confirmed"] = e.confirmed
     except Transient as e:
-        out = {"status": "failed", "kind": "waiting" if isinstance(e, Waiting) else "transient", "error": str(e), "action_key": None}
+        out = {"status": "failed", "kind": "killed" if isinstance(e, EmergKilled) else "waiting" if isinstance(e, Waiting) else "transient", "error": str(e), "action_key": None}
     except Deterministic as e:
         out = {"status": "failed", "kind": "deterministic", "error": str(e), "action_key": None}
     except PraiseNeeded as e:
@@ -1736,7 +1750,7 @@ def bookkeeping(ctx, vs, now, d):
     with tickets_locked() as T:
         tks = T["tickets"]
         for k, t in list(tks.items()):
-            if t.get("status") == "running" and not pid_alive(t.get("pid")):
+            if t.get("status") == "running" and t.get("owner") != "grok" and not pid_alive(t.get("pid")):
                 tks[k] = apply_outcome(t, {"status": "failed", "kind": "transient", "error": "上次运行中断（进程已不在）"}, now)[0]
         for w in vs:
             k = w["key"]; t = tks.get(k)
@@ -1817,6 +1831,7 @@ def run_ticket(A, ctx, vs):
                     gated = gated or ({"status": "gated", "qa": w["c"]["qa"], "fp": w["c"]["fp"], "error": gates[w["c"]["qa"]]}, 1); continue
                 cur = T["tickets"].get(w["key"]) or {}
                 if cur.get("status") == "running" and pid_alive(cur.get("pid")): continue      # another process is on it
+                if cur.get("owner") == "grok": continue                                         # the Grok line has it (--qa too)
                 lk = try_lock(f"{OUT}/locks/{w['c']['qa']}-{fp8(w['c']['fp'])}.lock")
                 if lk: v, tk_lk = w, lk; break
             if not v:

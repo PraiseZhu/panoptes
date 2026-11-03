@@ -708,6 +708,13 @@ def dispatch_infra(st):
     qlog(f"launched infrafix --next (top {top.get('sig8')} {top.get('cat')}/{top.get('stage')}, {len(todo)} pending)")
 
 
+def grok_sweep(st):
+    """Grok line (grokline.py): switch off / usage stop / 90 min without progress -> its tickets back to the Pi queue; 23:59 day line."""
+    if DRY: return
+    import grokline
+    grokline.sweep(st)
+
+
 def kick_janitor(prs):
     """one janitor run now (run.sh holds its job lock: when the */10 run is on, this one just skips)"""
     if DRY: qlog(f"DRY: would kick janitor (pr-closed {prs})"); return
@@ -734,7 +741,7 @@ def main():
     try: fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError: return 0
     st = jload(STATE, {})
-    for name, fn in (("emerg", emerg_kill), ("reports", scan_reports), ("fix", dispatch_fix), ("drafts", check_drafts), ("resolved", resolved), ("infra", dispatch_infra), ("cleanup", cleanup), ("digest", digest_parked)):
+    for name, fn in (("emerg", emerg_kill), ("reports", scan_reports), ("fix", dispatch_fix), ("drafts", check_drafts), ("resolved", resolved), ("infra", dispatch_infra), ("cleanup", cleanup), ("digest", digest_parked), ("grok", grok_sweep)):
         try: fn(st)
         except Exception as e:
             st.setdefault("errors", {})[name] = f"{now_cst().strftime('%F %T')} {str(e)[:200]}"; qlog(f"{name} error: {str(e)[:200]}")
