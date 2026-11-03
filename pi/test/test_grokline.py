@@ -329,4 +329,25 @@ class TestMalformedUsage(Grok):
                 d = bad.get("days") if isinstance(bad, dict) else None
                 if isinstance(d, dict): self.assertIn(g.day_gate(d.get("2026-10-23"))[0], ("stop", "hold"))
 
+CORRUPT_TICKETS = {   # 11-03 step 12: what a crash mid-write / a bad hand edit leaves in the Pi line's shared tickets.json
+    "truncated": '{"tickets": {"1178:%s": {"qa": 1178, "status": "running", "owner": "gr' % A,
+    "not json": "not json at all\n", "empty": "", "root list": "[]", "tickets list": '{"tickets": []}',
+    "ticket not object": '{"tickets": {"1178:x": 5}}',
+}
+
+class TestCorruptTickets(Grok):
+    def test_sweep_skips_and_never_rewrites(self):
+        os.makedirs(prfix.OUT, exist_ok=True); p = f"{prfix.OUT}/tickets.json"
+        for name, raw in CORRUPT_TICKETS.items():
+            for sw in (False, True):   # switch off = "give every Grok ticket back" path, the one that writes
+                with self.subTest(file=name, switch=sw):
+                    self.switch(sw)
+                    with open(p, "w") as f: f.write(raw)
+                    m = os.stat(p).st_mtime_ns
+                    self.assertEqual(G().sweep(now=NOW), [])                      # no exception, nothing handed back
+                    self.assertEqual(open(p).read(), raw)                          # never overwritten (not as {} either)
+                    self.assertEqual(os.stat(p).st_mtime_ns, m)
+                    G().sweep(now=NOW.replace(hour=23, minute=59))
+                    self.assertEqual(open(p).read(), raw)
+
 if __name__ == "__main__": unittest.main()
