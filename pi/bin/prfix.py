@@ -589,7 +589,7 @@ def collect(reps, ledger, fix2, nofix=frozenset()):
     for (n, fp), row in ledger.items():
         if not fp or row.get("status") != "open" or (n, fp) in out or fp in cur_fps.get(n, set()): continue
         if not mine(row.get("author")) or not want(n, row.get("level"), fix2, True): continue
-        if row.get("level") == "P2" and (n in nofix or row.get("pending_verification")): continue
+        if row.get("level") == "P2" and (n in nofix or (n, fp) in nofix or row.get("pending_verification")): continue
         h = next((x for _, p, _ in (reps.get(n) or {}).get("hist", []) for x in p.get("findings") or [] if x.get("fingerprint") == fp), None) \
             or next((x for x in (reps.get(n) or {}).get("acc", []) if x.get("fingerprint") == fp), None)
         x = dict(h or {}, fingerprint=fp, severity=row.get("level"))
