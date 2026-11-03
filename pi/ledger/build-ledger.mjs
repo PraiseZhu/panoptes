@@ -212,9 +212,9 @@ for (const [key, v] of Object.entries(sent)) {
 // 待核实 / 没确认的 P2 不派活但台账留行（no_ticket）。只差覆盖率（coverage-gate / own-tests）只在 P2 且判「修」时收。
 // 待核实的行带 pending_verification: true
 const RULINGS = process.env.MIVO_QA_P2_RULINGS || '/workspace/fleet-standards/p2-rulings.md';
-const fix2 = new Set(), nofix = new Set();
+const fix2 = new Set(), nofix = new Set(), closed = new Set();  // closed = 「结案…」: out of needs_you (PM 2026-11-02 16:22 PST)
 const NOFIX = ['不修', '产品代码不修', '误报', 'P3', '已修'];  // + any 「结案…」(already fixed, no new ticket; p2.py record 结案)
-try { for (const line of fs.readFileSync(RULINGS, 'utf8').split('\n')) { const c = line.trim().replace(/^\||\|$/g, '').split('|').map(x => x.trim()); if (c.length >= 4 && /^#?\d+$/.test(c[1] || '')) { if (c[3] === '修') fix2.add(+c[1].replace('#', '')); if (NOFIX.includes(c[3]) || c[3].startsWith('结案')) nofix.add(+c[1].replace('#', '')); } } }
+try { for (const line of fs.readFileSync(RULINGS, 'utf8').split('\n')) { const c = line.trim().replace(/^\||\|$/g, '').split('|').map(x => x.trim()); if (c.length >= 4 && /^#?\d+$/.test(c[1] || '')) { if (c[3] === '修') fix2.add(+c[1].replace('#', '')); if (NOFIX.includes(c[3]) || c[3].startsWith('结案')) nofix.add(+c[1].replace('#', '')); if (c[3].startsWith('结案')) closed.add(+c[1].replace('#', '')); } } }
 catch { gaps.push(`p2-rulings.md 读不到（${RULINGS}），按没有裁决处理`); }
 // -> { sev, ticket }：sev = 台账要不要留这一行（null = 不留）；ticket = prfix 会不会派活（own_pr_ticket 非空）
 function ownTicket(x, n, pending) {
@@ -391,7 +391,8 @@ for (const row of out) {
   // 规则（2026-10-22）：复测通过前不算已修复。有修复 PR（无论是否合并）但复测未通过 → 修复已合并，待复测（未合并的留在 fixed 下由 fixed_not_merged 统计）
   if (row.status === 'fixed' && !row.retest_confirmed && row.merged === true) Object.assign(row, { status: 'fix_merged_pending_retest', status_zh: STZH.fix_merged_pending_retest });
   else if (row.status === 'fixed' && !row.retest_confirmed) Object.assign(row, { status: 'fix_pr_open', status_zh: STZH.fix_pr_open });
-  row.needs_human = row.fix_round > MAX_AUTO_ROUNDS || (row.status === 'open' && row.fix_round === MAX_AUTO_ROUNDS && row.retest === 'fail');
+  // a 「结案」 ruling settles the PR: checked before the third-round rule, so a closed PR never lands in needs_you
+  row.needs_human = !closed.has(row.pr) && (row.fix_round > MAX_AUTO_ROUNDS || (row.status === 'open' && row.fix_round === MAX_AUTO_ROUNDS && row.retest === 'fail'));
   if (row.needs_human) needsYou.push({ key: row.key, pr: row.pr, author: row.author, level: row.level, severity: row.level, summary: row.summary, fix_round: row.fix_round, fix_prs: fixPrs, handoff_issue: row.handoff_issue?.url || null,
     reason: row.status === 'open' ? `已自动修 ${row.fix_round} 轮仍未通过复测，转人工` : `已修到第 ${row.fix_round} 轮（${row.status_zh}），请确认结案、不再开第 ${row.fix_round + 1} 轮` });
 }

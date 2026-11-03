@@ -84,6 +84,15 @@ class BuildLedger(Base):
         self.assertEqual(LG.check(doc, DAY), ([], ["GitHub 查询失败：None（修复 PR 未核对，标 unknown）"]) if not doc["github_check"].get("ok") else ([], []))
 
 
+    def test_jiean_ruling_excluded_before_third_round(self):
+        # PM 2026-11-02 16:22 PST: #966/#1077 「结案（已修）」 must not be in needs_you even at fix_round 3
+        open(self.rulings, "a").write("| 日期 | 报告 PR | 问题 | 裁决 | 理由 |\n|---|---|---|---|---|\n| 2026-11-03 | #100 | 第三轮 | 结案（已修） | 已修 |\n")
+        r = self.build(DAY); self.assertEqual(r.returncode, 0, r.stderr)
+        doc = json.load(open(f"{self.qa}/ledger/daily/{DAY}.json"))
+        row = {x["key"]: x for x in doc["rows"]}[f"{REPO}#100:{FP}"]
+        self.assertEqual(row["fix_round"], 3); self.assertFalse(row["needs_human"])
+        self.assertEqual((doc["summary"]["needs_you"], doc["needs_you"]), (0, []))
+
 class LedgerPy(Base):
     def lg(self):
         os.environ["PI_QA_HOME"] = self.qa
