@@ -757,6 +757,26 @@ def cleanup(st):
                          stderr=subprocess.STDOUT, start_new_session=True, cwd=f"{PI_CODE}/bin")
 
 
+# 11-04 ④（prwatch-drafts-1103/FINDINGS.md）：GitHub 偶发一次 5xx/超时就让 watchdog 报 prwatch:error:*。现在 errors[name] 记最近一次错误，
+# error_counts[name] 记连续失败次数，watchdog 满 ERR_STREAK 次才报；这一步真跑成功一次，两者都清掉（节流跳过不算成功）。
+# touch $PI_STATE/prwatch-error-alert-once = 回到旧行为（出错一次就报、成功不清 errors、不计数）；rm 恢复新行为。每轮重读。
+ERR_ALERT_ONCE = f"{BASE}/prwatch-error-alert-once"
+THROTTLE_KEY = {"drafts": "drafts_at", "resolved": "resolved_at", "cleanup": "cleanup_at", "digest": "digest_day"}   # 没变 = 这轮被节流跳过
+
+
+def run_step(st, name, fn):
+    old = os.path.exists(ERR_ALERT_ONCE)
+    tk = THROTTLE_KEY.get(name); before = st.get(tk) if tk else None
+    try: fn(st)
+    except Exception as e:
+        st.setdefault("errors", {})[name] = f"{now_cst().strftime('%F %T')} {str(e)[:200]}"; qlog(f"{name} error: {str(e)[:200]}")
+        if not old: c = st.setdefault("error_counts", {}); c[name] = c.get(name, 0) + 1
+        return
+    if old or (tk and st.get(tk) == before): return
+    for k in ("errors", "error_counts"):
+        if name in (st.get(k) or {}): del st[k][name]
+
+
 def main():
     if mode() != "pi": return 0
     lk = open("/tmp/pi-fallback-prwatch.lock", "w")
@@ -764,9 +784,7 @@ def main():
     except BlockingIOError: return 0
     st = jload(STATE, {})
     for name, fn in (("emerg", emerg_kill), ("reports", scan_reports), ("fix", dispatch_fix), ("drafts", check_drafts), ("resolved", resolved), ("infra", dispatch_infra), ("cleanup", cleanup), ("digest", digest_parked), ("grok", grok_sweep)):
-        try: fn(st)
-        except Exception as e:
-            st.setdefault("errors", {})[name] = f"{now_cst().strftime('%F %T')} {str(e)[:200]}"; qlog(f"{name} error: {str(e)[:200]}")
+        run_step(st, name, fn)
     st["last_check"] = now_cst().strftime("%Y-%m-%d %H:%M:%S CST")
     if not DRY:
         os.makedirs(os.path.dirname(STATE), exist_ok=True); tmp = f"{STATE}.{os.getpid()}"
