@@ -128,11 +128,11 @@ def qualifies(v):
 
 
 def pr_meta(key, title=None):
-    """Pi-line conventions for a Grok fix PR (same builders as outbound/prfix), so prwatch.check_drafts, prfix --revise and the
+    """Pi-line conventions for a Grok fix PR (same strings as outbound.pi_open_trailer / prfix fix_one), so prwatch.check_drafts, prfix --revise and the
     6h ownership check (lib.PI_MARK_RE) treat it as the Pi line's own. key = '<qa>:<fp>' (tickets.json key)."""
-    import outbound
     n, fp = key.split(":", 1); n = int(n); fk = f"fixpr:{n}:{fp}"
-    trailer = outbound.pi_open_trailer(fk)
+    trailer = f"QA: #{n}\nFingerprint: {fp}\nPi-Open: {fk}"   # = outbound.pi_open_trailer / prfix fix_one (outbound not imported: merger
+                                                            # reads the box's policy.json at import)
     return {"branch": "qa-fix/" + fk.replace(":", "-")[:60], "pr_body_block": f"QA: #{n}\nFingerprint: {fp}\n\n<!-- pi-line {fk} -->",
             "commit_trailer": trailer, "commit_message": f"{title or f'fix: QA #{n}'}\n\n{trailer}"}
 
