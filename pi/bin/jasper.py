@@ -20,6 +20,10 @@ def latest_ops_review():
     $PI_STATE/out/ops/review-<day>.md; /workspace/review-ops/daily/ is the legacy hand-written fallback (stopped at 10-29)."""
     fs = sorted(f for f in glob.glob(f"{BASE}/out/ops/review-*.md") if re.fullmatch(r"review-\d{4}-\d{2}-\d{2}\.md", os.path.basename(f)))
     return fs[-1] if fs else None
+# R13 (11-03, #182/#176): the formal 运维 daily review is out/ops/review-<day>.md in BOTH modes; /workspace/review-ops/daily/ is the
+# legacy hand-written fallback that stopped at 10-29 -- never call the review stale / missing because that old dir is.
+REVIEW_NOTE = (' facts["Mivo QA 运维"].review_ops_latest is the formal 运维 daily review (R13: $PI_STATE/out/ops/review-<day>.md, in every mode, '
+               "not shadow); /workspace/review-ops/daily/ is only the legacy fallback that stopped at 2026-10-29, so its age is NOT a failure.")
 def muted_for_brief(d, y):
     """outbound.py BRIEF_QUEUE: muted nudge/pm-retro/pm-cos/ops-review/overdue messages from y 09:00 to d 09:00 (Beijing time),
     so each one is in exactly one brief"""
@@ -67,10 +71,10 @@ def main():
     if os.path.exists(pm): facts["pi_pm_goals"] = [l for l in open(pm).read().splitlines() if l.startswith("## G")]
     fj = f"{BASE}/out/jasper/{d}.facts.json"; write_atomic(fj, json.dumps(facts, ensure_ascii=False, indent=1))
     RULE = ("fleet-mode=pi (since 2026-10-23): the Pi line (code /workspace/panoptes/pi, state /workspace/mivo-qa/pi) IS the production line; judge each bot by "
-            "facts.pi_line_evidence (its outputs are the deliveries). Grok-line fields (fleet-standards/pm-daily, review-ops, mivo-merger "
+            "facts.pi_line_evidence (its outputs are the deliveries). Grok-line fields (fleet-standards/pm-daily, mivo-merger "
             "audit.log) are expected to be stale in pi mode and are NOT failures." if mode() == "pi" else
             'Paths under /workspace/mivo-qa/pi or "pi_line_outputs" are the SHADOW Pi line, never evidence that a Grok-line bot delivered; '
-            "judge each bot only by its own Grok-line fields.")
+            "judge each bot only by its own Grok-line fields.") + REVIEW_NOTE
     if os.environ.get("JASPER_FACTS_ONLY") == "1": print(json.dumps(facts.get("pi_line_evidence"), ensure_ascii=False, indent=1)); return
     try:
         txt, tid = pi("work", "/tmp", f"""Write Praise's 9:00 fleet brief in Chinese (<=15 lines) using ONLY facts in {fj} (read it; you may also read files it names, read-only).
