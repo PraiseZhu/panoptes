@@ -169,7 +169,7 @@ class TestRevise(GitTmp):
         self.assertEqual(re.findall(r"^diff --git a/(\S+)", open(a["patch"]).read(), re.M), ["src/foo.js"])   # review 10-24: no revert of bar.js
         sh("git", "-C", d, "apply", a["patch"]); self.assertIn("PR also changed bar", rf(f"{d}/src/bar.js"))
         t = prfix.load_tickets()["tickets"]["rev:1301"]
-        self.assertEqual((t["status"], t["revisions"], t["last_head"]), ("pushed", 1, self.head))
+        self.assertEqual((t["status"], t["revisions"], t["last_head"]), ("push_action_written", 1, self.head))
         self.assertFalse(os.path.exists(f"{prfix.WT_ROOT}/pi-wt-rev-1301"))             # worktree always removed
         rc, r = self.revise(); self.assertEqual(r["status"], "skipped")                 # same head again: waits for the push
 
@@ -260,7 +260,7 @@ class TestRevise(GitTmp):
         self.assertEqual(sh("git", "-C", d, "rev-list", "--parents", "-n", "1", a["new_head"]).split()[1:], [self.head, main])
         self.assertIn("FIXED", sh("git", "-C", d, "show", f"{a['new_head']}:src/foo.js"))
         self.assertIn(f"Pi-Revise: {a['key']}", sh("git", "-C", d, "log", "-1", "--format=%B", a["new_head"]))
-        t = prfix.load_tickets()["tickets"]["rev:1301"]; self.assertEqual((t["status"], t.get("merges"), t.get("revisions")), ("pushed", 1, 0))
+        t = prfix.load_tickets()["tickets"]["rev:1301"]; self.assertEqual((t["status"], t.get("merges"), t.get("revisions")), ("push_action_written", 1, 0))
 
     def test_unresolved_conflict_markers_stop_after_three_rounds(self):
         seed = f"{self.tmp}/seed"; g = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", seed]
@@ -281,7 +281,7 @@ class TestRevise(GitTmp):
             rc, r = self.revise()
             self.assertEqual((rc, r["status"]), (0, "pr_action_written"), r)
             a = self.acts[-1]; self.assertEqual((a["type"], a["ruled"], a["names"]), ("gh.run.rerun-failed", True, ["unit (windows, 2)"]))
-            t = prfix.load_tickets()["tickets"]["rev:1301"]; self.assertEqual((t["status"], t["rerun_only"]), ("pushed", True))
+            t = prfix.load_tickets()["tickets"]["rev:1301"]; self.assertEqual((t["status"], t["rerun_only"]), ("push_action_written", True))
             with prfix.tickets_locked() as T: T["tickets"].pop("rev:1301")
             self.acts.clear(); self.verdict = "RELATED\nthe PR's path join breaks on windows"; self.model = "winfix"
             rc, r = self.revise(); self.assertEqual(r["status"], "pr_action_written", r)   # model said unrelated? not here: it fixed on first try

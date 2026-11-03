@@ -29,7 +29,7 @@ class T(unittest.TestCase):
     def test_rerun_at_this_head_then_dirty_merges_main(self):
         r, calls, t = self.run_revise({"status": "pushed", "last_head": H, "rerun_only": True, "revisions": 1, "last_cnt": "revisions"})
         self.assertEqual(calls, ["merge"], r)
-        self.assertEqual((t["status"], t["last_cnt"], t["merges"]), ("pushed", "merges", 1))
+        self.assertEqual((t["status"], t["last_cnt"], t["merges"]), ("push_action_written", "merges", 1))
 
     def test_merge_already_pushed_at_this_head_is_not_redone(self):
         r, calls, _ = self.run_revise({"status": "pushed", "last_head": H, "merges": 1, "last_cnt": "merges"})

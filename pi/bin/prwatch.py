@@ -354,7 +354,7 @@ def kick_finished(st):
     ks = st.setdefault("kicked", []); cut = (now_cst() - dt.timedelta(days=1)).isoformat()
     keys = [jload(f"{BASE}/out/praise-pr/last-result.json", {}).get("action_key")]
     tks = jload(f"{BASE}/out/praise-pr/tickets.json", {}).get("tickets", {})
-    keys += [x.get("action_key") for x in tks.values() if x.get("status") in ("pr_action_written", "pushed") and (x.get("updated_at") or "") >= cut]
+    keys += [x.get("action_key") for x in tks.values() if x.get("status") in ("pr_action_written", "push_action_written", "pushed") and (x.get("updated_at") or "") >= cut]
     # the only DMs left (kind 5, 10-24 evening): kick them like the PR actions
     keys += [f"needs-praise:{x.get('qa')}:{x.get('fp')}" for k, x in tks.items()
              if not k.startswith("rev:") and x.get("status") == "needs_praise" and (x.get("updated_at") or "") >= cut]
@@ -549,14 +549,14 @@ def revise_or_wait(st, done, n, head, tag, seen, rv, cnt_key, cap, what, red=())
     if rv.get("status") == "parked" and (rv.get("next_retry_at") or "") > now_cst().isoformat(): return True
     dead = rv.get("status") == "running" and not pid_alive(rv.get("pid"))   # prfix --revise records it as a transient failure when it starts
     same_kind = (rv.get("last_cnt") or "revisions") == cnt_key or not b_on()   # 11-03 B: a CI fix / re-run pushed at this head says nothing about a merge
-    if same_kind and rv.get("status") == "pushed" and rv.get("last_head") == head and rv.get("rerun_only") \
+    if same_kind and rv.get("status") in ("push_action_written", "pushed") and rv.get("last_head") == head and rv.get("rerun_only") \
             and (jload(f"{BASE}/out/outbound/ledger.json", {}).get(rv.get("action_key")) or {}).get("status") == "done":
         # the ruled re-run of this head happened and the checks are red again. prfix --revise would only skip this head ("已经修过、
         # 等推送"), so launching it is a no-op loop (10-25: #1271 spun 14 h). The judge said the PR is not the cause: give CI a fresh
         # run instead -- main merged in when the PR is behind (update-branch, daily budget), else the failed jobs re-run every 3 h.
         # A new head is a new question for prfix; nothing here asks Praise.
         return ruled_red_again(st, done, n, head, tag, seen, red)
-    elif (rv.get("status") == "running" and not dead) or (same_kind and rv.get("status") == "pushed" and rv.get("last_head") == head): return True   # in hand
+    elif (rv.get("status") == "running" and not dead) or (same_kind and rv.get("status") in ("push_action_written", "pushed") and rv.get("last_head") == head): return True   # in hand
     if rv.get("status") == "failed" and rv.get("head") == head and (rv.get("next_retry_at") or "") > now_cst().isoformat(): return True
     lt = st.setdefault("revise_launched", {})
     try: ran_after = rv.get("status") == "failed" and rv.get("head") == head and dt.datetime.fromisoformat(rv.get("updated_at")).timestamp() > lt.get(tag, 0)
