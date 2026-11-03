@@ -56,7 +56,7 @@ class T(unittest.TestCase):
         mem = 20000; st = {}
         h = prwatch.headroom_mb(t, mem=mem, st=st)
         self.assertEqual(h, mem - (prwatch.TASK_PEAK_MB - 100) - prwatch.PANOPTES_PEAK_MB)
-        self.assertEqual(prwatch.headroom_mb({}, mem=mem, st=st), mem)
+        self.assertEqual(prwatch.headroom_mb({}, mem=mem, st=st), mem - min(prwatch.PANOPTES_PEAK_MB, prwatch.TEST_RESERVE_CAP_MB))   # 11-03: always reserved, capped while nothing runs
         self.assertEqual(prwatch.dispatch_runs({11: (1, 5, PY)}), [])
 
     def test_pstack_flag_dropped_only_in_frontmatter(self):

@@ -47,6 +47,9 @@ const GROUP_OVERDUE = process.argv.includes('--group-overdue') // 逾期未回�
 const OVERDUE_ONLY = process.argv.includes('--overdue-only') // 只跑逾期通报，跳过私信提醒/感谢
 // PR 作者之外一起 @ 的负责人（Praise 2026-10-19：路滨宇的 PR 由 aj 负责），见 handoff-routes.json
 const OVERDUE_CC = overdueCc()
+// 这些作者 PR 上的 QA 问题由 Praise PR 跟进（PM 11-03）：不私信、不感谢、逾期通报不 @，见 handoff-routes.json praise_pr_authors
+const PRAISE_PR_AUTHORS = new Set((() => { try { return loadRoutes().praise_pr_authors ?? [] } catch { return [] } })())
+const PRAISE_PR = '由 Praise PR 跟进（排队中）'
 
 const readJson = (p, d) => (existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : d)
 const bjDate = (d = new Date()) => new Date(d.getTime() + 8 * 3600e3).toISOString().slice(0, 10)
@@ -94,6 +97,7 @@ for (const [key, v] of Object.entries(sent)) {
   const pr = Number(m[1])
   const fps = new Set([m[2], ...(v.covered_fingerprints || [])])
   const { author, findings, mergedAt } = findingsFor(pr)
+  if (PRAISE_PR_AUTHORS.has(author)) continue
   const hit = []
   for (const f of findings) {
     const fp = f.fingerprint, pfp = f.pr_fingerprint
@@ -220,6 +224,7 @@ for (const [key, it] of Object.entries(OVERDUE_ONLY ? {} : state.items)) {
   const rec = { key, pr: it.pr, login: it.login, status_before: it.status, reminders: it.reminders }
   summary.items.push(rec)
   if (it.status !== 'open' || !it.login) continue
+  if (PRAISE_PR_AUTHORS.has(it.login)) { rec.skip = PRAISE_PR; continue }
   if (it.author_facing === false) {
     rec.not_author_facing = true; summary.not_author_facing ||= []; summary.not_author_facing.push({ pr: it.pr, login: it.login, problems: (it.problems || []).slice(0, 2) })
     if (!DRY) { it.status = 'closed'; it.closed_at = new Date().toISOString(); it.closed_via = 'not-author-facing'; it.closed_note = '统一分级（10-24 起发出的私信）：这条私信对应的问题都不算作者的问题（待核实 / 只差覆盖率 / AI 补测线索等），不再提醒' }
@@ -338,8 +343,9 @@ if (GROUP_OVERDUE) {
     const lines = [[t(`以下 ${ov.notices.length} 个 PR 的问题已通知作者超过 3 天，还没看到回应（原 PR 下首行「结论：…」的留言，或写了「QA #原PR号」的修复 PR）。QA 结论和发版打包挂钩，这几条没有结论会卡在待确认状态。`)], [t(' ')]]
     for (const x of ov.notices) {
       const head = [{ tag: 'a', text: `#${x.pr}`, href: R + x.pr }, t(` ${short(x.title)} — `)]
-      head.push(x.person?.feishu_open_id ? { tag: 'at', user_id: x.person.feishu_open_id, user_name: x.person.name } : t(x.person?.name || x.login))
-      for (const cc of OVERDUE_CC[x.login] || []) { const p = allByLogin.get(cc); head.push(t(' '), p?.feishu_open_id ? { tag: 'at', user_id: p.feishu_open_id, user_name: p.name } : t(p?.name || cc)) }
+      if (PRAISE_PR_AUTHORS.has(x.login)) head.push(t(PRAISE_PR))
+      else head.push(x.person?.feishu_open_id ? { tag: 'at', user_id: x.person.feishu_open_id, user_name: x.person.name } : t(x.person?.name || x.login))
+      for (const cc of PRAISE_PR_AUTHORS.has(x.login) ? [] : OVERDUE_CC[x.login] || []) { const p = allByLogin.get(cc); head.push(t(' '), p?.feishu_open_id ? { tag: 'at', user_id: p.feishu_open_id, user_name: p.name } : t(p?.name || cc)) }
       lines.push(head)
       for (const f of x.issues) lines.push([t(`· ${lvl[f.severity]}${f.test_backed ? '（自动测试已复现）' : f.verification?.status === 'confirmed' ? '（审查结论，测试系统已复核触发路径可达）' : '（审查结论，测试未复现）'}：${oneLine(f.title)}`)])
       lines.push([t(`· 已通知 ${x.days} 天（${x.via.join('、')}，${bjDate(new Date(x.notified_at)).slice(5).replace('-', '月')}日），至今未见回应。`)])

@@ -34,6 +34,17 @@ function main() {
   mkdirSync(dirname(file), { recursive: true })
   writeFileSync(file, spec.content)
   try {
+    // 先核对植入错误对得上源码，再跑测试：对不上的补测（例如把已删组件的属性套到活组件上）不能报「当前代码上失败」（#1433）。
+    // spec.legacyOrder（回滚开关 qa-misattrib-off，runner 写进 spec）= 旧顺序：先跑测试，失败就 exit 1
+    const target = join(process.cwd(), spec.mutation.file)
+    const checkMutation = () => {
+      let text
+      try { text = readFileSync(target, 'utf8') } catch { console.log(`植入错误的源文件不存在：${spec.mutation.file}`); return null }
+      if (countOf(text, spec.mutation.find) !== 1) { console.log('植入错误对不上源码（要替换的片段不是恰好出现一次），这个补测无法证明有效，已丢弃'); return null }
+      return text
+    }
+    let original = spec.legacyOrder ? undefined : checkMutation()
+    if (original === null) { process.exitCode = 4; return }
     const first = runTest(spec.runCmd, spec.filePath, spec.runFileStrip)
     if (first.code !== 0) {
       console.log(first.out.split('\n').slice(-OUTPUT_TAIL).join('\n'))
@@ -41,10 +52,8 @@ function main() {
       process.exitCode = 1
       return
     }
-    const target = join(process.cwd(), spec.mutation.file)
-    let original
-    try { original = readFileSync(target, 'utf8') } catch { console.log(`植入错误的源文件不存在：${spec.mutation.file}`); process.exitCode = 4; return }
-    if (countOf(original, spec.mutation.find) !== 1) { console.log('植入错误对不上源码（要替换的片段不是恰好出现一次），这个补测无法证明有效，已丢弃'); process.exitCode = 4; return }
+    original ??= checkMutation()
+    if (original === null) { process.exitCode = 4; return }
     let mutated
     try {
       writeFileSync(target, original.replace(spec.mutation.find, spec.mutation.replace))

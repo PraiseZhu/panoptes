@@ -92,6 +92,14 @@ class T(unittest.TestCase):
         self.assertEqual(self.queue(), [])
         self.assertTrue(sent and all(self.ledger()[a["key"]]["status"] == "done" for _, a in ROUTED))
 
+    def test_queue_path_is_a_directory_logs_and_run_continues(self):
+        os.makedirs(O.BRIEF_QUEUE())   # append -> IsADirectoryError; before the fix this crashed the whole run
+        self.assertEqual(self.main(), 0)
+        led = self.ledger()
+        for _, a in ROUTED: self.assertNotIn(a["key"], led)   # not recorded "briefed" -> retried once the path is fixed
+        self.assertEqual(led[OTHER[1]["key"]]["reason"], "praise-dm-mute")   # later actions still handled
+        self.assertIn("FAILED(brief-queue)", self.report())
+
 
 class Jasper(unittest.TestCase):
     def test_brief_gets_each_queued_item_once(self):

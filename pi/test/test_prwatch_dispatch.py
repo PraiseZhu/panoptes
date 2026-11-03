@@ -19,10 +19,12 @@ class T(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="prwatch-test-")
         self.saved = {k: getattr(prwatch, k) for k in ("BASE", "RPT", "FIX_FLAG", "qlog", "act", "kick_outbound", "mem_mb", "proc_table",
-                                                       "inputs_sig", "DRY")}
+                                                       "inputs_sig", "DRY", "TEST_RESERVE_OFF", "EMERG_KILL_OFF", "ARGUS")}
         self.saved_sp = (prwatch.subprocess.run, prwatch.subprocess.Popen)
         prwatch.BASE = self.tmp; prwatch.RPT = f"{self.tmp}/reports"; prwatch.FIX_FLAG = f"{self.tmp}/takeover/prfix-event"
         os.makedirs(prwatch.RPT); wf(prwatch.FIX_FLAG, "")
+        prwatch.TEST_RESERVE_OFF = f"{self.tmp}/prwatch-test-reserve-off"; prwatch.EMERG_KILL_OFF = f"{self.tmp}/prwatch-emerg-kill-off"
+        prwatch.ARGUS = f"{self.tmp}/argus"
         self.logs, self.acts, self.kicks, self.launches = [], [], [], []
         prwatch.qlog = self.logs.append
         prwatch.act = lambda job, a: self.acts.append(a)
@@ -42,6 +44,8 @@ class T(unittest.TestCase):
     def tickets(self, **kw): wf(f"{self.tmp}/out/praise-pr/tickets.json", json.dumps({"tickets": kw}))
 
 class TestHeadroom(T):
+    """the 10-24 rule, still what `touch prwatch-test-reserve-off` gives (11-03 rollback); the new rule: test_fix_yield_reserve_kill.py"""
+    def setUp(self): super().setUp(); wf(prwatch.TEST_RESERVE_OFF, "")
     def test_running_fixes_reserve_what_they_may_still_grow(self):
         t = {10: (1, 300, PY), 11: (10, 200, b"node\0pi\0"), 20: (1, 500, PY)}       # fix A: 500 MB tree, fix B: 500 MB
         # no merge test running yet, but fixes are: one may start any minute -> its whole peak is reserved too (review 10-24)
@@ -84,7 +88,7 @@ class TestDispatch(T):
     def test_waits_for_memory_and_logs_once(self):
         self.procs({}, prwatch.ADMIT_FREE_MB + prwatch.RUN_PEAK_MB - 1); self.tickets()
         st = {}; prwatch.dispatch_fix(st); prwatch.dispatch_fix(st)
-        self.assertEqual(self.launches, []); self.assertEqual(sum("waits for memory" in m for m in self.logs), 1)
+        self.assertEqual(self.launches, []); self.assertEqual(sum("fix dispatch waits" in m for m in self.logs), 1)
         prwatch.mem_mb = lambda: 11000; prwatch.dispatch_fix(st)
         self.assertEqual(len(self.launches), 1)
     def test_nothing_to_do(self):
@@ -230,6 +234,22 @@ class TestDraftCI(T):
         self.procs({7: (1, 5, b"/bin/bash\0/x/bin/run.sh\0prfix\0--revise\0001301\0")}, 16000)
         self.draft("a" * 40, [("unit", "FAILURE")])
         self.assertEqual(self.tick({}), [])
+    def test_red_head_that_turns_dirty_gets_main_merged_in(self):   # 11-03 B: it used to count "red" as handled and sit DIRTY
+        self.draft("a" * 40, [("unit", "FAILURE")]); self.prs[0]["mergeStateStatus"] = "DIRTY"
+        st = {"draft_seen": {"1301:" + "a" * 12: "red"}}
+        self.assertEqual(self.tick(st)[0][1:], ["prfix", "--revise", "1301"])
+    def test_rerun_pushed_at_this_head_does_not_hold_back_a_merge(self):   # 11-03 B
+        self.tickets(**{"rev:1301": {"status": "pushed", "last_head": "a" * 40, "rerun_only": True, "last_cnt": "revisions", "revisions": 1}})
+        self.draft("a" * 40, []); self.prs[0]["mergeStateStatus"] = "DIRTY"
+        self.assertEqual(self.tick({})[0][1:], ["prfix", "--revise", "1301"])
+        self.tickets(**{"rev:1301": {"status": "pushed", "last_head": "a" * 40, "last_cnt": "merges", "merges": 1}})
+        self.assertEqual(self.tick({}), [])                                      # the merge itself is in hand
+    def test_b_off_flag_keeps_the_old_skip(self):
+        wf(prwatch.B_OFF, "")
+        try:
+            self.draft("a" * 40, [("unit", "FAILURE")]); self.prs[0]["mergeStateStatus"] = "DIRTY"
+            self.assertEqual(self.tick({"draft_seen": {"1301:" + "a" * 12: "red"}}), [])
+        finally: os.remove(prwatch.B_OFF)
     def test_conflict_with_main_goes_to_the_model_never_a_dm(self):   # 10-24 evening: no DM, the bot keeps at it
         self.draft("a" * 40, [], behind=False); self.prs[0]["mergeStateStatus"] = "DIRTY"
         st = {}; got = self.tick(st)

@@ -9,6 +9,10 @@
 10-28 加 (c) 停滞：PraiseZhu 名下所有 open PR（不限 QA 修复 PR、不限 draft）超过 1h 无进展就催；
 进展 = 新 commit（head SHA 变）、CI check 状态变、新评论（评论数变）、新 review / review 评论（review 数变）。指纹存 PI_STATE/out/pm/pmnudge-progress.json；
 每段停滞只催一次（nudged 标记，跨小时、跨天都不重催），有进展后清零重新计时。
+11-03 B（Mivo 测试项目经理.md「2026-11-02 Praise 新规」催办范围 1-5）：不再豁免 bot 自己的修复 PR；QA 修复 PR（draft 和 ready）另按
+ DIRTY/BEHIND 超过 2h、ready 且 BLOCKED 超过 24h、head 上没有 main CI（workflow「CI」）的 check 超过 30 分钟催，每段只催一次
+ （PI_STATE/out/pm/pmnudge-segments.json）；kiro（kirozeng）正文含「QA: #N」的 open PR 同样催。
+ 回滚：touch PI_STATE/pmnudge-b-off（每轮重读）-> 恢复 11-03 前的行为。
 用法：pmnudge.py [--dry-run]（--dry-run 只打印，不写任何文件）
 """
 import sys
@@ -59,6 +63,10 @@ def draft_since(n, created):
 
 STALL_H = 1.0
 PROGRESS = f"{BASE}/out/pm/pmnudge-progress.json"
+SEGMENTS = f"{BASE}/out/pm/pmnudge-segments.json"
+KIRO = "kirozeng"
+MAIN_CI = "CI"   # xindong/mivo-canvas-plugin .github/workflows/ci.yml 的 workflow 名
+DIRTY_H, BLOCKED_H, NOCI_H = 2.0, 24.0, 0.5
 
 def progress_sig(p):
     """进展指纹：head commit + 每个 check 的状态 + 评论数 + review 数（行内 review 评论也会产生一条 review）；任一变化即算有进展"""
@@ -81,14 +89,47 @@ def stalls(prs, state, now):
             out.append((p, h, since)); new[k]["nudged"] = True
     return out, new
 
+def conditions(p):
+    """这个 PR 现在满足的 B 类条件 -> {名字: (值, 阈值小时, 催办行标签, 说明)}；值变了就是新的一段"""
+    ms, head = (p.get("mergeStateStatus") or "").upper(), p.get("headRefOid") or ""
+    out = {}
+    if ms in ("DIRTY", "BEHIND"): out["merge"] = (ms, DIRTY_H, ms.lower(), f"mergeStateStatus={ms}")
+    if not p.get("isDraft") and ms == "BLOCKED": out["blocked"] = (ms, BLOCKED_H, "ready+blocked", "ready 但 BLOCKED")
+    if not any(c.get("workflowName") == MAIN_CI for c in p.get("statusCheckRollup") or []):
+        out["nomainci"] = (head, NOCI_H, "无 main CI", f"head {head[:9]} 上没有 main CI（workflow「{MAIN_CI}」）的 check")
+    return out
+
+def segment_alerts(prs, state, now):
+    """-> (本轮要催的 [(pr, 条件, 标签, 说明, since)], 新 state)。state[pr][条件] = {val, since, nudged}：同一段只催一次，
+    条件消失或值变了（换 head、DIRTY->BEHIND）重新计时"""
+    out, new = [], {}
+    for p in prs:
+        k, old, seg = str(p["number"]), state.get(str(p["number"])) or {}, {}
+        for c, (val, lim, tag, why) in conditions(p).items():
+            o = old.get(c) or {}
+            same = o.get("val") == val and o.get("since")
+            seg[c] = {"val": val, "since": o["since"] if same else now.isoformat(), "nudged": bool(same and o.get("nudged"))}
+            h = (now - parse_ts(seg[c]["since"])).total_seconds() / 3600
+            if h > lim and not seg[c]["nudged"]:
+                out.append((p, c, tag, f"{why} 已 {h:.1f}h（超过 {lim:g}h）", seg[c]["since"])); seg[c]["nudged"] = True
+        if seg: new[k] = seg
+    return out, new
+
+FIELDS = "number,title,isDraft,createdAt,body,headRefName,headRefOid,comments,reviews,statusCheckRollup,mergeStateStatus"
+
 def main():
     dry = "--dry-run" in sys.argv
     d = today(); hh = now_cst().strftime("%H:%M")
     try:
         prs = gh(["pr", "list", "-R", REPO, "--author", "PraiseZhu", "--state", "open", "--limit", "100",
-                  "--json", "number,title,isDraft,createdAt,body,headRefName,headRefOid,comments,reviews,statusCheckRollup"])
+                  "--json", FIELDS])
     except Exception as e:   # gh 挂了：不崩、不催、不动进展文件（下轮再看）
         log("pmnudge: gh pr list 失败，本轮跳过：", str(e)[:200]); return
+    b = b_on()
+    if b:
+        try: prs += [p for p in gh(["pr", "list", "-R", REPO, "--author", KIRO, "--state", "open", "--limit", "100", "--json", FIELDS])
+                     if re.search(r"QA[:：]\s*#\d+", p.get("body") or "")]
+        except Exception as e: log("pmnudge: kiro 的 PR 列表读取失败，本轮只看 PraiseZhu：", str(e)[:200])
     nof, p01 = nofix_prs(), p01_prs()
     fixed = merged_refs()   # 10-28：QA 单号已被合并的修复 PR 修掉 -> 这个 draft 是重复 / 被取代的，不催（#1343 被 #1345 取代）
     qa, skip = [], []
@@ -112,7 +153,7 @@ def main():
         pend = [nm(c) for c in cs if c.get("status", "").upper() not in ("COMPLETED", "") or st(c) in PEND]
         since, how = draft_since(n, p["createdAt"]); age = (now_cst() - since).total_seconds() / 3600
         why = None
-        if "<!-- pi-line fixpr:" in (p.get("body") or ""):   # 10-24: the bot's own fix PRs -- prwatch / prfix --revise move them, DM only if stuck
+        if not b and "<!-- pi-line fixpr:" in (p.get("body") or ""):   # 10-24: the bot's own fix PRs -- prwatch / prfix --revise move them, DM only if stuck
             notyet.append(f"#{n}（bot 自己的修复 PR，bot 自己推进，推不动会单独私信）"); continue
         if red and age > 2: why = f"draft {age:.1f}h（自{how}）且非 review-pr 红：{', '.join(red)}"
         elif cs and not red and not pend: why = f"除 review-pr 外全绿仍是 draft（draft {age:.1f}h）"
@@ -133,8 +174,17 @@ def main():
         acts.append({"key": f"nudge:{n}:stall:{since}", "type": "nudge", "to": "Praise PR", "priority": True,
                      "channel": "待 Praise 定（见 handoff 渠道方案）", "text": f"#{n} {why}",
                      "dedupe": "同一段停滞（同 since）只催一次；有进展后重新计时"})
+    try: seg_old = json.load(open(SEGMENTS))
+    except Exception: seg_old = {}
+    segs, seg_new = segment_alerts(qa, seg_old, now_cst()) if b else ([], seg_old)
+    for p, c, tag, why, since in sorted(segs, key=lambda x: x[0]["number"]):
+        n = p["number"]
+        L.append(f"- 催 #{n} {tag}（QA: {', '.join('#'+str(r) for r in p['refs'])}）{why}")
+        acts.append({"key": f"nudge:{n}:{c}:{since}", "type": "nudge", "to": "Praise PR", "priority": True,
+                     "channel": "待 Praise 定（见 handoff 渠道方案）", "text": f"#{n} {why}",
+                     "dedupe": "同一段（同条件、同 since）只催一次；条件变了重新计时"})
     if notyet: L.append("- 不催（未满 2h 或仍在跑）：" + "、".join(notyet))
-    if ready: L.append("- 已 ready，归 Mac mini 盯梢，不催：" + " ".join(ready))
+    if ready: L.append(("- 已 ready，只按 dirty/behind、ready+blocked、无 main CI 催，其余归 Mac mini 盯梢：" if b else "- 已 ready，归 Mac mini 盯梢，不催：") + " ".join(ready))
     if skip: L.append("- 范围外：" + "；".join(skip))
     if not acts: L.append("- 本轮无催办")
     txt = "\n".join(L) + "\n\n"
@@ -160,5 +210,6 @@ def main():
         write_atomic(canon, oc + ("\n" if oc and not oc.endswith("\n\n") else "") + txt)
     if chief: write_atomic(f"{BASE}/out/pm/{d}.chief.md", chief)
     write_atomic(PROGRESS, json.dumps(pst_new, ensure_ascii=False, indent=1))
+    if b: write_atomic(SEGMENTS, json.dumps(seg_new, ensure_ascii=False, indent=1))
     record_actions("pm", d + ".nudges", acts)
 if __name__ == "__main__": main()

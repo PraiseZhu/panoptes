@@ -26,6 +26,9 @@ class T(unittest.TestCase):
         after = json.load(open(self.p))
         self.assertEqual(after[KEYS[0]], {"status": "done"}); self.assertEqual(after["daily:1"], {"status": "done"})
         self.assertNotIn(KEYS[1], after)
+    def test_one_key_per_fingerprint(self):   # 11-03 B: two gave_up keys of one finding -> only the first is reset
+        self.assertEqual(R.reset(self.p, ["fixpr:1566:mq1-b", "fixpr:1566:mq1-b:a2", "fixpr:1519:mq1-c"]), ["fixpr:1566:mq1-b", "fixpr:1519:mq1-c"])
+        self.assertIn("fixpr:1566:mq1-b:a2", json.load(open(self.p)))
     def test_cli_requires_keys_and_reports_skipped(self):
         env = dict(os.environ, PI_LOCK_DIR=self.d)
         cmd = [sys.executable, os.path.join(BIN, "reset_abandoned.py"), "--ledger", self.p]
