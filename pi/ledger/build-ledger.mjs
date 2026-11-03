@@ -212,9 +212,17 @@ for (const [key, v] of Object.entries(sent)) {
 // 待核实 / 没确认的 P2 不派活但台账留行（no_ticket）。只差覆盖率（coverage-gate / own-tests）只在 P2 且判「修」时收。
 // 待核实的行带 pending_verification: true
 const RULINGS = process.env.MIVO_QA_P2_RULINGS || '/workspace/fleet-standards/p2-rulings.md';
+// nofix / closed hold a PR number (row without 指纹: the whole PR) or "<PR>:<fingerprint>" (row with 指纹, p2.py record --fp:
+// | 日期 | 报告 PR | 指纹 | 问题 | 裁决 | …; that finding only) -- same rows as finding_policy.ruling_rows. Rollback switch: the file
+// $PI_STATE/p2-fp-rulings-off (re-read every run) -> fingerprint rows count for their whole PR again.
 const fix2 = new Set(), nofix = new Set(), closed = new Set();  // closed = 「结案…」: out of needs_you (PM 2026-11-02 16:22 PST)
 const NOFIX = ['不修', '产品代码不修', '误报', 'P3', '已修'];  // + any 「结案…」(already fixed, no new ticket; p2.py record 结案)
-try { for (const line of fs.readFileSync(RULINGS, 'utf8').split('\n')) { const c = line.trim().replace(/^\||\|$/g, '').split('|').map(x => x.trim()); if (c.length >= 4 && /^#?\d+$/.test(c[1] || '')) { if (c[3] === '修') fix2.add(+c[1].replace('#', '')); if (NOFIX.includes(c[3]) || c[3].startsWith('结案')) nofix.add(+c[1].replace('#', '')); if (c[3].startsWith('结案')) closed.add(+c[1].replace('#', '')); } } }
+const FP_OFF = fs.existsSync(path.join(process.env.PI_STATE || '/workspace/mivo-qa/pi', 'p2-fp-rulings-off'));
+const signed = (set, n, fp) => set.has(n) || set.has(`${n}:${fp}`);
+try { for (const line of fs.readFileSync(RULINGS, 'utf8').split('\n')) { const c = line.trim().replace(/^\||\|$/g, '').split('|').map(x => x.trim()); if (c.length >= 4 && /^#?\d+$/.test(c[1] || '')) {
+  const n = +c[1].replace('#', ''), fpRow = /^mq1-[0-9a-z]+(-pr\d+)?$/.test(c[2]); if (fpRow && c.length < 5) continue;
+  const v = fpRow ? c[4] : c[3], k = fpRow && !FP_OFF ? `${n}:${c[2].replace(/-pr\d+$/, '')}` : n;
+  if (v === '修') fix2.add(n); if (NOFIX.includes(v) || v.startsWith('结案')) nofix.add(k); if (v.startsWith('结案')) closed.add(k); } } }
 catch { gaps.push(`p2-rulings.md 读不到（${RULINGS}），按没有裁决处理`); }
 // -> { sev, ticket }：sev = 台账要不要留这一行（null = 不留）；ticket = prfix 会不会派活（own_pr_ticket 非空）
 function ownTicket(x, n, pending) {
@@ -228,7 +236,7 @@ function ownTicket(x, n, pending) {
   if (src === 'check' && ![undefined, null, 'introduced'].includes(x.status)) return null;
   if (sev === 'P2') {
     const unconfirmed = pending || !!x.pending_kind || String(x.verdict || '').toUpperCase() === 'PLAUSIBLE';
-    if (nofix.has(n)) return null;
+    if (signed(nofix, n, x.fingerprint)) return null;
     return { sev, ticket: !unconfirmed };
   }
   return { sev, ticket: true };
@@ -392,7 +400,7 @@ for (const row of out) {
   if (row.status === 'fixed' && !row.retest_confirmed && row.merged === true) Object.assign(row, { status: 'fix_merged_pending_retest', status_zh: STZH.fix_merged_pending_retest });
   else if (row.status === 'fixed' && !row.retest_confirmed) Object.assign(row, { status: 'fix_pr_open', status_zh: STZH.fix_pr_open });
   // a 「结案」 ruling settles the PR: checked before the third-round rule, so a closed PR never lands in needs_you
-  row.needs_human = !closed.has(row.pr) && (row.fix_round > MAX_AUTO_ROUNDS || (row.status === 'open' && row.fix_round === MAX_AUTO_ROUNDS && row.retest === 'fail'));
+  row.needs_human = !signed(closed, row.pr, row.fingerprint) && (row.fix_round > MAX_AUTO_ROUNDS || (row.status === 'open' && row.fix_round === MAX_AUTO_ROUNDS && row.retest === 'fail'));
   if (row.needs_human) needsYou.push({ key: row.key, pr: row.pr, author: row.author, level: row.level, severity: row.level, summary: row.summary, fix_round: row.fix_round, fix_prs: fixPrs, handoff_issue: row.handoff_issue?.url || null,
     reason: row.status === 'open' ? `已自动修 ${row.fix_round} 轮仍未通过复测，转人工` : `已修到第 ${row.fix_round} 轮（${row.status_zh}），请确认结案、不再开第 ${row.fix_round + 1} 轮` });
 }

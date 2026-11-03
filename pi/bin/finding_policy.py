@@ -89,7 +89,7 @@ def own_pr_ticket(x, n, fix2, unified=False, nofix=frozenset(), pending=False):
     """Praise 2026-10-23: 只修自己的 PR，测出问题立刻修。On an own PR every P0/P1 the tests raised is a ticket -- including
     待核实 items (pending_verification, unverified / PLAUSIBLE review, AI-test leads): prfix's first step writes a failing
     test, which IS the verification; no repro -> NOREPRO note, no PR. P2: a confirmed P2 (in findings, not pending, review
-    verdict not PLAUSIBLE) is a ticket unless the PR is in nofix (p2-rulings.md 不修 / 产品代码不修 / 误报 / P3 / 已修 —
+    verdict not PLAUSIBLE) is a ticket unless the PR or (PR, fingerprint) is in nofix (p2-rulings.md 不修 / 产品代码不修 / 误报 / P3 / 已修 —
     p2-rulings.md 10-23 header: confirmed P2 must be fixed, rulings only decide valid / which level); a pending or unconfirmed P2
     is no ticket (the ledger keeps the row). Coverage-only (coverage-gate / own-tests) is never a ticket since 2026-10-26 (coverage
     is info only: coverage_gate.blocking false; only a missed stated target, source stated-acceptance, is a P2). Excluded always: dismissed (误报 / REJECTED / pre-existing / flaky), qa-error (the test
@@ -105,7 +105,7 @@ def own_pr_ticket(x, n, fix2, unified=False, nofix=frozenset(), pending=False):
     if src == "check" and x.get("status") not in (None, "introduced"): return None
     if sev == "P2":
         unconfirmed = pending or bool(x.get("pending_kind")) or str(x.get("verdict") or "").upper() == "PLAUSIBLE"
-        if unconfirmed or n in nofix: return None
+        if unconfirmed or n in nofix or (n, x.get("fingerprint")) in nofix: return None
     return sev
 
 FP_CELL = re.compile(r"mq1-[0-9a-z]+(?:-pr\d+)?")
@@ -126,10 +126,23 @@ def fix_rulings(text):
 NOFIX_RULINGS = ("不修", "产品代码不修", "误报", "P3", "已修")   # + any 「结案…」 (p2.py record 结案: already fixed, no ticket)
 def _nofix(r): return r in NOFIX_RULINGS or r.startswith("结案")
 
+def fp_rulings_off():
+    """Rollback switch (B-fp, 2026-11-03), re-read on every call: the file $PI_STATE/p2-fp-rulings-off (default
+    /workspace/mivo-qa/pi/p2-fp-rulings-off) exists -> a fingerprint row counts for its whole PR again (pre-B-fp semantics)."""
+    return os.path.exists(os.path.join(os.environ.get("PI_STATE") or "/workspace/mivo-qa/pi", "p2-fp-rulings-off"))
+
+def bare_fp(fp): return re.sub(r"-pr\d+$", "", fp)   # mq1-…-pr1340 (pr_fingerprint) -> mq1-… (a finding's `fingerprint`)
+
+def ruling_keys(text, keep):
+    """Rows whose ruling passes keep(): PR for a row without a fingerprint (covers the whole PR), (PR, bare fingerprint) for a
+    row with one (covers that finding only). Rollback switch on -> PR for both."""
+    off = fp_rulings_off()
+    return {n if off or not fp else (n, bare_fp(fp)) for n, fp, r in ruling_rows(text) if keep(r)}
+
 def no_fix_rulings(text):
-    """PRs whose P2 ruling in fleet-standards/p2-rulings.md says no PR is needed: 不修 / 产品代码不修 / 误报 / P3 / 已修 (fixed elsewhere) / 结案….
-    A row with a fingerprint still counts for its whole PR here; per-finding callers use no_fix_findings."""
-    return {n for n, _, r in ruling_rows(text) if _nofix(r)}
+    """P2 rulings in fleet-standards/p2-rulings.md that say no PR is needed: 不修 / 产品代码不修 / 误报 / P3 / 已修 (fixed elsewhere) / 结案….
+    PR (whole PR) or (PR, fingerprint) (that finding only), see ruling_keys. Check a finding with `n in s or (n, fp) in s`."""
+    return ruling_keys(text, _nofix)
 
 def no_fix_findings(text):
     """Signed rulings per finding: {"by_fp": {pr_fingerprint: "no_fix"|"fixed"}, "pr_wide": {PR: "no_fix"|"fixed"}}.

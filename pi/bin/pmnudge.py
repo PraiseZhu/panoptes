@@ -13,17 +13,21 @@
 """
 import sys
 from lib import *
+from finding_policy import ruling_keys
 RULINGS = "/workspace/fleet-standards/p2-rulings.md"
 RED = ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE")
 PEND = ("", "PENDING", "QUEUED", "IN_PROGRESS", "EXPECTED", "WAITING", "REQUESTED")
 
 def nofix_prs():
-    s = set()
-    if os.path.exists(RULINGS):
-        for line in open(RULINGS):
-            c = [x.strip() for x in line.strip().strip("|").split("|")]
-            if len(c) >= 4 and re.fullmatch(r"#?\d+", c[1] or "") and ("不修" in c[3] or c[3].startswith("结案")): s.add(int(c[1].lstrip("#")))
-    return s
+    """判「不修」/「结案…」的行 -> PR（没指纹的行）/ (PR, 指纹)（带指纹的行，只管那一条；finding_policy.ruling_keys）"""
+    if not os.path.exists(RULINGS): return set()
+    return ruling_keys(open(RULINGS).read(), lambda r: "不修" in r or r.startswith("结案"))
+
+def only_nofix(refs, body, nof, p01):
+    """修复 PR 只关联判「不修」的 P2：每个 QA 单号都不是 P0/P1，且要么都整 PR 判了不修，要么正文里的每个指纹都按指纹判了不修"""
+    if any(r in p01 for r in refs): return False
+    fps = set(re.findall(r"mq1-[0-9a-z]+", body or ""))
+    return all(r in nof for r in refs) or bool(fps) and all(any((r, f) in nof for r in refs) for f in fps)
 
 def p01_prs():
     s = set()
@@ -92,7 +96,7 @@ def main():
         refs = [int(x) for x in re.findall(r"QA[:：]\s*#(\d+)", p.get("body") or "")]
         if not refs: continue
         if re.search(r"keel|lifeline", (p.get("headRefName") or "") + " " + p["title"], re.I): skip.append(f"#{p['number']} keel/lifeline 叠加链"); continue
-        if all(r in nof and r not in p01 for r in refs): skip.append(f"#{p['number']} 只关联判「不修」的 P2（{refs}）"); continue
+        if only_nofix(refs, p.get("body"), nof, p01): skip.append(f"#{p['number']} 只关联判「不修」的 P2（{refs}）"); continue
         if superseded(p, refs, fixed): skip.append(f"#{p['number']} 被已合并的 {'、'.join(sorted(set('#' + str(fixed[r]) for r in refs)))} 取代"); continue
         p["refs"] = refs; qa.append(p)
     st = lambda c: (c.get("conclusion") or c.get("state") or c.get("status") or "").upper()

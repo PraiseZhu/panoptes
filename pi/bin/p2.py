@@ -2,12 +2,15 @@
 """Shadow P2 ruling proposals via Pi (tap/anthropic/claude-opus-5-5, read-only tools).
 Never edits fleet-standards/p2-rulings.md. Writes out/p2/<date>.md + out/p2/state.json.
 usage: p2.py                 shadow proposals (model calls, cron only)
-       p2.py record <报告PR> <问题> <修|不修|结案> <理由> <证据路径...> [--by 会签人] [--status 规则状态]
+       p2.py record <报告PR> <问题> <修|不修|结案> <理由> <证据路径...> [--fp 指纹] [--by 会签人] [--status 规则状态]
          appends one row to p2-rulings.md (backup first, never overwriting a same-second backup); 规则状态 defaults to 「Jasper 已裁」.
+         --fp mq1-…[-pr<报告PR>]: the row signs that one finding only (指纹 column after 报告 PR, written as mq1-…-pr<报告PR>);
+         without --fp the row signs the whole PR, exactly as before. Rollback: touch $PI_STATE/p2-fp-rulings-off.
          结案 = already fixed / settled, no new fix ticket (build-ledger, finding_policy, pm and pmnudge treat it like 已修).
        p2.py --help / -h     print this and exit (no model call, nothing written)"""
 import sys, json, os, re, subprocess, shutil
 from lib import *
+from finding_policy import FP_CELL, bare_fp, ruling_keys
 TIER = "judge"  # pi-auto tier (opus-5-5/medium); Praise 2026-10-22: never pass --model/--thinking
 MODEL = "pi-auto judge (tap/anthropic/claude-opus-5-5, medium)"
 DAYS = int(os.environ.get("P2_DAYS", "3"))          # report dates within last N days
@@ -27,18 +30,16 @@ def collect(today):
             for x in p.get("findings", []):
                 if x.get("severity") != "P2": continue
                 k = x.get("pr_fingerprint") or f"{p['number']}:{x.get('title')}"
-                items[k] = {"key": k, "pr": p["number"], "title": x.get("title", ""), "file": x.get("file"),
+                items[k] = {"key": k, "pr": p["number"], "fp": x.get("fingerprint"), "title": x.get("title", ""), "file": x.get("file"),
                             "line": x.get("line"), "source": x.get("source"), "test_backed": x.get("test_backed"),
                             "evidence": x.get("evidence"), "report": f, "date": d.get("date"),
                             "sha": p.get("tested_sha") or p.get("merge_sha")}
     return items
 
 def already_ruled(it, rul):
-    """Grok 线按报告 PR 记裁决（一行可含多条，如「AI 测试 P2 两条」），所以按 PR 号匹配。"""
-    for line in rul.splitlines():
-        c = [x.strip() for x in line.strip().strip("|").split("|")]
-        if len(c) >= 4 and c[1].lstrip("#") == str(it["pr"]): return True
-    return False
+    """Grok 线按报告 PR 记裁决（一行可含多条，如「AI 测试 P2 两条」），所以没指纹的行按 PR 号匹配；带指纹的行只算那一条。"""
+    keys = ruling_keys(rul, lambda r: True)
+    return it["pr"] in keys or (it["pr"], it.get("fp")) in keys
 
 def src_tree(sha):
     d = f"{SRC}/{sha[:12]}"
@@ -80,14 +81,18 @@ VERDICTS = ("修", "不修", "结案")
 PENDING = "⚠ P2 裁决规则（只修判「修」的 P2；PM 与 Praise PR 逐个核对代码和 QA 报告证据）是 2026-10-22 Jasper 转述的新规则，Praise 本人尚未确认。"
 
 def record(argv):
-    """p2.py record <报告PR> <问题> <修|不修|结案> <理由> <证据路径...> --by "PM+Praise PR" [--status 规则状态]
+    """p2.py record <报告PR> <问题> <修|不修|结案> <理由> <证据路径...> [--fp 指纹] --by "PM+Praise PR" [--status 规则状态]
     PM 与 Praise PR 会签后才用：追加一行到 p2-rulings.md（日期、报告 PR、问题、裁决、理由、证据、会签、规则状态）。
     模型提议（cron）永不调用这里。"""
-    by, status = "PM+Praise PR", "Jasper 已裁"
+    by, status, fp = "PM+Praise PR", "Jasper 已裁", None
+    if "--fp" in argv: i = argv.index("--fp"); fp = argv[i + 1]; argv = argv[:i] + argv[i + 2:]
     if "--by" in argv: i = argv.index("--by"); by = argv[i + 1]; argv = argv[:i] + argv[i + 2:]
     if "--status" in argv: i = argv.index("--status"); status = argv[i + 1]; argv = argv[:i] + argv[i + 2:]
     if len(argv) < 5 or argv[2] not in VERDICTS: sys.exit("usage: p2.py record <PR> <问题> <修|不修|结案> <理由> <证据路径...> [--by 会签人] [--status 规则状态]")
     pr, title, verdict, reason, ev = int(argv[0].lstrip("#")), argv[1], argv[2], argv[3], argv[4:]
+    if fp is not None:
+        if not FP_CELL.fullmatch(fp) or fp != bare_fp(fp) and fp != f"{bare_fp(fp)}-pr{pr}": sys.exit(f"--fp 不是 #{pr} 的指纹：{fp}")
+        fp = f"{bare_fp(fp)}-pr{pr}"
     for e in ev:
         if not os.path.exists(e.split(":")[0]) and not e.startswith(("http", "#")): sys.exit(f"证据路径不存在：{e}")
     clean = lambda x: x.replace("|", "/").replace("\n", " ")
@@ -97,7 +102,7 @@ def record(argv):
     if "| 证据 |" not in txt:
         txt = txt.replace("| 日期 | 报告 PR | 问题 | 裁决 | 理由 |\n|---|---|---|---|---|", "| 日期 | 报告 PR | 问题 | 裁决 | 理由 | 证据 | 会签 | 规则状态 |\n|---|---|---|---|---|---|---|---|")
     if not txt.endswith("\n"): txt += "\n"
-    txt += f"| {dt.datetime.now(CST).date().isoformat()} | #{pr} | {clean(title)} | {verdict} | {clean(reason)} | {'<br>'.join(map(clean, ev))} | {clean(by)} | {clean(status)} |\n"
+    txt += f"| {dt.datetime.now(CST).date().isoformat()} | #{pr} | {fp + ' | ' if fp else ''}{clean(title)} | {verdict} | {clean(reason)} | {'<br>'.join(map(clean, ev))} | {clean(by)} | {clean(status)} |\n"
     if os.environ.get("P2_DRY"): print(txt); return
     if os.path.exists(RULINGS):
         b = RULINGS + ".bak-" + dt.datetime.now(CST).strftime("%Y%m%d-%H%M%S"); n, i = b, 1

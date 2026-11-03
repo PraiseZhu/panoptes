@@ -16,7 +16,7 @@
 """
 import sys, json, re, os
 from lib import *
-from finding_policy import author_findings, pending_items
+from finding_policy import author_findings, pending_items, ruling_keys
 
 NOTES = "/workspace/praise-pr/notes"
 RULINGS = "/workspace/fleet-standards/p2-rulings.md"
@@ -34,15 +34,20 @@ def all_versions(n):
     return out
 
 def ruled(verdict):
-    """p2-rulings.md rows: | 日期 | 报告 PR | 问题 | 裁决 | 理由 | ... -> set of (pr, 问题前缀)"""
-    s = set()
-    if not os.path.exists(RULINGS): return s
-    for line in open(RULINGS):
-        c = [x.strip() for x in line.strip().strip("|").split("|")]
-        if len(c) >= 4 and re.fullmatch(r"#?\d+", c[1] or ""):
-            v = "不修" if "不修" in c[3] else ("修" if c[3] in ("修", "已修") or c[3].startswith("结案") else c[3])  # 「产品代码不修」→不修，「已修」「结案…」→修
-            if v == verdict: s.add(int(c[1].lstrip("#")))
-    return s
+    """p2-rulings.md rows whose verdict maps to `verdict` -> PR (row without 指纹) / (PR, fingerprint) (row with one; finding_policy.ruling_keys)"""
+    if not os.path.exists(RULINGS): return set()
+    v = lambda r: "不修" if "不修" in r else ("修" if r in ("修", "已修") or r.startswith("结案") else r)  # 「产品代码不修」→不修，「已修」「结案…」→修
+    return ruling_keys(open(RULINGS).read(), lambda r: v(r) == verdict)
+
+def p2_pr_rulings(p2fp, fix, nofix):
+    """(修 PRs, 不修 PRs). A row without 指纹 covers its PR (as before). Fingerprint rows cover a PR only when they sign every
+    current P2 of it ({PR: {fingerprint}}): all 不修 -> 不修; all signed, some 修 -> 修; one unsigned P2 left -> still 未裁决 / counted."""
+    fx, nf = {k for k in fix if isinstance(k, int)}, {k for k in nofix if isinstance(k, int)}
+    for n, fps in p2fp.items():
+        keys = {(n, f) for f in fps}
+        if keys and keys <= nofix: nf.add(n)
+        elif keys and keys <= fix | nofix: fx.add(n)
+    return fx, nf
 
 def daily_text(day):
     """日报原文。10-24 bug：Pi 线接管后 report/sent/<日>/ 不再产生，只读它 → 文本为空 → 「日报合并 None 个」、P1/P0 全空。"""
@@ -89,7 +94,7 @@ def main():
     L += [f"## 1. 合并 {N} 个", "- " + " ".join(f"#{n}" for n in sorted(nums)), f"- mergedBy：{by}", ""]
 
     # ---------- G1 + G5 + findings
-    g1 = 0; g1bad = []; g5 = 0; g5bad = []; nrep = 0; p01 = {}; p2s = []; manual = []; npend = 0
+    g1 = 0; g1bad = []; g5 = 0; g5bad = []; nrep = 0; p01 = {}; p2s = []; p2fp = {}; manual = []; npend = 0
     for p in prs:
         n = p["number"]; m = parse_ts(p["mergedAt"]); vs = all_versions(n)
         ts = [v for v in vs if v["t"]]
@@ -106,7 +111,7 @@ def main():
                 if x.get("severity") in ("P0", "P1"): p01.setdefault(n, (x["severity"], x.get("title", ""), first["t"] if first else m))
         cpr = (cur or {}).get("pr") or {}
         for x in author_findings(cpr):
-            if x.get("severity") == "P2": p2s.append((n, x.get("title", "")))
+            if x.get("severity") == "P2": p2s.append((n, x.get("title", ""))); p2fp.setdefault(n, set()).add(x.get("fingerprint"))
         npend += len(pending_items(cpr))
         try:
             cr = gh(["api", f"repos/{REPO}/commits/{p['headRefOid']}/check-runs?per_page=100"])
@@ -149,7 +154,7 @@ def main():
         cands = sorted(glob.glob(f"{QA}/ledger/daily/*.json")); led_f = cands[-1] if cands else None
         if led_f: unv.append(f"台账 {day}.json 缺，用 {os.path.basename(led_f)}")
     led = json.load(open(led_f)) if led_f else {"rows": []}
-    fixset = ruled("修"); nofix = ruled("不修")
+    fixset, nofix = p2_pr_rulings(p2fp, ruled("修"), ruled("不修"))
     lrows = {}
     for f in sorted(glob.glob(f"{QA}/ledger/daily/*.json")):
         if os.path.basename(f)[:10] < day: continue
