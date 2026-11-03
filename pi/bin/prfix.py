@@ -1777,8 +1777,10 @@ def pick_qa(A, ctx, vs, now):
     mine = [v for v in vs if v["c"]["qa"] == A.qa and (not A.fp or v["c"]["fp"].startswith(A.fp))]
     if not mine:   # the operator may also force a P2 that is not ruled 修: look it up in the current report
         rep = (ctx["reports"].get(A.qa) or {}).get("cur")
-        xs = [x for x in (rep[1].get("findings") or [] if rep else []) if x.get("fingerprint") and x.get("severity") in ("P0", "P1", "P2")
-              and (not A.fp or x["fingerprint"].startswith(A.fp))]
+        # findings + pending_verification, as collect() (:581) and the report lookup (:1938) do; a pending item has only severity_if_confirmed
+        xs = [dict(x, severity=x.get("severity") or x.get("severity_if_confirmed"))
+              for x in ((rep[1].get("findings") or []) + (rep[1].get("pending_verification") or []) if rep else [])]
+        xs = [x for x in xs if x.get("fingerprint") and x["severity"] in ("P0", "P1", "P2") and (not A.fp or x["fingerprint"].startswith(A.fp))]
         nf = ctx.get("nofix") or frozenset()   # 11-04: a signed per-fingerprint no-fix row holds for --qa / pi-dispatch qa:N too
         ruled = [x for x in xs if (A.qa, x["fingerprint"]) in nf]
         x = next((x for x in xs if x not in ruled), None)
