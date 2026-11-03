@@ -41,6 +41,15 @@ class Policy(Switch):
         self.assertEqual(F.own_pr_ticket(p2(B), 1340, set(), True, nofix=nf), "P2")
         self.assertIsNone(F.own_pr_ticket(p2(B), 5, set(), True, nofix=nf))   # row without 指纹: whole PR, as before
 
+    def test_fp_row_exempts_a_p1_review_lead_but_pr_wide_row_does_not(self):
+        # 11-04: 1433:mq1-9be27e51 / 1456:mq1-7a5374 are pending P1 review leads; a PR-wide (P2) row never covered them,
+        # a signed fingerprint row now does -- only that finding, other P1 of the PR stay tickets.
+        nf = F.no_fix_rulings(ROWS)
+        p1 = lambda fp: {"fingerprint": fp, "severity_if_confirmed": "P1", "source": "code-review", "title": fp[-4:]}
+        self.assertIsNone(F.own_pr_ticket(p1(A), 1340, set(), True, nofix=nf, pending=True))
+        self.assertEqual(F.own_pr_ticket(p1(B), 1340, set(), True, nofix=nf, pending=True), "P1")
+        self.assertEqual(F.own_pr_ticket(p1(A), 5, set(), True, nofix=nf, pending=True), "P1")   # PR-wide row stays P2-only
+
     def test_switch_restores_whole_pr(self):
         self.switch_off()
         nf = F.no_fix_rulings(ROWS); self.assertEqual(nf, {5, 1340})
@@ -135,6 +144,15 @@ class BuildLedger(Switch):
 
     def test_switch_drops_the_whole_pr(self):
         self.switch_off(); self.assertEqual(self.keys(), [])
+
+    def test_p1_fp_row_drops_that_p1_but_pr_wide_row_does_not(self):
+        # 11-04 (JS ownTicket mirror of own_pr_ticket): fingerprint row exempts a P1 lead; a PR-wide row never exempts a P1.
+        p1 = lambda fp: {"fingerprint": fp, "severity_if_confirmed": "P1", "source": "code-review", "title": fp[-4:]}
+        json.dump({"generated_at": "2026-11-02T10:00:00Z", "prs": [{"number": 1340, "author": {"login": "PraiseZhu"}, "findings": [],
+                   "pending_verification": [p1(A), p1(B)]}]}, open(f"{self.qa}/reports/merged/PR-1340.json", "w"))
+        self.assertEqual(self.keys(), [f"{REPO}#1340:{B}"])
+        open(self.rul, "w").write("# P2 裁决记录\n\n" + HDR + "| 2026-11-03 | #1340 | 整 PR | 不修 | r |\n")
+        self.assertEqual(self.keys(), [f"{REPO}#1340:{A}", f"{REPO}#1340:{B}"])
 
 
 if __name__ == "__main__":

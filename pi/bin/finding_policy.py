@@ -110,6 +110,7 @@ def own_pr_ticket(x, n, fix2, unified=False, nofix=frozenset(), pending=False):
     if src == "qa-error": return None
     if src in ("coverage-gate", "own-tests"): return None   # 2026-10-26: coverage is info only (coverage_gate.blocking false) -> never a ticket / ledger row
     if src == "check" and x.get("status") not in (None, "introduced"): return None
+    if (n, x.get("fingerprint")) in nofix: return None   # 11-04: a signed per-fingerprint no-fix ruling (p2.py record --fp) exempts that finding at any level (P0/P1 review leads too)
     if sev == "P2":
         unconfirmed = pending or bool(x.get("pending_kind")) or str(x.get("verdict") or "").upper() == "PLAUSIBLE"
         if unconfirmed or n in nofix or (n, x.get("fingerprint")) in nofix: return None
