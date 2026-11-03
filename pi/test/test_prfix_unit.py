@@ -217,6 +217,32 @@ class TestClaims(unittest.TestCase):
         self.assertIn(f"1125:{B}", verdicts(ctx(reports=rep, fix2=set())), "no ruling at all: a confirmed P2 is a ticket")
         self.assertEqual(prfix.fix_rulings("| 10-23 | #1124 | x | 修 | y |\n| 10-23 | #948 | P2 | 已修 | z |\n| 10-23 | #434 | p | 产品代码不修 | w |"), {1124})
 
+    def test_qa_force_respects_fp_no_fix_ruling(self):
+        # 11-04 #1433: a fingerprint row (不修/误报) must stop `--qa N` (pi-dispatch qa:N) too, not only --next / Grok claims
+        with mock.patch.dict(os.environ, {"PI_STATE": "/nonexistent-pi-state"}): nf = prfix.no_fix_rulings(f"| 2026-11-04 | #1433 | {A}-pr1433 | e2e | 不修 | 误报 | x | y | z |")
+        f = dict(finding(A, "P1"), source="code-review", verification={"status": "confirmed"})
+        tk = {"status": "pr_action_written", "action_key": f"prfix:1433:{A}:a2", "gave_up_count": 0}
+        c = ctx(reports={1433: report(1433, "PraiseZhu", [f, finding(B, "P1")])}, nofix=nf,
+                tickets={f"1433:{A}": tk}, outbound={tk["action_key"]: "gave_up"})
+        vs = prfix.evaluate_all(c, NOW)
+        self.assertNotIn(f"1433:{A}", [v["key"] for v in vs])                          # --next / grokline queue
+        v, err = prfix.pick_qa(argparse.Namespace(qa=1433, fp=A[:12], supersedes=None), c, vs, NOW)
+        self.assertIsNone(v); self.assertEqual(err["status"], "stopped"); self.assertIn("不修", err["error"])
+        v, err = prfix.pick_qa(argparse.Namespace(qa=1433, fp=None, supersedes=None), c, vs, NOW)
+        self.assertIsNone(err); self.assertEqual(v["key"], f"1433:{B}")                  # the unruled finding still works
+
+    def test_qa_force_respects_ruling_on_pending_only_fp(self):
+        # 11-04 acceptance #193: in PR-1433.json the ruled fp is only in pending_verification (severity_if_confirmed P1)
+        with mock.patch.dict(os.environ, {"PI_STATE": "/nonexistent-pi-state"}):
+            nf = prfix.no_fix_rulings(f"| 2026-11-04 | #1433 | {A}-pr1433 | e2e | 不修 | 误报 | x | y | z |")
+        rep = report(1433, "PraiseZhu", [finding(B, "P3")])
+        rep["cur"][1]["pending_verification"] = [{"fingerprint": A, "severity_if_confirmed": "P1", "source": "code-review",
+                                                  "pending_kind": "review-unverified", "title": "e2e"}]
+        c = ctx(reports={1433: rep}, nofix=nf)
+        vs = prfix.evaluate_all(c, NOW)
+        v, err = prfix.pick_qa(argparse.Namespace(qa=1433, fp=A[:12], supersedes=None), c, vs, NOW)
+        self.assertIsNone(v); self.assertEqual(err["status"], "stopped"); self.assertEqual(err["fp"], A)
+
     def test_docs_finding_is_a_manual_order(self):
         rep = {1124: report(1124, "x", [finding(A, "P2", file="docs/ops/bff-deployment.md")])}
         v = verdicts(ctx(reports=rep, fix2={1124}))[f"1124:{A}"]
