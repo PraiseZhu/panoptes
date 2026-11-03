@@ -18,6 +18,7 @@ import sys, json, re, difflib, subprocess
 from lib import *
 import praise_notice as PN
 from finding_policy import author_findings, pending_items, effective_severity
+from handoff_action import handoff_issue_action   # shared with handoff.py plan / backfill: one key per finding
 
 OWNER = "PraiseZhu"; CAL = f"{PI_CODE}/conf/daily-calibrations.json"; SENT = f"{QA}/report/sent"
 GROUP_OF = lambda day: f"{SENT}/{day}/group-content.txt"
@@ -227,26 +228,6 @@ def send_own(day, keys, run=subprocess.run):
     try:
         r = run(cmd, timeout=900); log(f"outbound (own keys {len(keys)}) rc={r.returncode}"); return r.returncode
     except Exception as e: log(f"outbound (own keys) failed: {type(e).__name__} -> left to the */10 run"); return None
-
-def handoff_issue_action(day, i, f):
-    """gh.issue.create for one author problem (10-30): the body says what was found where, on which tested commit, under which
-    fingerprint, and gets (via handoff_key, appended by outbound) the mivo-qa-handoff marker that handoff.py / handoff-receipts.mjs match receipts against
-    (with the `handoff` label outbound adds). Unknown values are written as 未知, never guessed."""
-    n = i["n"]; fp = f.get("fingerprint") or ""; pfp = f.get("pr_fingerprint") or (f"{fp}-pr{n}" if fp else "")
-    loc = f.get("file") or "未知"
-    if f.get("file") and f.get("line") is not None: loc += f":{f['line']}"
-    sha = i.get("tested_sha") or i.get("merge_sha")
-    title = f.get("title") or f.get("test") or f"PR #{n} QA 交接"
-    body = "\n".join([
-        f"QA 日报（数据日 {day}）在 PR #{n} 上测出的问题，请处理：https://github.com/{REPO}/pull/{n}", "",
-        f"- 级别：{f.get('severity') or '未知'}",
-        f"- 问题：{title}",
-        f"- 位置：{loc}",
-        f"- 测试的合并提交：{sha or '未知'}",
-        f"- 指纹：{fp or '未知'}" + (f"（本 PR：{pfp}）" if pfp and pfp != fp else ""),
-        ])   # outbound appends the mivo-qa-handoff marker from handoff_key (comments in a body are stripped as draft marks)
-    return {"key": f"handoff:{n}:{pfp or fp}", "type": "gh.issue.create", "pr": n, "title": f"[{f.get('severity')}] {title}" if f.get("severity") else title,
-            "text": body, "labels": ["handoff"], "handoff_key": pfp}
 
 def handoff_files_actions(day, routes):
     """one gh.handoff.files per handoff repo for the report day (PM 10-30): outbound pushes what the 日报 staged under
