@@ -48,8 +48,12 @@ def main():
         L.append(f"| PM G1–G5 | out/pm/{day}.md | fleet-standards/pm-daily/{day}.md | " + "；".join(f"{k} Pi {ga.get(k,'-')} / Grok {gb.get(k,'-')}{'' if ga.get(k)==gb.get(k) else ' ≠'}" for k in ("G1","G2a","G2b","G3","G5")) + " |")
     else: L.append(f"| PM G1–G5 | {'有' if pp else '缺'} | {'有' if gp else '缺'} | 无法比较 |")
     # 运维复盘
+    # R13 (review-ops/bin/daily_review.py:22-24, 11-03): since 10-29 the formal review is $PI_STATE/out/ops/review-<day>.md (this
+    # file); review-ops/daily/<day>.md is only the legacy hand-written fallback, compared when one exists.
     po, go = rd(f"{BASE}/out/ops/review-{day}.md"), rd(f"/workspace/review-ops/daily/{day}.md")
-    if po and go:
+    if po and not go:
+        L.append(f"| 运维复盘 | out/ops/review-{day}.md | 同一份（R13：10-29 起正式版就是 out/ops/review-<日>.md，review-ops/daily/ 只是旧的人工兜底） | 正式版在，无独立 Grok 复盘可比 |")
+    elif po and go:
         pc = re.findall(r"→\s*(维持P1|降为P2|降为P3|误报)", po); gc = re.findall(r"校准为 (P\d|P\d 误报)", go)
         L.append(f"| 运维复盘 | out/ops/review-{day}.md | review-ops/daily/{day}.md | Pi 校准结论 {len(pc)} 条 {pc}；Grok 校准 {len(gc)} 条 {gc}（逐条人工对照） |")
     else: L.append(f"| 运维复盘 | {'有' if po else '缺'} | {'有' if go else '缺'} | 无法比较 |")
