@@ -209,4 +209,47 @@ class TestCorruptUsage(Grok):
         r = G().check(now=NOW)
         self.assertEqual((r["gate"], r["may_open"]), ("stop", False))
 
+BAD_USAGE = {   # every malformed grok-usage.json shape: today's entry (2026-10-23) or the whole file
+    "str_numbers": {"days": {"2026-10-23": {"baseline": "5", "samples": [["t", "6"]], "opened": 0, "done": 0, "trips": []}}},
+    "str_50": {"days": {"2026-10-23": {"baseline": 5.0, "samples": [["t", "50"]], "opened": 0, "done": 0, "trips": []}}},
+    "bool_true": {"days": {"2026-10-23": {"baseline": True, "samples": [["t", True]], "opened": 0, "done": 0, "trips": []}}},
+    "day_not_dict": {"days": {"2026-10-23": ["x"]}},
+    "bad_samples": {"days": {"2026-10-23": {"baseline": 5.0, "samples": [5.0, ["t"]], "opened": 0, "done": 0, "trips": []}}},
+    "samples_not_list": {"days": {"2026-10-23": {"baseline": 5.0, "samples": 7, "opened": 0, "done": 0, "trips": []}}},
+    "days_not_dict": {"days": [1, 2]},
+    "not_json": "{not json",
+}
+
+class TestMalformedUsage(Grok):
+    def write_usage(self, v):
+        os.makedirs(prfix.OUT, exist_ok=True)
+        with open(G().usage_path(), "w") as f: f.write(v if isinstance(v, str) else json.dumps(v))
+    def test_valid_pct_types(self):
+        v = G().valid_pct
+        for bad in ("50", True, False, None, [5], float("nan"), float("inf"), -5, 101): self.assertFalse(v(bad), bad)
+        for ok in (0, 50, 50.5, 100): self.assertTrue(v(ok), ok)
+        self.assertEqual(G().gate("5", "6")[0], "hold"); self.assertEqual(G().gate(True, 5)[0], "hold")
+    def test_sweep_returns_tickets_switch_off_and_on(self):
+        for name, bad in BAD_USAGE.items():
+            for sw in (False, True):
+                with self.subTest(file=name, switch=sw):
+                    self.switch(sw); self.write_usage(bad)
+                    self.put(tickets(**{f"1178:{A}": self.grok_owned(1178, A), f"1179:{C}": self.grok_owned(1179, C)}))
+                    back = G().sweep(now=NOW)
+                    self.assertEqual(sorted(k for k, _ in back), [f"1178:{A}", f"1179:{C}"])
+                    self.assertEqual((self.tk(f"1178:{A}").get("owner"), self.tk(f"1179:{C}").get("owner")), (None, None))
+                    G().sweep(now=NOW.replace(hour=23, minute=59))   # the day line path never crashes either
+    def test_switch_on_gate_check_claim_fail_closed(self):
+        for name, bad in BAD_USAGE.items():
+            with self.subTest(file=name):
+                self.switch(); self.write_usage(bad); self.put(tickets(**self.both_pi_slots()))
+                g = G()
+                r = g.check(now=NOW)
+                self.assertIn(r["gate"], ("stop", "hold")); self.assertFalse(r["may_open"])
+                r = g.claim(5.0, now=NOW)
+                self.assertEqual(r["status"], "no"); self.assertIn(r["gate"], ("stop", "hold"))
+                self.assertNotIn("owner", self.tk(f"1179:{C}"))
+                d = bad.get("days") if isinstance(bad, dict) else None
+                if isinstance(d, dict): self.assertIn(g.day_gate(d.get("2026-10-23"))[0], ("stop", "hold"))
+
 if __name__ == "__main__": unittest.main()
