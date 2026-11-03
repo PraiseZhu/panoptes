@@ -3,14 +3,15 @@
 // 最早 = 组里是其他所有提交祖先的那个；分叉找不到时取 tested_at 最早的。isAncestor(a, b) 由调用方给（git merge-base --is-ancestor）。
 import { spawnSync } from 'node:child_process'
 
-// 旧报告没有 test_script_failure 字段：runner_error 且 unverified 同样算（新报告里两者一致）
-// 新报告在 runner_error+unverified 但产品步骤已跑时显式写 test_script_failure: false，不再回落
-export const isTestScriptFailure = (c) => Boolean(c?.test_script_failure ?? (c?.failure_type === 'runner_error' && c?.status === 'unverified'))
+// 新报告直接读 test_script_failure（产品步骤已跑时显式写 false）；旧报告没有这个字段：走同一个 isScriptFailure，
+// 日志用 evidence.log_tail，改动文件只有报告里带了才用（没有就只按相对 / 仓库内路径判断）
+export const isTestScriptFailure = (c, changedFiles = []) => Boolean(c?.test_script_failure ??
+  isScriptFailure({ type: c?.failure_type, status: c?.status, test: c?.test, result: { tail: c?.evidence?.log_tail }, changedFiles }))
 
 export function groupTestScriptFailures(reports, { isAncestor = () => false } = {}) {
   const groups = new Map()
   for (const r of reports ?? []) for (const p of r?.prs ?? []) for (const c of p.failed_checks ?? []) {
-    if (!isTestScriptFailure(c) || !c.evidence?.tested_sha) continue
+    if (!isTestScriptFailure(c, changedFileNames(p)) || !c.evidence?.tested_sha) continue
     const g = groups.get(c.fingerprint) ?? { fingerprint: c.fingerprint, check_id: c.check_id, test: c.test ?? null, seen: [] }
     if (!g.seen.some((x) => x.pr === p.number && x.sha === c.evidence.tested_sha)) g.seen.push({ pr: p.number, sha: c.evidence.tested_sha, tested_at: p.tested_at ?? null })
     groups.set(c.fingerprint, g)
@@ -28,7 +29,6 @@ export const gitIsAncestor = (gitDir) => (a, b) => spawnSync('git', ['-C', gitDi
 // - browser-product-roundtrip「roundtrip did not complete」：产品旅程已经跑了（#1384），是产品失败
 // - 缺模块（Cannot find module / ERR_MODULE_NOT_FOUND / Failed to load）：缺的是被测代码（相对路径、仓库内绝对路径）
 //   或 PR diff 动过的文件 → PR 删 / 改名了被测模块，是产品失败；只有 node_modules / 裸包名且 diff 没碰才算脚本问题
-export const ROUNDTRIP_REASON = 'product persist/export roundtrip did not complete'
 const MISSING_MODULE = /(?:Cannot find (?:module|package)|Failed to load(?: url)?)\s+['"]?([^'"\s]+)['"]?/g
 
 export function missingModules(tail) {
@@ -45,7 +45,11 @@ const isProductModule = (spec, changedFiles) => {
 
 export function isScriptFailure({ type, status, result, test, changedFiles = [] }) {
   if (type !== 'runner_error' || status !== 'unverified') return false
-  if ((result?.checkReasons ?? []).some((c) => c.id === test && c.reason === ROUNDTRIP_REASON)) return false
+  // browser-product-roundtrip 只有「roundtrip did not complete」这一种 runner_error（runner.mjs checkFailureType），按检查名排除，旧报告没有 check_reasons 也适用
+  if (test === 'browser-product-roundtrip') return false
   if (missingModules(result?.tail).some((m) => isProductModule(m, changedFiles))) return false
   return true
 }
+
+// PR 报告里的改动文件名（报告带 files[] 时）；没有就空
+const changedFileNames = (p) => (Array.isArray(p?.files) ? p.files : []).map((f) => (typeof f === 'string' ? f : f?.filename)).filter(Boolean)

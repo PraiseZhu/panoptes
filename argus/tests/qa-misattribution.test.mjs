@@ -180,9 +180,19 @@ test('3d. missing module that the PR diff touched (deleted / renamed) → produc
   assert.equal(untouched.failed_checks.find((x) => x.check_id === 'unit').test_script_failure, true, 'same bare spec, diff did not touch it → test-script failure')
 })
 
+test('3e. legacy report entry (no test_script_failure field): roundtrip and in-repo missing module are not grouped; harness-only still is', async () => {
+  const { groupTestScriptFailures, isTestScriptFailure } = await import('../src/test-script-failures.mjs')
+  const legacy = { ...check1384, test_script_failure: undefined, evidence: { ...check1384.evidence, log_tail: 'product persist/export roundtrip did not complete' } }
+  assert.equal(isTestScriptFailure(legacy), false)
+  const mod = { ...legacy, fingerprint: 'mq1-mod', test: 'widget renders', evidence: { ...legacy.evidence, log_tail: "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '../src/widget.mjs' imported from /repo/tests/w.test.mjs" } }
+  const harness = { ...legacy, fingerprint: 'mq1-harness', test: 'candidate-snapshot-stable', evidence: { ...legacy.evidence, log_tail: '' } }
+  const groups = groupTestScriptFailures([{ prs: [{ number: 1384, tested_at: '2026-10-30', failed_checks: [legacy, mod, harness] }] }])
+  assert.deepEqual(groups.map((g) => g.test), ['candidate-snapshot-stable'])
+})
+
 test('3. groupTestScriptFailures: one group per fingerprint, first_seen = the ancestor commit (old reports without the flag count too)', async () => {
   const { groupTestScriptFailures } = await import('../src/test-script-failures.mjs')
-  const legacy = { ...check1384, test_script_failure: undefined }
+  const legacy = { ...check1384, test: 'candidate-snapshot-stable', test_script_failure: undefined }
   const pr = (number, sha, tested_at, c = legacy) => ({ number, tested_at, failed_checks: [{ ...c, evidence: { ...c.evidence, tested_sha: sha } }] })
   const order = ['a1384', 'b1433', 'c1456']   // a1384 是另外两个的祖先
   const isAncestor = (x, y) => order.indexOf(x) <= order.indexOf(y)
