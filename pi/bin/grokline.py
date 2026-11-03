@@ -7,7 +7,7 @@ Switch: PI_STATE/takeover/prfix-grok-overflow (present = on, re-read on every ca
 Usage gate (pure: gate()): weekly % from CheckSubscriptionUsage, written here by the bot (--claim/--record/--finish --pct).
   baseline = first record of the Beijing day (lowered if a later record is smaller, e.g. the weekly reset).
   rise >= 10 -> stop: every Grok ticket goes back to Pi now; rise >= 8 or week >= 70 -> hold: no new ticket, running ones finish.
-When (may_open()): switch on, gate open, and either both Pi slots busy with Pi-line todo still queued, or a ticket Pi handed
+When (may_open()): switch on, gate open, and either both Pi slots busy (or Pi blocked by memory admission) with Pi-line todo still queued, or a ticket Pi handed
   over (emergency-killed > 3 times today, prfix sets grok_wanted).
 Claim: --claim --pct P takes the first todo in Pi's own priority order under tickets.json's flock: owner=grok, pid=null,
   host=cloud, status=running, usage_start; refused while Grok already holds GROK_CAP (2) owner=grok tickets. Pi never takes owner=grok. --progress KEY keeps it; 90 min without -> back to Pi.
@@ -25,6 +25,7 @@ import prfix
 HOLD_RISE, STOP_RISE, WEEK_CAP = 8.0, 10.0, 70.0
 STALE_MIN = 90
 PI_SLOTS = 2                     # = prwatch.MAX_FIXES
+PRWATCH_STATE = f"{BASE}/out/prwatch/state.json"   # prwatch's own state (read-only here)
 GROK_CAP = 2                     # DESIGN §3: Grok holds at most 2 tickets at once
 GROK_AUTHORS = ("PraiseZhu", "kirozeng")   # 11-03: Grok claims only tickets whose source PR is by one of these
 
@@ -51,7 +52,7 @@ def gate(baseline, cur):
     return "open", f"今天涨 {rise} 点，每周 {cur}%"
 
 
-def may_open(switch, g, pi_running, pi_todo, wanted, held=0):
+def may_open(switch, g, pi_running, pi_todo, wanted, held=0, pi_blocked=False):
     """-> (bool, reason). g = gate()[0]; pi_running = live Pi-line fixes; pi_todo = todo tickets nobody runs; wanted = tickets Pi
     handed over today; held = tickets Grok holds now (grok_held)."""
     if not switch: return False, "开关关着（takeover/prfix-grok-overflow 不在）"
@@ -59,6 +60,7 @@ def may_open(switch, g, pi_running, pi_todo, wanted, held=0):
     if held >= GROK_CAP: return False, f"Grok 已占 {held}/{GROK_CAP} 张"
     if wanted: return True, f"{wanted} 张单 Pi 今天被杀超过 {prfix.KILLS_TO_GROK} 次，交给 Grok"
     if pi_todo and pi_running >= PI_SLOTS: return True, f"Pi 线 {pi_running} 个位置都满，还有 {pi_todo} 张待修"
+    if pi_todo and pi_blocked: return True, f"Pi 线被内存准入挡住（{pi_running}/{PI_SLOTS} 在跑），还有 {pi_todo} 张待修"
     return False, ("没有积压" if not pi_todo else f"Pi 线只占了 {pi_running}/{PI_SLOTS} 个位置")
 
 
@@ -154,6 +156,13 @@ def pi_running(tks):
     return sum(1 for t in tks.values() if t.get("status") == "running" and t.get("owner") != "grok" and prfix.pid_alive(t.get("pid")))
 
 
+def pi_mem_blocked(path=None):
+    """prwatch's last fix dispatch is waiting on memory admission (state.json fix_wait = 'headroom N MB < N MB'); Grok runs off-box"""
+    try:
+        with open(path or PRWATCH_STATE) as f: return str(json.load(f).get("fix_wait") or "").startswith("headroom")
+    except (OSError, ValueError, AttributeError): return False
+
+
 def grok_held(tks):
     """tickets Grok holds now: owner=grok (finish/release/sweep clear owner, so this is exactly the live claims)"""
     return sum(1 for t in tks.values() if t.get("owner") == "grok")
@@ -189,7 +198,7 @@ def check(now=None):
     else: d = doc["days"].get(now.date().isoformat()) or {}; g, gwhy = day_gate(d)
     tks = prfix.load_tickets().get("tickets", {})
     todo, wanted = queue(now)
-    ok, why = may_open(on(), g, pi_running(tks), len(todo), len(wanted), grok_held(tks))
+    ok, why = may_open(on(), g, pi_running(tks), len(todo), len(wanted), grok_held(tks), pi_mem_blocked())
     return {"switch": on(), "gate": g, "gate_reason": gwhy, "may_open": ok, "reason": why, "pi_running": pi_running(tks),
             "pi_todo": len(todo), "handed_over": wanted, "grok": sorted(k for k, t in tks.items() if t.get("owner") == "grok"),
             "today": d, "pm_report_due": bool(d.get("pm_report_due"))}
@@ -206,7 +215,7 @@ def claim(pct, now=None):
     g, gwhy = day_gate(d)
     todo, wanted = queue(now)
     tks0 = prfix.load_tickets().get("tickets", {})
-    ok, why = may_open(on(), g, pi_running(tks0), len(todo), len(wanted), grok_held(tks0))
+    ok, why = may_open(on(), g, pi_running(tks0), len(todo), len(wanted), grok_held(tks0), pi_mem_blocked())
     if not ok: return {"status": "no", "reason": why, "gate": g, "gate_reason": gwhy}
     with prfix.tickets_locked() as T:   # re-read under the flock: Pi may have taken a ticket since queue()
         tks = T["tickets"]; key = None
@@ -275,7 +284,7 @@ def gate_dry_run(now=None):
         out.update(switch=None, gate="hold", gate_reason=f"用量记录读不了，按 hold：{str(e)[:120]}"); g = "hold"
     try:
         tks = prfix.load_tickets().get("tickets", {}); todo, wanted = queue(now)
-        ok, why = may_open(bool(out["switch"]), g, pi_running(tks), len(todo), len(wanted), grok_held(tks))
+        ok, why = may_open(bool(out["switch"]), g, pi_running(tks), len(todo), len(wanted), grok_held(tks), pi_mem_blocked())
         out.update(pi_running=pi_running(tks), qualifying_todo=todo, handed_over=wanted, authors=list(GROK_AUTHORS),
                    grok=sorted(k for k, t in tks.items() if t.get("owner") == "grok"), may_open=ok, reason=why,
                    would_claim=(wanted + todo)[0] if ok and (wanted + todo) else None)

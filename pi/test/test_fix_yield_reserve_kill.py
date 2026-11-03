@@ -43,17 +43,27 @@ class T(unittest.TestCase):
 
 class Reserve(T):
     def test_merge_test_peak_reserved_with_nothing_running(self):
-        self.assertEqual(prwatch.headroom_mb({}, mem=11000), 11000 - prwatch.PANOPTES_PEAK_MB)
+        self.assertEqual(prwatch.headroom_mb({}, mem=11000), 11000 - min(prwatch.PANOPTES_PEAK_MB, prwatch.TEST_RESERVE_CAP_MB))
         touch(prwatch.TEST_RESERVE_OFF)                                              # rollback: the first fix needs no reserve
         self.assertEqual(prwatch.headroom_mb({}, mem=11000), 11000)
+
+    def test_first_fix_not_stacked_on_whole_test_peak(self):   # 11-03 idle: 8613 MB free never met 9030 + 8687 MB
+        st = {"peaks": {"panoptes": [6683, 5000, 4000], "fix": [735, 2604, 1800]}}
+        self.procs({}, 8613); self.assertIsNone(prwatch.admit_block({}, st)[0])
+        t = {10: (1, 300, PY)}                                               # once a fix runs, the whole test peak is reserved again
+        self.assertEqual(prwatch.headroom_mb(t, mem=20000, st=st), 20000 - (int(2604 * 1.3) - 300) - int(6683 * 1.3))
+
+    def test_learned_peak_ignores_one_outlier(self):           # 11-03 state.json: one fix 5765 among 735-2604
+        h = [735, 900, 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000, 2100, 2200, 2300, 2400, 2500, 2550, 2604, 5765]
+        self.assertEqual(prwatch.learned({"peaks": {"fix": h}}, "fix", 2560), int(2550 * 1.3))
 
     def test_running_test_keeps_its_growth_and_the_next_one_reserved(self):
         t = {50: (1, 1400, PAN)}
         self.assertEqual(prwatch.headroom_mb(t, mem=9700), 9700 - (prwatch.PANOPTES_PEAK_MB - 1400) - prwatch.PANOPTES_PEAK_MB)
 
-    def test_box_baseline_admits_exactly_one_fix(self):   # DESIGN.md §2.2: 12006 - 7662 = 4344 >= 1536 + 2805
-        self.procs({}, 12006); self.assertIsNone(prwatch.admit_block({}, ST)[0])
-        self.procs({}, 11900); self.assertIn("headroom", prwatch.admit_block({}, ST)[0])
+    def test_box_baseline_admits_exactly_one_fix(self):   # 11-03: first fix reserves min(7662, 3072): 7413 - 3072 = 4341 = 1536 + 2805
+        self.procs({}, 7413); self.assertIsNone(prwatch.admit_block({}, ST)[0])
+        self.procs({}, 7412); self.assertIn("headroom", prwatch.admit_block({}, ST)[0])
 
     def test_at_most_two_fixes_even_with_memory(self):
         t = {10: (1, 300, PY), 20: (1, 300, PY)}
