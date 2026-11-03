@@ -2,6 +2,9 @@
 """Mivo QA 日报 handoff duty (Grok line: handoff-routes.json, aj0928-handoff + handover-mivo). Files only; gh read-only.
 usage: handoff.py [scan]                  receipts scan (00:05/06:20/15:20/18:35); 15:20 adds overdue actions
        handoff.py plan <数据日> [--render-only] [--diff-sent]   issues the daily report WOULD open for that day
+       handoff.py backfill [--since <数据日>] [--pr N ...]   review list of handoff issues missed because the report came
+                                 after that day's daily run (writes out/handoff/backfill-<今天>.{md,json} only; never records
+                                 actions, never sends; off while $PI_STATE/handoff-backfill-off exists)
 Rules ported: route by author via handoff-routes.json (cc for lubinyu-lab -> aj0928); open one issue per finding
 (key = pr_fingerprint "<fp>-pr<N>") for the author problems of the unified severity (finding_policy.notifiable,
 new_notice=True: never 待核实 items, coverage-only, AI-test leads, P3, pre_existing, flaky/unverified, qa-error, PLAUSIBLE or
@@ -15,7 +18,8 @@ QA's own comments (PraiseZhu) never count. Answered too: a merged fix PR whose t
 without an answer) only for QA handoff issues: the mivo-qa-handoff marker and the handoff label."""
 import sys, glob
 from lib import *
-from finding_policy import notifiable
+from finding_policy import notifiable, no_fix_findings
+from handoff_action import handoff_issue_action
 ROUTES = "/workspace/panoptes/report/handoff-routes.json"
 # Author receipt -- one format since 2026-10-23, same rule as panoptes report/handoff-receipts.mjs parseReceiptDetail
 # (shared cases: test/receipt-cases.json = panoptes argus/tests/fixtures/receipt-cases.json). The receipt is the first
@@ -127,7 +131,7 @@ def known_keys(gh_ok=True):
                 if m: keys.setdefault(m.group(1), i["url"]); src.setdefault(m.group(1), f"gh:{rt['repo']}#{i['number']}")
     return keys, src, gh_issues
 
-def _plan_one(n, r, rt, keys, src, rows, pend, acts):
+def _plan_one(n, r, rt, keys, src, rows, pend, acts, day=None, login=None):
     pr = r["pr"]
     for x in pr.get("pending_verification") or []:
         pend.append((n, x.get("check_id") or x.get("fingerprint"), f"待核实（{x.get('kind_zh') or x.get('pending_kind')}），不开 issue"))
@@ -137,8 +141,9 @@ def _plan_one(n, r, rt, keys, src, rows, pend, acts):
         k = x.get("pr_fingerprint") or f"{x.get('fingerprint')}-pr{n}"
         st = f"已开 {keys[k]}（{src[k]}）" if k in keys else "would-open"
         rows.append((n, x["severity"], k, rt["repo"], st, x.get("title")))
-        if k not in keys: acts.append({"key": f"handoff:{n}:{x.get('fingerprint')}", "type": "gh.issue.create", "repo": rt["repo"], "pr": n,
-                                       "level": x["severity"], "title": f"[{x['severity']}] #{n} {x.get('title')}", "dedupe_against": "issues.json ∪ sent/*/created.tsv ∪ gh marker"})
+        if k not in keys:   # same action (key handoff:<PR>:<pr_fingerprint>, body, marker) as daily.py; before 11-03 the key was the bare fingerprint
+            acts.append({**handoff_issue_action(day, {"n": n, "tested_sha": pr.get("tested_sha"), "merge_sha": pr.get("merge_sha")}, x),
+                         "repo": rt["repo"], "route_author": login, "level": x["severity"], "dedupe_against": "issues.json ∪ sent/*/created.tsv ∪ gh marker"})
     for c in (pr.get("handoff") or {}).get("cases") or []:
         if c.get("qa_status") == "failed" and c.get("confirmed") is not True:
             pend.append((n, c.get("key") or f"handoff:{n}:{c.get('id')}", "作者用例自动测试没过、未确认 -> 待确认，不开 issue"))
@@ -158,7 +163,7 @@ def plan(day, ro, diff):
         if not rt or n in held: continue
         f, r = load_report(n)
         if not r or not r.get("pr"): continue
-        try: _plan_one(n, r, rt, keys, src, rows, pend, acts)
+        try: _plan_one(n, r, rt, keys, src, rows, pend, acts, day, login)
         except Exception as e:   # 一个 PR 的报告坏了只跳过它，记成待核实
             log(f"plan #{n} failed: {type(e).__name__}: {e}"); pend.append((n, "report-error", f"报告解析出错（{type(e).__name__}），不开 issue"))
     L = [f"# 交接 issue 计划 数据日 {day}（Pi line，只写文件）", "", "| PR | 级别 | key | 仓 | 状态 | 标题 |", "|---|---|---|---|---|---|"]
@@ -171,6 +176,97 @@ def plan(day, ro, diff):
         L += ["", "## 对比 Grok sent/created.tsv", f"- Grok 开了 {len(gk)}，Pi 计划 {len(pk)}；只在 Grok：{sorted(gk-pk) or '无'}；只在 Pi：{sorted(pk-gk) or '无'}"]
     out = f"{BASE}/out/handoff/plan-{day}{'.render' if ro else ''}.md"; write_atomic(out, "\n".join(L) + "\n")
     if not ro: record_actions("handoff", day, acts)
+
+# ---- backfill (2026-11-03, /workspace/pi-work/handoff-backfill/DESIGN.md): a report written after its data day's daily run
+# never got its handoff issues (daily.py only looks at one day once; #1340: report 10-29 13:54, daily 10-29 07:35).
+BACKFILL_OFF = lambda: f"{BASE}/handoff-backfill-off"
+P2_STATE = lambda: f"{BASE}/out/p2/state.json"
+RULINGS = "/workspace/fleet-standards/p2-rulings.md"
+
+def jload(p, d):
+    try: return json.load(open(p))
+    except (OSError, ValueError): return d
+
+def daily_run_time(day):
+    """When the daily report for data day `day` last ran -> (aware datetime, source) or (None, None).
+    out/daily/<day>.json mtime (kept from 10-29), else the outbound ledger time of mivo-daily-report:<day>."""
+    p = f"{BASE}/out/daily/{day}.json"
+    if os.path.exists(p): return dt.datetime.fromtimestamp(os.path.getmtime(p), CST), "out/daily mtime"
+    at = (jload(f"{BASE}/out/outbound/ledger.json", {}).get(f"mivo-daily-report:{day}") or {}).get("at")
+    return (parse_ts(at), "outbound ledger") if at else (None, None)
+
+def report_time(f, doc):
+    t = parse_ts(doc.get("generated_at")) if doc.get("generated_at") else None
+    return (t, "generated_at") if t else (dt.datetime.fromtimestamp(os.path.getmtime(f), CST), "文件 mtime（报告没有 generated_at）")
+
+def shadow_ruling(st, n, x):
+    """Pi's model proposal in out/p2/state.json (key = pr_fingerprint, else "<PR>:<title>", as p2.py writes it), or None."""
+    return st.get(x.get("pr_fingerprint") or "") or st.get(f"{n}:{x.get('title')}")
+
+def backfill(since=None, only=(), gh_ok=True):
+    """Review list only: which handoff issues the daily report would have opened for PRs whose report came after that day's
+    daily run (or whose day had no run, or which the daily listed as fault / health). Rulings per finding: a signed ruling
+    with the fingerprint, else an old PR-wide one, skips; a shadow proposal (out/p2/state.json) alone is 待人工确认, never
+    opened. Only PRs merged into main (or with no base recorded). Writes out/handoff/backfill-<today>.{md,json}; nothing else."""
+    if os.path.exists(BACKFILL_OFF()): log(f"backfill off ({BACKFILL_OFF()} exists)"); return None
+    rul = no_fix_findings(open(RULINGS).read() if os.path.exists(RULINGS) else "")
+    st = jload(P2_STATE(), {})
+    keys, src, gi = known_keys(gh_ok)
+    gh_failed = {rt["repo"] for rt in routes()} - set(gi)
+    rows, no_route = [], set()
+    for f in sorted(glob.glob(f"{RPT}/PR-*.json")):
+        m = re.search(r"PR-(\d+)\.json$", f)
+        if not m: continue
+        n = int(m.group(1))
+        if only and n not in only: continue
+        _, r = load_report(n)
+        pr = (r or {}).get("pr")
+        if not pr or not pr.get("merged_at"): continue
+        day = parse_ts(pr["merged_at"]).astimezone(CST).date().isoformat()
+        if since and day < since: continue
+        gen, gsrc = report_time(f, r["doc"]); ran, rsrc = daily_run_time(day)
+        meta = jload(f"{BASE}/out/daily/{day}.json", {}) or {}
+        sick = n in (meta.get("fault") or []) or n in {h.get("pr") for h in meta.get("health") or []}
+        if ran and gen <= ran and not sick: continue
+        when = f"报告 {gen.astimezone(CST).strftime('%m-%d %H:%M')}（{gsrc}）vs 日报 " + (f"{ran.astimezone(CST).strftime('%m-%d %H:%M')}（{rsrc}）" if ran else "无记录") + ("；日报列为 fault / health" if sick else "")
+        login = pr.get("author"); login = login.get("login") if isinstance(login, dict) else login
+        rt = route_for(login)
+        if not rt: no_route.add(n); continue
+        base = {"day": day, "pr": n, "repo": rt["repo"], "when": when}
+        if (pr.get("base_ref") or "main") != "main":
+            rows.append({**base, "level": "—", "key": "—", "loc": "—", "status": "out_of_scope(non-main)", "why": f"合入 {pr['base_ref']}，不是 main"}); continue
+        held = n in {c.get("pr") for c in meta.get("carry_over") or []} or str(n) in (jload(f"{PI_CODE}/conf/daily-calibrations.json", {}).get("by_day", {}).get(day, {}).get("hold") or {})
+        for x in pr.get("findings") or []:
+            if x.get("severity") not in ("P0", "P1", "P2"): continue
+            fp = x.get("fingerprint") or ""; pfp = x.get("pr_fingerprint") or f"{fp}-pr{n}"
+            loc = (x.get("file") or "未知") + (f":{x['line']}" if x.get("file") and x.get("line") is not None else "")
+            row = {**base, "level": x["severity"], "key": f"handoff:{n}:{pfp}", "loc": loc, "title": x.get("title")}
+            sh = shadow_ruling(st, n, x)
+            if held: row.update(status="carry_over", why="日报没发这个 PR（carry_over / hold）")
+            elif not notifiable(x, new_notice=True): row.update(status="不可通知", why="统一分级下不算作者的问题")
+            elif pfp in rul["by_fp"]: row.update(status=f"skipped({rul['by_fp'][pfp]})", why="p2-rulings.md 签字（按指纹）")
+            elif n in rul["pr_wide"]: row.update(status=f"skipped({rul['pr_wide'][n]})", why="p2-rulings.md 签字（legacy，按 PR）")
+            elif sh: row.update(status="待人工确认", why=f"只有影子裁决「{sh.get('ruling')}」（{sh.get('asked_at')}），要 PM 和 Praise PR 用 p2.py record 签字", asked_at=sh.get("asked_at"))
+            elif pfp in keys or (fp and fp in keys): k = pfp if pfp in keys else fp; row.update(status="已开", why=f"{keys[k]}（{src[k]}）")
+            elif rt["repo"] in gh_failed: row.update(status="未核实", why="gh 读取交接仓失败，不当作 would-open")
+            else:
+                row.update(status="would-open", why="报告晚于日报，没开过")
+                row["action"] = {**handoff_issue_action(day, {"n": n, "tested_sha": pr.get("tested_sha"), "merge_sha": pr.get("merge_sha")}, x),
+                                 "repo": rt["repo"], "route_author": login, "level": x["severity"]}
+            rows.append(row)
+    rows.sort(key=lambda x: (x["day"], x["pr"], x["key"]))
+    wait = [x for x in rows if x["status"] == "待人工确认"]
+    summary = {s: sum(1 for x in rows if x["status"] == s) for s in sorted({x["status"] for x in rows})}
+    L = ["# 交接 issue 补开审核清单（Pi line，只写文件，不开 issue）", "", f"范围：数据日 ≥ {since or '全部'}" + (f"，PR {sorted(only)}" if only else "") +
+         "；报告晚于该数据日日报（或那天没有日报记录、或日报列为 fault / health）的 PR，只算合入 main 的。", "",
+         "统计：" + ("，".join(f"{k} {v}" for k, v in summary.items()) or "无候选") + (f"；没有交接路由的 PR {len(no_route)} 个" if no_route else ""), ""]
+    if wait: L += [f"待人工确认 {len(wait)} 条，最早影子裁决 {min(str(x.get('asked_at')) for x in wait)}。", ""]
+    L += ["| 数据日 | PR | 级别 | key | 目标仓 | 位置 | 报告时间 vs 日报时间 | 状态 | 原因 |", "|---|---|---|---|---|---|---|---|---|"]
+    L += [f"| {x['day']} | #{x['pr']} | {x['level']} | {x['key']} | {x['repo']} | {x['loc']} | {x['when']} | {x['status']} | {x['why']} |" for x in rows]
+    out = f"{BASE}/out/handoff/backfill-{today()}"
+    write_atomic(out + ".md", "\n".join(L) + "\n")
+    write_atomic(out + ".json", json.dumps({"since": since, "prs": sorted(only), "summary": summary, "no_route": sorted(no_route), "rows": rows}, ensure_ascii=False, indent=1) + "\n")
+    return rows
 
 COVERAGE_RE = re.compile(r"覆盖率|coverage", re.I)
 
@@ -255,5 +351,8 @@ def overdue_text(rt, x):
 def main():
     a = [x for x in sys.argv[1:] if not x.startswith("--")]; fl = set(sys.argv[1:]) - set(a)
     if a and a[0] == "plan": plan(a[1] if len(a) > 1 else data_day([0]), "--render-only" in fl, "--diff-sent" in fl)
+    elif a and a[0] == "backfill":
+        v = sys.argv[2:]; since = v[v.index("--since") + 1] if "--since" in v else None
+        backfill(since, {int(v[i + 1]) for i, x in enumerate(v) if x == "--pr"})
     else: scan("--render-only" in fl)
 if __name__ == "__main__": main()

@@ -47,7 +47,7 @@ const base = `http://127.0.0.1:${server.address().port}`
 
 let browser
 try {
-  browser = await chromium.launch({ headless: true, args: ['--disable-gpu', '--disable-dev-shm-usage'] })
+  browser = await chromium.launch({ headless: true, args: ['--disable-gpu', '--disable-dev-shm-usage', ...String(process.env.CHROMIUM_FLAGS ?? '').split(' ').filter((f) => f === '--force-prefers-reduced-motion')] })
 } catch (err) { server.close(); check('pw-browser-launch', 'unavailable', `chromium failed to launch: ${String(err.message).split('\n')[0]}`); finish(2) }
 
 for (const page of pagesArg.split(',').filter(Boolean)) {

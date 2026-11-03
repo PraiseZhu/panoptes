@@ -24,12 +24,20 @@ or exit 76 from the memory gate) is relaunched after a short backoff (2 / 10 min
 state.json inflight {PR: {day, tries}} keeps it idempotent (never relaunched while running / queued, dropped once the
 report exists) and bounded (MAX_TRIES launches, then left to catch-up).
 
+Integration branches (11-03): every base except registry.skipBaseBranches (probe-*) is tested (pi/bin/basegate.py, the same rule
+as catch-up / watchdog / nightly). ls-remote watches main + integration/* + release/* (any head moving marks dirty); every
+POLL_S (10 min) the closed-PR list (per_page=100) is read even when nothing moved, so merges into feat/* or any other base are
+launched within 10 minutes. Main merges are launched before branch merges. Rollback: PANOPTES_MAIN_ONLY=1 or the flag file
+$PI_STATE/panoptes-main-only (re-read every tick) -> main only, as before.
+
 Gate: runs only when /workspace/fleet-mode is `pi` (the Grok on-merge routine owns `grok`).
 Alerts: none per tick. state.json carries last_check (heartbeat) and fail_streak; boxcheck/boxhealth alert on
 staleness or a fail streak >= 15, once per state change.
 --dry-run: print the decision, change nothing.
 """
 import datetime as dt, fcntl, json, os, subprocess, sys, time, urllib.request
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import basegate   # noqa: E402  one base-branch rule for mergewatch / watchdog / catch-up (11-03)
 
 REPO_URL = 'https://github.com/xindong/mivo-canvas-plugin'
 BASE = os.environ.get('PI_BASE') or os.environ.get('PI_STATE') or '/workspace/mivo-qa/pi'   # state root (lib.PI_STATE; no lib import here)
@@ -40,9 +48,12 @@ CATCHUP_LOCK = os.path.join(QA_HOME, 'argus-root', 'catch-up.lock')
 RUN_NIGHTLY = '/workspace/panoptes/run-nightly.sh'
 LAUNCH_LOG = os.path.join(QA_HOME, 'argus-root', 'logs', 'mergewatch-catch-up.log')
 REPORTS = os.path.join(QA_HOME, 'reports')
-API_PULLS = 'https://api.github.com/repos/xindong/mivo-canvas-plugin/pulls?state=closed&sort=updated&direction=desc&per_page=30'
+API_PULLS = 'https://api.github.com/repos/xindong/mivo-canvas-plugin/pulls?state=closed&sort=updated&direction=desc&per_page=100'   # 11-03: 30 -> 100 (busiest day 23 merges + PRs bumped by comments)
 DRY = '--dry-run' in sys.argv
 MAX_TRIES = 3   # same bound as catch-up (retries 3x); every launch counts, memory skips (exit 76) included
+POLL_S = 600   # 11-03: list closed PRs every 10 min even when no watched ref moved (merges into feat/* etc.)
+# refs whose head moving marks dirty at once (p95 <= 2 min); any other base is found by the 10-minute poll. PANOPTES_MAIN_ONLY -> main only
+WATCH_REFS = ('refs/heads/main', 'refs/heads/integration/*', 'refs/heads/release/*')
 BACKOFF_S = (120, 600)   # earliest retry after try 1 / try 2 launched: fast failures (exit 75, crash) don't burn 3 tries in 3 min
 
 
@@ -114,20 +125,32 @@ def fetch_pulls(tok):
 
 
 def fresh_merges(pulls, since_iso, reports=None):
-    """since_iso 之后合并、还没有 reports/merged/PR-N.json 的 PR：[(number, 上海合并日)]，旧的在前。"""
+    """since_iso 之后合并、目标分支要测（basegate.should_test：除 skipBaseBranches 外都测）、还没有 reports/merged/PR-N.json 的 PR：
+    [(number, 上海合并日)]，main 在前（11-03：集成分支扎堆时不挤 main），同类里旧的在前。"""
     reports = reports or REPORTS
     since = dt.datetime.fromisoformat(since_iso.replace('Z', '+00:00'))
     out = []
     for p in pulls or []:
         m = p.get('merged_at')
-        if not m or (p.get('base') or {}).get('ref', 'main') != 'main':
+        base = (p.get('base') or {}).get('ref', 'main')
+        if not m or not basegate.should_test(base):
             continue
         t = dt.datetime.fromisoformat(m.replace('Z', '+00:00'))
         if t <= since or os.path.exists(os.path.join(reports, 'merged', f"PR-{p['number']}.json")):
             continue
         day = t.astimezone(dt.timezone(dt.timedelta(hours=8))).strftime('%Y-%m-%d')
-        out.append((t, p['number'], day))
-    return [(n, d) for _, n, d in sorted(out)]
+        out.append((base != 'main', t, p['number'], day))
+    return [(n, d) for _, _, n, d in sorted(out)]
+
+
+def parse_ls_remote(text):
+    """git ls-remote 输出 -> {ref: sha}（只要 refs/heads/*）。"""
+    out = {}
+    for line in (text or '').splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1].startswith('refs/heads/'):
+            out[parts[1]] = parts[0]
+    return out
 
 
 def running_prs(proc='/proc'):
@@ -150,7 +173,7 @@ def running_prs(proc='/proc'):
 def requeue(inflight, busy, reports=None, t=None):
     """inflight {"N": {day, tries, next_at}} 里已结束但没报告、退避已到（next_at）的 PR → [(n, day)] 重排；有报告的删掉，tries 用完的交给 catch-up。原地改 inflight。"""
     reports, t, out = reports or REPORTS, time.time() if t is None else t, []
-    for k in sorted(inflight, key=int):
+    for k in sorted(inflight, key=lambda k: (inflight[k].get('base', 'main') != 'main', int(k))):   # main first (11-03)
         n, e = int(k), inflight[k]
         if os.path.exists(os.path.join(reports, 'merged', f'PR-{n}.json')) or e.get('tries', 0) >= MAX_TRIES:
             del inflight[k]
@@ -221,12 +244,12 @@ def main():
     inflight = st.setdefault('inflight', {})
     busy = running_prs()
 
-    def go(n, day):
+    def go(n, day, base='main'):
         cmd = priority_cmd(n, day)
         if DRY:
             return log('DRY: would launch ' + ' '.join(cmd))
         p = launch(cmd, sha or st.get('main_sha') or '')
-        e = inflight.setdefault(str(n), {'day': day, 'tries': 0})
+        e = inflight.setdefault(str(n), {'day': day, 'tries': 0, 'base': base})
         e['tries'] += 1
         e['next_at'] = time.time() + BACKOFF_S[min(e['tries'], len(BACKOFF_S)) - 1]
         busy.add(n)
@@ -238,11 +261,13 @@ def main():
 
     try:
         st.pop('auth', None)   # 10-26: praiseautomation App removed (belongs to another account); default git credentials only
-        out = subprocess.run(['git', 'ls-remote', REPO_URL, 'refs/heads/main'], capture_output=True, text=True,
+        refs = ['refs/heads/main'] if basegate.main_only() else list(WATCH_REFS)
+        out = subprocess.run(['git', 'ls-remote', REPO_URL, *refs], capture_output=True, text=True,
                              timeout=25, env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'})
-        sha = out.stdout.split()[0] if out.returncode == 0 and out.stdout.strip() else ''
+        heads = parse_ls_remote(out.stdout) if out.returncode == 0 else {}
+        sha = heads.get('refs/heads/main', '')
     except subprocess.TimeoutExpired:
-        sha = ''
+        sha, heads = '', {}
     if not sha:
         st['fail_streak'] = st.get('fail_streak', 0) + 1
         if st['fail_streak'] in (1, 15) or st['fail_streak'] % 60 == 0:
@@ -261,16 +286,31 @@ def main():
         st['main_sha'] = sha
         st['main_moved_at'] = now()
         st['dirty'] = True
+    # 11-03：integration/* release/* 的头动了也置 dirty（新出现的分支不算：开分支不是合并；分支被删也不算）
+    prev = st.get('ref_shas')
+    for ref, h in sorted(heads.items()):
+        if ref == 'refs/heads/main' or prev is None or ref not in prev or prev[ref] == h:
+            continue
+        log(f"ref moved {ref[len('refs/heads/'):]} {prev[ref][:8]} -> {h[:8]}")
+        st['dirty'] = True
+    st['ref_shas'] = heads
 
-    tok = gh_token() if st.get('dirty') else None
-    if st.get('dirty') and tok:
+    # 11-03：每 10 分钟不管有没有 ref 动都拉一次已关闭 PR，合进 feat/* 等任意分支的 PR 最晚 10 分钟内被发现
+    poll_due = time.time() - st.get('last_poll_ts', 0) >= POLL_S
+    tok = gh_token() if st.get('dirty') or poll_due else None
+    if (st.get('dirty') or poll_due) and tok:
+        st['last_poll_ts'] = time.time()
         # 合并即测插队：每个新合并的 PR 单独起一个 --priority 运行（不等 catch-up.lock / 顺序队列，槽位上限 1，见 scripts/qa-slot.sh）
         since = st.get('merged_seen') or (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=2)).isoformat()
         try:
             pulls = fetch_pulls(tok)
+            bases = {p.get('number'): (p.get('base') or {}).get('ref', 'main') for p in pulls or []}
             for n, day in fresh_merges(pulls, since):
                 if n not in busy and str(n) not in inflight:
-                    go(n, day)
+                    if bases.get(n) != 'main':
+                        log(f"branch merge #{n} into {bases.get(n)}")
+                        st['dirty'] = True   # catch-up fallback below covers it too if the priority run fails
+                    go(n, day, bases.get(n) or 'main')
             ms = [p['merged_at'] for p in pulls if p.get('merged_at')]
             if ms:
                 st['merged_seen'] = max([since] + [m.replace('Z', '+00:00') for m in ms])

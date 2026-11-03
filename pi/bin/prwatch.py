@@ -27,7 +27,7 @@
 Heartbeat: out/prwatch/state.json last_check (watchdog alerts when stale). Quiet log out/logs/prwatch-<day>.log (events only).
 --dry-run: print decisions, write/launch/send nothing.
 """
-import fcntl, hashlib, sys, time
+import fcntl, hashlib, math, signal, sys, time
 from lib import *
 import praise_notice as PN
 import ready_guard as RG
@@ -143,6 +143,7 @@ def inputs_sig():
 ADMIT_FREE_MB = 1536    # free memory left even if every running job, a merge test and the new fix all hit their peaks at once
                         # (the live guard stays: prfix waits for MemAvailable >= 3 GB before every heavy step, Praise 10-23)
 RUN_PEAK_MB = int(os.environ.get("PRFIX_RUN_PEAK_MB") or 2560)      # a fix's peak until 3 runs are observed (10-23 pre-push ~1-1.5 GB)
+TEST_RESERVE_CAP_MB = int(os.environ.get("PRWATCH_TEST_RESERVE_CAP_MB") or 3072)  # merge-test reserve while 0 fixes / tests run
 PANOPTES_PEAK_MB = int(os.environ.get("PANOPTES_PEAK_MB") or 6144)  # a panoptes run's peak until 3 runs are observed (10-23: ~6 GB)
 RO_FLAGS = (b"--list", b"--pending-json", b"--cleanup-stale", b"--dry-run")   # never claim a ticket: not fix runs
 # How many fixes run at once is decided by memory alone (Praise 10-24, no cap). The peaks are learned: every minute prwatch
@@ -150,6 +151,41 @@ RO_FLAGS = (b"--list", b"--pending-json", b"--cleanup-stale", b"--dry-run")   # 
 # the last 20 x 1.3 (minute samples miss short tsc / vitest spikes). A merge test may start any minute (cron :07, every merge),
 # so from the second fix on its peak is reserved even while none runs. On this 16 GB box that usually means one fix beside a
 # merge test (10-23 17:08 the box already dipped to 2.1 GB free); more memory -> more fixes.
+# 11-03 (concurrency plan §2.2): tests first. A whole merge-test peak is always reserved (even with no fix running), at most
+# MAX_FIXES fixes run at once, and no fix starts while a merge test is queued (live qa-slot req-* files).
+# Rollback: touch {BASE}/prwatch-test-reserve-off -> the rule above (reserve from the 2nd fix on, no cap, queue ignored).
+TEST_RESERVE_OFF = f"{BASE}/prwatch-test-reserve-off"
+MAX_FIXES = 2
+# 11-03 (§2.3): MemAvailable < EMERG_MB for EMERG_S seconds while a fix runs -> kill that fix's current step (not prfix.py itself);
+# prfix sees the mark, puts the ticket back as "waiting" (not a failed try). Rollback: touch {BASE}/prwatch-emerg-kill-off.
+EMERG_KILL_OFF = f"{BASE}/prwatch-emerg-kill-off"
+EMERG_MB, EMERG_S, EMERG_POLL_S, EMERG_GRACE_S = 2048, 30, 5, 10
+ARGUS = os.environ.get("PI_ARGUS_ROOT") or f"{QA}/argus-root"   # tests point it at a temp dir (conftest / isolation)
+
+
+def flag_on(off_file): return not os.path.exists(off_file)
+
+
+def emerg_mark(pid): return f"{BASE}/out/praise-pr/emerg-kill/{pid}"
+
+
+def slot_live(kind):
+    """live qa-slot files of a kind (scripts/qa-slot.sh: priority/req-<pid> = a run waiting for its slot, conc-<pid> = a concurrent
+    on-merge run); files of dead pids do not count"""
+    try: names = os.listdir(f"{ARGUS}/priority")
+    except OSError: return 0
+    k = f"{kind}-"
+    return sum(1 for n in names if n.startswith(k) and n[len(k):].isdigit() and pid_exists(int(n[len(k):])))
+
+
+def tests_queued(): return slot_live("req")
+def tests_running(): return slot_live("conc") > 0 or not lock_free(f"{ARGUS}/nightly.lock")
+
+
+def pid_exists(pid):
+    try: os.kill(pid, 0); return True
+    except ProcessLookupError: return False
+    except PermissionError: return True
 
 
 def proc_table():
@@ -190,6 +226,28 @@ def prfix_runs(t):
     return pys, [w for w in t if is_wrap(w) and not set(tree(t, w)) & set(pys)]
 
 
+OWN_PRFIX = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "prfix.py"))
+
+
+def own_prfix(t, p):
+    """True when pid p runs this checkout's prfix.py (realpath, relative paths resolved against /proc/p/cwd): emerg_kill must
+    never pick another copy of prfix.py on the shared box (other worktrees, other bots)."""
+    v = t[p][2].split(b"\0")
+    if len(v) < 2: return False
+    s = os.fsdecode(v[1])
+    if not os.path.isabs(s):
+        try: s = os.path.join(os.readlink(f"/proc/{p}/cwd"), s)
+        except OSError: return False
+    return os.path.realpath(s) == OWN_PRFIX
+
+
+def proc_start(p):
+    """start time (clock ticks since boot) of pid p, or None: with the cmdline, tells a reused pid from the original process"""
+    try:
+        with open(f"/proc/{p}/stat") as f: return f.read().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError): return None
+
+
 TASK_PEAK_MB = int(os.environ.get("PI_DISPATCH_PEAK_MB") or 1536)   # one pi_dispatch.py task (pi agent + whatever it runs; 10-27 guess)
 
 
@@ -208,7 +266,9 @@ def panoptes_procs(t):
 
 def learned(st, kind, default):
     h = ((st or {}).get("peaks") or {}).get(kind) or []
-    return max(default // 4, int(max(h[-20:]) * 1.3)) if len(h) >= 3 else default
+    if len(h) < 3: return default
+    w = sorted(h[-20:])   # p90 (nearest rank), not the max: one outlier (11-03: fix 5765 among 735-2604) must not lock 20 runs
+    return max(default // 4, int(w[math.ceil(0.9 * len(w)) - 1] * 1.3))
 
 
 def sample_peaks(st, t):
@@ -235,8 +295,58 @@ def headroom_mb(t, mem=None, st=None):
     grow += sum(max(0, TASK_PEAK_MB - sum(t[q][1] for q in tree(t, p))) for p in disp)
     pan = panoptes_procs(t)
     if pan: grow += max(0, pan_pk - sum(t[p][1] for p in pan))
-    elif pys or waiting or disp: grow += pan_pk
+    if flag_on(TEST_RESERVE_OFF):                    # always room for the next merge test, whatever runs now --
+        # but with nothing running the first fix is not stacked on a whole test peak (11-03: 9030 + 8687 MB > a 16 GB box)
+        grow += pan_pk if (pan or pys or waiting or disp) else min(pan_pk, TEST_RESERVE_CAP_MB)
+    elif not pan and (pys or waiting or disp): grow += pan_pk
     return (mem_mb() if mem is None else mem) - grow
+
+
+def admit_block(t, st):
+    """-> (why a new fix / revise may not start, or None; headroom MB)"""
+    room, need = headroom_mb(t, st=st), ADMIT_FREE_MB + learned(st, "fix", RUN_PEAK_MB)
+    if room < need: return f"headroom {room} MB < {need} MB", room
+    if flag_on(TEST_RESERVE_OFF):
+        pys, waiting = prfix_runs(t)
+        if len(pys) + len(waiting) >= MAX_FIXES: return f"{len(pys) + len(waiting)} fixes running (max {MAX_FIXES})", room
+        q = tests_queued()
+        if q: return f"{q} merge test(s) queued", room
+    return None, room
+
+
+def emerg_kill(st):
+    """MemAvailable < EMERG_MB for EMERG_S s while a fix runs -> SIGTERM (then SIGKILL after EMERG_GRACE_S) the current step of the
+    biggest fix: every child tree of its prfix.py, never prfix.py itself, after writing the mark prfix reads when the step returns."""
+    d = os.path.dirname(emerg_mark(0))
+    for n in (os.listdir(d) if os.path.isdir(d) else []):   # marks of prfix runs that ended before reading them
+        if not DRY and not (n.isdigit() and pid_exists(int(n))): os.remove(f"{d}/{n}")
+    if not flag_on(EMERG_KILL_OFF) or mem_mb() >= EMERG_MB or not (lambda t: [p for p in prfix_runs(t)[0] if own_prfix(t, p)])(proc_table()): return
+    t0 = time.time()
+    while time.time() - t0 < EMERG_S:
+        time.sleep(EMERG_POLL_S)
+        if mem_mb() >= EMERG_MB: return
+    t = proc_table(); pys = [p for p in prfix_runs(t)[0] if own_prfix(t, p)]
+    if not pys: return
+    p = max(pys, key=lambda x: sum(t[q][1] for q in tree(t, x)))
+    victims = [q for k in t if t[k][0] == p for q in tree(t, k)]
+    if not victims: return
+    mem = mem_mb()
+    if DRY: qlog(f"DRY: would kill the current step of prfix {p} ({len(victims)} procs, MemAvailable {mem} MB)"); return
+    os.makedirs(os.path.dirname(emerg_mark(p)), exist_ok=True)
+    with open(emerg_mark(p), "w") as f: json.dump({"at": now_cst().isoformat(timespec="seconds"), "mem_mb": mem, "pids": victims}, f)
+    ident = {q: (t[q][2], proc_start(q)) for q in victims}
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        if sig == signal.SIGKILL:   # re-read: only pids still in p's step with the same cmdline + start time (no reused pid)
+            t2 = proc_table()
+            now = set(q for k in t2 if t2[k][0] == p for q in tree(t2, k)) if p in t2 and own_prfix(t2, p) else set()
+            victims = [q for q in victims if q in now and (t2[q][2], proc_start(q)) == ident[q]]
+        for q in victims:
+            try: os.kill(q, sig)
+            except OSError: pass
+        if sig == signal.SIGTERM: time.sleep(EMERG_GRACE_S)
+    st.setdefault("emerg_kills", []).append({"at": now_cst().isoformat(timespec="seconds"), "prfix": p, "mem_mb": mem, "procs": len(victims)})
+    st["emerg_kills"] = st["emerg_kills"][-50:]
+    qlog(f"MemAvailable {mem} MB < {EMERG_MB} MB for {EMERG_S}s -> killed the current step of prfix {p} ({len(victims)} procs); ticket goes back to the queue")
 
 
 def kick_finished(st):
@@ -298,10 +408,11 @@ def dispatch_fix(st):
                     for x in jload(f"{BASE}/out/praise-pr/tickets.json", {}).get("tickets", {}).values())
     due = sig != st.get("fix_inputs") or time.time() - st.get("fix_checked_at", 0) > 900 or st.get("fix_more") or retry_due
     if not due: return
-    room, need = headroom_mb(t, st=st), ADMIT_FREE_MB + learned(st, "fix", RUN_PEAK_MB)
-    if room < need:                                               # stay due; re-check next minute
-        if st.get("fix_wait") != len(pys): qlog(f"fix dispatch waits for memory: headroom {room} MB < {need} MB, {len(pys)} fixing")
-        st["fix_wait"] = len(pys)
+    why, room = admit_block(t, st)
+    if why:                                                       # stay due; re-check next minute
+        kind = re.sub(r"\d+", "N", why)                          # log once per kind of wait, not every minute's numbers
+        if st.get("fix_wait") != kind: qlog(f"fix dispatch waits: {why}, {len(pys)} fixing")
+        st["fix_wait"] = kind
         if st.get("fix_pending"): st.setdefault("fix_wait_since", time.time())   # work known to wait (watchdog: > 3 h -> tell him)
         return
     st.pop("fix_wait", None)
@@ -332,6 +443,9 @@ UB_PER_DAY = 6          # update-branch per PR per day (10-24: the old cap of 2 
 MAX_REVISIONS = 2       # = prfix.MAX_REVISIONS
 MAX_MERGES = 3          # = prfix.MAX_MERGES
 PILINE = "<!-- pi-line fixpr:"
+def is_bot_fixpr(p):
+    """a draft fix PR the Pi line (or the Grok line via grokline.pr_meta) opened: pi-line marker + qa-fix/* branch"""
+    return PILINE in (p.get("body") or "") and (p.get("headRefName") or "").startswith("qa-fix/")
 
 
 def pid_alive(pid):
@@ -348,8 +462,8 @@ def launch_revise(st, n, head):
     t = proc_table()
     pys, waiting = prfix_runs(t)   # a run.sh wrapper still waiting for memory counts too (review 10-24: wrappers stacked up)
     if any(b"--revise" in t[q][2] and str(n).encode() in t[q][2].split(b"\0") for q in pys + waiting): return "busy"
-    room, need = headroom_mb(t, st=st), ADMIT_FREE_MB + learned(st, "fix", RUN_PEAK_MB)
-    if room < need: return "wait"
+    why, room = admit_block(t, st)
+    if why: return "wait"
     if DRY: qlog(f"DRY: would launch prfix --revise {n} (head {head[:9]})"); return "launched"
     os.makedirs(f"{BASE}/out/logs", exist_ok=True)
     with open(f"{BASE}/out/logs/prwatch-launches.log", "a") as lf:
@@ -421,14 +535,15 @@ def revise_or_wait(st, done, n, head, tag, seen, rv, cnt_key, cap, what, red=())
     if rv.get("status") == "needs_praise" and rv.get("head") == head: return True
     if rv.get("status") == "parked" and (rv.get("next_retry_at") or "") > now_cst().isoformat(): return True
     dead = rv.get("status") == "running" and not pid_alive(rv.get("pid"))   # prfix --revise records it as a transient failure when it starts
-    if rv.get("status") == "pushed" and rv.get("last_head") == head and rv.get("rerun_only") \
+    same_kind = (rv.get("last_cnt") or "revisions") == cnt_key or not b_on()   # 11-03 B: a CI fix / re-run pushed at this head says nothing about a merge
+    if same_kind and rv.get("status") == "pushed" and rv.get("last_head") == head and rv.get("rerun_only") \
             and (jload(f"{BASE}/out/outbound/ledger.json", {}).get(rv.get("action_key")) or {}).get("status") == "done":
         # the ruled re-run of this head happened and the checks are red again. prfix --revise would only skip this head ("已经修过、
         # 等推送"), so launching it is a no-op loop (10-25: #1271 spun 14 h). The judge said the PR is not the cause: give CI a fresh
         # run instead -- main merged in when the PR is behind (update-branch, daily budget), else the failed jobs re-run every 3 h.
         # A new head is a new question for prfix; nothing here asks Praise.
         return ruled_red_again(st, done, n, head, tag, seen, red)
-    elif (rv.get("status") == "running" and not dead) or (rv.get("status") == "pushed" and rv.get("last_head") == head): return True   # in hand
+    elif (rv.get("status") == "running" and not dead) or (same_kind and rv.get("status") == "pushed" and rv.get("last_head") == head): return True   # in hand
     if rv.get("status") == "failed" and rv.get("head") == head and (rv.get("next_retry_at") or "") > now_cst().isoformat(): return True
     lt = st.setdefault("revise_launched", {})
     try: ran_after = rv.get("status") == "failed" and rv.get("head") == head and dt.datetime.fromisoformat(rv.get("updated_at")).timestamp() > lt.get(tag, 0)
@@ -478,13 +593,13 @@ def check_drafts(st):
               "--json", "number,headRefOid,headRefName,body,statusCheckRollup,mergeStateStatus"])
     done = st.setdefault("draft_seen", {}); ub = st.setdefault("update_branch_day", {}); day = today()
     # 10-24 (plan S2): a bot draft that left this list was merged / closed / readied -> janitor right away (branches, worktrees)
-    ours = sorted(p["number"] for p in prs if PILINE in (p.get("body") or "") and (p.get("headRefName") or "").startswith("qa-fix/"))
+    ours = sorted(p["number"] for p in prs if is_bot_fixpr(p))
     gone = sorted(set(st.get("bot_drafts") or []) - set(ours)); st["bot_drafts"] = ours
     if gone: kick_janitor(",".join(f"mivo#{n}" for n in gone))
     for p in prs:
         # 10-24: only the fix PRs the Pi line opened. Session / human drafts with "QA: #N" (#1166) are not ours to ready or fix, and a
         # PR the Mac mini watcher turned back into a draft while it fixes it must not be readied mid-fix.
-        if PILINE not in (p.get("body") or "") or not (p.get("headRefName") or "").startswith("qa-fix/"): continue
+        if not is_bot_fixpr(p): continue
         n, head = p["number"], p["headRefOid"]
         cs = [c for c in p.get("statusCheckRollup") or [] if "review-pr" not in (c.get("name") or c.get("context") or "")]
         concl = [((c.get("conclusion") or c.get("state") or "").upper(), (c.get("status") or "COMPLETED").upper(), c.get("name") or c.get("context")) for c in cs]
@@ -493,16 +608,17 @@ def check_drafts(st):
         if (p.get("mergeStateStatus") or "").upper() == "DIRTY":
             # conflicts with main: GitHub runs few or no checks and update-branch cannot merge -> prfix --revise merges main in and the
             # model resolves the conflicts (10-24); a DM only when that is off / used up / stopped at this head
-            if seen in ("ready", "red", "dirty"): continue
+            # 11-03 B: a head first seen red (or readied) that then conflicts with main still gets main merged in; only a dirty DM
+            # already sent for this head ends it (it used to count red/ready as done and the draft sat DIRTY)
+            if seen == "dirty" or (seen in ("ready", "red") and not b_on()): continue
             if revise_or_wait(st, done, n, head, tag, seen, revise_ticket(n), "merges", MAX_MERGES, "conflicts with main"): continue
-            if seen not in ("ready", "red", "dirty"):
-                alert(st, n, "dirty")
-                act("prwatch", {"key": f"dirty:{tag}", "type": "slack.dm", "to": "Praise", "text": PN.text(PN.item("action", f"修复 PR #{n} 跟 main 冲突了",
-                    f"修 PR bot 为 #{qa} 开的修复 PR #{n}（草稿）和最新 main 有冲突，GitHub 不再跑完整测试；bot 自己合 main 解冲突已经停下了（或开关关着）。",
-                    f"这个修复 PR 停住了，#{qa} 的问题还在。",
-                    todo=PN.ask_session(f"修复草稿 PR #{n}（QA: #{qa}）跟 main 冲突，把 main 合进来解决冲突后推到它的分支上"),
-                    link=f"https://github.com/{REPO}/pull/{n}"))})
-                done[tag] = "dirty"; qlog(f"#{n} conflicts with main -> DM")
+            alert(st, n, "dirty")
+            act("prwatch", {"key": f"dirty:{tag}", "type": "slack.dm", "to": "Praise", "text": PN.text(PN.item("action", f"修复 PR #{n} 跟 main 冲突了",
+                f"修 PR bot 为 #{qa} 开的修复 PR #{n}（草稿）和最新 main 有冲突，GitHub 不再跑完整测试；bot 自己合 main 解冲突已经停下了（或开关关着）。",
+                f"这个修复 PR 停住了，#{qa} 的问题还在。",
+                todo=PN.ask_session(f"修复草稿 PR #{n}（QA: #{qa}）跟 main 冲突，把 main 合进来解决冲突后推到它的分支上"),
+                link=f"https://github.com/{REPO}/pull/{n}"))})
+            done[tag] = "dirty"; qlog(f"#{n} conflicts with main -> DM")
             continue
         if not concl or any(s != "COMPLETED" or v in ("", "PENDING", "EXPECTED") for v, s, _ in concl): continue   # still running
         red = [nm for v, s, nm in concl if v in BAD_CONCL]
@@ -601,6 +717,13 @@ def dispatch_infra(st):
     qlog(f"launched infrafix --next (top {top.get('sig8')} {top.get('cat')}/{top.get('stage')}, {len(todo)} pending)")
 
 
+def grok_sweep(st):
+    """Grok line (grokline.py): switch off / usage stop / 90 min without progress -> its tickets back to the Pi queue; 23:59 day line."""
+    if DRY: return
+    import grokline
+    grokline.sweep(st)
+
+
 def kick_janitor(prs):
     """one janitor run now (run.sh holds its job lock: when the */10 run is on, this one just skips)"""
     if DRY: qlog(f"DRY: would kick janitor (pr-closed {prs})"); return
@@ -627,7 +750,7 @@ def main():
     try: fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError: return 0
     st = jload(STATE, {})
-    for name, fn in (("reports", scan_reports), ("fix", dispatch_fix), ("drafts", check_drafts), ("resolved", resolved), ("infra", dispatch_infra), ("cleanup", cleanup), ("digest", digest_parked)):
+    for name, fn in (("emerg", emerg_kill), ("reports", scan_reports), ("fix", dispatch_fix), ("drafts", check_drafts), ("resolved", resolved), ("infra", dispatch_infra), ("cleanup", cleanup), ("digest", digest_parked), ("grok", grok_sweep)):
         try: fn(st)
         except Exception as e:
             st.setdefault("errors", {})[name] = f"{now_cst().strftime('%F %T')} {str(e)[:200]}"; qlog(f"{name} error: {str(e)[:200]}")

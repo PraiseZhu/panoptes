@@ -101,7 +101,7 @@ try {
 } catch (err) { check('lm-vite', 'unavailable', `vite dev server failed: ${String(err.message).split('\n')[0]}`); await finish(2) }
 const base = `http://127.0.0.1:${server.address().port}`
 try {
-  browser = await chromium.launch({ headless: true, args: ['--disable-gpu', '--disable-dev-shm-usage'] })
+  browser = await chromium.launch({ headless: true, args: ['--disable-gpu', '--disable-dev-shm-usage', ...String(process.env.CHROMIUM_FLAGS ?? '').split(' ').filter((f) => f === '--force-prefers-reduced-motion')] })
 } catch (err) { check('lm-browser-launch', 'unavailable', `chromium failed to launch: ${String(err.message).split('\n')[0]}`); await finish(2) }
 
 const NAME = 'mivo-canvas-demo'

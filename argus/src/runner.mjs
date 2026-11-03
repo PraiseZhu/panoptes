@@ -9,6 +9,7 @@ import { machineLoad } from './memory.mjs'
 import { gitTokenFor } from './github.mjs'
 import { fileURLToPath } from 'node:url'
 import { validateTestReport } from './config.mjs'
+import { qaMisattribOff } from './misattrib-flag.mjs'
 import { normalizeTestOutcomes } from './test-outcomes.mjs'
 import { vitestCoverageArgs, readCoverageDir, readV8Dir, mergeCoverageFiles } from './coverage.mjs'
 import { stepCacheEnabled, stepCacheKey, lookupStepResult, storeStepResult, reusedResult } from './stepcache.mjs'
@@ -160,8 +161,12 @@ export function stepEnv(runDir, profile) {
     MIVO_ASSET_STORE_DIR: join(runDir, 'assets'),
     ...(process.env.PLAYWRIGHT_BROWSERS_PATH ? { PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH } : {}),
     ...extra,
+    // 沙箱浏览器固定 prefers-reduced-motion（scripts/chromium-linux.sh 把 CHROMIUM_FLAGS 接到命令行）：#1384 起 Mivo 平滑镜头在
+    // 沙箱 headless 里收敛不到 harness 严格等待的视口值，减弱动效后往返 2/2 通过（kiro-p1-1102 / rerun-1384-rm）。回滚：qa-misattrib-off
+    ...(qaMisattribOff() ? {} : { CHROMIUM_FLAGS: [extra.CHROMIUM_FLAGS, REDUCED_MOTION_FLAG].filter(Boolean).join(' ') }),
   }
 }
+export const REDUCED_MOTION_FLAG = '--force-prefers-reduced-motion'
 
 // 请求的版本不在镜像里（合并后 main 被回退 / 合并分支合并后删掉）是输入事实，不是 QA 机器坏掉：
 // 上层（nightly.mjs processTargets）据此把这一轮记成 not-tested，不记 qa-error —— 否则一条永久事实
@@ -277,6 +282,23 @@ export function bwrapArgs(runDir, { extraRo = [], extraRw = [], chdir = null } =
   return args
 }
 
+// 沙箱自检（QA #1456 回归保护）：在跑任何步骤前，用同一套 bwrapArgs 在沙箱里 `stat -c %u /`，必须等于本次运行的 uid。
+// 不等（例如有人把根改回 `--ro-bind / /`，/ 显示成 65534）→ 抛错：这一轮记 QA 环境问题（qa-error / stage=pipeline，PR 没测到），
+// 不产出产品问题。回滚开关：$QA_HOME/sandbox-selfcheck-off（默认 /workspace/mivo-qa/sandbox-selfcheck-off）存在就跳过自检，每次运行都重新读。
+export const SANDBOX_SELFCHECK_ZH = '沙箱自检失败（QA 环境 / 沙箱问题，不是产品问题）：'
+export const sandboxSelfcheckOffFile = (env = process.env) => join(env.QA_HOME || '/workspace/mivo-qa', 'sandbox-selfcheck-off')
+export async function sandboxSelfCheck(runDir, profile = {}, { env = process.env, exec = run, mode = sandboxMode(profile), uid = process.getuid?.() } = {}) {
+  if (existsSync(sandboxSelfcheckOffFile(env))) return { skipped: 'off-switch' }
+  if (mode !== 'bwrap') return { skipped: mode }
+  const res = await exec(BWRAP, [...bwrapArgs(runDir), '--', 'stat', '-c', '%u', '/'], { env: baseEnv(), timeoutMs: 60_000 })
+  if (res.budgetExceeded) return { skipped: 'budget' }
+  const seen = res.ok ? String(res.tail ?? '').trim().split('\n').pop().trim() : null
+  if (seen === String(uid)) return { ok: true, uid: seen }
+  const msg = `${SANDBOX_SELFCHECK_ZH}沙箱里 / 的属主 uid 是 ${seen ?? `读不到（${String(res.tail ?? '').trim().slice(-200)}）`}，本次运行 uid 是 ${uid}（被测代码的祖先目录校验会误报，见 QA #1456）`
+  log('error', 'sandbox self-check failed: infra/sandbox problem, not a product finding', { runDir, rootUid: seen, runUid: uid, offSwitch: sandboxSelfcheckOffFile(env) })
+  throw new Error(msg)
+}
+
 function sandboxed(argv, runDir, profile, stepRo = []) {
   const mode = sandboxMode(profile)
   if (mode === 'disabled-by-profile' || mode === 'env-only') return argv
@@ -335,7 +357,7 @@ function toUnmetRequirement(step, src) {
 }
 
 // 探针和 AI 补测步骤：把 spec 和执行脚本放进测试目录（沙箱读不到 Argus 自己的代码目录）
-function prepareTool(step, runDir, vars) {
+export function prepareTool(step, runDir, vars) {
   const tools = join(runDir, 'tools')
   mkdirSync(tools, { recursive: true })
   if (step.probe) {
@@ -350,7 +372,7 @@ function prepareTool(step, runDir, vars) {
   if (step.aiTest) {
     writeFileSync(join(tools, 'ai-test-run.mjs'), readFileSync(AI_TEST_SCRIPT))
     // 补测代码原样写入，不做变量替换
-    writeFileSync(join(runDir, `${step.id}.json`), JSON.stringify(step.aiTest))
+    writeFileSync(join(runDir, `${step.id}.json`), JSON.stringify(qaMisattribOff() ? { ...step.aiTest, legacyOrder: true } : step.aiTest))
   }
 }
 
@@ -654,7 +676,10 @@ function readFailureReport(spec, runDir) {
     failureDetails.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
     const aggregate = report.checks.some((c) => c?.status === 'fail') ? 'fail' : report.checks.length && report.checks.every((c) => c?.status === 'pass') ? 'pass' : 'unavailable'
     if (report.status != null && report.status !== aggregate) incomplete = true
-    return { failures: failureDetails.map((c) => c.name), failureDetails, failureParseStatus: incomplete || !failureDetails.length ? 'incomplete' : 'complete' }
+    // 没通过的检查各自的原因首行（送代码审查用：只有用例名时模型只能写「证据不足」，#1384 真正的原因在 browser-host-probe 里）
+    const checkReasons = report.checks.filter((c) => c && typeof c.id === 'string' && c.status !== 'pass').slice(0, 10)
+      .map((c) => ({ id: c.id, status: String(c.status), reason: String(c.reason ?? '').split('\n')[0].slice(0, 300) }))
+    return { failures: failureDetails.map((c) => c.name), failureDetails, failureParseStatus: incomplete || !failureDetails.length ? 'incomplete' : 'complete', checkReasons }
   } catch { return missing /* 报告缺失或坏掉，不能退回整步确认 */ }
 }
 
@@ -683,6 +708,7 @@ export async function executeOnSha({ repo, jobId, label, sha, profile, stepIds, 
   async function runCheckout() {
     const src = await checkout(mirror, sha, runDir, { repo, lfs: Boolean(profile.lfs), mode: profile.checkoutMode ?? 'worktree' })
     const checkedOutSha = await verifyCheckoutSha(src, sha)
+    await sandboxSelfCheck(runDir, profile)
     return await runSteps(profile, src, runDir, { stepIds, beforeStep, execution: { jobId, runLabel: label, requestedSha: sha, checkedOutSha, diffBase } })
   }
 }

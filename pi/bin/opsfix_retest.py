@@ -22,20 +22,32 @@ RC_RETRY = 75                                     # EX_TEMPFAIL: skipped (lock /
 OVERLAP = dt.timedelta(hours=6)                   # re-scan before the watermark (gh search lag); done set prevents redo
 MAX_ATTEMPTS = 3                                  # a fix PR whose targets stay blocked is given up after 3 runs
 TRANSIENT = ("本轮模型调用已达上限",)             # blocked for budget reasons: does not count as an attempt
+# one-shot look-back after a qa_refs widening: the next watermark run scans from go-live once (done PRs still skipped),
+# then records the tag in state so later runs use the normal watermark window.
+REF_BACKFILL = ("qa-refs-2026-11-03", "2026-10-29T12:34:00+08:00")
 PERMANENT = ("没有合并报告", "原报告缺", "原 PR 的新增代码文件", "可执行新增行为 0", "没有轻量复跑")  # retry can't help
 
-def qa_refs(body): return [int(x) for x in re.findall(r"QA[:：]\s*#(\d+)", body or "")]
+def qa_refs(body, title=""):
+    """原问题 PR 号：同 pm_extra.fix_refs（正文/标题 QA: #N、QA #N、QA 来源：#N、QA 对 #N）。11-03 bug：只认正文 QA: #N，#1440/#1559/#1627/#1677 不复测。"""
+    from pm_extra import fix_refs
+    return fix_refs({"body": body, "title": title})
 
 def load_pr(n):
     try: return json.load(open(f"{RPT}/PR-{n}.json"))["prs"][0]
     except Exception: return None
 
-def pick_targets(fix_body, orig_pr, orig_report):
-    """Which of the source report's findings this fix PR claims to fix. Returns list of findings."""
+def pick_targets(fix_body, orig_pr, orig_report, fix_title=""):
+    """Which of the source report's findings this fix PR claims to fix. Returns list of findings.
+    A fingerprint the fix PR names (body or title) is also looked up in the source report's code-review
+    pending_verification (AI P1 not confirmed by repo review, e.g. #1425/#1451); only named ones, tagged
+    target_source=pending_verification. They stay out of findings, so P0–P2 / G2 counts are unchanged."""
     fs = [x for x in (orig_report or {}).get("findings", []) if x.get("severity") in SEV_OK
           and (x.get("calibration") or {}).get("to") != "误报"]
-    named = set(FP_RE.findall(fix_body or ""))
+    named = set(FP_RE.findall(f"{fix_body or ''}\n{fix_title or ''}"))
     hit = [x for x in fs if x.get("fingerprint") in named]
+    got = {x.get("fingerprint") for x in hit}
+    hit += [dict(x, target_source="pending_verification") for x in (orig_report or {}).get("pending_verification") or []
+            if x.get("source") == "code-review" and x.get("fingerprint") in named - got]
     if hit: return hit
     body = fix_body or ""
     kinds = [k for k in ("coverage-gate", "code-review") if k in body]
@@ -51,15 +63,15 @@ def ledger_path():
 
 def targets_for(p):
     tg = []
-    for o in qa_refs(p.get("body")):
+    for o in qa_refs(p.get("body"), p.get("title")):
         rep = load_pr(o)
-        for f in pick_targets(p.get("body"), o, rep): tg.append((o, f))
+        for f in pick_targets(p.get("body"), o, rep, p.get("title")): tg.append((o, f))
         if not rep: tg.append((o, None))
     return tg
 
 def plan(day, only=None):
     """[(fix_pr_dict, [(orig_pr, finding)])] for fix PRs merged on `day` with QA: #N (pm_extra.retest rule)."""
-    return [(p, targets_for(p)) for p in merged_prs(day) if qa_refs(p.get("body")) and not (only and p["number"] not in only)]
+    return [(p, targets_for(p)) for p in merged_prs(day) if qa_refs(p.get("body"), p.get("title")) and not (only and p["number"] not in only)]
 
 # ---------- scope: watermark (pure parts) ----------
 def parse_at(s):
@@ -87,16 +99,17 @@ def seed_state(runs_lines, today_d):
         wm = dt.datetime.combine(today_d - dt.timedelta(days=1), dt.time(), CST); done = {}
     return {"watermark": wm.isoformat(timespec="seconds"), "done": done, "retry": {}}
 
-def select_fix_prs(prs, state, only=None):
+def select_fix_prs(prs, state, only=None, since=None):
     """prs: merged PRs (number, mergedAt, body, ...) from at least watermark-OVERLAP. Keep fix PRs (QA: #N) that are not done
     and (merged after watermark-OVERLAP or in the retry set); `only` forces those numbers even if done. Oldest merge first,
     so retest `at` follows merge order (effective_retest's 'latest at')."""
     lo = parse_at(state.get("watermark")) - OVERLAP if state.get("watermark") else None
+    if since and lo: lo = min(lo, since)   # one-shot look-back (REF_BACKFILL)
     done, retry = state.get("done") or {}, state.get("retry") or {}
     out = []
     for p in prs:
         n = p["number"]
-        if not qa_refs(p.get("body")): continue
+        if not qa_refs(p.get("body"), p.get("title")): continue
         if only:
             if n in only: out.append(p)
             continue
@@ -433,20 +446,24 @@ def run(a):
         state = seed_state(runs, stamp.date()); log(f"no retest-state.json -> seeded watermark {state['watermark']} done={sorted(state['done'], key=int)}")
     if a.day:   # explicit data day (manual); done fix PRs are still recorded, the watermark is not moved
         P = sorted(plan(a.day, only), key=lambda t: (t[0].get("mergedAt") or "", t[0]["number"]))
-        scope, advance = f"数据日 {a.day}", False
+        scope, advance, backfill = f"数据日 {a.day}", False, False
     else:
         if getattr(a, "since", None): state["watermark"] = a.since
         lo = parse_at(state["watermark"]) - OVERLAP
         lo = min([lo] + [t for t in (parse_at(v.get("merged_at")) for v in (state.get("retry") or {}).values()) if t])
-        P = [(p, targets_for(p)) for p in select_fix_prs(merged_since(lo), state, only)]
+        backfill = not only and state.get("ref_backfill") != REF_BACKFILL[0]
+        if backfill: lo = min(lo, parse_at(REF_BACKFILL[1]))
+        P = [(p, targets_for(p)) for p in select_fix_prs(merged_since(lo), state, only, since=lo if backfill else None)]
         scope = f"{state['watermark']} 之后合并、尚未复测的修复 PR" + (f"（含重试 {sorted(state['retry'], key=int)}）" if state.get("retry") else "")
         advance = not only
+        if backfill: scope += f"（一次性回看 {REF_BACKFILL[1]} 起：{REF_BACKFILL[0]}）"
     print(f"retest {scope}: {len(P)} fix PR(s) with QA: #N; mode={'EXECUTE' if a.execute else 'DRY-RUN'}")
     for p, tg in P:
         print(f"  #{p['number']} merged {p.get('mergedAt')} head {p['headRefOid'][:10]} ← " + ", ".join(
-            f"#{o}:{(f or {}).get('source','无报告')}:{(f or {}).get('fingerprint','-')}" for o, f in tg))
+            f"#{o}:{(f or {}).get('source','无报告')}:{(f or {}).get('fingerprint','-')}" + (":pending_verification" if (f or {}).get("target_source") else "") for o, f in tg))
     if not a.execute: print("DRY: nothing run, nothing written (add --execute)"); return 0
     if not P:
+        if advance and backfill: state["ref_backfill"] = REF_BACKFILL[0]
         if advance: state.update(watermark=stamp.isoformat(timespec="seconds"), last_run={"at": stamp.isoformat(timespec="seconds"), "fix_prs": []}); save_state(state, stamp)
         print("nothing to retest"); return 0
     if mem_mb() < 3072: return note_skip(state, f"MemAvailable {mem_mb()}MB < 3072MB", stamp)
@@ -473,14 +490,15 @@ def run(a):
                         else: model_calls += 1; res, why, det = run_review(p, o, f, ev_base)
                     else: res, why = "blocked", f"{f.get('source')} 类问题没有轻量复跑（要整步重跑：opsfix backfill --rerun --pr {n}）"
                 except Exception as e: res, why = "blocked", f"复测执行出错：{str(e)[:300]}"
-                rec = dict(fix_pr=n, original_pr=o, fingerprint=fp, source=f.get("source"), title=f.get("title"), result=res,
+                rec = dict(fix_pr=n, original_pr=o, fingerprint=fp, source=f.get("source"), target_source=f.get("target_source", "findings"), title=f.get("title"), result=res,
                            reason=why, evidence=f"{ev_base}.json", at=at, detail=det)
                 write_atomic(f"{ev_base}.json", json.dumps(rec, ensure_ascii=False, indent=1))
                 results.append(rec); log(f"#{n} ← #{o} {fp} {f.get('source')}: {res} — {why}")
         # write-back
         for n in sorted({r["fix_pr"] for r in results}):
             ents = [{"fingerprint": r["fingerprint"], "original_pr": r["original_pr"], "result": r["result"], "method": r["source"],
-                     "reason": r["reason"], "evidence": r["evidence"], "at": r["at"], "by": BY}
+                     "reason": r["reason"], "evidence": r["evidence"], "at": r["at"], "by": BY,
+                     **({"target_source": r["target_source"]} if r.get("target_source") == "pending_verification" else {})}
                     for r in results if r["fix_pr"] == n and r["fingerprint"] and r["result"] in ("pass", "fail")]
             f = f"{RPT}/PR-{n}.json"
             if not ents or not os.path.exists(f): continue
@@ -512,6 +530,7 @@ def run(a):
         for p, _ in P:   # remember merge time of retry entries so the next scan window still covers them
             if str(p["number"]) in state.get("retry", {}): state["retry"][str(p["number"])]["merged_at"] = p.get("mergedAt")
         if advance: state["watermark"] = stamp.isoformat(timespec="seconds")
+        if advance and backfill: state["ref_backfill"] = REF_BACKFILL[0]
         state["last_run"] = {"at": stamp.isoformat(timespec="seconds"), "scope": scope, "fix_prs": sorted(by_fix), "done": done_now, "retry": retry_now, "unmatched": len(unmatched)}
         state.pop("last_skip", None); save_state(state, stamp)
     finally:

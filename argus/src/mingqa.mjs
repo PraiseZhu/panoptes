@@ -11,6 +11,7 @@ import { redact, truncate, jsonObjectBody, tail, toChatCompletionsUrl, fetchRetr
 import { CODE_DIR, CACHE_DIR } from './paths.mjs'
 import { withoutHandoff } from './classify.mjs'
 import { loadSeverityStandard } from './severity.mjs'
+import { qaMisattribOff } from './misattrib-flag.mjs'
 
 export const MINGQA_DIR = process.env.ARGUS_MINGQA_DIR ?? join(CODE_DIR, '..', 'ming-qa') // panoptes: submodule next to argus/
 const QA_AGENT = () => join(MINGQA_DIR, 'skills/quality-assurance-agent/scripts/qa_agent.py')
@@ -334,14 +335,31 @@ export function referenceText(reference) {
   ].join('\n\n')
 }
 
-export async function codeReview({ secrets, pr, files, results, profile, outDir, cacheKey = null, cached = null, prior = null, verdictOf = null, source = {}, reference = null, deps = {}, log = (m) => console.error(m) }) {
+// 送审查的检查摘要。2026-11-03（Praise PR step 9）：FAIL 行带失败原因（报告里没通过的检查的 reason 首行）和 nightly 已算出的
+// 归因（重跑 / 合并前版本结果、pre-existing、测试脚本自身出错）；只有用例名时模型只能写「证据不足，可能 P1」（#1384 #1433 #1456）。
+// 回滚开关 qa-misattrib-off 打开时只有旧的一行
+export function checkSummary(results, failedChecks = [], { off = qaMisattribOff() } = {}) {
+  const lines = []
+  for (const r of (results ?? []).filter((x) => x.kind !== 'setup')) {
+    lines.push(`- ${r.id} (${r.nameZh}): ${r.unavailable ? 'unavailable' : r.ok ? 'pass' : `FAIL${r.timedOut ? ' (timeout)' : ''}${r.failures?.length ? ` — ${r.failures.slice(0, 5).join('; ')}` : ''}`}`)
+    if (off || r.ok) continue
+    for (const c of (r.checkReasons ?? []).slice(0, 5)) lines.push(`    reason: ${c.id} ${c.status}: ${c.reason}`)
+    for (const c of (failedChecks ?? []).filter((x) => x.check_id === r.id).slice(0, 5)) {
+      lines.push(`    QA attribution${c.test ? ` (${c.test})` : ''}: ${c.status}; rerun=${c.evidence?.rerun ?? '?'}, base=${c.evidence?.base_run ?? '?'}${c.pre_existing ? '; same failure on the base revision (pre-existing)' : ''}${c.test_script_failure ? '; test script error: the product steps never ran' : ''}`)
+    }
+  }
+  if (!off && (failedChecks ?? []).length) lines.push('Note: a failed check that is pre-existing, also fails on base, or is a test script error is not evidence against this diff. Do not list it as a finding or an unverified item; QA tracks it on the check itself.')
+  return lines.join('\n')
+}
+
+export async function codeReview({ secrets, pr, files, results, failedChecks = [], profile, outDir, cacheKey = null, cached = null, prior = null, verdictOf = null, source = {}, reference = null, deps = {}, log = (m) => console.error(m) }) {
   mkdirSync(outDir, { recursive: true })
   if (cached) return withLoose(await finishReview({ outDir, doc: cached.doc, model: cached.model, tokens: 0, ms: 0, sampling: cached.sampling ?? null, reused: true, reusedFrom: { key: cached.key.slice(0, 16), stored_at: cached.stored_at, ...(cached.source ?? {}), original_tokens: cached.tokens ?? null } }), cached.json_loose)
   if (!secrets.ARGUS_LLM_BASE_URL || !secrets.ARGUS_LLM_API_KEY) return { status: 'unavailable', error: { kind: 'config', message: 'QA_LLM_BASE_URL / QA_LLM_API_KEY not configured' } }
   // 统一分级读不到（副本被改、锁文件坏了）就不审：不凭摘要自己定级
   let std
   try { std = loadSeverityStandard() } catch (err) { return { status: 'unavailable', error: { kind: 'severity-standard', message: redact(err.message).slice(0, 300) } } }
-  const testSummary = (results ?? []).filter((r) => r.kind !== 'setup').map((r) => `- ${r.id} (${r.nameZh}): ${r.unavailable ? 'unavailable' : r.ok ? 'pass' : `FAIL${r.timedOut ? ' (timeout)' : ''}${r.failures?.length ? ` — ${r.failures.slice(0, 5).join('; ')}` : ''}`}`).join('\n')
+  const testSummary = checkSummary(results, failedChecks)
   const user = redact([
     `Repository: ${pr.base?.repo?.full_name ?? ''}`,
     `PR #${pr.number}: ${pr.title}`,

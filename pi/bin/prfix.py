@@ -84,6 +84,11 @@ MAX_REVISIONS = 2       # --revise rounds per bot draft fix PR (red GitHub CI fe
 AUTHOR_SELF = "PraiseZhu"       # Praise 10-23: prfix fixes only our own PRs (others: daily bot -> their handoff repos)
 BACKOFF_MIN = (15, 60, 240)        # after the 1st/2nd/3rd transient failure; the 4th -> needs_human
 MIN_MEM_GB = 3
+# Grok line (11-03, plan §3/§5, grokline.py): switch takeover/prfix-grok-overflow (present = on, re-read every call). Pi never takes an
+# owner=grok ticket; with the switch on, a ticket emergency-killed more than KILLS_TO_GROK times in a Beijing day waits for Grok that day.
+KILLS_TO_GROK = 3
+GROK_HANDOVER = f"今天被紧急杀超过 {KILLS_TO_GROK} 次，交给 Grok 线"
+def grok_on(): return lib.takeover("prfix-grok-overflow")
 BUSY = 75
 TIER = _E("PRFIX_TIER") or "deep"   # pi-auto: deep = tap/deepseek/deepseek-flash:discount, thinking max (Praise 10-24, model 10-30; was heavy = high)
 PR_CACHE_TTL = 60                    # s: parallel runs + prwatch share one PR list (10-24: a full 3000-PR list per run ate GraphQL quota)
@@ -100,6 +105,7 @@ CONTRIB = "贡献流程见 [CONTRIBUTING.md](https://github.com/xindong/mivo-can
 
 class Transient(Exception): """npm / network / model rc / timeout: back off and retry"""
 class Waiting(Transient): """the box had no memory for us: retry later without spending one of the transient retries"""
+class EmergKilled(Waiting): """prwatch.emerg_kill killed the current step; counted per ticket per day (> KILLS_TO_GROK -> Grok line)"""
 class Deterministic(Exception): """the fix itself is not good enough (yet): parked, retried later by itself"""
 class PraiseNeeded(Exception): """category 5 (the only things the bot asks Praise about): the fix touches CI config / repo rules / secrets"""
 class GateFileError(Exception): pass
@@ -209,13 +215,22 @@ def run(cmd, cwd=None, t=1800, env=None, inp=None):
     kw = {"input": inp} if inp is not None else {"stdin": subprocess.DEVNULL}
     try:
         r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=t, env=env, **kw)
+        emerg_check()
         return r.returncode, (r.stdout or "") + (r.stderr or "")
     except subprocess.TimeoutExpired as e:
+        emerg_check()
         o = e.stdout or ""
         if isinstance(o, bytes): o = o.decode("utf-8", "replace")
         return 124, f"{o}\n[prfix] timeout after {t}s"
     except FileNotFoundError as e:
         return 127, f"[prfix] {e}"
+def emerg_check():
+    """prwatch.emerg_kill marked this process before killing its step (memory < 2G for 30 s): the step's result is void, the
+    ticket goes back to the queue without using up a retry."""
+    import prwatch
+    m = prwatch.emerg_mark(os.getpid())
+    if os.path.exists(m):
+        os.remove(m); raise EmergKilled("内存低于 2G 持续 30 秒，prwatch 杀了当前步骤，本单回到队列")
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]")
 def clean(s):
     """Tool output without terminal colour codes (10-24: the fix2 prompt for QA1198 quoted vitest as `31m1 failed?[39m`)."""
@@ -274,6 +289,18 @@ _QA_HOLD = {}   # the nightly.lock file while a ticket runs (only when SHARE_WIT
 # Praise 2026-10-23 23:xx: "机器内存够同时跑" -> prfix no longer takes panoptes' nightly.lock; merge tests never wait for a fix.
 # The guard is memory instead: MemAvailable >= 3G before every heavy step (wait up to 30 min, then transient back-off).
 SHARE_WITH_PANOPTES = os.environ.get("PRFIX_SHARE_WITH_PANOPTES", "1") != "0"
+YIELD_OFF = f"{BASE}/prfix-yield-off"   # rollback (11-03 §2.3): touch -> only the MemAvailable >= 3G check before each step
+YIELD_EXTRA_MB = 3072
+def mem_wait_reason():
+    """why the next heavy step must wait, or None. Besides MemAvailable >= 3G: while a merge test runs or is queued, the step also
+    waits until MemAvailable >= the test's learned peak + 3G (tests first; between steps only, a running step is never paused)."""
+    m = mem_gb()
+    if m < MIN_MEM_GB: return f"MemAvailable {m:.1f}G < {MIN_MEM_GB}G"
+    if os.path.exists(YIELD_OFF): return None
+    import prwatch
+    if not (prwatch.tests_running() or prwatch.tests_queued()): return None
+    need = prwatch.learned(prwatch.jload(prwatch.STATE, {}), "panoptes", prwatch.PANOPTES_PEAK_MB) + YIELD_EXTRA_MB
+    return f"合并测试在跑或排队，MemAvailable {m * 1024:.0f}MB < 测试峰值+3G {need}MB" if m * 1024 < need else None
 def yield_to_panoptes():
     """Called before every model step and heavy local step (10-23): merge tests go first. If a panoptes run is queued on
     nightly.lock, hand the lock over, wait until panoptes is done, then take it back and continue the ticket. Praise's rule
@@ -281,8 +308,8 @@ def yield_to_panoptes():
     f = _QA_HOLD.get("f")
     if SHARE_WITH_PANOPTES:
         t0 = time.time()
-        while mem_gb() < MIN_MEM_GB:
-            if time.time() - t0 > 1800: raise Waiting(f"等内存超过 30 分钟（MemAvailable {mem_gb():.1f}G < {MIN_MEM_GB}G）")
+        while (why := mem_wait_reason()):
+            if time.time() - t0 > 1800: raise Waiting(f"等内存超过 30 分钟（{why}）")
             time.sleep(30)
         return
     if not f or subprocess.run(["pgrep", "-f", "panoptes/run-nightly.sh"], capture_output=True).returncode != 0: return
@@ -599,10 +626,11 @@ def qa_ref_re(n):
 def fmt_prs(ps): return " ".join(f"#{p['number']}({(p.get('state') or '?').lower()})" for p in ps)
 
 def ticket_view(t, now):
-    """A ticket as --next would see it after normalising a dead 'running' entry into a transient failure."""
+    """A ticket as --next would see it after normalising a dead 'running' entry into a transient failure (a Grok-line claim has
+    no box pid: grokline.sweep is what takes it back)."""
     if not t: return None
     t = dict(t)
-    if t.get("status") == "running" and not pid_alive(t.get("pid")):
+    if t.get("status") == "running" and t.get("owner") != "grok" and not pid_alive(t.get("pid")):
         t = apply_outcome(t, {"status": "failed", "kind": "transient", "error": "上次运行中断（进程已不在）"}, now)[0]
     return t
 
@@ -712,6 +740,8 @@ def evaluate(c, ctx, now=None):
     if st == "failed" and tk.get("next_retry_at") and (ts(tk["next_retry_at"]) or now) > now:
         skips.append(f"退避中，{cst(tk['next_retry_at'])} 北京后重试（已失败 {tk.get('transient_failures', 0)} 次：{(tk.get('last_error') or '')[:80]}）")
     if st == "running" and pid_alive(tk.get("pid")): skips.append(f"运行中（pid {tk.get('pid')}，{tk.get('started_at')} 开始）")
+    if tk.get("owner") == "grok": skips.append(f"Grok 线在修（{tk.get('started_at')} 认领）")
+    elif tk.get("grok_wanted") == now.astimezone(CST).date().isoformat() and grok_on(): skips.append(GROK_HANDOVER)
     fs, dl, _ = times(c, ctx["reports"])
     if manual and c["source"] != "history" and not gate: skips.insert(0, manual)
     else: manual = None
@@ -800,8 +830,13 @@ def apply_outcome(tk, out, now):
     elif kind == "deterministic": park(tk, "修不动", err, now)
     elif kind == "praise":
         tk.update(status="needs_praise", last_error=err, next_retry_at=None); notify = "needs_praise"
-    elif kind == "waiting":   # no memory for us: not the ticket's fault, so it does not use up a transient retry
+    elif kind in ("waiting", "killed"):   # no memory for us: not the ticket's fault, so it does not use up a transient retry
         tk.update(status="failed", last_error=err, next_retry_at=(now + dt.timedelta(minutes=BACKOFF_MIN[0])).isoformat(timespec="seconds"))
+        if kind == "killed":   # plan §5: more than KILLS_TO_GROK emergency kills in one Beijing day -> handed to the Grok line
+            day = now.astimezone(CST).date().isoformat()
+            k = int(tk.get("kills") or 0) + 1 if tk.get("kill_day") == day else 1
+            tk.update(kill_day=day, kills=k)
+            if k > KILLS_TO_GROK: tk["grok_wanted"] = day
     else:
         tf = int(tk.get("transient_failures") or 0) + 1; tk["transient_failures"] = tf
         if tf > len(BACKOFF_MIN):
@@ -1378,7 +1413,7 @@ def fix_one(c, A, d):
         def ask(k, prompt):
             yield_to_panoptes()
             try: text, task = pi(TIER, wd, step_prompt(k, prompt), session, timeout=2400, write=True, skills=False, nice=True)
-            except Exception as e: raise Transient(f"模型 {k} 调用失败：{str(e)[:300]}")
+            except Exception as e: emerg_check(); raise Transient(f"模型 {k} 调用失败：{str(e)[:300]}")
             res["model"].append({"step": k, "task": task, "text": text}); texts.append(text); return text
         # 1 reproduce (the model is told once when it wrote no test / its test passes on base)
         t1 = ask("repro", f"{ctx}\n\nTASK 1 (reproduce only): add a regression test next to the existing tests of that module that FAILS on current code "
@@ -1634,7 +1669,7 @@ def fix_one(c, A, d):
         out = {"status": "norepro", "kind": "norepro", "error": str(e), "action_key": None, "confirmed": e.confirmed}
         res["norepro"] = (str(e), e.text); res["judge"] = e.judge; res["norepro_confirmed"] = e.confirmed
     except Transient as e:
-        out = {"status": "failed", "kind": "waiting" if isinstance(e, Waiting) else "transient", "error": str(e), "action_key": None}
+        out = {"status": "failed", "kind": "killed" if isinstance(e, EmergKilled) else "waiting" if isinstance(e, Waiting) else "transient", "error": str(e), "action_key": None}
     except Deterministic as e:
         out = {"status": "failed", "kind": "deterministic", "error": str(e), "action_key": None}
     except PraiseNeeded as e:
@@ -1716,7 +1751,7 @@ def bookkeeping(ctx, vs, now, d):
     with tickets_locked() as T:
         tks = T["tickets"]
         for k, t in list(tks.items()):
-            if t.get("status") == "running" and not pid_alive(t.get("pid")):
+            if t.get("status") == "running" and t.get("owner") != "grok" and not pid_alive(t.get("pid")):
                 tks[k] = apply_outcome(t, {"status": "failed", "kind": "transient", "error": "上次运行中断（进程已不在）"}, now)[0]
         for w in vs:
             k = w["key"]; t = tks.get(k)
@@ -1797,6 +1832,7 @@ def run_ticket(A, ctx, vs):
                     gated = gated or ({"status": "gated", "qa": w["c"]["qa"], "fp": w["c"]["fp"], "error": gates[w["c"]["qa"]]}, 1); continue
                 cur = T["tickets"].get(w["key"]) or {}
                 if cur.get("status") == "running" and pid_alive(cur.get("pid")): continue      # another process is on it
+                if cur.get("owner") == "grok": continue                                         # the Grok line has it (--qa too)
                 lk = try_lock(f"{OUT}/locks/{w['c']['qa']}-{fp8(w['c']['fp'])}.lock")
                 if lk: v, tk_lk = w, lk; break
             if not v:
@@ -1924,7 +1960,7 @@ def revise(A):
             if t.get("status") == "needs_praise" and t.get("head") == head:
                 stop = ({"status": "needs_praise", "pr": n, "error": t.get("last_error")}, 1)
             elif paused: stop = ({"status": "skipped", "pr": n, "reason": f"暂停中，{cst(t['next_retry_at'])} 北京后自动再试：{(t.get('last_error') or '')[:100]}"}, 0)
-            elif t.get("status") == "pushed" and t.get("last_head") == head: stop = ({"status": "skipped", "pr": n, "reason": "这个 head 已经修过、等推送"}, 0)
+            elif t.get("status") == "pushed" and t.get("last_head") == head and ((t.get("last_cnt") or "revisions") == cnt_key or not b_on()): stop = ({"status": "skipped", "pr": n, "reason": "这个 head 已经修过、等推送"}, 0)
             elif int(t.get(cnt_key) or 0) >= cap and t.get("status") != "parked":
                 # kind 4, no DM: pause, then try again by itself with a fresh budget (10-24 evening)
                 park(t, "修不动", (f"跟 main 的冲突已经合了 {t.get(cnt_key)} 轮，又冲突了" if conflict else
@@ -1944,7 +1980,7 @@ def revise(A):
             with tickets_locked() as T:
                 t = dict(T["tickets"].get(key) or {}); stamp = now_cst().isoformat(timespec="seconds")
                 if out["status"] == "pr_action_written":
-                    t.update(status="pushed", action_key=out["action_key"], last_head=head, rerun_only=bool(out.get("rerun_only")),
+                    t.update(status="pushed", action_key=out["action_key"], last_head=head, rerun_only=bool(out.get("rerun_only")), last_cnt=cnt_key,
                              **{cnt_key: int(t.get(cnt_key) or 0) + 1},
                              last_error=None, next_retry_at=None, transient_failures=0, pid=None, updated_at=stamp)
                     t["history"] = (list(t.get("history") or []) + [{"at": stamp, "status": "pushed", "error": ""}])[-20:]
@@ -2000,7 +2036,7 @@ def revise_merge(A, d, n, qa, fp, p, red):
         def ask(k, prompt):
             yield_to_panoptes()
             try: text, task = pi(TIER, wd, step_prompt(k, prompt), session, timeout=2400, write=True, skills=False, nice=True)
-            except Exception as e: raise Transient(f"模型 {k} 调用失败：{str(e)[:300]}")
+            except Exception as e: emerg_check(); raise Transient(f"模型 {k} 调用失败：{str(e)[:300]}")
             res["model"].append({"step": k, "task": task, "text": text}); return text
         left = conflicted
         for i in range(1, 4):
@@ -2100,7 +2136,7 @@ def revise_one(A, d, n, qa, fp, p, red):
             yield_to_panoptes()
             before = snapshot(wd, sorted(set(changed(wd, head, junk)) | touched))
             try: text, task = pi(TIER, wd, step_prompt(k, prompt), session, timeout=2400, write=True, skills=False, nice=True)
-            except Exception as e: raise Transient(f"模型 {k} 调用失败：{str(e)[:300]}")
+            except Exception as e: emerg_check(); raise Transient(f"模型 {k} 调用失败：{str(e)[:300]}")
             after = snapshot(wd, sorted(set(changed(wd, head, junk)) | set(before)))
             touched.update(f for f in after if f not in before or after.get(f) != before.get(f))   # files the model itself wrote
             # (review 10-24; "not in before": a file it deleted or moved away reads None both times)

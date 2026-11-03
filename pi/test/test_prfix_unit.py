@@ -924,7 +924,10 @@ class TestRepoScripts(Tmp):
 
     def test_platform_evidence_accepted_by_repo_evaluator(self):
         r = prfix.platform_eval(self.wd, self.base, self.head, "no block", True)
-        self.assertTrue(r["requiresWindowsEvidence"]); self.assertIn("input", r["risks"])
+        # product #1387 (313e6517): platform-risk.mjs no longer asks for a Windows run; requiresWindowsEvidence is a deprecated
+        # always-false field and requiresDisclosure carries the obligation (evaluatePlatformRisk). A UI change with no block must fail.
+        self.assertTrue(r["requiresDisclosure"]); self.assertFalse(r["requiresWindowsEvidence"]); self.assertIn("input", r["risks"])
+        self.assertIn("production UI/platform change requires mivo-platform-evidence", r["errors"])
         c = {"qa": 1178, "fp": A, "sev": "P1", "title": "t", "finding": finding(A, file="cindyplugin/src/agent/foo.ts", line=1)}
         res = {"root": "ROOT CAUSE cindyplugin/src/agent/foo.ts:1\nexpl", "pred_pr": 4242, "rc_repro": 1, "rc_revert": 1}
         pf = {"steps": ["tsc -b", "lint"], "passed": 2, "total": 2, "seconds": 61}

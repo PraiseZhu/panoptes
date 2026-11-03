@@ -34,6 +34,9 @@ R=/workspace/panoptes/pi/bin/run.sh
 5  * * * * box $R handoff @00
 20 * * * * box $R handoff @06,15
 35 * * * * box $R handoff @18
+# 11-03: handoff backfill (PR #158) once a day after the 07:35/08:35 daily -- review list only (out/handoff/backfill-<today>.{md,json}),
+# no actions, no outbound. Rollback: touch /workspace/mivo-qa/pi/handoff-backfill-off (cron skips; handoff.py backfill also refuses)
+50 * * * * box [ -e /workspace/mivo-qa/pi/handoff-backfill-off ] || $R handoff @09 backfill
 # 10-28: 日报 08:35 -> 07:35（box 暂停曾把日报推过 09:00）；写完动作立即调 outbound 只发日报自己的 key；08:35 为重试，台账去重
 35 * * * * box $R daily @07,08
 5  * * * * box $R jasper @09

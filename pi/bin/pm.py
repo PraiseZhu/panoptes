@@ -40,7 +40,7 @@ def ruled(verdict):
     for line in open(RULINGS):
         c = [x.strip() for x in line.strip().strip("|").split("|")]
         if len(c) >= 4 and re.fullmatch(r"#?\d+", c[1] or ""):
-            v = "不修" if "不修" in c[3] else ("修" if c[3] in ("修", "已修") else c[3])  # 「产品代码不修」→不修，「已修」→修
+            v = "不修" if "不修" in c[3] else ("修" if c[3] in ("修", "已修") or c[3].startswith("结案") else c[3])  # 「产品代码不修」→不修，「已修」「结案…」→修
             if v == verdict: s.add(int(c[1].lstrip("#")))
     return s
 
@@ -67,6 +67,11 @@ def reported_levels(txt):
         m = re.match(r"^#(\d+)\s", line)
         if m and cur: lv.setdefault(cur, set()).add(int(m.group(1)))
     return lv
+
+def is_review_pr(name):
+    """review-pr 检查名：合进 main 的是「review-pr」，合进 integration/* 等非 main 基线的是「review-pr (integration)」。
+    11-02 bug：只认精确的「review-pr」，7 个 integration/canvas-s2 PR 全记成「无 review-pr」（G5 15/23，实为 22/23）。"""
+    return name == "review-pr" or name.startswith("review-pr (")
 
 def note_for(n):
     fs = [f for f in glob.glob(f"{NOTES}/*{n}*") if re.search(rf"(^|[-_/]){n}([-_.]|$)", os.path.basename(f))]
@@ -110,7 +115,7 @@ def main():
         npend += len(pending_items(cpr))
         try:
             cr = gh(["api", f"repos/{REPO}/commits/{p['headRefOid']}/check-runs?per_page=100"])
-            rv = sorted([c for c in cr.get("check_runs", []) if c["name"] == "review-pr"], key=lambda c: c.get("completed_at") or "", reverse=True)
+            rv = sorted([c for c in cr.get("check_runs", []) if is_review_pr(c["name"])], key=lambda c: c.get("completed_at") or "", reverse=True)
             concl = (rv[0]["conclusion"] or rv[0]["status"]) if rv else "无 review-pr"
         except Exception as e: concl = "未核实"; unv.append(f"G5 #{n}: {str(e)[:80]}")
         if concl == "success": g5 += 1

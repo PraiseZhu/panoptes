@@ -115,22 +115,40 @@ def own_pr_ticket(x, n, fix2, unified=False, nofix=frozenset(), pending=False):
         if unconfirmed or n in nofix: return None
     return sev
 
+FP_CELL = re.compile(r"mq1-[0-9a-z]+(?:-pr\d+)?")
+def ruling_rows(text):
+    """(PR, pr_fingerprint or None, ruling) for each record row of fleet-standards/p2-rulings.md. Old rows are
+    | 日期 | 报告 PR | 问题 | 裁决 | …; rows from 2026-11-03 may carry a fingerprint: | 日期 | 报告 PR | 指纹 | 问题 | 裁决 | …"""
+    for line in (text or "").splitlines():
+        c = [x.strip() for x in line.strip().strip("|").split("|")]
+        if len(c) < 4 or not re.fullmatch(r"#?\d+", c[1] or ""): continue
+        if FP_CELL.fullmatch(c[2]):
+            if len(c) >= 5: yield int(c[1].lstrip("#")), c[2], c[4]
+        else: yield int(c[1].lstrip("#")), None, c[3]
+
 def fix_rulings(text):
     """PRs whose P2 ruling in fleet-standards/p2-rulings.md is exactly 修 (已修 = fixed elsewhere; 不修 / 产品代码不修 = no PR)."""
-    s = set()
-    for line in (text or "").splitlines():
-        c = [x.strip() for x in line.strip().strip("|").split("|")]
-        if len(c) >= 4 and re.fullmatch(r"#?\d+", c[1] or "") and c[3] == "修": s.add(int(c[1].lstrip("#")))
-    return s
+    return {n for n, _, r in ruling_rows(text) if r == "修"}
 
-NOFIX_RULINGS = ("不修", "产品代码不修", "误报", "P3", "已修")
+NOFIX_RULINGS = ("不修", "产品代码不修", "误报", "P3", "已修")   # + any 「结案…」 (p2.py record 结案: already fixed, no ticket)
+def _nofix(r): return r in NOFIX_RULINGS or r.startswith("结案")
+
 def no_fix_rulings(text):
-    """PRs whose P2 ruling in fleet-standards/p2-rulings.md says no PR is needed: 不修 / 产品代码不修 / 误报 / P3 / 已修 (fixed elsewhere)."""
-    s = set()
-    for line in (text or "").splitlines():
-        c = [x.strip() for x in line.strip().strip("|").split("|")]
-        if len(c) >= 4 and re.fullmatch(r"#?\d+", c[1] or "") and c[3] in NOFIX_RULINGS: s.add(int(c[1].lstrip("#")))
-    return s
+    """PRs whose P2 ruling in fleet-standards/p2-rulings.md says no PR is needed: 不修 / 产品代码不修 / 误报 / P3 / 已修 (fixed elsewhere) / 结案….
+    A row with a fingerprint still counts for its whole PR here; per-finding callers use no_fix_findings."""
+    return {n for n, _, r in ruling_rows(text) if _nofix(r)}
+
+def no_fix_findings(text):
+    """Signed rulings per finding: {"by_fp": {pr_fingerprint: "no_fix"|"fixed"}, "pr_wide": {PR: "no_fix"|"fixed"}}.
+    by_fp = rows with a fingerprint; pr_wide = old rows without one (they cover every finding of the PR). 已修 / 结案… -> fixed,
+    不修 / 产品代码不修 / 误报 / P3 -> no_fix, 修 -> nothing (the finding stands). On a PR with both kinds of old rows no_fix wins."""
+    by_fp, pr_wide = {}, {}
+    for n, fp, r in ruling_rows(text):
+        if not _nofix(r): continue
+        kind = "fixed" if (r == "已修" or r.startswith("结案")) else "no_fix"
+        if fp: by_fp[fp] = kind
+        elif pr_wide.get(n) != "no_fix": pr_wide[n] = kind
+    return {"by_fp": by_fp, "pr_wide": pr_wide}
 
 def is_p0_alert(pr):
     """合并官 P0 告警：已定级 P0（severity == "P0"），或任一检查 / finding 带 p0_candidate: true（已合并、最新主干仍失败，等级仍是 P1）。

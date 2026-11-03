@@ -31,6 +31,8 @@ import { recentGiveUps } from './catchup.mjs'
 import { prTestDimensions } from './pr-tests.mjs'
 import { generateTargetedTests, toAiTestSteps, toAiGaps, toUncoveredTargets, toAiTestResult, aiTestCaps, aiTestTier, degradeForQuota, toSourceHead } from './aitests.mjs'
 import { createQuota, memoryQuota, resolvePool, CAPPED_ZH } from './quota.mjs'
+import { qaMisattribOff } from './misattrib-flag.mjs'
+import { groupTestScriptFailures, gitIsAncestor, isScriptFailure } from './test-script-failures.mjs'
 
 // 代码版本在进程启动（模块加载）时记下：运行中 checkout 前进不会让报告冒认新提交（#1086 曾在 dfbc980 之前启动，却记成 153e03e）
 const LOADED_ARGUS_COMMIT = (() => { try { return execFileSync('git', ['-C', CODE_DIR, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim() } catch { return null } })()
@@ -78,6 +80,8 @@ function classifyKey(key, { first, rerun, base, latest, latestIsSame, skipLatest
   }
   return { status: 'introduced', why: 'fails reproducibly on this PR and passes on the base revision' }
 }
+
+export const TEST_SCRIPT_WHY = 'test script error (runner_error): the test script / harness failed before the product steps ran, so the product steps never executed; not attributable to this PR'
 
 // 检查失败的定级（统一分级，Praise 2026-10-23；文档见 README-linux.md）：
 //  introduced：产品类检查（构建/类型/单测/接口/E2E）→ P1（已合并、未合并一样）；质量守卫类 → P2；试运行检查（trialOnly）最高 P2。
@@ -452,6 +456,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     out.failed_checks.push({ check_id: r.id, check_name: r.nameZh, dimension: 'white-box', test: null, status: 'setup-failed', severity: null, attribution: 'dependency install failed twice; no checks could run', fingerprint: fp, pr_fingerprint: prFingerprint(fp, number), evidence: { tested_sha: sha, exit_code: r.exitCode, timed_out: r.timedOut, log_tail: evidenceTail(r), log_file: join(evDir, 'h1r/logs', `${r.id}.log`) } })
     health.env_problems.push({ pr: number, message: `setup step '${r.id}' failed twice (exit ${r.exitCode})` })
   }
+  const misattribOff = qaMisattribOff()
   for (const key of failureKeys(first)) {
     const stepId = key.slice(0, key.indexOf('::'))
     const test = key.slice(key.indexOf('::') + 2)
@@ -462,6 +467,9 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     const named = test !== '*'
     const fp = fingerprintOf(repo, ['check', stepId, named ? test : wholeStepSignature(r)])
     const type = r?.failureDetails?.find((f) => f.name === test)?.type ?? null
+    // runner_error 且产品步骤一步没开始（不是 roundtrip、缺的不是被测 / diff 里的模块）才标 test_script_failure（test-script-failures.mjs）
+    const scriptFailure = !misattribOff && isScriptFailure({ type, status, result: r, test, changedFiles: files.map((f) => f.filename) })
+    if (scriptFailure) why = TEST_SCRIPT_WHY
     const compareOn = (results) => { const x = results?.find((y) => y.id === stepId); return x ? (x.unavailable ? 'unavailable' : x.timedOut ? 'timeout' : x.ok ? 'pass' : (named ? (x.failures?.includes(test) ? 'fail' : 'not-failing') : 'fail')) : 'not-run' }
     let baseComparison
     if (status === 'flaky') {
@@ -479,6 +487,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
       check_id: stepId, check_name: r?.nameZh, dimension: toBox(step, profile), qa_dimensions: step.covers ?? [],
       test: named ? test : null, failure_type: type, status, flaky: status === 'flaky', related_to_pr: status === 'flaky' ? false : undefined,
       pre_existing: preExisting,
+      ...(!misattribOff && type === 'runner_error' && status === 'unverified' ? { test_script_failure: scriptFailure } : {}),
       severity: envTimeout ? 'P3' : severityFor({ status, step, merged }), attribution: envTimeout ? `${why}; test timed out in a trial-only check and passed on the idle-machine rerun: treated as environment load, not a PR finding` : why,
       ...(envTimeout ? { not_a_pr_finding: true, env_suspected: 'trial-timeout' } : {}),
       // 统一分级 P0 要人工或裁决确认：已合并、产品类、本 PR 引入且（复查过的）最新主干仍失败 → 只标 p0_candidate，等级仍是 P1
@@ -488,6 +497,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
         tested_sha: sha, base_sha: baseSha, exit_code: r?.exitCode, signal: r?.signal ?? null, ended_at: r?.endedAt ?? null, timed_out: Boolean(r?.timedOut),
         first_run: 'fail', rerun: compareOn(rerun), base_run: baseRun, ...(latest ? { latest_main_run: compareOn(latest) } : {}),
         command: (step.cmd ?? []).join(' '), log_tail: evidenceTail(r, named ? test : null), log_file: join(evDir, 'h1/logs', `${stepId}.log`),
+        ...(!misattribOff && r?.checkReasons?.length ? { check_reasons: r.checkReasons } : {}),
         ...(step.trialOnly ? { machine_load: { first_run: r?.machine ?? null, rerun_wait: out.rerun_idle_wait ?? null, rerun: rerun?.find((y) => y.id === stepId)?.machine ?? null } } : {}),
         ...(baseComparison?.compared ? { base_log_file: join(evDir, 'b/logs', `${stepId}.log`) } : {}),
       },
@@ -535,7 +545,9 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   // 失败检查：unverified / setup-failed / timeout / flaky 不是作者的问题 → 待核实（QA 自查）；其余按 severityFor 进 findings
   const asCheck = (c) => ({ source: 'check', test_backed: checkIsTestBacked(c), ...c })
   for (const c of out.failed_checks.filter((x) => !x.not_a_pr_finding && !x.low_memory && QA_SELF_CHECK_STATUSES.includes(x.status))) {
-    out.pending_verification.push(toPending('check-qa', asCheck(c), { reason: `check ${c.status}: not attributable to the PR author; QA re-runs / fixes the environment first`, reasonZh: `检查结果是 ${c.status}，不是作者的问题，QA 先自己查清（重跑、修环境）` }))
+    out.pending_verification.push(toPending('check-qa', asCheck(c), c.test_script_failure
+      ? { reason: 'test script error: the product steps never ran; QA fixes the test script / harness first, nothing to attribute to the PR', reasonZh: '测试脚本自身出错，产品步骤没跑：QA 先修测试脚本 / harness，不归到这个 PR' }
+      : { reason: `check ${c.status}: not attributable to the PR author; QA re-runs / fixes the environment first`, reasonZh: `检查结果是 ${c.status}，不是作者的问题，QA 先自己查清（重跑、修环境）` }))
   }
   out.findings = [...out.failed_checks.filter((c) => !c.not_a_pr_finding && !c.low_memory && !QA_SELF_CHECK_STATUSES.includes(c.status)).map(asCheck), ...out.findings]
   out.severity = out.findings.length ? maxSev(out.findings.map((f) => f.severity)) : 'P3'
@@ -943,7 +955,8 @@ export async function runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha
     out.quota_capped.push(quota.markCapped('ai-review', { pr: number }))
     return
   }
-  const cr = await (deps.codeReview ?? codeReview)({ secrets, pr, files: reviewFiles, results, profile, outDir: join(evDir, 'code-review'), cacheKey: ck, cached, prior: priorVerdict, verdictOf: reviewVerdict, reference,
+  const misattribOff = qaMisattribOff()
+  const cr = await (deps.codeReview ?? codeReview)({ secrets, pr, files: reviewFiles, results, failedChecks: out.failed_checks ?? [], profile, outDir: join(evDir, 'code-review'), cacheKey: ck, cached, prior: priorVerdict, verdictOf: reviewVerdict, reference,
     source: { pr: number, run_id: opts.runId ?? null, reviewed_sha: out.reviewed_sha, reviewed_at: new Date().toISOString() } })
   if (cr.status !== 'unavailable' && (!cr.reused || cr.fresh_comparison)) quota.consume('ai-review', cr.tokens ?? 0)
   if (cr.status !== 'ok') {
@@ -993,6 +1006,13 @@ export async function runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha
   }
   for (const u of unverified) {
     const fp = codeReviewFingerprint(repo, { file: u.file ?? '', symbol: u.symbol ?? '', category: u.category ?? 'unverified', title: u.title })
+    // 审查只是要补证据、说的是本 PR 某个失败检查 → 并进那条检查（review_requests），不再单开一条「P1 待核实」（#1384 #1433 #1456）
+    const check = misattribOff ? null : matchFailedCheck(u, out.failed_checks)
+    if (check) {
+      (check.review_requests ??= []).push({ title: u.title, file: u.file ?? null, line: u.line ?? null, reason: u.reason ?? null, severity_if_confirmed: u.severity_if_confirmed ?? null, fingerprint: fp })
+      out.code_review.folded_into_checks = (out.code_review.folded_into_checks ?? 0) + 1
+      continue
+    }
     const kind = UNVERIFIED_TO_PENDING[u.kind] ?? (u.kind === 'same-as-ruling' ? 'review-ruled' : 'review-unverified')
     out.pending_verification.push(toPending(kind, { source: 'code-review', check_id: 'code-review', dimension: 'white-box', severity: u.severity_if_confirmed ?? null, llm_severity: u.raw_severity ?? u.severity_if_confirmed ?? null, verdict: u.verdict ?? null,
       category: u.category ?? null, title: u.title, file: u.file, line: u.line, symbol: u.symbol ?? null, fingerprint: fp, pr_fingerprint: prFingerprint(fp, number),
@@ -1002,6 +1022,14 @@ export async function runCodeReview({ out, repo, pr, files, prDiff, sha, baseSha
   toVerify.sort((x, y) => (x.severity === 'P0' ? 0 : 1) - (y.severity === 'P0' ? 0 : 1))   // P0 先核（每 PR 有上限）
   await verifyReviewP1s({ entries: toVerify, out, repo, pr, sha: out.reviewed_sha ?? sha, profile, secrets, health, number, quota, opts, prDiff, handoffRaw, rulingsText, deps })
   settleCodeReviewStatus(out)
+}
+
+// 审查的 needs-evidence 条目指向哪条失败检查：标题 / 理由里出现用例名、检查中文名或带连字符的检查 id（e2e-browser）。
+// 不认短的检查 id（unit / lint），免得普通英文词误配
+export function matchFailedCheck(u, checks) {
+  if (u?.kind !== 'needs-evidence') return null
+  const text = `${u.title ?? ''} ${u.reason ?? ''}`
+  return (checks ?? []).find((c) => [c.test, c.check_name, c.check_id?.includes('-') ? c.check_id : null].some((n) => n && text.includes(n))) ?? null
 }
 
 const UNVERIFIED_REASON_ZH = {
@@ -1170,6 +1198,8 @@ export function envSnapshot() {
     playwright: (() => { try { return JSON.parse(readFileSync(join(CODE_DIR, 'node_modules/playwright/package.json'), 'utf8')).version } catch { return null } })(),
     python: ver(process.env.ARGUS_PYTHON ?? 'python3', ['--version']), disk_free_gb: free,
     umask: currentUmask(), umask_inherited: process.env.PANOPTES_INHERITED_UMASK || INHERITED_UMASK,
+    // 沙箱浏览器是否固定 prefers-reduced-motion（runner.stepEnv 的 CHROMIUM_FLAGS；回滚开关 qa-misattrib-off）
+    browser_reduced_motion: !qaMisattribOff(),
   }
 }
 
@@ -1771,6 +1801,8 @@ export async function runNightly(opts = {}) {
       test_backed_findings_by_severity: Object.fromEntries(['P0', 'P1', 'P2', 'P3'].map((s) => [s, allFindings.filter((f) => f.test_backed && f.severity === s).length])),
       prs_test_backed: prs.filter((p) => p.test_backed).map((p) => p.number),
       pending_verification: pendingSummary(prs.flatMap((p) => p.pending_verification ?? [])),
+      // 测试脚本自身出错按指纹归组、归到最早出现的提交（跨天看：scripts/test-script-failures.mjs）
+      ...(qaMisattribOff() ? {} : { test_script_failures: groupTestScriptFailures([{ prs }], { isAncestor: gitIsAncestor(mirrorPath(repo)) }) }),
     },
     prs,
     issues: { enabled: false, repo: ISSUE_REPO, labels: ISSUE_LABELS, dedup: 'fingerprint marker in body (label qa-auto): open issue → comment with new evidence; closed as fixed → reopen + comment; closed as not planned / wontfix label → silent', policy: 'P0/P1 findings backed by a failing check on PRs authored by PraiseZhu; system_health failures always; LLM-review-only findings never', results: [] },
@@ -1829,6 +1861,8 @@ export function mergedReportFor(report, pr, { kind = 'merged' } = {}) {
       test_backed_findings_by_severity: Object.fromEntries(['P0', 'P1', 'P2', 'P3'].map((s) => [s, findings.filter((f) => f.test_backed && f.severity === s).length])),
       prs_test_backed: pr.test_backed ? [pr.number] : [],
       pending_verification: pendingSummary(pr.pending_verification ?? []),
+      // 运行报告有 test_script_failures 时，单 PR 文件保留本 PR 参与的组（回滚开关关闭时运行报告没有该键，这里也不写）
+      ...(Array.isArray(report.summary?.test_script_failures) ? { test_script_failures: report.summary.test_script_failures.filter((g) => (g.prs ?? []).includes(pr.number)) } : {}),
     },
     prs: [pr],
     issues: { enabled: false, reason: 'written from a nightly run; issues are only handled by the run itself' },

@@ -39,6 +39,6 @@ def sandbox_state():
     cur = os.environ.get("PI_STATE")
     if not cur or os.path.realpath(cur) == os.path.realpath(live_state()):
         t = tempfile.mkdtemp(prefix="pi-test-state-")
-        os.environ.update(PI_STATE=f"{t}/state", PI_WORK=f"{t}/work", PI_WORK_ROOT=f"{t}/work")
+        os.environ.update(PI_STATE=f"{t}/state", PI_WORK=f"{t}/work", PI_WORK_ROOT=f"{t}/work", PI_ARGUS_ROOT=f"{t}/argus")
         for d in ("state", "work"): os.makedirs(f"{t}/{d}", exist_ok=True)
     return os.environ["PI_STATE"]

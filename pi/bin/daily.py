@@ -18,9 +18,12 @@ import sys, json, re, difflib, subprocess
 from lib import *
 import praise_notice as PN
 from finding_policy import author_findings, pending_items, effective_severity
+from handoff_action import handoff_issue_action   # shared with handoff.py plan / backfill: one key per finding
 
 OWNER = "PraiseZhu"; CAL = f"{PI_CODE}/conf/daily-calibrations.json"; SENT = f"{QA}/report/sent"
 GROUP_OF = lambda day: f"{SENT}/{day}/group-content.txt"
+ROUTES_FILE = os.environ.get("MIVO_QA_HANDOFF_ROUTES") or os.path.join(os.path.dirname(PI_CODE), "report", "handoff-routes.json")
+PRAISE_PR = "由 Praise PR 跟进（排队中）"
 
 def jl(p, d=None):
     try: return json.load(open(p))
@@ -32,6 +35,10 @@ def authors():
     for r in d.get("roster", []) + d.get("mivo_authors", []):
         if r.get("github_login"): m.setdefault(r["github_login"], {}).update({k: v for k, v in r.items() if v is not None})
     return m
+
+def praise_pr_authors():
+    """handoff-routes.json praise_pr_authors: QA findings on their PRs are followed up by Praise PR (no @, no DM)."""
+    return set((jl(ROUTES_FILE, {}) or {}).get("praise_pr_authors") or [])
 
 def is_bot(login, a): return login.endswith("[bot]") or a.get("account_type") == "Bot"
 
@@ -135,7 +142,8 @@ def render(day, items, fault, carry, cal, resend=False):
     P0, P1 = owner_last(P0), owner_last(P1)
     P2 = owner_last(P2)
     pend = [(i, f) for i in items for f in i.get("leads") or []]
-    at = lambda i, k: f"@{i['who']}" if k in ("P0", "P1", "P2") and not is_bot(i["login"], i["a"]) else i["who"]
+    pp = praise_pr_authors()
+    at = lambda i, k: PRAISE_PR if i["login"] in pp else f"@{i['who']}" if k in ("P0", "P1", "P2") and not is_bot(i["login"], i["a"]) else i["who"]
     mo, dd = int(day[5:7]), int(day[8:10]); L = []
     p2s = f"P2 {len(P2)} 个需要修复"
     sick = [i for i in items if i.get("health")]
@@ -155,7 +163,7 @@ def render(day, items, fault, carry, cal, resend=False):
             tb = "测试复现" if f.get("test_backed") else ("审查结论，测试系统已复核触发路径可达（这是看代码发现的）" if (f.get("verification") or {}).get("status") == "confirmed"
                   else "审查结论，测试未复现（自动测试全部通过，这是看代码发现的）" if not i["failed_checks"] else "审查结论，测试未复现")
             L.append(f"· {tb}。")
-            if isinstance(ev, dict) and ev.get("recommendation"):
+            if isinstance(ev, dict) and ev.get("recommendation") and i["login"] not in pp:
                 L.append(f"· 下一步：{ev['recommendation'].rstrip('。；;，, ')}，然后提修复 PR（标题或描述写「QA #{i['n']}」）；如果觉得不用改，在 PR 下留言，第一行写「结论：不修，原因…」。")
         for f in [f for f in i["real"] if f.get("severity") != k and f.get("source") == "code-review"][:1]:
             L.append(f"· 另有 1 条 {f['severity']} 审查意见：{f.get('title')}。需要修，可以排在 P1 之后。")
@@ -178,7 +186,7 @@ def render(day, items, fault, carry, cal, resend=False):
     sd = f"{SENT}/{day}"; dms = []
     sent_dm = {int(m.group(1)) for f in (os.listdir(sd) if os.path.isdir(sd) else []) for m in [re.match(r"dm-(\d+)\.txt$", f)] if m}
     for i in P0 + P1 + P2:
-        if not i.get("real"): continue
+        if not i.get("real") or i["login"] in pp: continue
         if i["n"] in sent_dm: dms.append((0 if i["login"] == OWNER else 1, i, "已飞书私信" if i["login"] == OWNER else "日报发出后飞书私信"))
         elif i["a"].get("notify_via_feishu") and i["login"] != OWNER and not is_bot(i["login"], i["a"]):
             dms.append((1, i, "日报发出后飞书私信"))
@@ -228,26 +236,6 @@ def send_own(day, keys, run=subprocess.run):
         r = run(cmd, timeout=900); log(f"outbound (own keys {len(keys)}) rc={r.returncode}"); return r.returncode
     except Exception as e: log(f"outbound (own keys) failed: {type(e).__name__} -> left to the */10 run"); return None
 
-def handoff_issue_action(day, i, f):
-    """gh.issue.create for one author problem (10-30): the body says what was found where, on which tested commit, under which
-    fingerprint, and gets (via handoff_key, appended by outbound) the mivo-qa-handoff marker that handoff.py / handoff-receipts.mjs match receipts against
-    (with the `handoff` label outbound adds). Unknown values are written as 未知, never guessed."""
-    n = i["n"]; fp = f.get("fingerprint") or ""; pfp = f.get("pr_fingerprint") or (f"{fp}-pr{n}" if fp else "")
-    loc = f.get("file") or "未知"
-    if f.get("file") and f.get("line") is not None: loc += f":{f['line']}"
-    sha = i.get("tested_sha") or i.get("merge_sha")
-    title = f.get("title") or f.get("test") or f"PR #{n} QA 交接"
-    body = "\n".join([
-        f"QA 日报（数据日 {day}）在 PR #{n} 上测出的问题，请处理：https://github.com/{REPO}/pull/{n}", "",
-        f"- 级别：{f.get('severity') or '未知'}",
-        f"- 问题：{title}",
-        f"- 位置：{loc}",
-        f"- 测试的合并提交：{sha or '未知'}",
-        f"- 指纹：{fp or '未知'}" + (f"（本 PR：{pfp}）" if pfp and pfp != fp else ""),
-        ])   # outbound appends the mivo-qa-handoff marker from handoff_key (comments in a body are stripped as draft marks)
-    return {"key": f"handoff:{n}:{pfp or fp}", "type": "gh.issue.create", "pr": n, "title": f"[{f.get('severity')}] {title}" if f.get("severity") else title,
-            "text": body, "labels": ["handoff"], "handoff_key": pfp}
-
 def handoff_files_actions(day, routes):
     """one gh.handoff.files per handoff repo for the report day (PM 10-30): outbound pushes what the 日报 staged under
     $QA/handoff/staging/<repo name>/daily/<YYYY>/<MM>/<day>/; Pi writes no content. Until the files are staged it waits (stale)."""
@@ -273,7 +261,7 @@ def main():
     acts = [{"key": f"mivo-daily-report:{day}", "type": "slack.post", "channel": "C0CAH3W61N2", "body_file": out,
              "dedupe_against": [f"{QA}/report/slack/sent.json", f"{SENT}/{day}/slack-sent.json"]}]
     for _, i, s in dms:
-        if i["login"] == OWNER: continue   # owner never DM'd by Pi (Grok used --allow-owner on 10-22; not a rule)
+        if i["login"] == OWNER or i["login"] in praise_pr_authors(): continue   # owner never DM'd by Pi (Grok used --allow-owner on 10-22; not a rule)
         acts.append({"key": f"dm:{day}:{i['n']}", "type": "feishu.dm", "to": i["who"], "pr": i["n"], "level": i["sev"],
                      "dedupe_against": [f"{QA}/feishu-sent.json (key dm:{day}:{i['n']} or {REPO}#{i['n']}:*)", f"{SENT}/{day}/dm-{i['n']}.txt"]})
     routes = jl("/workspace/panoptes/report/handoff-routes.json", {}); rjs = json.dumps(routes)

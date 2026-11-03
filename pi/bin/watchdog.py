@@ -25,6 +25,7 @@ Cron: */5, own quiet log out/logs/watchdog-<day>.log (only on change). --dry-run
 import sys, time, glob, hashlib, statistics
 from lib import *
 import outage
+import basegate   # 11-03 one base-branch rule (pi/bin/basegate.py)
 try:
     import praise_notice as PN
 except Exception as _pn_err:   # 10-24 复查：praise_notice 写坏了，看门狗（含绕过 outbound 的直发通道）不能跟着倒 —— 退回纯文本
@@ -219,21 +220,69 @@ def mergewatch_check(now, probs):
     if not pl or (now - pl).total_seconds() > 300: probs["prwatch:stale"] = job_item("prwatch", f"它每分钟都该转一圈，最后一次是 {str(pw.get('last_check', '无'))[11:16] or '无'}", f"心跳停了（最后 {pw.get('last_check', '无')}）")
 
 
+BRANCH_ALERT_MIN = 120   # 11-03 (B): a non-probe merge into a non-main base with no matching report after 2 h -> P2 in Jasper's 09:05 brief
+def BRIEF_QUEUE(): return f"{BASE}/out/outbound/brief-queue.jsonl"   # = outbound.BRIEF_QUEUE, read by jasper.muted_for_brief
+
+
+def report_gap(n, merge_sha):
+    """None = reports/merged/PR-N.json is a qualifying report for this merge (same rule as catchup.mjs gapOf: tested_sha ==
+    merge_sha, docs-only looks at merged_sha); else 'missing' / 'unreadable' / 'stale'. merge_sha unknown -> existence only."""
+    f = f"{RPT}/PR-{n}.json"
+    if not os.path.exists(f): return "missing"
+    try:
+        doc = json.load(open(f)); e = next(x for x in doc.get("prs") or [] if x.get("number") == n)
+    except Exception: return "unreadable"
+    if not merge_sha: return None
+    tested = (doc.get("merged_sha") or e.get("merge_sha")) if e.get("verdict") == "docs-only" else e.get("tested_sha")
+    return None if tested == merge_sha else "stale"
+
+
+def branch_alert(now, st, n, base, age, gap, sha):
+    """B: P2 into the 09:05 brief queue (never a DM to Praise); once per PR + merge sha. Off: PANOPTES_BRANCH_ALERT=0."""
+    if os.environ.get("PANOPTES_BRANCH_ALERT") == "0": return False
+    seen = st.setdefault("branch_alerted", {}); k = f"{n}:{sha or '-'}"
+    if k in seen: return False
+    what = {"missing": "没有测试报告", "unreadable": "报告读不了", "stale": "报告测的不是这个 merge commit"}.get(gap, gap)
+    text = (f"P2 漏测：#{n}（合进 {base}）已合并 {int(age)} 分钟，{what}，现在也没有在测它。"
+            f"补测：run-nightly.sh --pr {n} --write-merged；https://github.com/{REPO}/pull/{n}")
+    row = {"at": now.isoformat(timespec="seconds"), "key": f"branch-miss:{n}", "job": "watchdog", "type": "brief", "to": "Jasper",
+           "severity": "P2", "pr": n, "base": base, "merge_sha": sha, "gap": gap, "text": text}
+    if DRY: print("WOULD BRIEF", json.dumps(row, ensure_ascii=False)); return True
+    os.makedirs(os.path.dirname(BRIEF_QUEUE()), exist_ok=True)
+    with open(BRIEF_QUEUE(), "a") as q: q.write(json.dumps(row, ensure_ascii=False) + "\n")
+    seen[k] = row["at"]; log("branch-miss P2 -> brief queue", n, base, gap)
+    return True
+
+
 def merge_report_check(now, probs, st):
     if time.time() - st.get("merged_checked_at", 0) < 1800:   # one gh call per 30 min; keep last verdict in between
         for k, v in st.get("merged_probs", {}).items(): probs[k] = v
         return
     since = (now - dt.timedelta(hours=26)).astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    try: prs = gh(["pr", "list", "-R", REPO, "--state", "merged", "--search", f"merged:>={since}", "--json", "number,mergedAt,baseRefName", "--limit", "100"])
+    try: prs = gh(["pr", "list", "-R", REPO, "--state", "merged", "--search", f"merged:>={since}", "--json", "number,mergedAt,baseRefName,mergeCommit", "--limit", "100"])
     except Exception as e: log("gh pr list failed:", str(e)[:120]); return
-    # 10-30: panoptes tests only PRs merged into main (catchup.mjs the same); other bases are skipped, never "not tested"
-    skipped = [{"pr": p["number"], "base": p["baseRefName"]} for p in prs if p.get("baseRefName") not in (None, "main")]
-    prs = [p for p in prs if p.get("baseRefName") in (None, "main")]
+    # 11-03: one rule with catch-up / mergewatch / nightly (basegate.should_test): every base is tested except
+    # registry.skipBaseBranches (probe-*). PANOPTES_MAIN_ONLY=1 / flag file -> main only again.
+    globs = basegate.skip_globs()
+    skipped = [{"pr": p["number"], "base": p["baseRefName"]} for p in prs if not basegate.should_test(p.get("baseRefName"), globs)]
     active = subprocess.run(["pgrep", "-af", "run-nightly.sh"], capture_output=True, text=True).stdout
     mp = {}
     for p in prs:
-        n = p["number"]; age = (now - parse_ts(p["mergedAt"]).astimezone(CST)).total_seconds() / 60
-        if age < 90 or os.path.exists(f"{RPT}/PR-{n}.json") or re.search(rf"--pr {n}\b", active): continue
+        n, base = p["number"], p.get("baseRefName"); sha = (p.get("mergeCommit") or {}).get("oid")
+        age = (now - parse_ts(p["mergedAt"]).astimezone(CST)).total_seconds() / 60
+        if age < 90 or re.search(rf"--pr {n}\b", active): continue
+        tested = basegate.should_test(base, globs)
+        if not tested and basegate.matches_skip(base, globs): continue   # probe-*: never tested, never alerted
+        gap = report_gap(n, sha)
+        if not gap: continue
+        if base not in (None, "main"):
+            # integration / feature branch (or, under PANOPTES_MAIN_ONLY, a skipped non-probe base = the B sentinel): brief only, no DM
+            if age >= BRANCH_ALERT_MIN: branch_alert(now, st, n, base, age, gap, sha)
+            continue
+        if gap == "stale":
+            mp[f"stale:{n}"] = PN.item("auto", f"PR #{n} 的报告测的不是合并后的代码", f"#{n} 已经合并 {int(age)} 分钟，报告里的 tested_sha 不是它的 merge commit。",
+                "这个 PR 合并后的代码还没被测过。", auto="每 2 小时一次的兜底会按 merge commit 重测它", link=f"https://github.com/{REPO}/pull/{n}")
+            continue
         mp[f"noreport:{n}"] = PN.item("auto", f"PR #{n} 合并 {int(age)} 分钟了还没测", f"#{n} 已经合并 {int(age)} 分钟，还没有测试报告，现在也没有在测它。",
             "这个 PR 的问题要晚一点才知道。", auto="每小时一次的兜底会补测它；24 小时后还没测上会再提醒你",
             link=f"https://github.com/{REPO}/pull/{n}")
@@ -501,11 +550,16 @@ def prfix_check(now, probs):
 
 
 VIGIL_BAD = ("FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR")
+VIGIL_LEGACY = "vigil:stall"   # pre-11-03 single key for all stuck PRs; still in old state.json, dropped silently on the first run after upgrade
 
 
 def vigil_check(now, probs, st):
-    if time.time() - st.get("vigil_checked_at", 0) < 1800:   # one gh call per 30 min; keep the last verdict in between
-        for k, v in st.get("vigil_probs", {}).items(): probs[k] = v
+    """11-03: one key per stuck PR (vigil:stall:<number>), like janitor:unmarked on 10-30. The old single key vigil:stall
+    never closed when its PR set changed ({1627} -> {1621}): neither new nor recovered, nothing logged, nothing sent."""
+    cached = st.get("vigil_probs", {})
+    legacy = VIGIL_LEGACY in cached
+    if not legacy and time.time() - st.get("vigil_checked_at", 0) < 1800:   # one gh call per 30 min; keep the last verdict in between
+        for k, v in cached.items(): probs[k] = v
         return
     try: prs = gh(["pr", "list", "-R", REPO, "--author", "PraiseZhu", "--state", "open", "--limit", "60",
                    "--json", "number,title,isDraft,updatedAt,statusCheckRollup"])
@@ -518,14 +572,17 @@ def vigil_check(now, probs, st):
         idle = (now - parse_ts(p["updatedAt"]).astimezone(CST)).total_seconds() / 3600
         if red and idle > 4: stuck.append((idle, p["number"], (p.get("title") or "")[:40], red[:2]))
     vp = {}
-    if stuck:
-        stuck.sort(reverse=True)
-        lst = "；".join(f"#{n}「{t}」（{'、'.join(r)} 没过，{h:.0f} 小时没动静）" for h, n, t, r in stuck[:6])
-        vp["vigil:stall"] = PN.item("action", "Mac mini 盯梢那边有 PR 卡了很久", f"{len(stuck)} 个已转正式的 PR 在 GitHub 上很久没动静：{lst}。"
+    for h, n, t, r in sorted(stuck, reverse=True):
+        vp[f"vigil:stall:{n}"] = PN.item("action", f"Mac mini 盯梢那边有 PR 卡了很久：#{n}", f"已转正式的 PR #{n}「{t}」在 GitHub 上很久没动静（{'、'.join(r)} 没过，{h:.0f} 小时没动静）。"
             "可能是盯梢停了（10-23 晚就停过 5 个多小时），也可能它在本地修得比较久、还没推上来。",
-            "盯梢真停了的话，这些 PR 的审查意见、测试失败没人修，合不进去。",
+            "盯梢真停了的话，这个 PR 的审查意见、测试失败没人修，合不进去。",
             todo=["在 Mac mini 上看盯梢还在不在跑（上次停摆是 Keel 插件换了位置，见 vigil PR #48）",
-                  "或者在 Cindy 里让 Mac mini 上的会话直接处理这几个 PR"])
+                  f"或者在 Cindy 里让 Mac mini 上的会话直接处理 #{n}"])
+    if VIGIL_LEGACY in st.get("last_seen", {}):   # upgrade: the old aggregate key already passed the 2-run debounce for these PRs
+        st["last_seen"].update(vp)                 # -> per-PR keys report at once
+    for part in ("open", "last_seen"):             # 11-03 acceptance: drop the legacy key silently -- the per-PR keys replace it;
+        if (st.get(part) or {}).pop(VIGIL_LEGACY, None) is not None:   # left in "open" it was told as 「已恢复…不用管了」 next to 🔴 for the same PRs
+            log("vigil: dropped legacy key", VIGIL_LEGACY, "from", part, "(replaced by per-PR keys, no recovered notice)")
     st["vigil_checked_at"] = time.time(); st["vigil_probs"] = vp; probs.update(vp)
 
 

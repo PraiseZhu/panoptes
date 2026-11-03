@@ -15,6 +15,7 @@ SANDBOX_ENV = {
     "PI_STATE": f"{_T}/state", "PI_WORK": f"{_T}/work", "PI_WORK_ROOT": f"{_T}/work", "HOME": f"{_T}/home",
     "BOXHEALTH_TMP_ROOT": f"{_T}/tmp", "BOXHEALTH_LOG_DIRS": f"{_T}/logs", "MEMGUARD_DIR": f"{_T}/memguard",
     "PI_OUTAGE_WITNESS": f"{_T}/work/locks/outage-seq-witness", "PI_ROLLBACK_MARK": f"{_T}/state/ROLLBACK-SUSPECTED",
+    "PI_ARGUS_ROOT": f"{_T}/argus",   # prwatch.tests_running/queued: the qa-slot files (else the live merge-test slot)
     "npm_config_cache": f"{_T}/home/.npm", "PI_LOCK_DIR": f"{_T}/tmp",   # mergewatch / outbound job flocks (else the real /tmp ones)
 }
 for _d in ("state", "work", "home", "tmp", "logs", "memguard"): os.makedirs(f"{_T}/{_d}", exist_ok=True)

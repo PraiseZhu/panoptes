@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""cron_sync — /etc/cron.d/pi-fallback 以仓库 pi/cron/pi-line.cron 为准（10-28：opsdeploy 只同步 pi-call，定时表改了要手工装）。
-opsdeploy 每 10 分钟调 sync()：部署后、或任何一轮发现漂移时，先校验仓库版语法（不过就不装），把线上旧文件备份到
+"""cron_sync — /etc/cron.d/pi-fallback 以仓库 pi/cron/pi-line.cron 为准（#80 起自动同步，不用手工装；10-28 之前 opsdeploy 只同步 pi-call，定时表才要手工装）。
+opsdeploy 每 10 分钟调 sync()（sync_allowed 通过时：无部署错误且 HEAD == origin/main，#131）：部署后、或任何一轮发现漂移时，先校验仓库版语法（不过就不装），把线上旧文件备份到
 <state>/cron-bak/pi-fallback.<时间>（不放 /etc/cron.d，免得被 cron 读），用和手工一样的
 `sudo -n install -o root -g root -m 644` 装上，返回 diff 写日志。
 用法：cron_sync.py [check|sync]"""
