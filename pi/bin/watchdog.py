@@ -550,7 +550,7 @@ def prfix_check(now, probs):
 
 
 VIGIL_BAD = ("FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR")
-VIGIL_LEGACY = "vigil:stall"   # pre-11-03 single key for all stuck PRs; still in old state.json, recovers on the first run after upgrade
+VIGIL_LEGACY = "vigil:stall"   # pre-11-03 single key for all stuck PRs; still in old state.json, dropped silently on the first run after upgrade
 
 
 def vigil_check(now, probs, st):
@@ -579,7 +579,10 @@ def vigil_check(now, probs, st):
             todo=["在 Mac mini 上看盯梢还在不在跑（上次停摆是 Keel 插件换了位置，见 vigil PR #48）",
                   f"或者在 Cindy 里让 Mac mini 上的会话直接处理 #{n}"])
     if VIGIL_LEGACY in st.get("last_seen", {}):   # upgrade: the old aggregate key already passed the 2-run debounce for these PRs
-        st["last_seen"].update(vp)                 # -> per-PR keys report at once, vigil:stall recovers in the same run
+        st["last_seen"].update(vp)                 # -> per-PR keys report at once
+    for part in ("open", "last_seen"):             # 11-03 acceptance: drop the legacy key silently -- the per-PR keys replace it;
+        if (st.get(part) or {}).pop(VIGIL_LEGACY, None) is not None:   # left in "open" it was told as 「已恢复…不用管了」 next to 🔴 for the same PRs
+            log("vigil: dropped legacy key", VIGIL_LEGACY, "from", part, "(replaced by per-PR keys, no recovered notice)")
     st["vigil_checked_at"] = time.time(); st["vigil_probs"] = vp; probs.update(vp)
 
 

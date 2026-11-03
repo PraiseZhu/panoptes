@@ -45,20 +45,32 @@ class T(unittest.TestCase):
         self.assertEqual([k for k in st["open"] if k.startswith("vigil")], ["vigil:stall:1621"])
         self.assertTrue(any("现在好了" in a[0] and "#1627" in a[0] for a in self.sent))   # Praise is told 1627 recovered
 
-    def test_legacy_aggregate_key_recovers_after_upgrade_without_residue(self):
+    def seed_legacy(self, **extra):
         old = watchdog.PN.item("action", "Mac mini 盯梢那边有 PR 卡了很久", "1 个已转正式的 PR…#1621", todo=["x"])
         with open(watchdog.STATE, "w") as f:      # pre-upgrade state.json, fresh 30-min cache holding the old key
             json.dump({"open": {"vigil:stall": old}, "last_seen": {"vigil:stall": old}, "vigil_probs": {"vigil:stall": old},
-                       "vigil_checked_at": self.clock[0], "sent_at": 9e12}, f)
-        self.stuck = [1621]
+                       "vigil_checked_at": self.clock[0], "sent_at": 9e12, **extra}, f)
+
+    def test_legacy_aggregate_key_dropped_silently_after_upgrade(self):
+        self.seed_legacy(); self.stuck = [1621]
         self.assertEqual(watchdog.main(), 0); st = json.load(open(watchdog.STATE))   # same 30-min window: legacy cache is not reused
-        self.assertIn("recovered=['vigil:stall']", self.logs())
+        self.assertNotIn("'vigil:stall'", self.logs())           # never logged as recovered
         self.assertIn("new=['vigil:stall:1621']", self.logs())    # already debounced under the old key: reported in the same run
         for part in ("open", "last_seen", "vigil_probs"): self.assertNotIn("vigil:stall", st[part])
         self.assertIn("vigil:stall:1621", st["open"])
+        self.assertFalse(any("现在好了" in a[0] for a in self.sent))
         self.stuck = []; st = self.run_once()
         self.assertIn("recovered=['vigil:stall:1621']", self.logs())
         self.assertFalse([k for k in st["open"] if k.startswith("vigil")])
 
+    def test_legacy_key_never_reported_recovered_with_current_stalls(self):
+        """11-03 acceptance: live state still had vigil:stall; one message said 🔴 #1648/#1621 and 「已恢复…不用管了」."""
+        self.seed_legacy(sent_at=0); self.stuck = [1621, 1648]
+        for _ in range(3): st = self.run_once()
+        out = "\n".join(a[0] for a in self.sent)
+        self.assertIn("#1648", out); self.assertIn("#1621", out)
+        self.assertNotIn("已恢复", out); self.assertNotIn("现在好了", out)
+        self.assertNotIn("'vigil:stall'", self.logs())
+        for part in ("open", "last_seen", "vigil_probs"): self.assertNotIn("vigil:stall", st[part])
 
 if __name__ == "__main__": unittest.main()
