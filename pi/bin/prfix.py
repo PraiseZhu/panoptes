@@ -1777,8 +1777,14 @@ def pick_qa(A, ctx, vs, now):
     mine = [v for v in vs if v["c"]["qa"] == A.qa and (not A.fp or v["c"]["fp"].startswith(A.fp))]
     if not mine:   # the operator may also force a P2 that is not ruled 修: look it up in the current report
         rep = (ctx["reports"].get(A.qa) or {}).get("cur")
-        x = next((x for x in (rep[1].get("findings") or [] if rep else []) if x.get("fingerprint") and x.get("severity") in ("P0", "P1", "P2")
-                  and (not A.fp or x["fingerprint"].startswith(A.fp))), None)
+        xs = [x for x in (rep[1].get("findings") or [] if rep else []) if x.get("fingerprint") and x.get("severity") in ("P0", "P1", "P2")
+              and (not A.fp or x["fingerprint"].startswith(A.fp))]
+        nf = ctx.get("nofix") or frozenset()   # 11-04: a signed per-fingerprint no-fix row holds for --qa / pi-dispatch qa:N too
+        ruled = [x for x in xs if (A.qa, x["fingerprint"]) in nf]
+        x = next((x for x in xs if x not in ruled), None)
+        if not x and ruled:
+            return None, {"status": "stopped", "qa": A.qa, "fp": ruled[0]["fingerprint"],
+                          "error": f"p2-rulings.md 已按指纹裁了不修（{ruled[0]['fingerprint']}），--qa 不强修；要修先改裁决"}
         if x:
             c = {"qa": A.qa, "fp": x["fingerprint"], "sev": x["severity"], "source": "report", "author": author_of(rep[1]), "finding": x,
                  "title": x.get("title") or "", "row": ctx["ledger"].get((A.qa, x["fingerprint"]))}
