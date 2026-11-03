@@ -25,6 +25,12 @@ class LegacyMute(unittest.TestCase):   # B.T's sandbox, not its tests
         self.assertEqual([q["key"] for q in self.queue()].count(KEY), 1)
         self.assertEqual(self.main("--days", "2"), 0)   # later run: no re-enqueue
         self.assertEqual([q["key"] for q in self.queue()].count(KEY), 1)
+    def test_bad_queue_line_does_not_crash_and_legacy_is_queued_once(self):
+        open(O.BRIEF_QUEUE(), "w").write('{bad\n[1]\n{"key": "other"}\n')   # torn line from another writer, non-dict, unrelated
+        self.assertEqual(self.main("--days", "2"), 0); self.assertEqual(self.main("--days", "2"), 0)
+        self.assertEqual(self.ledger()[KEY]["status"], "briefed")
+        keys = [json.loads(l).get("key") for l in open(O.BRIEF_QUEUE()).read().splitlines()[3:]]
+        self.assertEqual(keys.count(KEY), 1, keys)
     def test_key_in_two_days_listed_once_per_run(self):
         self.assertEqual(self.main("--days", "2"), 0)
         self.assertEqual(len(self.rows()), 1, self.rows())
@@ -50,6 +56,7 @@ class FeishuGroupPost(unittest.TestCase):
         return O.h_feishu_group(a)[3]()
     def test_multiline_success_is_sent(self): self.assertEqual(self.do(SENT), "sent")
     def test_multiline_dedupe_is_skipped_not_failed(self): self.assertEqual(self.do(DEDUPE), "skipped (already sent)")
+    def test_log_then_multiline_json_parses(self): self.assertEqual(self.do("node: warning x\n" + SENT), "sent")
     def test_one_line_after_log_still_parses(self): self.assertEqual(self.do("log line\n" + json.dumps({"ok": True}) + "\n"), "sent")
 
 
