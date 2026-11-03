@@ -22,9 +22,15 @@ RC_RETRY = 75                                     # EX_TEMPFAIL: skipped (lock /
 OVERLAP = dt.timedelta(hours=6)                   # re-scan before the watermark (gh search lag); done set prevents redo
 MAX_ATTEMPTS = 3                                  # a fix PR whose targets stay blocked is given up after 3 runs
 TRANSIENT = ("本轮模型调用已达上限",)             # blocked for budget reasons: does not count as an attempt
+# one-shot look-back after a qa_refs widening: the next watermark run scans from go-live once (done PRs still skipped),
+# then records the tag in state so later runs use the normal watermark window.
+REF_BACKFILL = ("qa-refs-2026-11-03", "2026-10-29T12:34:00+08:00")
 PERMANENT = ("没有合并报告", "原报告缺", "原 PR 的新增代码文件", "可执行新增行为 0", "没有轻量复跑")  # retry can't help
 
-def qa_refs(body): return [int(x) for x in re.findall(r"QA[:：]\s*#(\d+)", body or "")]
+def qa_refs(body, title=""):
+    """原问题 PR 号：同 pm_extra.fix_refs（正文/标题 QA: #N、QA #N、QA 来源：#N、QA 对 #N）。11-03 bug：只认正文 QA: #N，#1440/#1559/#1627/#1677 不复测。"""
+    from pm_extra import fix_refs
+    return fix_refs({"body": body, "title": title})
 
 def load_pr(n):
     try: return json.load(open(f"{RPT}/PR-{n}.json"))["prs"][0]
@@ -51,7 +57,7 @@ def ledger_path():
 
 def targets_for(p):
     tg = []
-    for o in qa_refs(p.get("body")):
+    for o in qa_refs(p.get("body"), p.get("title")):
         rep = load_pr(o)
         for f in pick_targets(p.get("body"), o, rep): tg.append((o, f))
         if not rep: tg.append((o, None))
@@ -59,7 +65,7 @@ def targets_for(p):
 
 def plan(day, only=None):
     """[(fix_pr_dict, [(orig_pr, finding)])] for fix PRs merged on `day` with QA: #N (pm_extra.retest rule)."""
-    return [(p, targets_for(p)) for p in merged_prs(day) if qa_refs(p.get("body")) and not (only and p["number"] not in only)]
+    return [(p, targets_for(p)) for p in merged_prs(day) if qa_refs(p.get("body"), p.get("title")) and not (only and p["number"] not in only)]
 
 # ---------- scope: watermark (pure parts) ----------
 def parse_at(s):
@@ -87,16 +93,17 @@ def seed_state(runs_lines, today_d):
         wm = dt.datetime.combine(today_d - dt.timedelta(days=1), dt.time(), CST); done = {}
     return {"watermark": wm.isoformat(timespec="seconds"), "done": done, "retry": {}}
 
-def select_fix_prs(prs, state, only=None):
+def select_fix_prs(prs, state, only=None, since=None):
     """prs: merged PRs (number, mergedAt, body, ...) from at least watermark-OVERLAP. Keep fix PRs (QA: #N) that are not done
     and (merged after watermark-OVERLAP or in the retry set); `only` forces those numbers even if done. Oldest merge first,
     so retest `at` follows merge order (effective_retest's 'latest at')."""
     lo = parse_at(state.get("watermark")) - OVERLAP if state.get("watermark") else None
+    if since and lo: lo = min(lo, since)   # one-shot look-back (REF_BACKFILL)
     done, retry = state.get("done") or {}, state.get("retry") or {}
     out = []
     for p in prs:
         n = p["number"]
-        if not qa_refs(p.get("body")): continue
+        if not qa_refs(p.get("body"), p.get("title")): continue
         if only:
             if n in only: out.append(p)
             continue
@@ -433,20 +440,24 @@ def run(a):
         state = seed_state(runs, stamp.date()); log(f"no retest-state.json -> seeded watermark {state['watermark']} done={sorted(state['done'], key=int)}")
     if a.day:   # explicit data day (manual); done fix PRs are still recorded, the watermark is not moved
         P = sorted(plan(a.day, only), key=lambda t: (t[0].get("mergedAt") or "", t[0]["number"]))
-        scope, advance = f"数据日 {a.day}", False
+        scope, advance, backfill = f"数据日 {a.day}", False, False
     else:
         if getattr(a, "since", None): state["watermark"] = a.since
         lo = parse_at(state["watermark"]) - OVERLAP
         lo = min([lo] + [t for t in (parse_at(v.get("merged_at")) for v in (state.get("retry") or {}).values()) if t])
-        P = [(p, targets_for(p)) for p in select_fix_prs(merged_since(lo), state, only)]
+        backfill = not only and state.get("ref_backfill") != REF_BACKFILL[0]
+        if backfill: lo = min(lo, parse_at(REF_BACKFILL[1]))
+        P = [(p, targets_for(p)) for p in select_fix_prs(merged_since(lo), state, only, since=lo if backfill else None)]
         scope = f"{state['watermark']} 之后合并、尚未复测的修复 PR" + (f"（含重试 {sorted(state['retry'], key=int)}）" if state.get("retry") else "")
         advance = not only
+        if backfill: scope += f"（一次性回看 {REF_BACKFILL[1]} 起：{REF_BACKFILL[0]}）"
     print(f"retest {scope}: {len(P)} fix PR(s) with QA: #N; mode={'EXECUTE' if a.execute else 'DRY-RUN'}")
     for p, tg in P:
         print(f"  #{p['number']} merged {p.get('mergedAt')} head {p['headRefOid'][:10]} ← " + ", ".join(
             f"#{o}:{(f or {}).get('source','无报告')}:{(f or {}).get('fingerprint','-')}" for o, f in tg))
     if not a.execute: print("DRY: nothing run, nothing written (add --execute)"); return 0
     if not P:
+        if advance and backfill: state["ref_backfill"] = REF_BACKFILL[0]
         if advance: state.update(watermark=stamp.isoformat(timespec="seconds"), last_run={"at": stamp.isoformat(timespec="seconds"), "fix_prs": []}); save_state(state, stamp)
         print("nothing to retest"); return 0
     if mem_mb() < 3072: return note_skip(state, f"MemAvailable {mem_mb()}MB < 3072MB", stamp)
@@ -512,6 +523,7 @@ def run(a):
         for p, _ in P:   # remember merge time of retry entries so the next scan window still covers them
             if str(p["number"]) in state.get("retry", {}): state["retry"][str(p["number"])]["merged_at"] = p.get("mergedAt")
         if advance: state["watermark"] = stamp.isoformat(timespec="seconds")
+        if advance and backfill: state["ref_backfill"] = REF_BACKFILL[0]
         state["last_run"] = {"at": stamp.isoformat(timespec="seconds"), "scope": scope, "fix_prs": sorted(by_fix), "done": done_now, "retry": retry_now, "unmatched": len(unmatched)}
         state.pop("last_skip", None); save_state(state, stamp)
     finally:

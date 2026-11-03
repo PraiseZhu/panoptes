@@ -91,11 +91,15 @@ def handoff(day, prs, p01, p2s, miss, unv):
     if diff: miss.append(f"交接仓规则文件不一致：{', '.join(diff)}（人名以外的差异需人工确认）")
     return L + [""]
 
+CHANGELOG_TITLE = re.compile(r"更新日志")
+QA_REF = re.compile(r"(?<![A-Za-z])QA\s*(?:来源|对)?\s*[:：]?\s*#(\d+)")
 def fix_refs(p):
-    """修复 PR 引用的原问题 PR：正文「QA: #N」，或标题「QA #N」/「QA: #N」。
-    11-02 bug：只认正文，#1440（标题 QA #1409）、#1559（标题 QA #1478）没算成修复 PR。正文不带冒号的「QA #N」
-    仍不算（#1585 更新日志补扫正文里的 QA #1491/#1492 不是修复）。"""
-    refs = re.findall(r"QA[:：]\s*#(\d+)", p.get("body") or "") + re.findall(r"QA[:：]?\s*#(\d+)", p.get("title") or "")
+    """修复 PR 引用的原问题 PR：正文或标题里「QA: #N」「QA #N」「QA 来源：#N」「QA 对 #N」。纯「#N」「fixes #N」不算。
+    11-02 bug：只认正文，#1440（标题 QA #1409）、#1559（标题 QA #1478）没算成修复 PR。
+    11-03 bug：正文「QA 来源：#1409」「QA #943」「QA 对 #1449」不认（#1440/#1627/#1677）。
+    「chore: 更新日志补扫」PR 正文列的 QA #N 不是修复（#1585），标题含「更新日志」的整条不算。"""
+    if CHANGELOG_TITLE.search(p.get("title") or ""): return []
+    refs = QA_REF.findall(p.get("title") or "") + QA_REF.findall(p.get("body") or "")
     return list(dict.fromkeys(int(x) for x in refs))
 
 def third_round_open(r):
