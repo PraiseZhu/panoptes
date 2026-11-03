@@ -93,9 +93,14 @@ test('2. matchFailedCheck: only needs-evidence, and short check ids (unit) do no
 })
 
 // ── 3. 测试脚本自身出错单独标记、按最早出现的提交归组；runner_error 写明产品步骤没跑 ──
-test('3. runner_error + unverified: flagged test_script_failure, attribution says the product steps never ran (processPr, #1384 shape)', async () => {
-  const { MIRRORS_DIR } = await import('../src/paths.mjs')
-  const run = async (number) => {
+// 只有 harness 自己的检查失败（候选文件在层运行中被改），产品检查都没开始
+const CHECKS_HARNESS = [
+  { id: 'browser-host-probe', status: 'unavailable', reason: 'Error: real MivoCanvas pan target' },
+  { id: 'candidate-snapshot-stable', status: 'fail', reason: 'candidate files changed during layer run' },
+]
+const { MIRRORS_DIR } = await import('../src/paths.mjs')
+// run(number, { checks }) 跑 checks 格式报告；run(number, { failLog }) 跑一个首跑打印 failLog 并退出 1 的 node:test 风格步骤
+const run = async (number, { checks = CHECKS_1384, failLog = null, files = ['v.mjs'] } = {}) => {
     const repo = `fixture/pr${number}`
     const src = join(root, `source-${number}`)
     mkdirSync(src)
@@ -107,17 +112,22 @@ test('3. runner_error + unverified: flagged test_script_failure, attribution say
     mkdirSync(MIRRORS_DIR, { recursive: true })
     spawnSync('git', ['clone', '-q', '--bare', src, join(MIRRORS_DIR, `fixture__pr${number}.git`)])
     const pr = { number, title: 'code', html_url: 'https://example.invalid', user: { login: 'f' }, base: { ref: 'main', sha: baseSha }, head: { sha: 'f'.repeat(40) }, merged_at: new Date().toISOString(), merge_commit_sha: mergeSha, state: 'closed' }
-    writeFileSync(process.env.ARGUS_E2E_GH_STATE, JSON.stringify({ pr, baseSha, files: [{ filename: 'v.mjs', additions: 1, deletions: 1 }], calls: [] }))
+    writeFileSync(process.env.ARGUS_E2E_GH_STATE, JSON.stringify({ pr, baseSha, files: files.map((filename) => ({ filename, additions: 1, deletions: 1 })), calls: [] }))
     // 首跑 / 重跑写 #1384 的失败报告，合并前版本（b）通过
-    const report = JSON.stringify({ status: 'fail', checks: CHECKS_1384 })
-    const pass = JSON.stringify({ status: 'pass', checks: CHECKS_1384.map((c) => ({ ...c, status: 'pass' })) })
-    const cmd = ['sh', '-c', `mkdir -p "$1/e2e"; case "$(basename "$1")" in *-b-*) printf '%s' '${pass}' > "$1/e2e/report.browser.json"; exit 0;; *) printf '%s' '${report}' > "$1/e2e/report.browser.json"; exit 1;; esac`, 'sh', '${RUN}']
+    const report = JSON.stringify({ status: 'fail', checks })
+    const pass = JSON.stringify({ status: 'pass', checks: checks.map((c) => ({ ...c, status: 'pass' })) })
+    const cmd = failLog
+      ? ['sh', '-c', `case "$(basename "$1")" in *-b-*) exit 0;; *) printf '%s\n' "$2"; exit 1;; esac`, 'sh', '${RUN}', failLog]
+      : ['sh', '-c', `mkdir -p "$1/e2e"; case "$(basename "$1")" in *-b-*) printf '%s' '${pass}' > "$1/e2e/report.browser.json"; exit 0;; *) printf '%s' '${report}' > "$1/e2e/report.browser.json"; exit 1;; esac`, 'sh', '${RUN}']
     const profile = { sandbox: false, steps: [{ id: 'install', kind: 'setup', nameZh: '安装依赖', cmd: ['true'] },
-      { id: 'e2e-browser', nameZh: '浏览器端到端', kind: 'product', optional: true, covers: ['e2e'], cmd, failureReport: { format: 'checks', path: '${RUN}/e2e/report.browser.json' }, timeoutMin: 5 }] }
+      failLog
+        ? { id: 'unit', nameZh: '单元测试', kind: 'product', optional: true, covers: ['unit'], cmd, timeoutMin: 5 }
+        : { id: 'e2e-browser', nameZh: '浏览器端到端', kind: 'product', optional: true, covers: ['e2e'], cmd, failureReport: { format: 'checks', path: '${RUN}/e2e/report.browser.json' }, timeoutMin: 5 }] }
     return N.processPr({ repo, project: { repo, profileData: profile }, number, discovery: 'merged', secrets: {}, db: null, health: { status: 'ok', qa_tool_failures: [], env_problems: [], llm_errors: [], notes: [] },
       evidenceRoot: join(root, `ev-${number}`), opts: { noReview: true, reuseMerged: false } })
-  }
-  const out = await run(4101)
+}
+test('3. runner_error + unverified + no product step started: flagged test_script_failure, attribution says the product steps never ran (processPr)', async () => {
+  const out = await run(4101, { checks: CHECKS_HARNESS })
   const c = out.failed_checks.find((x) => x.check_id === 'e2e-browser')
   assert.equal(c.status, 'unverified')
   assert.equal(c.evidence.base_run, 'pass')
@@ -127,10 +137,47 @@ test('3. runner_error + unverified: flagged test_script_failure, attribution say
   const p = out.pending_verification.find((x) => x.check_id === 'e2e-browser')
   assert.equal(p.pending_kind, 'check-qa')
   assert.match(p.pending_reason_zh, /测试脚本自身出错，产品步骤没跑/)
-  const old = await withOff(() => run(4102))
+  const old = await withOff(() => run(4102, { checks: CHECKS_HARNESS }))
   const oc = old.failed_checks.find((x) => x.check_id === 'e2e-browser')
   assert.equal(oc.test_script_failure, undefined)
   assert.equal(oc.attribution, 'rerun result incomplete or failure type not comparable')
+})
+
+// 验收 #166 round 1：产品步骤已经开始的 runner_error 不能写成「测试脚本出错、与 PR 无关」
+test('3a. no product step started: only the harness check is a test-script failure, the product check in the same report is not', async () => {
+  const out = await run(4111, { checks: [...CHECKS_HARNESS, CHECKS_1384[1]] })
+  const harness = out.failed_checks.find((x) => x.test === 'candidate-snapshot-stable')
+  const product = out.failed_checks.find((x) => x.test === 'browser-product-roundtrip')
+  assert.equal(harness.test_script_failure, true)
+  assert.equal(product.test_script_failure, false)
+  assert.doesNotMatch(product.attribution, /product steps never executed/)
+})
+test('3b. roundtrip "did not complete" (#1384): the product journey ran → not a test-script failure', async () => {
+  const out = await run(4112)
+  const c = out.failed_checks.find((x) => x.test === 'browser-product-roundtrip')
+  assert.equal(c.failure_type, 'runner_error')
+  assert.equal(c.status, 'unverified')
+  assert.equal(c.test_script_failure, false)
+  assert.doesNotMatch(c.attribution, /product steps never executed/)
+  assert.ok(!out.summary?.test_script_failures?.length)
+})
+const moduleLog = (spec) => `✖ widget renders\n  Error [ERR_MODULE_NOT_FOUND]: Cannot find module '${spec}' imported from /repo/tests/widget.test.mjs`
+test('3c. missing module under the tested code (relative / in-repo path) → product failure, not a test-script failure', async () => {
+  const out = await run(4113, { failLog: moduleLog('/repo/src/widget.mjs') })
+  const c = out.failed_checks.find((x) => x.check_id === 'unit')
+  assert.equal(c.failure_type, 'runner_error')
+  assert.equal(c.test_script_failure, false)
+  assert.doesNotMatch(c.attribution, /product steps never executed/)
+  const pkg = await run(4115, { failLog: moduleLog('/repo/node_modules/left-pad/index.js') })
+  assert.equal(pkg.failed_checks.find((x) => x.check_id === 'unit').test_script_failure, true, 'a missing dependency outside the tested code stays a test-script failure')
+})
+test('3d. missing module that the PR diff touched (deleted / renamed) → product failure, not a test-script failure', async () => {
+  const out = await run(4114, { failLog: moduleLog('@mivo/canvas-core/smooth-camera'), files: ['packages/@mivo/canvas-core/smooth-camera.ts'] })
+  const c = out.failed_checks.find((x) => x.check_id === 'unit')
+  assert.equal(c.failure_type, 'runner_error')
+  assert.equal(c.test_script_failure, false)
+  const untouched = await run(4116, { failLog: moduleLog('@mivo/canvas-core/smooth-camera'), files: ['v.mjs'] })
+  assert.equal(untouched.failed_checks.find((x) => x.check_id === 'unit').test_script_failure, true, 'same bare spec, diff did not touch it → test-script failure')
 })
 
 test('3. groupTestScriptFailures: one group per fingerprint, first_seen = the ancestor commit (old reports without the flag count too)', async () => {

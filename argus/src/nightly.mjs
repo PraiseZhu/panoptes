@@ -32,7 +32,7 @@ import { prTestDimensions } from './pr-tests.mjs'
 import { generateTargetedTests, toAiTestSteps, toAiGaps, toUncoveredTargets, toAiTestResult, aiTestCaps, aiTestTier, degradeForQuota, toSourceHead } from './aitests.mjs'
 import { createQuota, memoryQuota, resolvePool, CAPPED_ZH } from './quota.mjs'
 import { qaMisattribOff } from './misattrib-flag.mjs'
-import { groupTestScriptFailures, gitIsAncestor } from './test-script-failures.mjs'
+import { groupTestScriptFailures, gitIsAncestor, isScriptFailure } from './test-script-failures.mjs'
 
 // 代码版本在进程启动（模块加载）时记下：运行中 checkout 前进不会让报告冒认新提交（#1086 曾在 dfbc980 之前启动，却记成 153e03e）
 const LOADED_ARGUS_COMMIT = (() => { try { return execFileSync('git', ['-C', CODE_DIR, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim() } catch { return null } })()
@@ -467,8 +467,8 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     const named = test !== '*'
     const fp = fingerprintOf(repo, ['check', stepId, named ? test : wholeStepSignature(r)])
     const type = r?.failureDetails?.find((f) => f.name === test)?.type ?? null
-    // runner_error = 测试脚本 / harness 自己没跑完：产品步骤没执行，这次失败不能说明 PR 有问题（#1384）。单独标 test_script_failure
-    const scriptFailure = !misattribOff && type === 'runner_error' && status === 'unverified'
+    // runner_error 且产品步骤一步没开始（不是 roundtrip、缺的不是被测 / diff 里的模块）才标 test_script_failure（test-script-failures.mjs）
+    const scriptFailure = !misattribOff && isScriptFailure({ type, status, result: r, test, changedFiles: files.map((f) => f.filename) })
     if (scriptFailure) why = TEST_SCRIPT_WHY
     const compareOn = (results) => { const x = results?.find((y) => y.id === stepId); return x ? (x.unavailable ? 'unavailable' : x.timedOut ? 'timeout' : x.ok ? 'pass' : (named ? (x.failures?.includes(test) ? 'fail' : 'not-failing') : 'fail')) : 'not-run' }
     let baseComparison
@@ -487,7 +487,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
       check_id: stepId, check_name: r?.nameZh, dimension: toBox(step, profile), qa_dimensions: step.covers ?? [],
       test: named ? test : null, failure_type: type, status, flaky: status === 'flaky', related_to_pr: status === 'flaky' ? false : undefined,
       pre_existing: preExisting,
-      ...(scriptFailure ? { test_script_failure: true } : {}),
+      ...(!misattribOff && type === 'runner_error' && status === 'unverified' ? { test_script_failure: scriptFailure } : {}),
       severity: envTimeout ? 'P3' : severityFor({ status, step, merged }), attribution: envTimeout ? `${why}; test timed out in a trial-only check and passed on the idle-machine rerun: treated as environment load, not a PR finding` : why,
       ...(envTimeout ? { not_a_pr_finding: true, env_suspected: 'trial-timeout' } : {}),
       // 统一分级 P0 要人工或裁决确认：已合并、产品类、本 PR 引入且（复查过的）最新主干仍失败 → 只标 p0_candidate，等级仍是 P1
