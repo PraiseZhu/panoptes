@@ -15,6 +15,7 @@ class LegacyMute(unittest.TestCase):   # B.T's sandbox, not its tests
     tearDown, main, ledger, queue, report = B.T.tearDown, B.T.main, B.T.ledger, B.T.queue, B.T.report
     def setUp(self):
         B.T.setUp(self)
+        os.environ["PI_LOCK_DIR"] = self.tmp   # own exec lock per test: a run that crashes holding it can't make later runs wait 5 min
         a = dict(B.ROUTED[-1][1])   # the same overdue key was emitted on 11-02 too
         json.dump({"actions": [{**a, "at": "2026-11-02T15:30:00+08:00"}]}, open(f"{self.tmp}/out/handoff/2026-11-02.actions.json", "w"))
         os.makedirs(os.path.dirname(O.LEDGER), exist_ok=True); json.dump({KEY: LEGACY}, open(O.LEDGER, "w"))
@@ -30,6 +31,14 @@ class LegacyMute(unittest.TestCase):   # B.T's sandbox, not its tests
         self.assertEqual(self.main("--days", "2"), 0); self.assertEqual(self.main("--days", "2"), 0)
         self.assertEqual(self.ledger()[KEY]["status"], "briefed")
         keys = [json.loads(l).get("key") for l in open(O.BRIEF_QUEUE()).read().splitlines()[3:]]
+        self.assertEqual(keys.count(KEY), 1, keys)
+    def test_invalid_utf8_queue_does_not_crash_and_legacy_is_queued_once(self):
+        open(O.BRIEF_QUEUE(), "wb").write(b'\xff\xfe{bad\n{"key": "x", "text": "\xe5\xa4'   # junk + torn multi-byte char
+                                          b'"}\n')
+        self.assertEqual(self.main("--days", "2"), 0); self.assertEqual(self.main("--days", "2"), 0)
+        led = self.ledger(); self.assertEqual(led[KEY]["status"], "briefed")
+        for _, a in B.ROUTED[:-1]: self.assertEqual(led[a["key"]]["status"], "briefed", a["key"])   # other actions still processed
+        keys = [json.loads(l).get("key") for l in open(O.BRIEF_QUEUE(), "rb").read().splitlines()[2:]]
         self.assertEqual(keys.count(KEY), 1, keys)
     def test_key_in_two_days_listed_once_per_run(self):
         self.assertEqual(self.main("--days", "2"), 0)

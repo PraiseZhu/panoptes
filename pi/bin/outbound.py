@@ -51,8 +51,10 @@ MERGE_DAY_CAP, MERGE_ROUND_CAP = 2, 1                  # policy maxMergesPerDay 
 BRIEF_ROUTED = ("nudge:", "pm-retro:", "pm-cos:", "ops-review:", "overdue:")
 def BRIEF_QUEUE(): return f"{BASE}/out/outbound/brief-queue.jsonl"
 def brief_queued(k):   # several writers append here: a torn / bad line is skipped, never crashes the run
-    try: lines = open(BRIEF_QUEUE()).read().splitlines()
+    try:
+        with open(BRIEF_QUEUE(), errors="replace") as f: lines = f.read().splitlines()   # torn multi-byte char -> U+FFFD, not a crash
     except FileNotFoundError: return False
+    except (OSError, ValueError) as e: log(f"brief-queue unreadable ({e.__class__.__name__}) -> treated as not queued"); return False
     for l in lines:
         try: r = json.loads(l)
         except ValueError: continue
