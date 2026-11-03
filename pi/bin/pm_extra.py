@@ -91,15 +91,27 @@ def handoff(day, prs, p01, p2s, miss, unv):
     if diff: miss.append(f"交接仓规则文件不一致：{', '.join(diff)}（人名以外的差异需人工确认）")
     return L + [""]
 
+def fix_refs(p):
+    """修复 PR 引用的原问题 PR：正文「QA: #N」，或标题「QA #N」/「QA: #N」。
+    11-02 bug：只认正文，#1440（标题 QA #1409）、#1559（标题 QA #1478）没算成修复 PR。正文不带冒号的「QA #N」
+    仍不算（#1585 更新日志补扫正文里的 QA #1491/#1492 不是修复）。"""
+    refs = re.findall(r"QA[:：]\s*#(\d+)", p.get("body") or "") + re.findall(r"QA[:：]?\s*#(\d+)", p.get("title") or "")
+    return list(dict.fromkeys(int(x) for x in refs))
+
+def third_round_open(r):
+    """第三轮且还没修好 → 该进早报「需要你做」。11-02 bug：只看 fix_round>=3，#966、#1077 台账 retest=pass、status=fixed
+    已修好，仍被报成「第三轮未报出」。"""
+    return (r.get("fix_round") or 0) >= 3 and r.get("status") not in ("fixed", "concluded") and r.get("retest") != "pass"
+
 def retest(day, prs, miss):
     nums = {p["number"] for p in prs}
-    fixes = [(p["number"], [int(x) for x in re.findall(r"QA[:：]\s*#(\d+)", p.get("body") or "")]) for p in prs]
+    fixes = [(p["number"], fix_refs(p)) for p in prs]
     fixes = [(n, r) for n, r in fixes if r]
     led = sorted(glob.glob(f"{QA}/ledger/daily/*.json")); led = json.load(open(led[-1])) if led else {"rows": [], "needs_you": []}
     byfix = {}
     for r in led["rows"]:
         for f in r.get("fix_prs") or []: byfix.setdefault(f["pr"], []).append(r)
-    L = ["## 12. 修复 PR 验收", f"- 数据日合并的修复 PR（正文含 QA: #N）：{len(fixes)} 个" + ("：" + " ".join(f"#{n}(QA {','.join('#'+str(x) for x in r)})" for n, r in fixes) if fixes else "")]
+    L = ["## 12. 修复 PR 验收", f"- 数据日合并的修复 PR（正文含 QA: #N 或标题含 QA #N）：{len(fixes)} 个" + ("：" + " ".join(f"#{n}(QA {','.join('#'+str(x) for x in r)})" for n, r in fixes) if fixes else "")]
     rt_ok = 0; wb = 0; pend = []
     for n, refs in fixes:
         try: p = json.load(open(f"{RPT}/PR-{n}.json"))["prs"][0]
@@ -112,7 +124,7 @@ def retest(day, prs, miss):
     L.append(f"- 原用例复测 + 定向回归：{rt_ok}/{len(fixes)}（报告里有 retest/定向回归字段，或 run_mode=fix-retest/targeted）")
     L.append(f"- 回写原问题（台账 retest 已出结果）：{wb}/{len(fixes)}" + (f"；仍 pending/未关联：{' '.join('#'+str(x) for x in pend)}" if pend else ""))
     rounds = [r.get("fix_round") or 0 for r in led["rows"]]
-    third = list({r["pr"]: r for r in led["rows"] if (r.get("fix_round") or 0) >= 3}.values())
+    third = list({r["pr"]: r for r in led["rows"] if third_round_open(r)}.values())
     needs = json.dumps(led.get("needs_you") or [], ensure_ascii=False)
     unrep = [r for r in third if f"#{r['pr']}" not in needs and str(r["pr"]) not in needs]
     L.append(f"- 轮次字段：台账 {'有' if any('fix_round' in r for r in led['rows']) else '缺'}（最高 {max(rounds or [0])}）；第三轮 {len(third)} 条" + (f"，未进早报「需要你做」：{' '.join('#'+str(r['pr']) for r in unrep)} ❌" if unrep else "，均已报出或无"))
