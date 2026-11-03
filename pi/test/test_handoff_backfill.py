@@ -102,7 +102,8 @@ class Rulings(unittest.TestCase):
     T = ("| 10-23 | #948 | P2 | 已修 | x |\n| 10-23 | #1124 | 文档 | 修 | x |\n| 11-03 | #1456 | 用例失败 | 不修 | 误报 | e | Jasper | Jasper 已裁 |\n"
          "| 11-03 | #9001 | mq1-test0000000000000002-pr9001 | 问题 2 | 误报 | x |\n")
     def test_pr_sets_keep_old_rows_and_read_fingerprint_rows(self):
-        self.assertEqual(FP.no_fix_rulings(self.T), {948, 1456, (9001, "mq1-test0000000000000002")})   # B-fp: a 指纹 row covers that finding only; self.assertEqual(FP.fix_rulings(self.T), {1124})
+        self.assertEqual(FP.no_fix_rulings(self.T), {948, 1456, (9001, "mq1-test0000000000000002")})   # B-fp: a 指纹 row covers that finding only
+        self.assertEqual(FP.fix_rulings(self.T), {1124})
     def test_no_fix_findings(self):
         self.assertEqual(FP.no_fix_findings(self.T), {"by_fp": {"mq1-test0000000000000002-pr9001": "no_fix"}, "pr_wide": {948: "fixed", 1456: "no_fix"}})
 
