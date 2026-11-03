@@ -9,6 +9,7 @@ import { machineLoad } from './memory.mjs'
 import { gitTokenFor } from './github.mjs'
 import { fileURLToPath } from 'node:url'
 import { validateTestReport } from './config.mjs'
+import { qaMisattribOff } from './misattrib-flag.mjs'
 import { normalizeTestOutcomes } from './test-outcomes.mjs'
 import { vitestCoverageArgs, readCoverageDir, readV8Dir, mergeCoverageFiles } from './coverage.mjs'
 import { stepCacheEnabled, stepCacheKey, lookupStepResult, storeStepResult, reusedResult } from './stepcache.mjs'
@@ -160,8 +161,12 @@ export function stepEnv(runDir, profile) {
     MIVO_ASSET_STORE_DIR: join(runDir, 'assets'),
     ...(process.env.PLAYWRIGHT_BROWSERS_PATH ? { PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH } : {}),
     ...extra,
+    // 沙箱浏览器固定 prefers-reduced-motion（scripts/chromium-linux.sh 把 CHROMIUM_FLAGS 接到命令行）：#1384 起 Mivo 平滑镜头在
+    // 沙箱 headless 里收敛不到 harness 严格等待的视口值，减弱动效后往返 2/2 通过（kiro-p1-1102 / rerun-1384-rm）。回滚：qa-misattrib-off
+    ...(qaMisattribOff() ? {} : { CHROMIUM_FLAGS: [extra.CHROMIUM_FLAGS, REDUCED_MOTION_FLAG].filter(Boolean).join(' ') }),
   }
 }
+export const REDUCED_MOTION_FLAG = '--force-prefers-reduced-motion'
 
 // 请求的版本不在镜像里（合并后 main 被回退 / 合并分支合并后删掉）是输入事实，不是 QA 机器坏掉：
 // 上层（nightly.mjs processTargets）据此把这一轮记成 not-tested，不记 qa-error —— 否则一条永久事实
@@ -335,7 +340,7 @@ function toUnmetRequirement(step, src) {
 }
 
 // 探针和 AI 补测步骤：把 spec 和执行脚本放进测试目录（沙箱读不到 Argus 自己的代码目录）
-function prepareTool(step, runDir, vars) {
+export function prepareTool(step, runDir, vars) {
   const tools = join(runDir, 'tools')
   mkdirSync(tools, { recursive: true })
   if (step.probe) {
@@ -350,7 +355,7 @@ function prepareTool(step, runDir, vars) {
   if (step.aiTest) {
     writeFileSync(join(tools, 'ai-test-run.mjs'), readFileSync(AI_TEST_SCRIPT))
     // 补测代码原样写入，不做变量替换
-    writeFileSync(join(runDir, `${step.id}.json`), JSON.stringify(step.aiTest))
+    writeFileSync(join(runDir, `${step.id}.json`), JSON.stringify(qaMisattribOff() ? { ...step.aiTest, legacyOrder: true } : step.aiTest))
   }
 }
 
@@ -654,7 +659,10 @@ function readFailureReport(spec, runDir) {
     failureDetails.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
     const aggregate = report.checks.some((c) => c?.status === 'fail') ? 'fail' : report.checks.length && report.checks.every((c) => c?.status === 'pass') ? 'pass' : 'unavailable'
     if (report.status != null && report.status !== aggregate) incomplete = true
-    return { failures: failureDetails.map((c) => c.name), failureDetails, failureParseStatus: incomplete || !failureDetails.length ? 'incomplete' : 'complete' }
+    // 没通过的检查各自的原因首行（送代码审查用：只有用例名时模型只能写「证据不足」，#1384 真正的原因在 browser-host-probe 里）
+    const checkReasons = report.checks.filter((c) => c && typeof c.id === 'string' && c.status !== 'pass').slice(0, 10)
+      .map((c) => ({ id: c.id, status: String(c.status), reason: String(c.reason ?? '').split('\n')[0].slice(0, 300) }))
+    return { failures: failureDetails.map((c) => c.name), failureDetails, failureParseStatus: incomplete || !failureDetails.length ? 'incomplete' : 'complete', checkReasons }
   } catch { return missing /* 报告缺失或坏掉，不能退回整步确认 */ }
 }
 
