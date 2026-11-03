@@ -209,13 +209,22 @@ def run(cmd, cwd=None, t=1800, env=None, inp=None):
     kw = {"input": inp} if inp is not None else {"stdin": subprocess.DEVNULL}
     try:
         r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=t, env=env, **kw)
+        emerg_check()
         return r.returncode, (r.stdout or "") + (r.stderr or "")
     except subprocess.TimeoutExpired as e:
+        emerg_check()
         o = e.stdout or ""
         if isinstance(o, bytes): o = o.decode("utf-8", "replace")
         return 124, f"{o}\n[prfix] timeout after {t}s"
     except FileNotFoundError as e:
         return 127, f"[prfix] {e}"
+def emerg_check():
+    """prwatch.emerg_kill marked this process before killing its step (memory < 2G for 30 s): the step's result is void, the
+    ticket goes back to the queue without using up a retry."""
+    import prwatch
+    m = prwatch.emerg_mark(os.getpid())
+    if os.path.exists(m):
+        os.remove(m); raise Waiting("内存低于 2G 持续 30 秒，prwatch 杀了当前步骤，本单回到队列")
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]")
 def clean(s):
     """Tool output without terminal colour codes (10-24: the fix2 prompt for QA1198 quoted vitest as `31m1 failed?[39m`)."""
@@ -274,6 +283,18 @@ _QA_HOLD = {}   # the nightly.lock file while a ticket runs (only when SHARE_WIT
 # Praise 2026-10-23 23:xx: "机器内存够同时跑" -> prfix no longer takes panoptes' nightly.lock; merge tests never wait for a fix.
 # The guard is memory instead: MemAvailable >= 3G before every heavy step (wait up to 30 min, then transient back-off).
 SHARE_WITH_PANOPTES = os.environ.get("PRFIX_SHARE_WITH_PANOPTES", "1") != "0"
+YIELD_OFF = f"{BASE}/prfix-yield-off"   # rollback (11-03 §2.3): touch -> only the MemAvailable >= 3G check before each step
+YIELD_EXTRA_MB = 3072
+def mem_wait_reason():
+    """why the next heavy step must wait, or None. Besides MemAvailable >= 3G: while a merge test runs or is queued, the step also
+    waits until MemAvailable >= the test's learned peak + 3G (tests first; between steps only, a running step is never paused)."""
+    m = mem_gb()
+    if m < MIN_MEM_GB: return f"MemAvailable {m:.1f}G < {MIN_MEM_GB}G"
+    if os.path.exists(YIELD_OFF): return None
+    import prwatch
+    if not (prwatch.tests_running() or prwatch.tests_queued()): return None
+    need = prwatch.learned(prwatch.jload(prwatch.STATE, {}), "panoptes", prwatch.PANOPTES_PEAK_MB) + YIELD_EXTRA_MB
+    return f"合并测试在跑或排队，MemAvailable {m * 1024:.0f}MB < 测试峰值+3G {need}MB" if m * 1024 < need else None
 def yield_to_panoptes():
     """Called before every model step and heavy local step (10-23): merge tests go first. If a panoptes run is queued on
     nightly.lock, hand the lock over, wait until panoptes is done, then take it back and continue the ticket. Praise's rule
@@ -281,8 +302,8 @@ def yield_to_panoptes():
     f = _QA_HOLD.get("f")
     if SHARE_WITH_PANOPTES:
         t0 = time.time()
-        while mem_gb() < MIN_MEM_GB:
-            if time.time() - t0 > 1800: raise Waiting(f"等内存超过 30 分钟（MemAvailable {mem_gb():.1f}G < {MIN_MEM_GB}G）")
+        while (why := mem_wait_reason()):
+            if time.time() - t0 > 1800: raise Waiting(f"等内存超过 30 分钟（{why}）")
             time.sleep(30)
         return
     if not f or subprocess.run(["pgrep", "-f", "panoptes/run-nightly.sh"], capture_output=True).returncode != 0: return
@@ -1377,7 +1398,7 @@ def fix_one(c, A, d):
         def ask(k, prompt):
             yield_to_panoptes()
             try: text, task = pi(TIER, wd, step_prompt(k, prompt), session, timeout=2400, write=True, skills=False, nice=True)
-            except Exception as e: raise Transient(f"模型 {k} 调用失败：{str(e)[:300]}")
+            except Exception as e: emerg_check(); raise Transient(f"模型 {k} 调用失败：{str(e)[:300]}")
             res["model"].append({"step": k, "task": task, "text": text}); texts.append(text); return text
         # 1 reproduce (the model is told once when it wrote no test / its test passes on base)
         t1 = ask("repro", f"{ctx}\n\nTASK 1 (reproduce only): add a regression test next to the existing tests of that module that FAILS on current code "
@@ -1999,7 +2020,7 @@ def revise_merge(A, d, n, qa, fp, p, red):
         def ask(k, prompt):
             yield_to_panoptes()
             try: text, task = pi(TIER, wd, step_prompt(k, prompt), session, timeout=2400, write=True, skills=False, nice=True)
-            except Exception as e: raise Transient(f"模型 {k} 调用失败：{str(e)[:300]}")
+            except Exception as e: emerg_check(); raise Transient(f"模型 {k} 调用失败：{str(e)[:300]}")
             res["model"].append({"step": k, "task": task, "text": text}); return text
         left = conflicted
         for i in range(1, 4):
@@ -2099,7 +2120,7 @@ def revise_one(A, d, n, qa, fp, p, red):
             yield_to_panoptes()
             before = snapshot(wd, sorted(set(changed(wd, head, junk)) | touched))
             try: text, task = pi(TIER, wd, step_prompt(k, prompt), session, timeout=2400, write=True, skills=False, nice=True)
-            except Exception as e: raise Transient(f"模型 {k} 调用失败：{str(e)[:300]}")
+            except Exception as e: emerg_check(); raise Transient(f"模型 {k} 调用失败：{str(e)[:300]}")
             after = snapshot(wd, sorted(set(changed(wd, head, junk)) | set(before)))
             touched.update(f for f in after if f not in before or after.get(f) != before.get(f))   # files the model itself wrote
             # (review 10-24; "not in before": a file it deleted or moved away reads None both times)
