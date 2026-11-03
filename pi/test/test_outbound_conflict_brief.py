@@ -81,10 +81,34 @@ class T(unittest.TestCase):
         self.assertEqual(led[MERGE[1]["key"]]["status"], "briefed")      # nudge: is BRIEF_ROUTED under the mute anyway
         self.assertEqual(self.dms, [])
 
+    def resolved_actions(self, plain=True):   # step 11 ③: prwatch resolved() 🟢 -- resolved:dirty:<sha> (conflict) beside a plain resolved:<sha> (CI red)
+        acts = [{**DIRTY[1], "at": NOW.isoformat()},
+                {"key": "resolved:dirty:0123456789", "type": "slack.dm", "to": "Praise", "text": "🟢 修复 PR #1641 后来弄好了（跟 main 冲突）", "at": NOW.isoformat()},
+                {"key": "resolved:abcdef0123", "type": "slack.dm", "to": "Praise", "text": "🟢 修复 PR #1650 后来弄好了（自动测试没过）", "at": NOW.isoformat()}][:3 if plain else 2]
+        json.dump({"actions": acts}, open(f"{self.tmp}/out/prwatch/{DAY}.actions.json", "w"), ensure_ascii=False)
+
+    def test_resolved_conflict_green_goes_to_brief_never_dm(self):
+        self.resolved_actions(plain=False); self.assertEqual(self.main(), 0)   # no mute: before, this 🟢 was a Slack DM
+        led = self.ledger(); self.assertEqual(led["resolved:dirty:0123456789"]["status"], "briefed")
+        self.assertIn("conflict reminder", led["resolved:dirty:0123456789"]["reason"]); self.assertEqual(self.dms, [])
+
+    def test_resolved_conflict_green_under_mute_briefed_not_just_skipped(self):
+        self.resolved_actions(); self.mute(); self.assertEqual(self.main(), 0)
+        led = self.ledger(); self.assertEqual(led["resolved:dirty:0123456789"]["status"], "briefed")
+        self.assertEqual(led["resolved:abcdef0123"]["status"], "skipped")             # non-conflict 🟢: unchanged (mute -> skipped)
+        self.assertIn("resolved:dirty:0123456789", [q["key"] for q in self.queue()]); self.assertEqual(self.dms, [])
+
+    def test_resolved_conflict_green_with_brief_route_off_is_muted_not_dm(self):
+        self.resolved_actions(plain=False); open(O.BRIEF_ROUTE_OFF(), "w").close(); self.assertEqual(self.main(), 0)
+        self.assertEqual(self.ledger()["resolved:dirty:0123456789"]["status"], "skipped")
+        self.assertEqual(self.queue(), []); self.assertEqual(self.dms, [])
+        self.assertIn("resolved:dirty:0123456789", open(f"{self.tmp}/out/outbound/muted-{DAY}.md").read())
+
     def test_other_keys_unchanged(self):
         self.assertFalse(O.conflict_brief("nudge:1641:stall:2026-11-03T18:05:00+08:00"))
         self.assertFalse(O.conflict_brief("nudge:2026-11-03:1641:red"))
         self.assertFalse(O.conflict_brief("resolved:abc"))
+        self.assertTrue(O.conflict_brief("resolved:dirty:0123456789"))
         self.assertTrue(O.conflict_brief("dirty:1641:abcdef123456"))
         self.assertTrue(O.conflict_brief("nudge:1641:merge:2026-11-03T18:05:00+08:00"))
 

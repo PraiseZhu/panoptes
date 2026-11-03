@@ -483,6 +483,9 @@ def pr_now(n):
     return None if p.get("state") == "OPEN" else "closed"
 
 
+def CONFLICT_BRIEF_OFF(): return f"{BASE}/conflict-brief-off"   # = outbound.CONFLICT_BRIEF_OFF (#177); touch = old routing
+
+
 def resolved(st):
     """Praise 10-24 (red DMs from before the bot fixed things looked like it was still stuck): every 10 min, one 🟢 DM for what a
     🔴 asked him to handle and the bot then finished on its own -- a needs_human / norepro ticket that later got its fix PR, or a fix
@@ -494,7 +497,8 @@ def resolved(st):
         for tag, v in (st.get("draft_seen") or {}).items():
             if v in ("red", "dirty"): al.setdefault(tag.split(":")[0], "backfill")
         st["alerted_backfilled"] = True
-    items, done_keys = [], []
+    items, done_keys, c_items, c_keys = [], [], [], []
+    split = not os.path.exists(CONFLICT_BRIEF_OFF())   # re-read every run (same flag as outbound.CONFLICT_BRIEF_OFF, #177)
     ob = jload(f"{BASE}/out/outbound/ledger.json", {})
     for k, t in jload(f"{BASE}/out/praise-pr/tickets.json", {}).get("tickets", {}).items():
         if k.startswith("rev:") or k in sent or t.get("status") != "pr_action_written": continue
@@ -516,13 +520,18 @@ def resolved(st):
         al.pop(n, None)
         if now == "closed" or f"pr:{n}" in sent: continue
         was = "跟 main 冲突" if since == "dirty" else "自动测试没过"
-        items.append(PN.item("resolved", f"修复 PR #{n} 后来弄好了", f"之前私信说 bot 开的修复 PR #{n} {was}；后来处理好了，现在{now}。",
-                             link=f"https://github.com/{REPO}/pull/{n}"))
-        done_keys.append(f"pr:{n}")
-    if not items: return
-    key = "resolved:" + hashlib.sha1(",".join(sorted(done_keys)).encode()).hexdigest()[:10]
-    act("prwatch", {"key": key, "type": "slack.dm", "to": "Praise", "text": PN.text(*items)})
-    st["resolved_sent"] = (sent + done_keys)[-500:]; qlog(f"resolved -> DM {key}: {done_keys}")
+        it = PN.item("resolved", f"修复 PR #{n} 后来弄好了", f"之前私信说 bot 开的修复 PR #{n} {was}；后来处理好了，现在{now}。",
+                     link=f"https://github.com/{REPO}/pull/{n}")
+        if since == "dirty" and split: c_items.append(it); c_keys.append(f"pr:{n}")
+        else: items.append(it); done_keys.append(f"pr:{n}")
+    # 11-03 step 11 ③: the 🟢 for a conflict (dirty:) reminder is a conflict reminder too -> its own resolved:dirty:<sha> key, which
+    # outbound.conflict_brief (#177) sends to the brief queue only, never a DM. touch <state>/conflict-brief-off -> old single bundle.
+    for xs, ks, pfx in ((items, done_keys, "resolved:"), (c_items, c_keys, "resolved:dirty:")):
+        if not xs: continue
+        key = pfx + hashlib.sha1(",".join(sorted(ks)).encode()).hexdigest()[:10]
+        act("prwatch", {"key": key, "type": "slack.dm", "to": "Praise", "text": PN.text(*xs)})
+        qlog(f"resolved -> {'brief' if pfx != 'resolved:' else 'DM'} {key}: {ks}")
+    if items or c_items: st["resolved_sent"] = (sent + done_keys + c_keys)[-500:]
 
 
 def revise_or_wait(st, done, n, head, tag, seen, rv, cnt_key, cap, what, red=()):
