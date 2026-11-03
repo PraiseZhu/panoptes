@@ -15,6 +15,11 @@ def panoptes_backlog(tickets):
     except Exception as e: return {"awaiting_merge_prs": waiting, "open_prs": f"未核实：{str(e)[:80]}"}
     return {"awaiting_merge_prs": waiting, "open_prs": len(prs), "oldest_open_at": min((p["createdAt"] for p in prs), default=None),
             "url": "https://github.com/PraiseZhu/panoptes/pulls"}
+def latest_ops_review():
+    """R13 (review-ops/bin/daily_review.py:22-24, 11-03): since 10-29 the formal daily review is Pi opsreview's
+    $PI_STATE/out/ops/review-<day>.md; /workspace/review-ops/daily/ is the legacy hand-written fallback (stopped at 10-29)."""
+    fs = sorted(f for f in glob.glob(f"{BASE}/out/ops/review-*.md") if re.fullmatch(r"review-\d{4}-\d{2}-\d{2}\.md", os.path.basename(f)))
+    return fs[-1] if fs else None
 def muted_for_brief(d, y):
     """outbound.py BRIEF_QUEUE: muted nudge/pm-retro/pm-cos/ops-review/overdue messages from y 09:00 to d 09:00 (Beijing time),
     so each one is in exactly one brief"""
@@ -33,7 +38,7 @@ def main():
       "Mivo QA 日报": {"slack_sent_for_yesterday": (sj.get(f"mivo-daily-report:{y}") or {}).get("sent_at"),
                      "ledger_latest": sorted(glob.glob(f"{QA}/ledger/daily/*.json"))[-1]},
       "Mivo 测试项目经理": {"pm_daily_yesterday_exists": os.path.exists(f"/workspace/fleet-standards/pm-daily/{y}.md")},
-      "Mivo QA 运维": {"review_ops_latest": sorted(glob.glob("/workspace/review-ops/daily/*.md"))[-1],
+      "Mivo QA 运维": {"review_ops_latest": latest_ops_review(),   # R13 (11-03): formal review = out/ops/review-<day>.md
                      "catch_up_log_age_h": age("/workspace/mivo-qa/argus-root/logs/catch-up-cron.log")},
       "Mivo 合并官": {"PAUSED": os.path.exists("/workspace/mivo-merger/PAUSED"), "audit_age_h": age("/workspace/mivo-merger/audit.log")},
       "备份管家": {"sync_log_age_h": age("/workspace/grokbot-box-check/sync.log")},
