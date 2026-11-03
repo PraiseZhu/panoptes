@@ -47,5 +47,42 @@ class T(unittest.TestCase):
         self.assertGreater(n[0], 5)
         self.assertEqual(p.returncode, 0, p.stderr[-1500:])
 
+    def test_import_time_env_leaks_from_other_modules_do_not_break_tests(self):
+        """11-04: `python3 -m unittest discover -s test` imports every module before running any test, so each module's import-time
+        os.environ edits leak into the others (pytest's conftest isolates modules, discover does not). Base e12881b: 6 failures --
+        test_grokline/test_prfix_unit setdefault PRFIX_OWNERS='*' over test_fix_authors' pop; test_p2_fp_rulings re-points
+        JANITOR_CONF over test_prfix_unit's; lib.BASE frozen by the first importer while later modules move PI_STATE. Replay those
+        leaks after import in a child process: the affected tests must stay green."""
+        bad = tempfile.mkdtemp(prefix="leaked-env-"); self.addCleanup(shutil.rmtree, bad, True)
+        with open(f"{bad}/janitor.json", "w") as fh: fh.write('{"enforce": false}')
+        code = f"""import os, sys, unittest; sys.path.insert(0, {HERE!r})
+import test_fix_authors, test_p2_fp_rulings, test_prfix_unit
+os.environ.update(PRFIX_OWNERS="*", PI_STATE={bad!r}, JANITOR_CONF={bad + '/janitor.json'!r})   # what other modules leave behind
+names = ["test_fix_authors.FixAuthors.test_default_and_rollback_flag", "test_p2_fp_rulings.Policy.test_switch_restores_whole_pr",
+         "test_p2_fp_rulings.P2Record.test_shadow_proposals_skip_only_the_signed_finding",
+         "test_p2_fp_rulings.PmAndNudge.test_pm_counts_pr_until_every_p2_is_signed",
+         "test_p2_fp_rulings.PmAndNudge.test_pmnudge_skips_only_fix_prs_for_signed_findings",
+         "test_prfix_unit.TestFixOneEndToEnd.test_success_with_janitor_enforcing_drops_worktree_keeps_patch"]
+r = unittest.TextTestRunner(verbosity=0).run(unittest.defaultTestLoader.loadTestsFromNames(names))
+sys.exit(0 if r.wasSuccessful() and r.testsRun == len(names) else 1)"""
+        p = subprocess.run([sys.executable, "-c", code], cwd=os.path.join(os.path.dirname(HERE), "bin"), capture_output=True, text=True, timeout=300)
+        self.assertEqual(p.returncode, 0, p.stderr[-3000:])
+
+    def test_mergewatch_resume_ignores_the_live_mergewatch_lock(self):
+        """test_mergewatch_resume.py used the live /tmp/pi-fallback-mergewatch.lock (no PI_LOCK_DIR): while the production
+        mergewatch cron held it, main() returned at once and the module failed (selftest). Hold that lock in a private mount
+        namespace (bwrap binds a scratch file over the path; the live lock is never taken) and run the module: it must pass."""
+        live = "/tmp/pi-fallback-mergewatch.lock"
+        if not (shutil.which("bwrap") and os.path.exists(live)): self.skipTest("needs bwrap and the live lock file as a mount point (box only)")
+        fake = tempfile.mkdtemp(prefix="fake-mw-lock-"); self.addCleanup(shutil.rmtree, fake, True); open(f"{fake}/lock", "w").close()
+        hold = ("import fcntl, subprocess, sys; f = open(sys.argv[1], 'w'); fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); "
+                "sys.exit(subprocess.run([sys.executable, sys.argv[2]]).returncode)")
+        env = {k: v for k, v in os.environ.items() if k != "PI_LOCK_DIR"}
+        p = subprocess.run(["bwrap", "--dev-bind", "/", "/", "--bind", f"{fake}/lock", live, sys.executable, "-c", hold, live,
+                            f"{HERE}/test_mergewatch_resume.py"], cwd=os.path.join(os.path.dirname(HERE), "bin"), env=env,
+                           capture_output=True, text=True, timeout=120)
+        if "bwrap:" in p.stderr and p.returncode != 0 and "Traceback" not in p.stderr: self.skipTest(p.stderr[-300:])
+        self.assertEqual(p.returncode, 0, p.stderr[-1500:])
+
 if __name__ == "__main__":
     unittest.main()

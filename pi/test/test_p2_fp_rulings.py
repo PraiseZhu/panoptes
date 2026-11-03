@@ -27,6 +27,9 @@ def p2(fp): return {"fingerprint": fp, "severity": "P2", "source": "check", "sta
 
 class Switch(unittest.TestCase):
     def setUp(self):
+        # the switch is read from $PI_STATE at call time; under unittest discover lib (L.BASE) was imported by an earlier module
+        # under another PI_STATE and later modules moved PI_STATE again: pin it to L.BASE for this test, restored after
+        e = mock.patch.dict(os.environ, PI_STATE=L.BASE); e.start(); self.addCleanup(e.stop)
         os.makedirs(L.BASE, exist_ok=True); self.off = os.path.join(L.BASE, "p2-fp-rulings-off")
         self.addCleanup(lambda: os.path.exists(self.off) and os.remove(self.off))
 

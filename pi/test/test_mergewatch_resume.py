@@ -1,7 +1,9 @@
 """python3 test/test_mergewatch_resume.py — 10-27：VM 每次恢复（outage pause）mergewatch 都对同一个 main sha 重起 catch-up
 （03:46、07:42、07:56、08:23、08:36、09:18 共 6 次，都无事可做）。停机恢复不再置 dirty，只有 main sha 变了才起。不联网、不起真进程。"""
 import os, sys, json, tempfile, types, importlib.util
-tmp = tempfile.mkdtemp(); os.environ.update(PI_STATE=tmp, PI_FLEET_MODE="pi"); os.environ.pop("PI_BASE", None)
+_ENV = dict(os.environ)   # runs at import: under unittest discover the env below must not leak into later modules
+# PI_LOCK_DIR: never the live /tmp/pi-fallback-mergewatch.lock (held by the production mergewatch cron -> main() returns 0, no launch)
+tmp = tempfile.mkdtemp(); os.environ.update(PI_STATE=tmp, PI_FLEET_MODE="pi", PI_LOCK_DIR=tmp); os.environ.pop("PI_BASE", None)
 B = os.environ.get("PI_BIN") or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin")
 s = importlib.util.spec_from_file_location("mergewatch", f"{B}/mergewatch.py"); M = importlib.util.module_from_spec(s); s.loader.exec_module(M)
 M.DRY = False; launches = []; head = ["23247021aaaa"]
@@ -15,4 +17,5 @@ assert launches == [], launches                       # 同一个 sha，停机�
 head[0] = "96edc713bbbb"; M.main()                    # 停机期间有合并：sha 变了 → 起一次
 assert len(launches) == 1 and "--catch-up" in launches[0][0] and launches[0][1] == head[0], launches
 M.main(); assert len(launches) == 1
+os.environ.clear(); os.environ.update(_ENV)
 print("ok test_mergewatch_resume")
