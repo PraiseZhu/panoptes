@@ -16,9 +16,14 @@ Claim: --claim --pct P takes the first todo in Pi's own priority order under tic
 Records: out/praise-pr/grok-usage.json (per day: baseline, samples, opened, done, trips); one line per day in
   out/praise-pr/grok-daily.log from 23:59 Beijing (prwatch sweep): baseline, close, rise, opened, done, trips.
   A trip (stop or week >= 70) sets pm_report_due for the day: the bot reports it to the test PM the same day (--check shows it).
-Usage: grokline.py gate --dry-run (read-only) | pr-meta --key QA:FP [--title T] (read-only) | --check | --record --pct P | --claim --pct P | --progress KEY | --finish KEY --pct P --pr N | --release KEY --pct P
+pr-meta (11-03, product #1701): --wd is required = the product checkout with the fix committed at HEAD. The platform disclosure
+  (mivo-platform-evidence) comes from prfix.platform_eval/platform_for against the merge-base with the SOURCE PR's base branch
+  (gh baseRefName, or --base), already prepended to pr_body_block. Use pr_body_block verbatim; never hand-write a
+  mivo-platform-evidence block (a hand-written not-applicable on cindyplugin/ is what failed pr-format-gate on #1701).
+  Any doubt (non-full SHA, evaluator unavailable, block still rejected) -> status error, no PR.
+Usage: grokline.py gate --dry-run (read-only) | pr-meta --key QA:FP --wd DIR [--base BRANCH] [--title T] (read-only) | --check | --record --pct P | --claim --pct P | --progress KEY | --finish KEY --pct P --pr N | --release KEY --pct P
 Output: one JSON line on stdout."""
-import argparse, contextlib, fcntl, math, sys
+import argparse, contextlib, fcntl, math, re, sys
 from lib import *
 import prfix
 
@@ -191,6 +196,40 @@ def pr_meta(key, title=None):
             "commit_trailer": trailer, "commit_message": f"{title or f'fix: QA #{n}'}\n\n{trailer}"}
 
 
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+def platform_meta(wd, base, head):
+    """Platform block for a Grok fix PR = what prfix's own open path emits (prfix.platform_eval -> platform_for). base/head must be
+    full SHAs. Fail closed: raises instead of returning no block when the evaluator can't judge or rejects the block it got."""
+    if not (SHA_RE.match(base or "") and SHA_RE.match(head or "")): raise ValueError(f"base/head 必须是完整 40 位 SHA：{base!r} {head!r}")
+    ev = prfix.platform_eval(wd, base, head, "", True)
+    if not isinstance(ev, dict) or "requiresDisclosure" not in ev: raise RuntimeError(f"platform-risk 评估失败：{ev!r}")
+    _, names = prfix.run(["git", "diff", "--name-only", base, head], cwd=wd)
+    files = [f for f in names.splitlines() if f]; tests = prfix.runnable(files)
+    block = "\n".join(prfix.platform_for(ev, [f for f in files if f not in tests], tests))
+    chk = prfix.platform_eval(wd, base, head, block, True)
+    left = [e for e in (chk or {}).get("errors", ["评估器无结果"]) if e != prfix.TRUSTED_PROOF_ERR]
+    if chk is None or left: raise RuntimeError(f"生成的平台证据块仍被拒：{left}")
+    return block
+
+def source_base(n):
+    """baseRefName of the source PR (QA #n is a PR of REPO): integration/* or main."""
+    b = (gh(["pr", "view", str(int(n)), "-R", REPO, "--json", "baseRefName"]) or {}).get("baseRefName")
+    if not b: raise RuntimeError(f"读不到 PR #{n} 的 baseRefName")
+    return b
+
+def pr_meta_wd(key, wd, title=None, base_ref=None):
+    """pr_meta + the platform block, prepended to pr_body_block. wd = product checkout, fix committed at HEAD."""
+    m = pr_meta(key, title); n = int(key.split(":", 1)[0])
+    ref = base_ref or source_base(n)
+    _, head = prfix.run(["git", "rev-parse", "HEAD"], cwd=wd)
+    _, base = prfix.run(["git", "merge-base", "HEAD", f"origin/{ref}"], cwd=wd)
+    block = platform_meta(wd, base.strip(), head.strip())
+    m.update(platform_block=block, base_ref=ref, base_sha=base.strip(), head_sha=head.strip())
+    if block: m["pr_body_block"] = block + "\n" + m["pr_body_block"]
+    return m
+
+
 def check(now=None):
     now = now or now_cst()
     doc = load_usage()
@@ -360,7 +399,7 @@ def sweep(st=None, now=None):
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", nargs="?", choices=["gate", "pr-meta"]); ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--key"); ap.add_argument("--title")
+    ap.add_argument("--key"); ap.add_argument("--title"); ap.add_argument("--wd"); ap.add_argument("--base")
     ap.add_argument("--check", action="store_true"); ap.add_argument("--record", action="store_true")
     ap.add_argument("--claim", action="store_true"); ap.add_argument("--progress"); ap.add_argument("--finish"); ap.add_argument("--release")
     ap.add_argument("--pct", type=float); ap.add_argument("--pr", type=int); ap.add_argument("--why", default="Grok 放弃")
@@ -370,7 +409,10 @@ def main(argv=None):
         if A.cmd == "gate":
             r = gate_dry_run() if A.dry_run else {"status": "error", "error": "gate 只有 --dry-run（只读）"}
         elif A.cmd == "pr-meta":
-            r = dict(pr_meta(A.key, A.title), status="ok") if A.key else {"status": "error", "error": "pr-meta 要 --key QA:FP"}
+            if not (A.key and A.wd): r = {"status": "error", "error": "pr-meta 要 --key QA:FP 和 --wd <产品仓修复后的 checkout>"}
+            else:
+                try: r = dict(pr_meta_wd(A.key, A.wd, A.title, A.base), status="ok")
+                except Exception as e: r = {"status": "error", "error": f"平台证据块生成失败（{type(e).__name__}: {e}），不要开 PR，也不要手写 mivo-platform-evidence"}
         elif (A.record or A.claim or A.finish) and A.pct is None: r = {"status": "error", "error": "--pct 必填（CheckSubscriptionUsage 每周用量 %）"}
         elif A.pct is not None and not valid_pct(A.pct): r = {"status": "error", "gate": "hold", "error": f"--pct {A.pct} 无效（要 0-100 的有限数）：按 hold 处理，不记录"}
         elif A.record:

@@ -350,4 +350,60 @@ class TestCorruptTickets(Grok):
                     G().sweep(now=NOW.replace(hour=23, minute=59))
                     self.assertEqual(open(p).read(), raw)
 
+# ---- Grok-line PR open path (#1701: Grok hand-wrote not-applicable on a cindyplugin/ fix; pr_meta never ran platform_block)
+import shutil, subprocess, tempfile
+from test_prfix_unit import LIVE, REPO_FILES  # noqa: E402
+@unittest.skipUnless(all(os.path.exists(f"{LIVE}/{f}") for f in REPO_FILES) and shutil.which("node"), "mivo-canvas-plugin checkers not available")
+class TestPrMetaPlatform(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(); self.wd = f"{self.tmp}/repo"
+        for f in REPO_FILES:
+            os.makedirs(os.path.dirname(f"{self.wd}/{f}"), exist_ok=True); shutil.copy(f"{LIVE}/{f}", f"{self.wd}/{f}")
+        self.w("cindyplugin/check-dist-main.mjs", "export const scan = () => []\n"); self.w("docs/x.md", "a\n")
+        self.git("init", "-q", "-b", "main"); self.commit("base")
+        self.base = self.git("rev-parse", "HEAD"); self.git("update-ref", "refs/remotes/origin/main", self.base)
+    def tearDown(self): shutil.rmtree(self.tmp, ignore_errors=True)
+    def w(self, f, t):
+        os.makedirs(os.path.dirname(f"{self.wd}/{f}"), exist_ok=True); 
+        with open(f"{self.wd}/{f}", "w") as fh: fh.write(t)
+    def git(self, *a): return subprocess.check_output(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", self.wd, *a], text=True).strip()
+    def commit(self, m): self.git("add", "-A"); self.git("commit", "-q", "-m", m)
+    def cindy_fix(self):
+        self.w("cindyplugin/check-dist-main.mjs", "export const scan = () => null\n")
+        self.w("cindyplugin/check-dist-main.test.mjs", "import { scan } from './check-dist-main.mjs'\n"); self.commit("fix")
+    def meta(self): return G().pr_meta_wd(f"1553:{C}", self.wd, "fix: x (QA #1553)", base_ref="main")
+
+    def test_cindyplugin_fix_gets_block_that_passes(self):
+        self.cindy_fix(); m = self.meta(); body = "summary\n\n" + m["pr_body_block"]
+        self.assertIn("```mivo-platform-evidence", m["pr_body_block"]); self.assertIn("QA: #1553", m["pr_body_block"])
+        ev = prfix.platform_eval(self.wd, self.base, self.git("rev-parse", "HEAD"), body, True)
+        self.assertTrue(ev["requiresDisclosure"])
+        self.assertEqual([e for e in ev["errors"] if e != prfix.TRUSTED_PROOF_ERR], [])
+
+    def test_docs_only_no_block(self):
+        self.w("docs/x.md", "b\n"); self.commit("docs"); m = self.meta()
+        self.assertEqual(m["platform_block"], ""); self.assertNotIn("mivo-platform-evidence", m["pr_body_block"])
+
+    def test_hand_written_not_applicable_rejected(self):
+        self.cindy_fix()
+        na = '```mivo-platform-evidence\n{"schemaVersion":1,"risks":[],"windowsStatus":"not-applicable","environment":"","evidence":[],"fallback":"","reason":"x"}\n```'
+        ev = prfix.platform_eval(self.wd, self.base, self.git("rev-parse", "HEAD"), na, True)
+        self.assertIn("not-applicable cannot exempt production UI or detected platform risks", ev["errors"])
+        self.assertNotIn('"not-applicable"', self.meta()["pr_body_block"])
+
+    def test_non_full_sha_fails_closed(self):
+        self.cindy_fix()
+        with self.assertRaises(ValueError): G().platform_meta(self.wd, self.base, "HEAD")
+        with self.assertRaises(ValueError): G().platform_meta(self.wd, self.base[:8], self.git("rev-parse", "HEAD"))
+
+    def test_cli_requires_wd_and_errors_not_empty_block(self):
+        import io, contextlib as cl
+        out = io.StringIO()
+        with cl.redirect_stdout(out): rc = G().main(["pr-meta", "--key", f"1553:{C}"])
+        self.assertEqual(rc, 1); self.assertIn("--wd", json.loads(out.getvalue())["error"])
+        out = io.StringIO()   # evaluator missing -> error, never an ok without a block
+        os.remove(f"{self.wd}/scripts/ci/platform-risk.mjs"); self.cindy_fix()
+        with cl.redirect_stdout(out): rc = G().main(["pr-meta", "--key", f"1553:{C}", "--wd", self.wd, "--base", "main"])
+        self.assertEqual(rc, 1); self.assertEqual(json.loads(out.getvalue())["status"], "error")
+
 if __name__ == "__main__": unittest.main()
