@@ -1276,6 +1276,15 @@ def scope_of(files):
             if part not in gen and re.fullmatch(r"[A-Za-z][\w-]{1,24}", part): return part
     return None
 
+def platform_for(ev, src, tests):
+    """Platform block lines for the fix PR body. ev = platform_eval result (None = evaluator unavailable -> conservative path rule).
+    Product #1387 (313e6517): requiresWindowsEvidence is a deprecated always-false field; requiresDisclosure carries the
+    obligation (platform-risk.mjs evaluatePlatformRisk), so the block is keyed on requiresDisclosure (old field still honoured)."""
+    if ev is None:
+        need = any(re.match(r"^(?:src|shared|cindyplugin|server)/|^scripts/(?!ci/|ops/)", f) for f in src)
+        return platform_block([], tests) if need else []
+    return platform_block(ev.get("risks") or [], tests) if (ev.get("requiresDisclosure") or ev.get("requiresWindowsEvidence")) else []
+
 def platform_eval(wd, base, head, body, committed):
     """Ask the repo's own evaluator (scripts/ci/platform-risk.mjs, pure, no network) which platform risks the diff has."""
     script = f"{wd}/scripts/ci/platform-risk.mjs"
@@ -1636,11 +1645,8 @@ def fix_one(c, A, d):
         body0 = pr_body(c, res, tests, src, pf, dok, issue, [])
         ev_ = platform_eval(wd, base, head, body0, not A.dry_run)
         warn = []
-        if ev_ is None:
-            need = any(re.match(r"^(?:src|shared|cindyplugin|server)/|^scripts/(?!ci/|ops/)", f) for f in src)
-            plat = platform_block([], tests) if need else []; warn.append("platform-risk 评估器不可用，Windows 平台证据按保守规则生成")
-        else:
-            plat = platform_block(ev_.get("risks") or [], tests) if ev_.get("requiresWindowsEvidence") else []
+        plat = platform_for(ev_, src, tests)
+        if ev_ is None: warn.append("platform-risk 评估器不可用，Windows 平台证据按保守规则生成")
         body = pr_body(c, res, tests, src, pf, dok, issue, plat)
         if ev_ is not None:
             chk = platform_eval(wd, base, head, body, not A.dry_run) or {}
