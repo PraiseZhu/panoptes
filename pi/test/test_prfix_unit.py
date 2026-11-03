@@ -935,6 +935,26 @@ class TestRepoScripts(Tmp):
         rules = json.loads(rf(f"{self.wd}/agent-use/docs/pr-rules.json"))
         for sec in rules["bugfixSections"] + rules.get("checklistSectionNames", []): self.assertIn(sec, body)
 
+    def test_ui_fix_pr_body_gets_disclosure_block(self):
+        # real evaluator: a fix touching cindyplugin/src (UI/input) must carry mivo-platform-evidence and then pass the gate
+        r = prfix.platform_eval(self.wd, self.base, self.head, "no block", True)
+        plat = prfix.platform_for(r, ["cindyplugin/src/agent/foo.ts"], ["cindyplugin/src/agent/foo.test.ts"])
+        c = {"qa": 1178, "fp": A, "sev": "P1", "title": "t", "finding": finding(A, file="cindyplugin/src/agent/foo.ts", line=1)}
+        res = {"root": "ROOT CAUSE cindyplugin/src/agent/foo.ts:1\nexpl", "pred_pr": 4242, "rc_repro": 1, "rc_revert": 1}
+        pf = {"steps": ["tsc -b"], "passed": 1, "total": 1, "seconds": 1}
+        body = prfix.pr_body(c, res, ["cindyplugin/src/agent/foo.test.ts"], ["cindyplugin/src/agent/foo.ts"], pf, True, None, plat)
+        self.assertIn("mivo-platform-evidence", body)
+        r2 = prfix.platform_eval(self.wd, self.base, self.head, body, True)
+        self.assertNotIn("production UI/platform change requires mivo-platform-evidence", r2["errors"])
+        self.assertEqual([e for e in r2["errors"] if e != prfix.TRUSTED_PROOF_ERR], [])
+
+class TestPlatformFor(unittest.TestCase):   # pure (runs on CI too): evaluator-shaped results after product #1387
+    def test_disclosure_flag_adds_block(self):
+        ev = {"risks": ["input"], "errors": [], "requiresDisclosure": True, "requiresWindowsEvidence": False}
+        self.assertIn("mivo-platform-evidence", "\n".join(prfix.platform_for(ev, ["cindyplugin/src/a.ts"], [])))
+    def test_no_obligation_no_block(self):
+        self.assertEqual(prfix.platform_for({"risks": [], "requiresDisclosure": False, "requiresWindowsEvidence": False}, ["docs/x.md"], []), [])
+
 # ====================================================================== 7. outbound snippet (skipped when not shipped next to bin/)
 SNIP = os.path.join(os.path.dirname(HERE), "outbound-hfixpr-snippet.py")
 @unittest.skipUnless(os.path.exists(SNIP), "outbound-hfixpr-snippet.py not present")
