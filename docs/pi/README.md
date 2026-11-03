@@ -79,7 +79,7 @@ panoptes catch-up 每 2 小时 :07 + 每次合并（mergewatch）起跑；修 PR
 | prfix.py（重写） | 一个进程一单（`--next`；10-24 起可并发，见文末）；指纹级认领（含作者自己的修复 PR、交接回执）；真实 vitest/npm 返回码；失败 finally 清理 worktree+分支；NOREPRO 写 notes + 私信；退避 15m/1h/4h→转人工；推送前跑仓库 .githooks/pre-push；PR 正文按模板；docs/pr 真实号（outbound 改名）；有合并测试排队就让出 nightly.lock；闸名单 conf/gates.json | prwatch 触发 + 11:20 兜底 | out/praise-pr/tickets.json、last-result.json |
 
 ## 10-23 晚 22:30–23:18 的规则（原写于 23:18，随主机回滚丢失，10-24 补回）
-- **只修自己和 kiro 的 PR**：prfix 只接 `finding_policy.FIX_AUTHORS`（PraiseZhu、kirozeng，Praise 11-02）的 PR（`PRFIX_OWNERS` 可覆盖；`touch /workspace/mivo-qa/pi/fix-authors-praise-only` 回到只接 PraiseZhu）。给 FIX_AUTHORS 作者的私信结尾逐条写「是否已有 bot 跟进」。别人的问题照旧由日报开到他们的交接仓，由他们自己的 bot 修；prwatch 也只为你自己的 PR 私信新问题。
+- **只修自己和 kiro 的 PR**：prfix 只接 `finding_policy.FIX_AUTHORS`（PraiseZhu、kirozeng，Praise 11-02）的 PR（`PRFIX_OWNERS` 可覆盖）；台账 `pi/ledger/build-ledger.mjs` 的 OWNERS 同为这两人，没有私信记录的 P0–P2 直接从合并报告入账（`MIVO_QA_LEDGER_OWNERS` 可覆盖）。`touch /workspace/mivo-qa/pi/fix-authors-praise-only` 让 prfix、prwatch、私信结尾和台账都回到只接 PraiseZhu（每次运行重读）。给 FIX_AUTHORS 作者的私信结尾逐条写「是否已有 bot 跟进」。别人的问题照旧由日报开到他们的交接仓，由他们自己的 bot 修；prwatch 也只为你自己的 PR 私信新问题。
 - **自己 PR 上测出的问题都算单**：P0/P1 一律修，含待核实（第一步写复现测试就是核实；复现不了写 notes 并私信）；审查确认成立的 P2 修，除非 p2-rulings.md 判了不修 / 产品代码不修 / 误报 / P3 / 已修；待核实的 P2 不派活，台账保留并标「待核实」；只差覆盖率的只当提示。台账（build-ledger）和 prfix 用同一套判断（finding_policy.own_pr_ticket）。
 - **和合并测试同时跑**：内存够就开工，不等 panoptes。
 - **修复草稿 CI 假红**：只有 race-prone 的整 PR 门（pr-format-gate、conflict sentinel）红时，每个 head 重跑一次；还红就 update-branch（合入最新 main，不改代码，每个 PR 最多 2 次）；还红才私信。
