@@ -255,6 +255,35 @@ class TestClaims(unittest.TestCase):
         self.assertEqual(st({"status": "running", "pid": 999999999, "started_at": NOW.isoformat()}), "skip")   # dead run -> backoff
 
 # ====================================================================== 3. priority
+class TestSupersedes(unittest.TestCase):
+    """11-04 「取代 #N」: --qa --supersedes N lifts the closed-PR stop only for our closed, unmerged fix PR N with this fingerprint."""
+    def pick(self, prs, sup=None):
+        c = ctx(reports={1011: report(1011, "PraiseZhu", [finding(A)])}, prs=prs)
+        return prfix.pick_qa(argparse.Namespace(qa=1011, fp=A, supersedes=sup), c, prfix.evaluate_all(c, NOW), NOW)
+    def test_supersede(self):
+        body = f"QA: #1011\n{A}"
+        closed = pr(1678, "PraiseZhu", body=body, state="CLOSED")
+        v, err = self.pick([closed])
+        self.assertIsNone(v); self.assertIn("被关掉了", err["error"])                                   # no --supersedes: still stopped
+        v, err = self.pick([closed], 1678)
+        self.assertIsNone(err); self.assertEqual((v["round"], v["c"]["supersedes"]), (1, 1678))         # positive: replaces round 1
+        for p, why in ((pr(1678, "PraiseZhu", body=f"QA: #1011\n{B}", state="CLOSED"), "指纹"),            # other fingerprint
+                       (pr(1678, "PraiseZhu", body=body, state="OPEN"), "OPEN"),
+                       (pr(1678, "PraiseZhu", body=body, state="MERGED"), "MERGED"),
+                       (pr(1678, "someone", body=body, state="CLOSED"), "bot")):
+            v, err = self.pick([p], 1678)
+            self.assertIsNone(v, why); self.assertEqual(err["status"], "stopped"); self.assertIn(why, err["error"])
+        v, err = self.pick([closed, pr(1700, "PraiseZhu", body=body, state="CLOSED")], 1678)
+        self.assertIsNone(v); self.assertIn("#1700", err["error"])                                    # only #N is lifted, not other closed PRs
+        v, err = self.pick([closed], 1679); self.assertIn("找不到", err["error"])
+    def test_pr_body_says_supersedes(self):
+        c = {"qa": 1011, "sev": "P1", "fp": A, "title": "t", "finding": {"file": "a.ts", "line": 1}, "supersedes": 1678}
+        pf = {"steps": [], "passed": 1, "total": 1, "seconds": 60}
+        plat = ["### Windows 平台证据", "", "```mivo-platform-evidence", '{"risk": "low"}', "```", ""]
+        body = prfix.pr_body(c, {}, ["a.test.ts"], ["src/a.ts"], pf, True, None, plat)
+        self.assertIn("QA: #1011\n\n取代 #1678\n", body); self.assertIn("\n".join(plat), body)
+        self.assertNotIn("取代", prfix.pr_body(dict(c, supersedes=None), {}, ["a.test.ts"], ["src/a.ts"], pf, True, None, plat))
+
 class TestPriority(unittest.TestCase):
     def test_p0_p1_p2_then_earliest_deadline(self):
         rep = {

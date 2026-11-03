@@ -1327,7 +1327,7 @@ def pr_body(c, res, tests, src, pf, docs_ok, issue_url, plat):
     fm = lambda fs: "、".join(f"`{f}`" for f in fs) or "无"
     cmd = "npx vitest run " + " ".join(runnable(tests))
     steps = " → ".join(pf.get("steps") or []) or ".githooks/pre-push"
-    L = [CONTRIB, "", f"QA: #{n}", "", "## 这次改了什么", "", "### 摘要", "",
+    L = [CONTRIB, "", f"QA: #{n}", ""] + ([f"取代 #{c['supersedes']}", ""] if c.get("supersedes") else []) + ["## 这次改了什么", "", "### 摘要", "",
          f"QA 报告 PR-{n} {sev}（{fp}，`{loc}`{(' ' + x['symbol']) if x.get('symbol') else ''}）：{c.get('title')}", "",
          f"根因：{root}", ""] + ([expl, ""] if expl else []) + [
          f"修复：最小改动 {fm(src)}；回归测试 {fm(tests)}（修复前失败、修复后通过）。本 PR 由 Pi 线 prfix 自动生成：先开 draft；CI 红了 bot 会把失败日志交给模型再修（最多 {MAX_REVISIONS} 轮）；除 review-pr 外的 CI 全绿后由 bot 自动转 ready，之后由 Mac mini 盯梢跟进 review-pr 和审查意见。", "",
@@ -1665,7 +1665,7 @@ def fix_one(c, A, d):
             att = int(c.get("attempt") or 1)   # 10-24: a later attempt after outbound gave up on this ticket's action needs a new key
             key = f"fixpr:{n}:{fp}" + (f":r{rnd}" if rnd > 1 else "") + (f":a{att}" if att > 1 else "")
             record_actions("praise-pr", d, [{"key": key, "type": "gh.pr.create(draft)", "patch": pfile, "title": title,
-                "body_must_contain": fp + (f" r{rnd}" if rnd > 1 else ""), "qa": n, "fingerprint": fp, "sev": sev, "ticket": f"{n}:{fp}", "round": res["round"],
+                "body_must_contain": fp + (f" r{rnd}" if rnd > 1 else ""), "qa": n, "fingerprint": fp, "sev": sev, "ticket": f"{n}:{fp}", "round": res["round"], "supersedes": c.get("supersedes"),
                 "local_branch": branch, "base": base, "head": head, "pred_pr": pred, "docs_dir_predicted": f"docs/pr/{pred}",
                 "preflight": f"{pf['passed']}/{pf['total']} ok in {pf['seconds']}s",
                 "note": "outbound: after gh pr create, if the real number != pred_pr, git mv docs/pr/<pred> docs/pr/<real> (+ front matter pr:) "
@@ -1789,6 +1789,14 @@ def pick_qa(A, ctx, vs, now):
         if not todo: return None, {"status": "error", "qa": A.qa, "error": f"#{A.qa} 有 {len(mine)} 条 finding 且都已认领/跳过，请用 --fp 指定"}
         mine = todo
     v = mine[0]
+    if getattr(A, "supersedes", None):   # 11-04 「取代 #N」: a closed, unmerged bot fix PR with this fp no longer counts as a round / closed-PR stop
+        n, fp = v["c"]["qa"], v["c"]["fp"]
+        p = next((p for p in ctx["prs"] if p.get("number") == A.supersedes), None)
+        why = ("找不到这个 PR" if not p else f"是 {p.get('state')}，只能取代已关闭未合并的" if p.get("state") != "CLOSED"
+               else "不是 bot 开的修复 PR" if author_of(p) != AUTHOR_SELF
+               else f"正文没有 QA #{n} 和指纹 {fp}" if fp not in (p.get("body") or "") or not qa_ref_re(n).search(p.get("body") or "") else None)
+        if why: return None, {"status": "stopped", "qa": A.qa, "fp": fp, "error": f"--supersedes #{A.supersedes} {why}"}
+        v = evaluate(v["c"], dict(ctx, prs=[q for q in ctx["prs"] if q is not p]), now); v["c"] = dict(v["c"], supersedes=A.supersedes)
     if v["hard_stop"]: return None, {"status": "stopped", "qa": A.qa, "fp": v["c"]["fp"], "error": v["hard_stop"]}
     if v["state"] != "todo": log(f"warn: --qa 人工指定，忽略：{v['reason']}")
     return v, None
@@ -2272,6 +2280,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="Praise PR fix duty (Pi line): one QA finding per run")
     ap.add_argument("--next", action="store_true", help="highest-priority unclaimed ticket (default)")
     ap.add_argument("--qa", type=int); ap.add_argument("--fp")
+    ap.add_argument("--supersedes", type=int, help="with --qa: replace closed, unmerged bot fix PR N carrying the same fingerprint (取代 #N)")
     ap.add_argument("--list", action="store_true"); ap.add_argument("--pending-json", action="store_true")
     ap.add_argument("--cleanup-stale", action="store_true"); ap.add_argument("--yes", action="store_true")
     ap.add_argument("--dry-run", action="store_true"); ap.add_argument("--base")
@@ -2279,6 +2288,7 @@ def main(argv=None):
     ap.add_argument("--allow-sensitive", action="store_true", help="no-op since 10-25 (sensitive files no longer stop the bot); kept so old commands still run")
     A = ap.parse_args(argv); A_ALLOW["sensitive"] = bool(A.allow_sensitive) and bool(A.qa or A.revise)
     if A.fp and not A.qa: ap.error("--fp needs --qa")
+    if A.supersedes and not A.qa: ap.error("--supersedes needs --qa")
     if A.cleanup_stale: return cleanup_stale(A.yes)
     if A.revise:
         try: return revise(A)

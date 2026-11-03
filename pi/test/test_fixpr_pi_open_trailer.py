@@ -68,6 +68,16 @@ class Superseded(unittest.TestCase):
         with mock.patch.object(O, "gh", self.gh([])):
             self.assertEqual(O.h_fixpr(self.A)[1](), "pending")
         self.assertIn("superseded", O.TERMINAL)
+    def test_supersedes_only_named_pr(self):   # 11-04 「取代 #N」: the closed fix PR N already carrying the marker is not "done"
+        a = dict(self.A, supersedes=1678)
+        old = [{"number": 1678, "body": "mq1-0fea r2"}]
+        with mock.patch.object(O, "gh", lambda args, js=True: old):
+            self.assertEqual(O.h_fixpr(self.A)[1](), "done")                      # no supersedes: still deduped
+            self.assertEqual(O.h_fixpr(a)[1](), "pending")
+        with mock.patch.object(O, "gh", lambda args, js=True: old + [{"number": 1700, "body": "mq1-0fea r2"}]):
+            self.assertEqual(O.h_fixpr(a)[1](), "done")                           # another PR with the marker still dedupes
+        with mock.patch.object(O, "gh", self.gh([{"number": 1621, "body": "mq1-0fea"}])):
+            self.assertEqual(O.h_fixpr(dict(self.A, supersedes=1678))[1](), "superseded:open fix PR #1621 already carries mq1-0fea")
     def test_off_flag(self):
         os.makedirs(os.path.dirname(L.B_OFF), exist_ok=True); open(L.B_OFF, "w").close()
         try:

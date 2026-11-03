@@ -23,6 +23,7 @@ CONFLICTS = [DIRTY, MERGE]
 class T(unittest.TestCase):
     def setUp(self):
         p = mock.patch.dict(os.environ); p.start(); self.addCleanup(p.stop)
+        p = mock.patch.object(L, "now_cst", lambda: NOW); p.start(); self.addCleanup(p.stop)   # lib.record_muted names muted-<BJ day>.md
         self.tmp = t = tempfile.mkdtemp(prefix="outbound-conflict-brief-")
         names = ("BASE", "LEDGER", "OUTBOUND_FLAG", "DISABLED_TYPES", "mode", "secret_env", "now_cst", "today", "slack", "run", "MEMINFO", "h_slack_dm")
         self.saved = {n: getattr(O, n) for n in names}

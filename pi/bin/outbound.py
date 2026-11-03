@@ -393,11 +393,12 @@ def h_fixpr(a):
     patch, must = a.get("patch"), a.get("body_must_contain", "")
     def state():
         hits = gh(["pr", "list", "-R", REPO, "--state", "all", "--search", f"\"{must}\" in:body author:@me", "--json", "number,body"]) if must else []
-        if any(must in (h.get("body") or "") for h in hits): return "done"
+        sup = a.get("supersedes")   # 取代 #N: prfix checked N is our closed, unmerged fix PR with this fp; only N is not a duplicate
+        if any(must in (h.get("body") or "") and h.get("number") != sup for h in hits): return "done"
         fp = a.get("fingerprint")
         if fp and fp != must and b_on():   # 11-03 B: round N of a finding whose earlier fix PR is still open -> do not open a second one
             op = gh(["pr", "list", "-R", REPO, "--state", "open", "--search", f"\"{fp}\" in:body author:@me", "--json", "number,body"])
-            n = next((h["number"] for h in op if fp in (h.get("body") or "")), None)
+            n = next((h["number"] for h in op if fp in (h.get("body") or "") and h["number"] != sup), None)
             if n: return f"superseded:open fix PR #{n} already carries {fp}"
         return "pending"
     def validate():
