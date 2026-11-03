@@ -222,6 +222,18 @@ class TestFollowup(Grok):
         open(g.usage_path(), "w").write("{not json")
         r = g.gate_dry_run(now=NOW)
         self.assertEqual((r["gate"], r["may_open"]), ("hold", False))
+    def test_skip_key_pending_ruling(self):   # 11-04: 1590 merged into 1610's session, --claim must be able to leave a key alone
+        self.switch(); self.put(tickets(**self.both_pi_slots())); g = G(); k = f"1179:{C}"
+        r = g.gate_dry_run(now=NOW, skip=[k])
+        self.assertEqual((r["would_claim"], r["skipped"], r["may_open"]), (None, [k], False))
+        r = g.claim(5.0, now=NOW, skip=[k])
+        self.assertEqual(r["status"], "no", r); self.assertNotIn("owner", self.tk(k))
+        self.assertEqual(g.claim(5.0, now=NOW, skip=["1:mq1-" + "0" * 20])["ticket"], k)   # other keys don't block it
+    def test_skip_bad_key_is_error(self):
+        import io, contextlib
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out): rc = G().main(["gate", "--dry-run", "--skip", "1610"])
+        self.assertEqual(rc, 1); self.assertIn("--skip", json.loads(out.getvalue())["error"])
     def test_grok_cap_two_held_blocks_claim(self):
         self.switch(); f1, f2 = "mq1-" + "a" * 20, "mq1-" + "b" * 20
         self.put(tickets(**self.both_pi_slots(), **{f"1180:{f1}": self.grok_owned(1180, f1), f"1181:{f2}": self.grok_owned(1181, f2)}))
