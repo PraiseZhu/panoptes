@@ -42,10 +42,10 @@ Findings:
     # group post (Grok line posted conclusion+path to the「MivoCanvas QA」Grok group): file + action only, no executor
     body = open(out).read(); head = next((l for l in body.splitlines() if l.startswith("合并 PR")), "")
     post = (f"【运维复盘 {day}（Pi line）】{head}\n" f"产出对齐/准确度/修复跟进见 {out}\n"
-            f"P1 校准提议 {n} 条（未落盘，待人工核实）。正式版仍写 /workspace/review-ops/daily/{day}.md（主持人）。")
+            f"P1 校准提议 {n} 条（未落盘，待人工核实）。正式版就是 {out}（R13：10-29 起，/workspace/review-ops/daily/ 只是旧的人工兜底）。")
     pp = f"{BASE}/out/ops/review-{day}{sfx}.post.md"; write_atomic(pp, post + "\n")
     if dry:
         log("dry-run: no outbound action recorded", pp); print(f"[dry-run] {out}\n[dry-run] would post (not recorded):\n{post}"); return
     record_actions("ops", day, [{"key": f"ops-review:{day}", "type": "grok.group", "to": "MivoCanvas QA",
-        "text_file": pp, "dedupe_basis": f"/workspace/review-ops/daily/{day}.md exists => Grok line already reviewed; Grok group has no API (not executable)"}])
+        "text_file": pp, "dedupe_basis": f"key ops-review:{day}; formal review = {out} (R13, since 10-29; review-ops/daily/ is the legacy hand-written fallback, no longer written by the Grok line); Grok group has no API (not executable)"}])
 if __name__ == "__main__": main()
