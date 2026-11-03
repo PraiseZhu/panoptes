@@ -21,6 +21,7 @@ usage: followup.py [scan|remind] [--no-remind] [--shadow]   (scan = 06:17 = repl
 import shutil
 from lib import *
 import praise_notice as PN
+import finding_policy as FP
 TOOL = "/workspace/panoptes/report/track-followups.mjs"
 SENDER = f"{PI_CODE}/bin/followup_sender.mjs"
 POST_SENDER = f"{PI_CODE}/bin/followup_post_sender.mjs"
@@ -41,6 +42,8 @@ def to_actions(dms, kind):
     for x in dms:
         who = login_of(x.get("open_id"))
         if not who: log(f"skip {x.get('dedupe_key')}: open_id not in author-map"); continue
+        # Praise 11-03: QA findings on FIX_AUTHORS' PRs are fixed by Praise PR, never chased with the author
+        if who in FP.fix_authors() and str(x.get("dedupe_key") or "").startswith("followup-remind:"): log(f"skip {x['dedupe_key']}: fix author"); continue
         acts.append({"key": x["dedupe_key"], "type": "feishu.dm", "to": who, "text": x["text"], "run": kind,
                      "dedupe_against": [f"{QA}/feishu-sent.json (key {x['dedupe_key']})"], "source": "track-followups"})
     return acts
