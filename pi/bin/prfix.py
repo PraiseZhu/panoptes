@@ -52,7 +52,7 @@ import lib
 import praise_notice as PN
 import workroot as W
 from git_identity import NOREPLY_EMAIL
-from finding_policy import notifiable, own_pr_ticket, no_fix_rulings
+from finding_policy import notifiable, own_pr_ticket, no_fix_rulings, fix_authors
 os.environ["PATH"] = "/usr/local/bin:" + os.environ.get("PATH", "")
 
 _E = os.environ.get
@@ -534,13 +534,14 @@ def dm_assignments(sent):
 # own_sev = finding_policy.own_pr_ticket (moved there 2026-10-23 so build-ledger.mjs keeps the same owner rows; body unchanged)
 own_sev = own_pr_ticket
 def owners():
-    """PR authors whose findings prfix fixes (Praise 10-23: only our own PRs; others go to their handoff repos). '*' = all (tests)."""
-    o = os.environ.get("PRFIX_OWNERS", AUTHOR_SELF)
+    """PR authors whose findings prfix fixes: finding_policy.fix_authors() (Praise 11-02: PraiseZhu + kirozeng; others go to
+    their handoff repos). PRFIX_OWNERS overrides; '*' = all (tests)."""
+    o = os.environ.get("PRFIX_OWNERS") or ",".join(fix_authors())
     return None if o.strip() == "*" else {x.strip() for x in o.split(",") if x.strip()}
 
 def collect(reps, ledger, fix2, nofix=frozenset()):
     """current report ∪ ledger open rows (fp absent from the current report) ∪ history-only (listed, never auto-picked).
-    Only PRs authored by owners() (default PraiseZhu)."""
+    Only PRs authored by owners() (default fix_authors())."""
     out, cur_fps = {}, {}; own = owners()
     mine = lambda a: own is None or (a or "") in own
     def add(n, x, source, author, row=None):
