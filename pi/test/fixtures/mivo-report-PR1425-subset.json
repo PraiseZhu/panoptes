@@ -1,0 +1,181 @@
+{
+ "_note": "subset of /workspace/mivo-qa/reports/merged/PR-1425.json prs[0] (read-only copy 2026-11-03)",
+ "number": 1425,
+ "severity": "P3",
+ "findings": [
+  {
+   "source": "check",
+   "test_backed": true,
+   "check_id": "e2e-browser",
+   "check_name": "浏览器端到端",
+   "dimension": "black-box",
+   "qa_dimensions": [
+    "e2e",
+    "ui",
+    "data",
+    "sideEffects",
+    "visual"
+   ],
+   "test": "browser-product-roundtrip",
+   "failure_type": "runner_error",
+   "status": "pre-existing",
+   "flaky": false,
+   "pre_existing": true,
+   "severity": "P3",
+   "attribution": "also fails on the base revision (base run failed; failure type not fingerprint-comparable, e.g. test_timeout)",
+   "fingerprint": "mq1-bb183524fddd60dc2ded",
+   "pr_fingerprint": "mq1-bb183524fddd60dc2ded-pr1425",
+   "evidence": {
+    "tested_sha": "af1ef07ae5e4f145df4e8c4811b7df12ae3c9f97",
+    "base_sha": "2353e868a8ce812b312c26f09966dd3b0b92fcc9",
+    "exit_code": 1,
+    "signal": null,
+    "ended_at": "2026-10-29T15:40:34.665Z",
+    "timed_out": false,
+    "first_run": "fail",
+    "rerun": "fail",
+    "base_run": "fail",
+    "command": "node scripts/e2e/bug-doctor-images/run.mjs --layer browser --base ${BASE_SHA} --out ${RUN}/e2e-browser",
+    "log_tail": "{\n  \"reportPath\": \"/workspace/mivo-qa/argus-root/cache/runs/n1425-h1-mvtpm8lm/e2e-browser/report.browser.json\",\n  \"status\": \"fail\",\n  \"layer\": \"browser\",\n  \"baseSha\": \"2353e868a8ce812b312c26f09966dd3b0b92fcc9\",\n  \"headSha\": \"af1ef07ae5e4f145df4e8c4811b7df12ae3c9f97\",\n  \"candidateSnapshotHash\": \"14a41c95c25004220bbb87c833db10d61f5aa7dcc4051dcbfce8102d71b50517\"\n}\n",
+    "log_file": "/workspace/mivo-qa/argus-root/app/evidence/nightly/2026-10-29/62c96efa/pr-1425/h1/logs/e2e-browser.log"
+   }
+  }
+ ],
+ "pending_verification": [
+  {
+   "source": "code-review",
+   "test_backed": false,
+   "check_id": "code-review",
+   "dimension": "white-box",
+   "llm_severity": "P1",
+   "verdict": "CONFIRMED",
+   "category": "correctness",
+   "title": "同一 head 重审期间旧 success 仍可放行合并",
+   "file": ".github/workflows/review-pr.yml",
+   "line": 323,
+   "symbol": "mirror-status",
+   "fingerprint": "mq1-04444d7ca0a293b7c829",
+   "pr_fingerprint": "mq1-04444d7ca0a293b7c829-pr1425",
+   "evidence": {
+    "evidence": ".github/workflows/review-pr.yml:323 将 `mirror-status` 设为 `needs: review`；:355 才开始 POST commit status。该作业在依赖完成前没有写入 pending 的步骤，因此已有同 context 的 success 不会被及时覆盖。",
+    "trigger": "某个 head 已有 `review-pr (integration)` 的 success 状态后，PraiseZhu 对同一 head 再次派发 live 审查；在新审查结束前尝试合并。",
+    "behavior": "`mirror-status` 依赖 `review` 完成才运行，且只有后续步骤才向该 head 写入新状态；新审查进行期间不会先写 `pending` 或清除旧状态，因此规则集仍能看到此前的 `success`。",
+    "impact": "同一 head 的新一轮审查尚未完成或最终会失败时，集成分支合并门禁仍可能放行，违背审查进行中应阻止合并的验收要求。",
+    "failure_scenario": "某个 head 已有 `review-pr (integration)` 的 success 状态后，PraiseZhu 对同一 head 再次派发 live 审查；在新审查结束前尝试合并。 → `mirror-status` 依赖 `review` 完成才运行，且只有后续步骤才向该 head 写入新状态；新审查进行期间不会先写 `pending` 或清除旧状态，因此规则集仍能看到此前的 `success`。",
+    "recommendation": "在新一轮审查开始时先为该 head 写入 `pending`，并保持写状态权限与审查代码的 `review` 作业隔离；只有本轮审查完成后再更新为最终状态。",
+    "reviewed_sha": "af1ef07ae5e4f145df4e8c4811b7df12ae3c9f97"
+   },
+   "verification": {
+    "status": "undetermined",
+    "method": "repo-review",
+    "verdict": "cannot-determine",
+    "reason": null,
+    "reasoning": "代码这一侧属实：mirror-status 依赖 review 作业（第 323 行），到第 355 行才 POST commit status，本轮开始时不会先写 pending。所以只要同一 head 在已有 success 状态之后被重新派发 live 审查，审查进行期间规则集仍会看到旧的 success。\n\n但问题能不能触发，取决于 Mini 前置审查会不会对一个已经 success 的 head 再次派发。这段逻辑在私有仓 PraiseZhu/Review-PR 的 mivo/prereview/round.mjs 里，不在本仓，我无法读取核实。\n\n本仓文档写明的同 head 重审路径有三条，都不满足「旧状态为 success」：\n- 被打回后讨论都已 resolve 再重审：旧状态是 failure（CONTRIBUTING.md:31）。\n- 审查失败后重试：旧状态是失败或没有状态（review-pr-setup.md:113）。\n- 改标题或正文：不触发重审（CONTRIBUTING.md:31）。\n\n唯一可能相关的是 specDigest 变化后的「下次送审时全量重审」（review-pr-setup.md:107）。它没有说明已 success、且 head 没变的 PR 会不会被重新派发。作者在 review.md R1 和 qa.md 里也明确说没有核对过 Mini 的这部分代码。\n\n另外，即使能触发：同一 PR 的审查是串行的（第 62 行 concurrency），新一轮结束后 mirror-status 会写入 failure 或 pending 覆盖旧值，所以影响限于审查进行中的窗口。\n\n综上，触发前提无法在本仓证实，也无法排除，按规则判 cannot-determine。缺的证据是 Mini round.mjs 里对已 success 的同一 head 是否会再派发（例如 specDigest 变化时）。",
+    "call_path": [
+     {
+      "file": ".github/workflows/review-pr.yml",
+      "line": 62,
+      "note": "concurrency 按 PR 分组且 cancel-in-progress: false，同一 PR 的审查串行执行，不会出现两轮并行写状态"
+     },
+     {
+      "file": ".github/workflows/review-pr.yml",
+      "line": 323,
+      "note": "mirror-status 设为 needs: review，要等 review 作业结束后才运行"
+     },
+     {
+      "file": ".github/workflows/review-pr.yml",
+      "line": 326,
+      "note": "always() 加 main / PraiseZhu / live / 本仓守卫"
+     },
+     {
+      "file": ".github/workflows/review-pr.yml",
+      "line": 355,
+      "note": "POST statuses/<head>，这是本轮唯一一次写 commit status；在此之前该 head 上上一轮的 success 仍然有效"
+     },
+     {
+      "file": "CONTRIBUTING.md",
+      "line": 31,
+      "note": "仓库文档写明：只改标题或正文不会触发重审；同一 head 重审只发生在上一轮被打回、讨论都已 resolve 之后，那时旧状态是 failure，不是 success"
+     },
+     {
+      "file": "docs/loops/review-pr-setup.md",
+      "line": 113,
+      "note": "同一提交的重派只发生在审查失败之后，旧状态不是 success"
+     },
+     {
+      "file": "docs/loops/review-pr-setup.md",
+      "line": 107,
+      "note": "specDigest 变化后，开放 PR「下次送审时」全量重审；没有写明已 success 的 head 会不会被重新派发"
+     }
+    ],
+    "design_reference": "docs/pr/1425/review.md B2「重审开始时不写 pending」标的是「作者决定不做（待裁定）」，合并前裁定为「无」，所以不能当作已批准的有意设计，不判 intended-design。",
+    "supported_scenario": "集成分支 PR 的某个 head 已有 review-pr (integration)=success 的 commit status，PraiseZhu（Mini 前置审查）对同一 head 再次派发 live 审查，有人在新一轮结束前合并。本仓文档里没有找到会对已 success 的同一 head 再派发的受支持路径，这一点依赖私有仓 PraiseZhu/Review-PR 的 mivo/prereview/round.mjs 才能确认。",
+    "steps": 8,
+    "model": "anthropic/claude-opus-5-5",
+    "tokens": 156699,
+    "reused": false,
+    "status_zh": "复核没能证实",
+    "opus_status": "undetermined"
+   },
+   "pending_kind": "review-p1-unconfirmed",
+   "owner": "qa",
+   "label_zh": "待核实（QA 自查）",
+   "kind_zh": "AI 代码审查单独发现的 P1，复核触发路径没能证实",
+   "severity_if_confirmed": "P1",
+   "pending_reason": "AI-only P1: no repro test failing on head and the Opus repo-wide review did not confirm it (undetermined)",
+   "pending_reason_zh": "AI 审查单独报的 P1：没有在 head 上失败的复现测试，Opus 整仓复核也没能证实（复核没能证实），先不发作者"
+  },
+  {
+   "source": "check",
+   "test_backed": false,
+   "check_id": "unit",
+   "check_name": "单元测试",
+   "dimension": "white-box",
+   "qa_dimensions": [
+    "unit",
+    "functional",
+    "regression",
+    "data"
+   ],
+   "test": "cindyplugin/src/__tests__/depositBindingLock.test.ts > SC-T3b.1 / SC-T3b1-fix.1 唯一业务链:AST 接线锁(替换可绕过的字符串扫描) > 真实读图消费链通过 AST 门禁:agentBridge 经 canvasReadImages 持有 R1,两文件 R2~R9 零 violation",
+   "failure_type": "test_timeout",
+   "status": "flaky",
+   "flaky": true,
+   "related_to_pr": false,
+   "pre_existing": false,
+   "attribution": "unstable: failed once, passed on a clean rerun of the same commit; not attributed to this PR; passed on the base (pre-merge) revision in one run; a single run cannot rule out the same instability on base",
+   "fingerprint": "mq1-828e5d28fc5a9e58a2db",
+   "pr_fingerprint": "mq1-828e5d28fc5a9e58a2db-pr1425",
+   "evidence": {
+    "tested_sha": "af1ef07ae5e4f145df4e8c4811b7df12ae3c9f97",
+    "base_sha": "2353e868a8ce812b312c26f09966dd3b0b92fcc9",
+    "exit_code": 1,
+    "signal": null,
+    "ended_at": "2026-10-29T15:59:18.883Z",
+    "timed_out": false,
+    "first_run": "fail",
+    "rerun": "pass",
+    "base_run": "pass",
+    "command": "npm run test:unit -- --reporter=default --reporter=json --outputFile=${TEST_REPORT}",
+    "log_tail": "\n⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯\n\n FAIL  cindyplugin/src/__tests__/depositBindingLock.test.ts > SC-T3b.1 / SC-T3b1-fix.1 唯一业务链:AST 接线锁(替换可绕过的字符串扫描) > 真实读图消费链通过 AST 门禁:agentBridge 经 canvasReadImages 持有 R1,两文件 R2~R9 零 violation\nError: Test timed out in 5000ms.\nIf this is a long-running test, pass a timeout value as the last argument or configure it globally with \"testTimeout\".\n ❯ cindyplugin/src/__tests__/depositBindingLock.test.ts:639:3\n    637|   })\n    638|\n    639|   it('真实读图消费链通过 AST 门禁:agentBridge 经 canvasReadImages 持有 R1,两文件 R2~R9 …\n       |   ^\n    640|     const bridgeSource = readFileSync(join(process.cwd(), AGENT_BRIDGE…\n    641|     const readerSource = readFileSync(join(process.cwd(), CANVAS_READ_…\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\n\n\n Test Files  1 failed | 952 passed | 1 skipped (954)\n      Tests  1 failed | 17355 passed | 7 skipped (17363)\n   Start at  23:41:10\n   Duration  1088.02s (transform 26.88s, setup 4.89s, import 176.36s, tests 754.81s, environment 28.32s)\n\nJSON report written to /workspace/mivo-qa/argus-root/cache/runs/n1425-h1-mvtpm8lm/reports/unit.json\n",
+    "log_file": "/workspace/mivo-qa/argus-root/app/evidence/nightly/2026-10-29/62c96efa/pr-1425/h1/logs/unit.log",
+    "base_log_file": "/workspace/mivo-qa/argus-root/app/evidence/nightly/2026-10-29/62c96efa/pr-1425/b/logs/unit.log"
+   },
+   "base_comparison": {
+    "compared": true,
+    "base_sha": "2353e868a8ce812b312c26f09966dd3b0b92fcc9",
+    "base_run": "pass",
+    "result": "passes-on-base",
+    "note": "passed on the base (pre-merge) revision in one run; a single run cannot rule out the same instability on base",
+    "note_zh": "合并前版本上跑一次通过；单次运行不能排除合并前也偶发失败"
+   },
+   "pending_kind": "check-qa",
+   "owner": "qa",
+   "label_zh": "待核实（QA 自查）",
+   "kind_zh": "检查失败但不是作者的问题（unverified / setup-failed / timeout / flaky）",
+   "severity_if_confirmed": null,
+   "pending_reason": "check flaky: not attributable to the PR author; QA re-runs / fixes the environment first",
+   "pending_reason_zh": "检查结果是 flaky，不是作者的问题，QA 先自己查清（重跑、修环境）"
+  }
+ ]
+}

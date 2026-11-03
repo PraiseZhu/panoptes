@@ -30,12 +30,18 @@ def load_pr(n):
     try: return json.load(open(f"{RPT}/PR-{n}.json"))["prs"][0]
     except Exception: return None
 
-def pick_targets(fix_body, orig_pr, orig_report):
-    """Which of the source report's findings this fix PR claims to fix. Returns list of findings."""
+def pick_targets(fix_body, orig_pr, orig_report, fix_title=""):
+    """Which of the source report's findings this fix PR claims to fix. Returns list of findings.
+    A fingerprint the fix PR names (body or title) is also looked up in the source report's code-review
+    pending_verification (AI P1 not confirmed by repo review, e.g. #1425/#1451); only named ones, tagged
+    target_source=pending_verification. They stay out of findings, so P0–P2 / G2 counts are unchanged."""
     fs = [x for x in (orig_report or {}).get("findings", []) if x.get("severity") in SEV_OK
           and (x.get("calibration") or {}).get("to") != "误报"]
-    named = set(FP_RE.findall(fix_body or ""))
+    named = set(FP_RE.findall(f"{fix_body or ''}\n{fix_title or ''}"))
     hit = [x for x in fs if x.get("fingerprint") in named]
+    got = {x.get("fingerprint") for x in hit}
+    hit += [dict(x, target_source="pending_verification") for x in (orig_report or {}).get("pending_verification") or []
+            if x.get("source") == "code-review" and x.get("fingerprint") in named - got]
     if hit: return hit
     body = fix_body or ""
     kinds = [k for k in ("coverage-gate", "code-review") if k in body]
@@ -53,7 +59,7 @@ def targets_for(p):
     tg = []
     for o in qa_refs(p.get("body")):
         rep = load_pr(o)
-        for f in pick_targets(p.get("body"), o, rep): tg.append((o, f))
+        for f in pick_targets(p.get("body"), o, rep, p.get("title")): tg.append((o, f))
         if not rep: tg.append((o, None))
     return tg
 
@@ -444,7 +450,7 @@ def run(a):
     print(f"retest {scope}: {len(P)} fix PR(s) with QA: #N; mode={'EXECUTE' if a.execute else 'DRY-RUN'}")
     for p, tg in P:
         print(f"  #{p['number']} merged {p.get('mergedAt')} head {p['headRefOid'][:10]} ← " + ", ".join(
-            f"#{o}:{(f or {}).get('source','无报告')}:{(f or {}).get('fingerprint','-')}" for o, f in tg))
+            f"#{o}:{(f or {}).get('source','无报告')}:{(f or {}).get('fingerprint','-')}" + (":pending_verification" if (f or {}).get("target_source") else "") for o, f in tg))
     if not a.execute: print("DRY: nothing run, nothing written (add --execute)"); return 0
     if not P:
         if advance: state.update(watermark=stamp.isoformat(timespec="seconds"), last_run={"at": stamp.isoformat(timespec="seconds"), "fix_prs": []}); save_state(state, stamp)
@@ -473,14 +479,15 @@ def run(a):
                         else: model_calls += 1; res, why, det = run_review(p, o, f, ev_base)
                     else: res, why = "blocked", f"{f.get('source')} 类问题没有轻量复跑（要整步重跑：opsfix backfill --rerun --pr {n}）"
                 except Exception as e: res, why = "blocked", f"复测执行出错：{str(e)[:300]}"
-                rec = dict(fix_pr=n, original_pr=o, fingerprint=fp, source=f.get("source"), title=f.get("title"), result=res,
+                rec = dict(fix_pr=n, original_pr=o, fingerprint=fp, source=f.get("source"), target_source=f.get("target_source", "findings"), title=f.get("title"), result=res,
                            reason=why, evidence=f"{ev_base}.json", at=at, detail=det)
                 write_atomic(f"{ev_base}.json", json.dumps(rec, ensure_ascii=False, indent=1))
                 results.append(rec); log(f"#{n} ← #{o} {fp} {f.get('source')}: {res} — {why}")
         # write-back
         for n in sorted({r["fix_pr"] for r in results}):
             ents = [{"fingerprint": r["fingerprint"], "original_pr": r["original_pr"], "result": r["result"], "method": r["source"],
-                     "reason": r["reason"], "evidence": r["evidence"], "at": r["at"], "by": BY}
+                     "reason": r["reason"], "evidence": r["evidence"], "at": r["at"], "by": BY,
+                     **({"target_source": r["target_source"]} if r.get("target_source") == "pending_verification" else {})}
                     for r in results if r["fix_pr"] == n and r["fingerprint"] and r["result"] in ("pass", "fail")]
             f = f"{RPT}/PR-{n}.json"
             if not ents or not os.path.exists(f): continue
