@@ -31,6 +31,7 @@ import fcntl, hashlib, math, signal, sys, time
 from lib import *
 import praise_notice as PN
 import ready_guard as RG
+from finding_policy import fix_authors
 
 DRY = "--dry-run" in sys.argv
 STATE = f"{BASE}/out/prwatch/state.json"
@@ -104,7 +105,7 @@ def scan_reports(st):
         except ValueError: continue          # still being written: read it again next minute
         seen[k] = {"m": m, "h": h}
         for p in doc.get("prs", []):
-            if (p.get("author") or "") != "PraiseZhu": continue   # Praise 10-23: others' PRs go to their handoff repos (daily bot), not to us
+            if (p.get("author") or "") not in fix_authors(): continue   # Praise 11-02: PraiseZhu + kirozeng; others' PRs go to their handoff repos
             xs = [dict(x, severity=x.get("severity") or x.get("severity_if_confirmed")) for x in (p.get("findings") or []) + (p.get("pending_verification") or [])]
             xs = [x for x in xs if x.get("severity") in ("P0", "P1") and x.get("fingerprint") not in notified]
             if not xs: continue

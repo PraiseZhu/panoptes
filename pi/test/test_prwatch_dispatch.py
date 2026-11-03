@@ -160,6 +160,11 @@ class TestNewFindings(T):
         st = {}; prwatch.scan_reports(st)
         wf(f"{prwatch.RPT}/PR-5.json", json.dumps({"prs": [{"number": 5, "author": "aj0928", "findings": [{"fingerprint": "mq1-z", "severity": "P0"}]}]}))
         prwatch.scan_reports(st); self.assertEqual(self.acts, [])
+        self.assertFalse(any("#5" in l for l in self.logs))
+    def test_kiro_prs_are_ours(self):   # Praise 11-02: FIX_AUTHORS = PraiseZhu + kirozeng
+        st = {}; prwatch.scan_reports(st)
+        wf(f"{prwatch.RPT}/PR-6.json", json.dumps({"prs": [{"number": 6, "author": "kirozeng", "findings": [{"fingerprint": "mq1-k", "severity": "P1"}]}]}))
+        prwatch.scan_reports(st); self.assertIn("mq1-k", st["notified_fps"]); self.assertTrue(any("new findings #6: 1" in l for l in self.logs))
 
 class TestDraftCI(T):
     """Our own draft fix PRs (10-24): green -> ready; whole-PR gate races -> update-branch when behind main, else one rerun; a real
