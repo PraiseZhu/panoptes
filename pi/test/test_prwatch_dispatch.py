@@ -234,6 +234,22 @@ class TestDraftCI(T):
         self.procs({7: (1, 5, b"/bin/bash\0/x/bin/run.sh\0prfix\0--revise\0001301\0")}, 16000)
         self.draft("a" * 40, [("unit", "FAILURE")])
         self.assertEqual(self.tick({}), [])
+    def test_red_head_that_turns_dirty_gets_main_merged_in(self):   # 11-03 B: it used to count "red" as handled and sit DIRTY
+        self.draft("a" * 40, [("unit", "FAILURE")]); self.prs[0]["mergeStateStatus"] = "DIRTY"
+        st = {"draft_seen": {"1301:" + "a" * 12: "red"}}
+        self.assertEqual(self.tick(st)[0][1:], ["prfix", "--revise", "1301"])
+    def test_rerun_pushed_at_this_head_does_not_hold_back_a_merge(self):   # 11-03 B
+        self.tickets(**{"rev:1301": {"status": "pushed", "last_head": "a" * 40, "rerun_only": True, "last_cnt": "revisions", "revisions": 1}})
+        self.draft("a" * 40, []); self.prs[0]["mergeStateStatus"] = "DIRTY"
+        self.assertEqual(self.tick({})[0][1:], ["prfix", "--revise", "1301"])
+        self.tickets(**{"rev:1301": {"status": "pushed", "last_head": "a" * 40, "last_cnt": "merges", "merges": 1}})
+        self.assertEqual(self.tick({}), [])                                      # the merge itself is in hand
+    def test_b_off_flag_keeps_the_old_skip(self):
+        wf(prwatch.B_OFF, "")
+        try:
+            self.draft("a" * 40, [("unit", "FAILURE")]); self.prs[0]["mergeStateStatus"] = "DIRTY"
+            self.assertEqual(self.tick({"draft_seen": {"1301:" + "a" * 12: "red"}}), [])
+        finally: os.remove(prwatch.B_OFF)
     def test_conflict_with_main_goes_to_the_model_never_a_dm(self):   # 10-24 evening: no DM, the bot keeps at it
         self.draft("a" * 40, [], behind=False); self.prs[0]["mergeStateStatus"] = "DIRTY"
         st = {}; got = self.tick(st)

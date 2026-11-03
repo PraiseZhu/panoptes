@@ -4,20 +4,32 @@
 Only the keys named with --keys are touched, and only while their status is still "gave_up": the entry is removed from
 out/outbound/ledger.json so the next outbound run treats it as new. A named key that is missing or in any other status
 is left alone and reported under "skipped". Every removal is logged with the old entry.
+11-03 B: at most one key per fingerprint (fixpr:<qa>:<fp>[:rN][:aN]): resetting two keys of one
+finding would let outbound open two fix PRs for it. The later ones are reported under "skipped". touch PI_STATE/pmnudge-b-off -> off.
 Idempotent: a second run finds nothing to reset and leaves the file byte-for-byte unchanged.
 Usage: python3 pi/bin/reset_abandoned.py --keys KEY[,KEY...] [--dry-run] [--ledger PATH]
 """
 import argparse, fcntl, json, os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from lib import BASE, write_atomic, log
+from lib import BASE, write_atomic, log, b_on
 
 LEDGER = f"{BASE}/out/outbound/ledger.json"   # = outbound.LEDGER (not imported: outbound pulls in merger's live policy file)
+
+def fingerprint(key):
+    """fixpr:1519:mq1-0fea[:r2][:a2] -> mq1-0fea (prfix action keys); anything else -> the key itself"""
+    p = key.split(":")
+    return p[2] if p[0] == "fixpr" and len(p) > 2 else key
 
 def reset(path, keys, dry_run=False):
     try: led = json.load(open(path))
     except (OSError, ValueError): led = None
     if led is None: raise SystemExit(f"FATAL {path} missing or unreadable")
-    hit = [k for k in dict.fromkeys(keys) if (led.get(k) or {}).get("status") == "gave_up"]
+    hit, fps = [], set()
+    for k in dict.fromkeys(keys):
+        if (led.get(k) or {}).get("status") != "gave_up": continue
+        fp = fingerprint(k)
+        if b_on() and fp in fps: log(f"reset_abandoned: skip {k}: fingerprint {fp} already reset in this run"); continue
+        fps.add(fp); hit.append(k)
     for k in hit:
         log(f"reset_abandoned{' (dry-run)' if dry_run else ''}: remove {k} = {json.dumps(led[k], ensure_ascii=False)[:300]}")
     if not hit: log("reset_abandoned: nothing to reset (already done)"); return []

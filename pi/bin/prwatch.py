@@ -526,14 +526,15 @@ def revise_or_wait(st, done, n, head, tag, seen, rv, cnt_key, cap, what, red=())
     if rv.get("status") == "needs_praise" and rv.get("head") == head: return True
     if rv.get("status") == "parked" and (rv.get("next_retry_at") or "") > now_cst().isoformat(): return True
     dead = rv.get("status") == "running" and not pid_alive(rv.get("pid"))   # prfix --revise records it as a transient failure when it starts
-    if rv.get("status") == "pushed" and rv.get("last_head") == head and rv.get("rerun_only") \
+    same_kind = (rv.get("last_cnt") or "revisions") == cnt_key or not b_on()   # 11-03 B: a CI fix / re-run pushed at this head says nothing about a merge
+    if same_kind and rv.get("status") == "pushed" and rv.get("last_head") == head and rv.get("rerun_only") \
             and (jload(f"{BASE}/out/outbound/ledger.json", {}).get(rv.get("action_key")) or {}).get("status") == "done":
         # the ruled re-run of this head happened and the checks are red again. prfix --revise would only skip this head ("已经修过、
         # 等推送"), so launching it is a no-op loop (10-25: #1271 spun 14 h). The judge said the PR is not the cause: give CI a fresh
         # run instead -- main merged in when the PR is behind (update-branch, daily budget), else the failed jobs re-run every 3 h.
         # A new head is a new question for prfix; nothing here asks Praise.
         return ruled_red_again(st, done, n, head, tag, seen, red)
-    elif (rv.get("status") == "running" and not dead) or (rv.get("status") == "pushed" and rv.get("last_head") == head): return True   # in hand
+    elif (rv.get("status") == "running" and not dead) or (same_kind and rv.get("status") == "pushed" and rv.get("last_head") == head): return True   # in hand
     if rv.get("status") == "failed" and rv.get("head") == head and (rv.get("next_retry_at") or "") > now_cst().isoformat(): return True
     lt = st.setdefault("revise_launched", {})
     try: ran_after = rv.get("status") == "failed" and rv.get("head") == head and dt.datetime.fromisoformat(rv.get("updated_at")).timestamp() > lt.get(tag, 0)
@@ -598,16 +599,17 @@ def check_drafts(st):
         if (p.get("mergeStateStatus") or "").upper() == "DIRTY":
             # conflicts with main: GitHub runs few or no checks and update-branch cannot merge -> prfix --revise merges main in and the
             # model resolves the conflicts (10-24); a DM only when that is off / used up / stopped at this head
-            if seen in ("ready", "red", "dirty"): continue
+            # 11-03 B: a head first seen red (or readied) that then conflicts with main still gets main merged in; only a dirty DM
+            # already sent for this head ends it (it used to count red/ready as done and the draft sat DIRTY)
+            if seen == "dirty" or (seen in ("ready", "red") and not b_on()): continue
             if revise_or_wait(st, done, n, head, tag, seen, revise_ticket(n), "merges", MAX_MERGES, "conflicts with main"): continue
-            if seen not in ("ready", "red", "dirty"):
-                alert(st, n, "dirty")
-                act("prwatch", {"key": f"dirty:{tag}", "type": "slack.dm", "to": "Praise", "text": PN.text(PN.item("action", f"修复 PR #{n} 跟 main 冲突了",
-                    f"修 PR bot 为 #{qa} 开的修复 PR #{n}（草稿）和最新 main 有冲突，GitHub 不再跑完整测试；bot 自己合 main 解冲突已经停下了（或开关关着）。",
-                    f"这个修复 PR 停住了，#{qa} 的问题还在。",
-                    todo=PN.ask_session(f"修复草稿 PR #{n}（QA: #{qa}）跟 main 冲突，把 main 合进来解决冲突后推到它的分支上"),
-                    link=f"https://github.com/{REPO}/pull/{n}"))})
-                done[tag] = "dirty"; qlog(f"#{n} conflicts with main -> DM")
+            alert(st, n, "dirty")
+            act("prwatch", {"key": f"dirty:{tag}", "type": "slack.dm", "to": "Praise", "text": PN.text(PN.item("action", f"修复 PR #{n} 跟 main 冲突了",
+                f"修 PR bot 为 #{qa} 开的修复 PR #{n}（草稿）和最新 main 有冲突，GitHub 不再跑完整测试；bot 自己合 main 解冲突已经停下了（或开关关着）。",
+                f"这个修复 PR 停住了，#{qa} 的问题还在。",
+                todo=PN.ask_session(f"修复草稿 PR #{n}（QA: #{qa}）跟 main 冲突，把 main 合进来解决冲突后推到它的分支上"),
+                link=f"https://github.com/{REPO}/pull/{n}"))})
+            done[tag] = "dirty"; qlog(f"#{n} conflicts with main -> DM")
             continue
         if not concl or any(s != "COMPLETED" or v in ("", "PENDING", "EXPECTED") for v, s, _ in concl): continue   # still running
         red = [nm for v, s, nm in concl if v in BAD_CONCL]
