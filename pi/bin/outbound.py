@@ -64,7 +64,8 @@ def BRIEF_ROUTE_OFF(): return f"{BASE}/outbound-brief-route-off"
 # 11-03 step 11: conflict reminders (prwatch dirty:<pr>:<head> slack.dm, pmnudge nudge:<pr>:merge:<since> DIRTY/BEHIND) never DM Praise,
 # with or without praise-dm-mute: they go to the brief queue (or, with BRIEF_ROUTE_OFF, a muted-*.md file bots read). Before, they
 # reached his Slack DM whenever the mute file was absent. Rollback: touch CONFLICT_BRIEF_OFF (re-read every run) -> they follow the mute again.
-CONFLICT_KEY = re.compile(r"^(dirty:|nudge:\d+:merge:)")
+# Step 11 ③: prwatch's 🟢 for a resolved conflict (resolved:dirty:<sha>) follows the same route.
+CONFLICT_KEY = re.compile(r"^(dirty:|nudge:\d+:merge:|resolved:dirty:)")
 def CONFLICT_BRIEF_OFF(): return f"{BASE}/conflict-brief-off"
 def conflict_brief(k): return bool(CONFLICT_KEY.match(str(k))) and not os.path.exists(CONFLICT_BRIEF_OFF())
 TERMINAL = ("done", "skipped", "gave_up", "uncertain", "briefed", "superseded")  # ledger statuses never retried (uncertain = a send was interrupted:
