@@ -18,7 +18,7 @@ Records: out/praise-pr/grok-usage.json (per day: baseline, samples, opened, done
   A trip (stop or week >= 70) sets pm_report_due for the day: the bot reports it to the test PM the same day (--check shows it).
 Usage: grokline.py gate --dry-run (read-only) | pr-meta --key QA:FP [--title T] (read-only) | --check | --record --pct P | --claim --pct P | --progress KEY | --finish KEY --pct P --pr N | --release KEY --pct P
 Output: one JSON line on stdout."""
-import argparse, contextlib, fcntl, sys
+import argparse, contextlib, fcntl, math, sys
 from lib import *
 import prfix
 
@@ -34,9 +34,15 @@ def daily_path(): return f"{prfix.OUT}/grok-daily.log"
 
 
 # ---------------------------------------------------------------- pure rules
+def valid_pct(x):
+    """a usable weekly-usage %: a real int/float (not bool, not str), finite, in [0, 100]; anything else is rejected"""
+    return type(x) in (int, float) and math.isfinite(x) and 0 <= x <= 100
+
+
 def gate(baseline, cur):
-    """-> (open | hold | stop, reason). No record today -> hold (fail closed)."""
+    """-> (open | hold | stop, reason). No record today or a bad value -> hold (fail closed)."""
     if baseline is None or cur is None: return "hold", "今天还没有用量记录"
+    if not (valid_pct(baseline) and valid_pct(cur)): return "hold", f"用量读数无效（baseline={baseline} cur={cur}）：不开新单"
     rise = round(cur - baseline, 2)
     if rise >= STOP_RISE: return "stop", f"今天已涨 {rise} 点 >= {STOP_RISE:g}：停掉所有 Grok 线单，退回 Pi 线"
     if rise >= HOLD_RISE: return "hold", f"今天已涨 {rise} 点 >= {HOLD_RISE:g}：不开新单，只做完在跑的"
@@ -75,8 +81,8 @@ def usage_locked():
     os.makedirs(prfix.OUT, exist_ok=True)
     lk = open(usage_path() + ".lock", "w"); fcntl.flock(lk, fcntl.LOCK_EX)
     try:
-        doc = json.load(open(usage_path())) if os.path.exists(usage_path()) else {}
-        doc.setdefault("days", {})
+        doc = load_usage()
+        if doc is None: raise UsageBad("grok-usage.json 读不了或格式不对")
         yield doc
         write_atomic(usage_path(), json.dumps(doc, ensure_ascii=False, indent=1))
     finally:
@@ -86,7 +92,7 @@ def usage_locked():
 def record(doc, pct, now, opened=0, done=0):
     """one usage sample into doc (in place) -> today's entry"""
     d = doc["days"].setdefault(now.date().isoformat(), {"baseline": None, "samples": [], "opened": 0, "done": 0, "trips": []})
-    if pct is not None:
+    if pct is not None and valid_pct(pct):   # a bad reading is never stored (it would poison the baseline)
         pct = float(pct)
         d["baseline"] = pct if d["baseline"] is None else min(d["baseline"], pct)
         d["samples"] = (d["samples"] + [[now.isoformat(timespec="seconds"), pct]])[-200:]
@@ -97,9 +103,41 @@ def record(doc, pct, now, opened=0, done=0):
     return d
 
 
+class UsageBad(Exception): pass
+
+
+def _day_ok(d):
+    """one day entry has exactly the shapes record()/day_gate()/summary_line() rely on"""
+    def count(v): return type(v) is int and v >= 0
+    return (isinstance(d, dict) and (d.get("baseline") is None or valid_pct(d.get("baseline")))
+            and isinstance(d.get("samples"), list)
+            and all(isinstance(x, list) and len(x) == 2 and isinstance(x[0], str) and valid_pct(x[1]) for x in d["samples"])
+            and count(d.get("opened", 0)) and count(d.get("done", 0))
+            and isinstance(d.get("trips", []), list) and all(isinstance(x, str) for x in d.get("trips", [])))
+
+
+def load_usage():
+    """-> the usage doc, validated (missing file = empty), or None when it is unreadable or malformed in any way (= stop)"""
+    try:
+        if not os.path.exists(usage_path()): return {"days": {}}
+        with open(usage_path()) as f: doc = json.load(f)
+        if not isinstance(doc, dict) or not isinstance(doc.get("days", {}), dict): return None
+        doc.setdefault("days", {})
+        if not all(isinstance(k, str) and _day_ok(d) for k, d in doc["days"].items()): return None
+        for d in doc["days"].values():
+            d.setdefault("baseline", None); d.setdefault("opened", 0); d.setdefault("done", 0); d.setdefault("trips", [])
+        return doc
+    except Exception:
+        return None
+
+
 def day_gate(d):
-    cur = d["samples"][-1][1] if d and d.get("samples") else None
-    return gate((d or {}).get("baseline"), cur)
+    try:
+        if d and not _day_ok(d): return "stop", "当天用量记录格式不对：按 stop 处理"
+        cur = d["samples"][-1][1] if d and d.get("samples") else None
+        return gate((d or {}).get("baseline"), cur)
+    except Exception as e:
+        return "stop", f"用量记录读不了（{type(e).__name__}）：按 stop 处理"
 
 
 def summary_line(day, d):
@@ -139,9 +177,9 @@ def pr_meta(key, title=None):
 
 def check(now=None):
     now = now or now_cst()
-    doc = json.load(open(usage_path())) if os.path.exists(usage_path()) else {"days": {}}
-    d = doc["days"].get(now.date().isoformat()) or {}
-    g, gwhy = day_gate(d)
+    doc = load_usage()
+    if doc is None: d, g, gwhy = {}, "stop", "grok-usage.json 读不了或格式不对：按 stop 处理"   # fail closed, never a crash
+    else: d = doc["days"].get(now.date().isoformat()) or {}; g, gwhy = day_gate(d)
     tks = prfix.load_tickets().get("tickets", {})
     todo, wanted = queue(now)
     ok, why = may_open(on(), g, pi_running(tks), len(todo), len(wanted))
@@ -153,7 +191,11 @@ def check(now=None):
 def claim(pct, now=None):
     """-> result dict; the ticket is claimed only when may_open (usage checked with THIS pct first)."""
     now = now or now_cst()
-    with usage_locked() as U: d = dict(record(U, pct, now))
+    if not valid_pct(pct): return {"status": "no", "reason": f"用量读数无效（{pct}）：按 hold 处理", "gate": "hold"}
+    try:
+        with usage_locked() as U: d = dict(record(U, pct, now))
+    except Exception as e:
+        return {"status": "no", "reason": f"用量记录读不了（{type(e).__name__}）：按 stop 处理", "gate": "stop"}
     g, gwhy = day_gate(d)
     todo, wanted = queue(now)
     ok, why = may_open(on(), g, pi_running(prfix.load_tickets().get("tickets", {})), len(todo), len(wanted))
@@ -171,8 +213,15 @@ def claim(pct, now=None):
         t.update(status="running", owner="grok", pid=None, host="cloud", started_at=stamp, progress_at=stamp, updated_at=stamp,
                  usage_start=float(pct), attempts=int(t.get("attempts") or 0) + 1)
         tks[key] = t
-    with usage_locked() as U: record(U, None, now, opened=1)
+    _record_quiet(None, now, opened=1)
     return {"status": "claimed", "ticket": key, "qa": t["qa"], "fp": t["fp"], "reason": why, "gate": g}
+
+
+def _record_quiet(pct, now, **kw):
+    """bookkeeping after a ticket change: a broken usage file must not undo or crash it (the gate already reads it as stop)"""
+    try:
+        with usage_locked() as U: record(U, pct, now, **kw)
+    except Exception as e: log(f"grok line: usage record skipped ({type(e).__name__}: {e})")
 
 
 def _own(key, fn, now):
@@ -230,47 +279,54 @@ def finish(key, pct, pr, now=None):
     now = now or now_cst()
     def fn(t, s):
         for k in ("owner", "host", "progress_at"): t.pop(k, None)
-        t.update(status="pr_action_written", action_key=None, pr=int(pr), finished_by="grok", usage_end=float(pct), pid=None,
+        t.update(status="pr_action_written", action_key=None, pr=int(pr), finished_by="grok", usage_end=float(pct) if valid_pct(pct) else None, pid=None,
                  updated_at=s, last_error=None, next_retry_at=None)
         t["history"] = (list(t.get("history") or []) + [{"at": s, "status": "grok_pr", "error": f"#{pr}"}])[-20:]
         return t
     r = _own(key, fn, now)
     if r["status"] == "ok":
-        with usage_locked() as U: record(U, pct, now, done=1)
+        _record_quiet(pct, now, done=1)   # record() drops a bad pct
     return r
 
 
 def give_back(key, pct, why, now=None):
     now = now or now_cst()
-    r = _own(key, lambda t, s: dict(release(t, why, now), usage_end=float(pct) if pct is not None else None), now)
-    if pct is not None and r["status"] == "ok":
-        with usage_locked() as U: record(U, pct, now)
+    r = _own(key, lambda t, s: dict(release(t, why, now), usage_end=float(pct) if valid_pct(pct) else None), now)
+    if valid_pct(pct) and r["status"] == "ok":
+        _record_quiet(pct, now)
     return r
 
 
 def sweep(st=None, now=None):
     """prwatch, every minute: switch off / gate stop / 90 min without progress -> back to Pi; the 23:59 day line."""
     now = now or now_cst(); day = now.date().isoformat()
-    doc = json.load(open(usage_path())) if os.path.exists(usage_path()) else {"days": {}}
-    g, _ = day_gate(doc["days"].get(day))
+    sw = on()
+    if not sw: doc, g, stop_why = None, "stop", "开关关了"          # switch off: give back without reading the usage file at all
+    else:
+        doc = load_usage()
+        if doc is None: g, stop_why = "stop", "grok-usage.json 读不了或格式不对，按 stop 处理"
+        else: g, stop_why = day_gate(doc["days"].get(day))
+        if g == "stop" and doc is not None: stop_why = f"用量闸门 stop（{stop_why}）"
     def why(t):
-        return ("开关关了" if not on() else "用量闸门 stop（今天涨 >= 10 点）" if g == "stop"
-                else f"{STALE_MIN} 分钟没有进展" if stale(t, now) else None)
+        return (stop_why if g == "stop" else f"{STALE_MIN} 分钟没有进展" if stale(t, now) else None)
     back = []
     if any(t.get("owner") == "grok" and why(t) for t in prfix.load_tickets().get("tickets", {}).values()):   # lock + write only then
         with prfix.tickets_locked() as T:
             for k, t in list(T["tickets"].items()):
                 w = t.get("owner") == "grok" and why(t)
                 if w: T["tickets"][k] = release(t, w, now); back.append((k, w))
-    due = [x for x, d in doc["days"].items() if not d.get("summarized") and (x < day or (x == day and now.strftime("%H:%M") >= "23:59"))]
-    if due:
-        with usage_locked() as U:
-            for x in sorted(due):
-                d = U["days"][x]
-                if d.get("summarized"): continue
-                os.makedirs(prfix.OUT, exist_ok=True)
-                with open(daily_path(), "a") as f: f.write(summary_line(x, d) + "\n")
-                d["summarized"] = True
+    try:   # the 23:59 day line is bookkeeping only: after the tickets, and a broken file never crashes the sweep
+        doc = doc if doc is not None else load_usage()
+        due = [x for x, d in (doc or {"days": {}})["days"].items()
+               if not d.get("summarized") and (x < day or (x == day and now.strftime("%H:%M") >= "23:59"))]
+        if due:
+            with usage_locked() as U:
+                for x in sorted(due):
+                    d = U["days"][x]
+                    if d.get("summarized"): continue
+                    with open(daily_path(), "a") as f: f.write(summary_line(x, d) + "\n")
+                    d["summarized"] = True
+    except Exception as e: log(f"grok line: day line skipped ({type(e).__name__}: {e})")
     for k, why in back: log(f"grok line: {k} back to the Pi queue ({why})")
     return back
 
@@ -290,9 +346,12 @@ def main(argv=None):
         elif A.cmd == "pr-meta":
             r = dict(pr_meta(A.key, A.title), status="ok") if A.key else {"status": "error", "error": "pr-meta 要 --key QA:FP"}
         elif (A.record or A.claim or A.finish) and A.pct is None: r = {"status": "error", "error": "--pct 必填（CheckSubscriptionUsage 每周用量 %）"}
+        elif A.pct is not None and not valid_pct(A.pct): r = {"status": "error", "gate": "hold", "error": f"--pct {A.pct} 无效（要 0-100 的有限数）：按 hold 处理，不记录"}
         elif A.record:
-            with usage_locked() as U: d = record(U, A.pct, now_cst())
-            r = {"status": "ok", "gate": day_gate(d), "today": d}
+            try:
+                with usage_locked() as U: d = record(U, A.pct, now_cst())
+                r = {"status": "ok", "gate": day_gate(d), "today": d}
+            except Exception as e: r = {"status": "error", "gate": "stop", "error": f"用量记录读不了（{type(e).__name__}）：按 stop 处理"}
         elif A.claim: r = claim(A.pct)
         elif A.progress: r = progress(A.progress)
         elif A.finish: r = finish(A.finish, A.pct, A.pr) if A.pr else {"status": "error", "error": "--finish 要 --pr"}
