@@ -145,6 +145,15 @@ class BuildLedger(Switch):
     def test_switch_drops_the_whole_pr(self):
         self.switch_off(); self.assertEqual(self.keys(), [])
 
+    def test_p1_fp_row_drops_that_p1_but_pr_wide_row_does_not(self):
+        # 11-04 (JS ownTicket mirror of own_pr_ticket): fingerprint row exempts a P1 lead; a PR-wide row never exempts a P1.
+        p1 = lambda fp: {"fingerprint": fp, "severity_if_confirmed": "P1", "source": "code-review", "title": fp[-4:]}
+        json.dump({"generated_at": "2026-11-02T10:00:00Z", "prs": [{"number": 1340, "author": {"login": "PraiseZhu"}, "findings": [],
+                   "pending_verification": [p1(A), p1(B)]}]}, open(f"{self.qa}/reports/merged/PR-1340.json", "w"))
+        self.assertEqual(self.keys(), [f"{REPO}#1340:{B}"])
+        open(self.rul, "w").write("# P2 裁决记录\n\n" + HDR + "| 2026-11-03 | #1340 | 整 PR | 不修 | r |\n")
+        self.assertEqual(self.keys(), [f"{REPO}#1340:{A}", f"{REPO}#1340:{B}"])
+
 
 if __name__ == "__main__":
     unittest.main()

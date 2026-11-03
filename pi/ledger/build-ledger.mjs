@@ -239,6 +239,7 @@ function ownTicket(x, n, pending) {
   if (src === 'qa-error') return null;
   if (src === 'coverage-gate' || src === 'own-tests') return sev === 'P2' && fix2.has(n) ? { sev, ticket: true } : null;
   if (src === 'check' && ![undefined, null, 'introduced'].includes(x.status)) return null;
+  if (nofix.has(`${n}:${x.fingerprint}`)) return null;  // 11-04: signed per-fingerprint no-fix row exempts that finding at any level; PR-wide rows stay P2-only (finding_policy.own_pr_ticket)
   if (sev === 'P2') {
     const unconfirmed = pending || !!x.pending_kind || String(x.verdict || '').toUpperCase() === 'PLAUSIBLE';
     if (signed(nofix, n, x.fingerprint)) return null;
