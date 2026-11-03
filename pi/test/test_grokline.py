@@ -164,4 +164,49 @@ class TestSweep(Grok):
         g.sweep(now=NOW.replace(hour=23, minute=59)); g.sweep(now=NOW + dt.timedelta(hours=4))
         self.assertEqual(open(g.daily_path()).read(), "2026-10-23 baseline=5.0 close=7.25 rise=2.25 opened=2 done=1 trips=-\n")
 
+class TestFollowup(Grok):
+    """11-03 follow-up: Pi-line PR conventions, author filter, hard cap on running work, backlog cleared, gate dry-run."""
+    def test_pr_meta_is_tracked_as_pi_line(self):
+        import prwatch
+        m = G().pr_meta(f"1179:{C}", "fix: x (QA #1179)")
+        self.assertEqual(m["branch"], f"qa-fix/fixpr-1179-{C}"[:67])
+        p = {"number": 9, "state": "OPEN", "isDraft": True, "author": {"login": "PraiseZhu"}, "headRefName": m["branch"],
+             "body": "summary\n\n" + m["pr_body_block"]}
+        self.assertTrue(prwatch.is_bot_fixpr(p))
+        self.assertEqual(prfix.revise_target(p, [])[:2], (1179, C))
+        self.assertTrue(lib.has_pi_trailer(m["commit_message"]))
+        self.assertIn("QA: #1179", m["pr_body_block"])
+        cm = [{"sha": "abc", "commit": {"message": m["commit_message"], "committer": {"date": dt.datetime.now(dt.timezone.utc).isoformat()}}}]
+        self.assertEqual(lib.foreign_recent_commits(cm), [])
+    def test_claims_only_praise_or_kirozeng(self):
+        self.switch(); self.put(tickets(**self.both_pi_slots()))
+        self.ctx["reports"][1179]["cur"][1]["author"] = "someone"
+        self.assertEqual(G().claim(5.0, now=NOW)["status"], "no")
+        self.ctx["reports"][1179]["cur"][1]["author"] = "kirozeng"
+        self.assertEqual(G().claim(5.0, now=NOW)["ticket"], f"1179:{C}")
+    def test_backlog_cleared_stops_taking_work(self):
+        self.switch(); self.put(tickets(**self.both_pi_slots()))
+        g = G(); self.assertEqual(g.claim(5.0, now=NOW)["status"], "claimed")
+        g.finish(f"1179:{C}", 5.5, 1700, now=NOW)
+        r = g.claim(5.6, now=NOW)
+        self.assertEqual((r["status"], g.queue(NOW)), ("no", ([], [])))
+        self.assertEqual(r["reason"], "没有积压")
+    def test_hard_cap_stops_running_ticket_on_progress(self):
+        self.switch(); self.put(tickets(**{f"1179:{C}": self.grok_owned(1179, C)}))
+        g = G()
+        with g.usage_locked() as U: g.record(U, 5.0, NOW - dt.timedelta(hours=1)); g.record(U, 15.0, NOW)
+        r = g.progress(f"1179:{C}", now=NOW)
+        self.assertEqual(r["status"], "stop")
+        t = self.tk(f"1179:{C}"); self.assertEqual((t["status"], t.get("owner")), ("queued", None))
+    def test_gate_dry_run_reads_only_and_bad_file_is_hold(self):
+        self.switch(); self.put(tickets(**self.both_pi_slots())); g = G()
+        with g.usage_locked() as U: g.record(U, 5.0, NOW)
+        before = open(g.usage_path()).read(), open(f"{prfix.OUT}/tickets.json").read()
+        r = g.gate_dry_run(now=NOW)
+        self.assertEqual((r["gate"], r["may_open"], r["would_claim"]), ("open", True, f"1179:{C}"))
+        self.assertEqual((open(g.usage_path()).read(), open(f"{prfix.OUT}/tickets.json").read()), before)
+        open(g.usage_path(), "w").write("{not json")
+        r = g.gate_dry_run(now=NOW)
+        self.assertEqual((r["gate"], r["may_open"]), ("hold", False))
+
 if __name__ == "__main__": unittest.main()

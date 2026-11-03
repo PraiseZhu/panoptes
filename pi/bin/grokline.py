@@ -16,7 +16,7 @@ Claim: --claim --pct P takes the first todo in Pi's own priority order under tic
 Records: out/praise-pr/grok-usage.json (per day: baseline, samples, opened, done, trips); one line per day in
   out/praise-pr/grok-daily.log from 23:59 Beijing (prwatch sweep): baseline, close, rise, opened, done, trips.
   A trip (stop or week >= 70) sets pm_report_due for the day: the bot reports it to the test PM the same day (--check shows it).
-Usage: grokline.py --check | --record --pct P | --claim --pct P | --progress KEY | --finish KEY --pct P --pr N | --release KEY --pct P
+Usage: grokline.py gate --dry-run (read-only) | pr-meta --key QA:FP [--title T] (read-only) | --check | --record --pct P | --claim --pct P | --progress KEY | --finish KEY --pct P --pr N | --release KEY --pct P
 Output: one JSON line on stdout."""
 import argparse, contextlib, fcntl, sys
 from lib import *
@@ -25,6 +25,7 @@ import prfix
 HOLD_RISE, STOP_RISE, WEEK_CAP = 8.0, 10.0, 70.0
 STALE_MIN = 90
 PI_SLOTS = 2                     # = prwatch.MAX_FIXES
+GROK_AUTHORS = ("PraiseZhu", "kirozeng")   # 11-03: Grok claims only tickets whose source PR is by one of these
 
 
 def on(): return prfix.grok_on()
@@ -115,10 +116,25 @@ def pi_running(tks):
 
 def queue(now):
     """Pi's view (same evaluate + priority): -> (todo keys, handed-over keys)"""
-    vs = prfix.evaluate_all(prfix.gather(), now)
+    vs = [v for v in prfix.evaluate_all(prfix.gather(), now) if qualifies(v)]   # backlog cleared -> both empty -> no claim
     todo = [v["key"] for v in vs if v["state"] == "todo"]
     wanted = [v["key"] for v in vs if v["state"] == "skip" and v["skips"] == [prfix.GROK_HANDOVER]]
     return todo, wanted
+
+
+def qualifies(v):
+    """a ticket Grok may take: its source PR author is in GROK_AUTHORS"""
+    return ((v.get("c") or {}).get("author") or "") in GROK_AUTHORS
+
+
+def pr_meta(key, title=None):
+    """Pi-line conventions for a Grok fix PR (same builders as outbound/prfix), so prwatch.check_drafts, prfix --revise and the
+    6h ownership check (lib.PI_MARK_RE) treat it as the Pi line's own. key = '<qa>:<fp>' (tickets.json key)."""
+    import outbound
+    n, fp = key.split(":", 1); n = int(n); fk = f"fixpr:{n}:{fp}"
+    trailer = outbound.pi_open_trailer(fk)
+    return {"branch": "qa-fix/" + fk.replace(":", "-")[:60], "pr_body_block": f"QA: #{n}\nFingerprint: {fp}\n\n<!-- pi-line {fk} -->",
+            "commit_trailer": trailer, "commit_message": f"{title or f'fix: QA #{n}'}\n\n{trailer}"}
 
 
 def check(now=None):
@@ -168,8 +184,46 @@ def _own(key, fn, now):
 
 
 def progress(key, now=None):
+    """keep a claim alive; with the switch off or the usage gate at stop the ticket goes back to Pi right here (status stop:
+    the Grok side must stop working on it), not a minute later in prwatch's sweep."""
     now = now or now_cst()
+    try:
+        doc = jload_usage()
+        g = day_gate(doc["days"].get(now.date().isoformat()))[0]
+    except Exception: g = "stop"   # unreadable usage file: fail closed
+    if not on() or g == "stop":
+        why = "开关关了" if not on() else "用量闸门 stop（今天涨 >= 10 点）"
+        r = _own(key, lambda t, s: release(t, why, now), now)
+        return dict(r, status="stop", reason=why) if r["status"] == "ok" else r
     return _own(key, lambda t, s: dict(t, progress_at=s, updated_at=s), now)
+
+
+def jload_usage():
+    if not os.path.exists(usage_path()): return {"days": {}}
+    with open(usage_path()) as f: return json.load(f)
+
+
+def gate_dry_run(now=None):
+    """read-only: the gate decision and its inputs (no usage record, no tickets write). Any bad input -> hold, never a crash."""
+    now = now or now_cst(); out = {"status": "dry-run", "now": now.isoformat(timespec="seconds")}
+    try:
+        doc = jload_usage()
+        d = doc["days"].get(now.date().isoformat()) or {}
+        cur = d["samples"][-1][1] if d.get("samples") else None
+        g, gwhy = day_gate(d)
+        out.update(switch=on(), baseline=d.get("baseline"), current=cur, gate=g, gate_reason=gwhy)
+    except Exception as e:
+        out.update(switch=None, gate="hold", gate_reason=f"用量记录读不了，按 hold：{str(e)[:120]}"); g = "hold"
+    try:
+        tks = prfix.load_tickets().get("tickets", {}); todo, wanted = queue(now)
+        ok, why = may_open(bool(out["switch"]), g, pi_running(tks), len(todo), len(wanted))
+        out.update(pi_running=pi_running(tks), qualifying_todo=todo, handed_over=wanted, authors=list(GROK_AUTHORS),
+                   grok=sorted(k for k, t in tks.items() if t.get("owner") == "grok"), may_open=ok, reason=why,
+                   would_claim=(wanted + todo)[0] if ok and (wanted + todo) else None)
+    except Exception as e:
+        out.update(gate="hold", may_open=False, would_claim=None, reason=f"工单队列读不了，按 hold：{str(e)[:120]}")
+    if out.get("gate") not in ("open", "hold", "stop"): out["gate"] = "hold"
+    return out
 
 
 def finish(key, pct, pr, now=None):
@@ -223,13 +277,19 @@ def sweep(st=None, now=None):
 
 def main(argv=None):
     ap = argparse.ArgumentParser()
+    ap.add_argument("cmd", nargs="?", choices=["gate", "pr-meta"]); ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--key"); ap.add_argument("--title")
     ap.add_argument("--check", action="store_true"); ap.add_argument("--record", action="store_true")
     ap.add_argument("--claim", action="store_true"); ap.add_argument("--progress"); ap.add_argument("--finish"); ap.add_argument("--release")
     ap.add_argument("--pct", type=float); ap.add_argument("--pr", type=int); ap.add_argument("--why", default="Grok 放弃")
     A = ap.parse_args(argv)
     real = sys.stdout; sys.stdout = sys.stderr       # helper logs never corrupt the JSON line
     try:
-        if (A.record or A.claim or A.finish) and A.pct is None: r = {"status": "error", "error": "--pct 必填（CheckSubscriptionUsage 每周用量 %）"}
+        if A.cmd == "gate":
+            r = gate_dry_run() if A.dry_run else {"status": "error", "error": "gate 只有 --dry-run（只读）"}
+        elif A.cmd == "pr-meta":
+            r = dict(pr_meta(A.key, A.title), status="ok") if A.key else {"status": "error", "error": "pr-meta 要 --key QA:FP"}
+        elif (A.record or A.claim or A.finish) and A.pct is None: r = {"status": "error", "error": "--pct 必填（CheckSubscriptionUsage 每周用量 %）"}
         elif A.record:
             with usage_locked() as U: d = record(U, A.pct, now_cst())
             r = {"status": "ok", "gate": day_gate(d), "today": d}

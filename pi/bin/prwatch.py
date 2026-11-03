@@ -437,6 +437,9 @@ UB_PER_DAY = 6          # update-branch per PR per day (10-24: the old cap of 2 
 MAX_REVISIONS = 2       # = prfix.MAX_REVISIONS
 MAX_MERGES = 3          # = prfix.MAX_MERGES
 PILINE = "<!-- pi-line fixpr:"
+def is_bot_fixpr(p):
+    """a draft fix PR the Pi line (or the Grok line via grokline.pr_meta) opened: pi-line marker + qa-fix/* branch"""
+    return PILINE in (p.get("body") or "") and (p.get("headRefName") or "").startswith("qa-fix/")
 
 
 def pid_alive(pid):
@@ -584,13 +587,13 @@ def check_drafts(st):
               "--json", "number,headRefOid,headRefName,body,statusCheckRollup,mergeStateStatus"])
     done = st.setdefault("draft_seen", {}); ub = st.setdefault("update_branch_day", {}); day = today()
     # 10-24 (plan S2): a bot draft that left this list was merged / closed / readied -> janitor right away (branches, worktrees)
-    ours = sorted(p["number"] for p in prs if PILINE in (p.get("body") or "") and (p.get("headRefName") or "").startswith("qa-fix/"))
+    ours = sorted(p["number"] for p in prs if is_bot_fixpr(p))
     gone = sorted(set(st.get("bot_drafts") or []) - set(ours)); st["bot_drafts"] = ours
     if gone: kick_janitor(",".join(f"mivo#{n}" for n in gone))
     for p in prs:
         # 10-24: only the fix PRs the Pi line opened. Session / human drafts with "QA: #N" (#1166) are not ours to ready or fix, and a
         # PR the Mac mini watcher turned back into a draft while it fixes it must not be readied mid-fix.
-        if PILINE not in (p.get("body") or "") or not (p.get("headRefName") or "").startswith("qa-fix/"): continue
+        if not is_bot_fixpr(p): continue
         n, head = p["number"], p["headRefOid"]
         cs = [c for c in p.get("statusCheckRollup") or [] if "review-pr" not in (c.get("name") or c.get("context") or "")]
         concl = [((c.get("conclusion") or c.get("state") or "").upper(), (c.get("status") or "COMPLETED").upper(), c.get("name") or c.get("context")) for c in cs]
