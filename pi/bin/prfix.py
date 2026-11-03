@@ -815,6 +815,18 @@ def park(tk, reason, err, now):
     tk.update(status="parked", park_reason=reason, last_error=err, park_count=pc, parked_at=now.isoformat(timespec="seconds"),
               next_retry_at=(now + dt.timedelta(hours=PARK_WAIT_H[min(pc, len(PARK_WAIT_H)) - 1])).isoformat(timespec="seconds"),
               fresh_retries=0, transient_failures=0)
+REV_IN_HAND = ("push_action_written", "pushed")   # rev:<N> written-not-yet-pushed and pushed: both mean "this head is in hand"
+
+
+def settle_push(tk, ledger, now):
+    """rev:<N> push_action_written -> pushed once outbound's ledger records its action_key as done (11-04: it used to say pushed at write time)"""
+    v = (ledger or {}).get(tk.get("action_key"))   # outbound_ledger(): key -> status; the raw ledger.json: key -> {status, ...}
+    if tk.get("status") != "push_action_written" or (v if isinstance(v, str) or v is None else v.get("status")) != "done": return tk
+    tk = dict(tk, status="pushed", updated_at=now.isoformat(timespec="seconds"))
+    tk["history"] = (list(tk.get("history") or []) + [{"at": tk["updated_at"], "status": "pushed", "error": ""}])[-20:]
+    return tk
+
+
 def apply_outcome(tk, out, now):
     """-> (ticket, notify) ; notify = 'needs_praise' | None (the DM to write). Since 10-24 evening only kind 5 asks Praise."""
     tk = dict(tk); st, kind, err = out.get("status"), out.get("kind"), out.get("error")
@@ -1976,6 +1988,8 @@ def revise(A):
         with (contextlib.nullcontext({"tickets": {}}) if A.dry_run else tickets_locked()) as T:
             t = dict(T["tickets"].get(key) or {"pr": n, "qa": qa, "fp": fp, "kind": "revise", "status": "queued", "revisions": 0, "attempts": 0,
                                                  "transient_failures": 0, "history": []})
+            s0 = t.get("status"); t = settle_push(t, outbound_ledger(), now)
+            if t.get("status") != s0: T["tickets"][key] = t
             if t.get("status") == "running" and not pid_alive(t.get("pid")):   # the last run died (OOM / reboot): counts as a transient failure
                 t, _ = apply_outcome(t, {"status": "failed", "kind": "transient", "error": "上次运行中断（进程已不在）"}, now); t["head"] = t.get("head") or head
                 T["tickets"][key] = t
@@ -1983,7 +1997,7 @@ def revise(A):
             if t.get("status") == "needs_praise" and t.get("head") == head:
                 stop = ({"status": "needs_praise", "pr": n, "error": t.get("last_error")}, 1)
             elif paused: stop = ({"status": "skipped", "pr": n, "reason": f"暂停中，{cst(t['next_retry_at'])} 北京后自动再试：{(t.get('last_error') or '')[:100]}"}, 0)
-            elif t.get("status") == "pushed" and t.get("last_head") == head and ((t.get("last_cnt") or "revisions") == cnt_key or not b_on()): stop = ({"status": "skipped", "pr": n, "reason": "这个 head 已经修过、等推送"}, 0)
+            elif t.get("status") in REV_IN_HAND and t.get("last_head") == head and ((t.get("last_cnt") or "revisions") == cnt_key or not b_on()): stop = ({"status": "skipped", "pr": n, "reason": "这个 head 已经修过、等推送"}, 0)
             elif int(t.get(cnt_key) or 0) >= cap and t.get("status") != "parked":
                 # kind 4, no DM: pause, then try again by itself with a fresh budget (10-24 evening)
                 park(t, "修不动", (f"跟 main 的冲突已经合了 {t.get(cnt_key)} 轮，又冲突了" if conflict else
@@ -2003,10 +2017,11 @@ def revise(A):
             with tickets_locked() as T:
                 t = dict(T["tickets"].get(key) or {}); stamp = now_cst().isoformat(timespec="seconds")
                 if out["status"] == "pr_action_written":
-                    t.update(status="pushed", action_key=out["action_key"], last_head=head, rerun_only=bool(out.get("rerun_only")), last_cnt=cnt_key,
+                    # 11-04: the push is only WRITTEN here (an outbound action); "pushed" comes when outbound's ledger says done (settle_push)
+                    t.update(status="push_action_written", action_key=out["action_key"], last_head=head, rerun_only=bool(out.get("rerun_only")), last_cnt=cnt_key,
                              **{cnt_key: int(t.get(cnt_key) or 0) + 1},
                              last_error=None, next_retry_at=None, transient_failures=0, pid=None, updated_at=stamp)
-                    t["history"] = (list(t.get("history") or []) + [{"at": stamp, "status": "pushed", "error": ""}])[-20:]
+                    t["history"] = (list(t.get("history") or []) + [{"at": stamp, "status": "push_action_written", "error": ""}])[-20:]
                 else:
                     t, notify = apply_outcome(t, out, now_cst())
                     if notify == "needs_praise": record_actions("praise-pr", d, [revise_dm(n, qa, fp, head, t.get("last_error") or out.get("error") or "")])
