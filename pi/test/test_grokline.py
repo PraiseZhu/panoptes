@@ -164,4 +164,49 @@ class TestSweep(Grok):
         g.sweep(now=NOW.replace(hour=23, minute=59)); g.sweep(now=NOW + dt.timedelta(hours=4))
         self.assertEqual(open(g.daily_path()).read(), "2026-10-23 baseline=5.0 close=7.25 rise=2.25 opened=2 done=1 trips=-\n")
 
+class TestBadValues(Grok):
+    def test_gate_rejects_bad_values(self):
+        g = G().gate
+        for b, c in ((float("nan"), float("nan")), (10, float("nan")), (float("nan"), 10), (5, float("inf")),
+                     (float("-inf"), 5), (5, -5), (-5, -5), (5, 101)):
+            self.assertEqual(g(b, c)[0], "hold", (b, c))
+    def test_bad_pct_never_poisons_baseline(self):
+        g = G()
+        with g.usage_locked() as U:
+            for bad in (float("nan"), float("inf"), -5.0): g.record(U, bad, NOW - dt.timedelta(hours=2))
+            g.record(U, 5.0, NOW - dt.timedelta(hours=1)); g.record(U, float("nan"), NOW); d = g.record(U, 15.0, NOW)
+        self.assertEqual(d["baseline"], 5.0); self.assertEqual([s[1] for s in d["samples"]], [5.0, 15.0])
+        self.assertEqual(g.day_gate(d)[0], "stop")       # the 10-point gate still fires
+    def test_claim_with_bad_pct_is_hold(self):
+        self.switch(); self.put(tickets(**self.both_pi_slots())); g = G()
+        for bad in (float("nan"), float("inf"), -5.0):
+            r = g.claim(bad, now=NOW)
+            self.assertEqual((r["status"], r["gate"]), ("no", "hold"), bad)
+        self.assertNotIn("owner", self.tk(f"1179:{C}"))
+        if os.path.exists(g.usage_path()):
+            self.assertIsNone((json.load(open(g.usage_path()))["days"].get("2026-10-23") or {}).get("baseline"))
+    def test_cli_rejects_bad_pct(self):
+        g = G()
+        for bad in ("nan", "inf", "-5"):
+            self.assertEqual(g.main(["--record", "--pct", bad]), 1, bad)
+        if os.path.exists(g.usage_path()):
+            for d in json.load(open(g.usage_path()))["days"].values(): self.assertIsNone(d["baseline"])
+
+class TestCorruptUsage(Grok):
+    def corrupt(self):
+        os.makedirs(prfix.OUT, exist_ok=True); open(G().usage_path(), "w").write("{not json")
+    def test_switch_off_corrupt_usage_returns_tickets(self):
+        self.put(tickets(**{f"1178:{A}": self.grok_owned(1178, A)})); self.corrupt()
+        self.assertEqual([k for k, _ in G().sweep(now=NOW)], [f"1178:{A}"])
+        self.assertEqual(self.tk(f"1178:{A}").get("owner"), None)
+    def test_switch_on_corrupt_usage_is_hard_stop(self):
+        self.switch(); self.corrupt()
+        self.put(tickets(**{f"1178:{A}": self.grok_owned(1178, A), f"1179:{C}": self.grok_owned(1179, C)}))
+        self.assertEqual(len(G().sweep(now=NOW)), 2)
+        self.assertEqual((self.tk(f"1178:{A}").get("owner"), self.tk(f"1179:{C}").get("owner")), (None, None))
+    def test_check_corrupt_usage_is_stop(self):
+        self.switch(); self.corrupt(); self.put(tickets(**self.both_pi_slots()))
+        r = G().check(now=NOW)
+        self.assertEqual((r["gate"], r["may_open"]), ("stop", False))
+
 if __name__ == "__main__": unittest.main()
