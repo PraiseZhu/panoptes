@@ -20,8 +20,9 @@ class Grok(Base):
     def setUp(self):
         super().setUp()
         self.saved_to = lib.TAKEOVER; lib.TAKEOVER = f"{self.tmp}/takeover"; os.makedirs(lib.TAKEOVER)
+        self.saved_ps = G().PRWATCH_STATE; G().PRWATCH_STATE = f"{self.tmp}/prwatch-state.json"   # never the box's live state
     def tearDown(self):
-        lib.TAKEOVER = self.saved_to; super().tearDown()
+        lib.TAKEOVER = self.saved_to; G().PRWATCH_STATE = self.saved_ps; super().tearDown()
     def switch(self, on=True):
         p = f"{lib.TAKEOVER}/prfix-grok-overflow"
         if on: open(p, "w").close()
@@ -51,6 +52,19 @@ class TestGate(unittest.TestCase):
         self.assertTrue(m(True, "open", 2, 1, 0)[0])
         self.assertTrue(m(True, "open", 0, 0, 1)[0])   # handed over by Pi
         self.assertFalse(m(True, "stop", 0, 0, 1)[0])
+
+    def test_may_open_when_pi_blocked_by_memory(self):   # 11-03: Pi 0 running (memory gate) + 6 queued -> both lines idle
+        m = G().may_open
+        self.assertTrue(m(True, "open", 0, 6, 0, 0, True)[0])
+        self.assertFalse(m(True, "open", 0, 0, 0, 0, True)[0])   # no backlog
+        self.assertFalse(m(True, "hold", 0, 6, 0, 0, True)[0])   # usage gate unchanged
+        self.assertFalse(m(True, "open", 0, 6, 0, 2, True)[0])   # GROK_CAP unchanged
+        import tempfile, json as J
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f: J.dump({"fix_wait": "headroom N MB < N MB"}, f)
+        self.assertTrue(G().pi_mem_blocked(f.name))
+        with open(f.name, "w") as g: J.dump({"fix_wait": "N merge test(s) queued"}, g)
+        self.assertFalse(G().pi_mem_blocked(f.name))
+        os.remove(f.name)
 
 class TestPiSide(Grok):
     def test_pi_next_skips_grok_owned(self):

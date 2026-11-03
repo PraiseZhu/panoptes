@@ -27,7 +27,7 @@
 Heartbeat: out/prwatch/state.json last_check (watchdog alerts when stale). Quiet log out/logs/prwatch-<day>.log (events only).
 --dry-run: print decisions, write/launch/send nothing.
 """
-import fcntl, hashlib, signal, sys, time
+import fcntl, hashlib, math, signal, sys, time
 from lib import *
 import praise_notice as PN
 import ready_guard as RG
@@ -142,6 +142,7 @@ def inputs_sig():
 ADMIT_FREE_MB = 1536    # free memory left even if every running job, a merge test and the new fix all hit their peaks at once
                         # (the live guard stays: prfix waits for MemAvailable >= 3 GB before every heavy step, Praise 10-23)
 RUN_PEAK_MB = int(os.environ.get("PRFIX_RUN_PEAK_MB") or 2560)      # a fix's peak until 3 runs are observed (10-23 pre-push ~1-1.5 GB)
+TEST_RESERVE_CAP_MB = int(os.environ.get("PRWATCH_TEST_RESERVE_CAP_MB") or 3072)  # merge-test reserve while 0 fixes / tests run
 PANOPTES_PEAK_MB = int(os.environ.get("PANOPTES_PEAK_MB") or 6144)  # a panoptes run's peak until 3 runs are observed (10-23: ~6 GB)
 RO_FLAGS = (b"--list", b"--pending-json", b"--cleanup-stale", b"--dry-run")   # never claim a ticket: not fix runs
 # How many fixes run at once is decided by memory alone (Praise 10-24, no cap). The peaks are learned: every minute prwatch
@@ -264,7 +265,9 @@ def panoptes_procs(t):
 
 def learned(st, kind, default):
     h = ((st or {}).get("peaks") or {}).get(kind) or []
-    return max(default // 4, int(max(h[-20:]) * 1.3)) if len(h) >= 3 else default
+    if len(h) < 3: return default
+    w = sorted(h[-20:])   # p90 (nearest rank), not the max: one outlier (11-03: fix 5765 among 735-2604) must not lock 20 runs
+    return max(default // 4, int(w[math.ceil(0.9 * len(w)) - 1] * 1.3))
 
 
 def sample_peaks(st, t):
@@ -291,7 +294,9 @@ def headroom_mb(t, mem=None, st=None):
     grow += sum(max(0, TASK_PEAK_MB - sum(t[q][1] for q in tree(t, p))) for p in disp)
     pan = panoptes_procs(t)
     if pan: grow += max(0, pan_pk - sum(t[p][1] for p in pan))
-    if flag_on(TEST_RESERVE_OFF): grow += pan_pk     # always room for the next merge test, whatever runs now
+    if flag_on(TEST_RESERVE_OFF):                    # always room for the next merge test, whatever runs now --
+        # but with nothing running the first fix is not stacked on a whole test peak (11-03: 9030 + 8687 MB > a 16 GB box)
+        grow += pan_pk if (pan or pys or waiting or disp) else min(pan_pk, TEST_RESERVE_CAP_MB)
     elif not pan and (pys or waiting or disp): grow += pan_pk
     return (mem_mb() if mem is None else mem) - grow
 
