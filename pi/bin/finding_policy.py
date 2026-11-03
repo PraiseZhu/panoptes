@@ -123,20 +123,22 @@ def fix_rulings(text):
     """PRs whose P2 ruling in fleet-standards/p2-rulings.md is exactly 修 (已修 = fixed elsewhere; 不修 / 产品代码不修 = no PR)."""
     return {n for n, _, r in ruling_rows(text) if r == "修"}
 
-NOFIX_RULINGS = ("不修", "产品代码不修", "误报", "P3", "已修")
+NOFIX_RULINGS = ("不修", "产品代码不修", "误报", "P3", "已修")   # + any 「结案…」 (p2.py record 结案: already fixed, no ticket)
+def _nofix(r): return r in NOFIX_RULINGS or r.startswith("结案")
+
 def no_fix_rulings(text):
-    """PRs whose P2 ruling in fleet-standards/p2-rulings.md says no PR is needed: 不修 / 产品代码不修 / 误报 / P3 / 已修 (fixed elsewhere).
+    """PRs whose P2 ruling in fleet-standards/p2-rulings.md says no PR is needed: 不修 / 产品代码不修 / 误报 / P3 / 已修 (fixed elsewhere) / 结案….
     A row with a fingerprint still counts for its whole PR here; per-finding callers use no_fix_findings."""
-    return {n for n, _, r in ruling_rows(text) if r in NOFIX_RULINGS}
+    return {n for n, _, r in ruling_rows(text) if _nofix(r)}
 
 def no_fix_findings(text):
     """Signed rulings per finding: {"by_fp": {pr_fingerprint: "no_fix"|"fixed"}, "pr_wide": {PR: "no_fix"|"fixed"}}.
-    by_fp = rows with a fingerprint; pr_wide = old rows without one (they cover every finding of the PR). 已修 -> fixed,
+    by_fp = rows with a fingerprint; pr_wide = old rows without one (they cover every finding of the PR). 已修 / 结案… -> fixed,
     不修 / 产品代码不修 / 误报 / P3 -> no_fix, 修 -> nothing (the finding stands). On a PR with both kinds of old rows no_fix wins."""
     by_fp, pr_wide = {}, {}
     for n, fp, r in ruling_rows(text):
-        if r not in NOFIX_RULINGS: continue
-        kind = "fixed" if r == "已修" else "no_fix"
+        if not _nofix(r): continue
+        kind = "fixed" if (r == "已修" or r.startswith("结案")) else "no_fix"
         if fp: by_fp[fp] = kind
         elif pr_wide.get(n) != "no_fix": pr_wide[n] = kind
     return {"by_fp": by_fp, "pr_wide": pr_wide}

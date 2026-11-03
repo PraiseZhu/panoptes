@@ -26,7 +26,7 @@ def nofix_prs():
     if os.path.exists(RULINGS):
         for line in open(RULINGS):
             c = [x.strip() for x in line.strip().strip("|").split("|")]
-            if len(c) >= 4 and re.fullmatch(r"#?\d+", c[1] or "") and "不修" in c[3]: s.add(int(c[1].lstrip("#")))
+            if len(c) >= 4 and re.fullmatch(r"#?\d+", c[1] or "") and ("不修" in c[3] or c[3].startswith("结案")): s.add(int(c[1].lstrip("#")))
     return s
 
 def p01_prs():
