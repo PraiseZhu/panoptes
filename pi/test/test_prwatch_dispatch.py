@@ -19,10 +19,12 @@ class T(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="prwatch-test-")
         self.saved = {k: getattr(prwatch, k) for k in ("BASE", "RPT", "FIX_FLAG", "qlog", "act", "kick_outbound", "mem_mb", "proc_table",
-                                                       "inputs_sig", "DRY")}
+                                                       "inputs_sig", "DRY", "TEST_RESERVE_OFF", "EMERG_KILL_OFF", "ARGUS")}
         self.saved_sp = (prwatch.subprocess.run, prwatch.subprocess.Popen)
         prwatch.BASE = self.tmp; prwatch.RPT = f"{self.tmp}/reports"; prwatch.FIX_FLAG = f"{self.tmp}/takeover/prfix-event"
         os.makedirs(prwatch.RPT); wf(prwatch.FIX_FLAG, "")
+        prwatch.TEST_RESERVE_OFF = f"{self.tmp}/prwatch-test-reserve-off"; prwatch.EMERG_KILL_OFF = f"{self.tmp}/prwatch-emerg-kill-off"
+        prwatch.ARGUS = f"{self.tmp}/argus"
         self.logs, self.acts, self.kicks, self.launches = [], [], [], []
         prwatch.qlog = self.logs.append
         prwatch.act = lambda job, a: self.acts.append(a)
@@ -42,6 +44,8 @@ class T(unittest.TestCase):
     def tickets(self, **kw): wf(f"{self.tmp}/out/praise-pr/tickets.json", json.dumps({"tickets": kw}))
 
 class TestHeadroom(T):
+    """the 10-24 rule, still what `touch prwatch-test-reserve-off` gives (11-03 rollback); the new rule: test_fix_yield_reserve_kill.py"""
+    def setUp(self): super().setUp(); wf(prwatch.TEST_RESERVE_OFF, "")
     def test_running_fixes_reserve_what_they_may_still_grow(self):
         t = {10: (1, 300, PY), 11: (10, 200, b"node\0pi\0"), 20: (1, 500, PY)}       # fix A: 500 MB tree, fix B: 500 MB
         # no merge test running yet, but fixes are: one may start any minute -> its whole peak is reserved too (review 10-24)
@@ -84,7 +88,7 @@ class TestDispatch(T):
     def test_waits_for_memory_and_logs_once(self):
         self.procs({}, prwatch.ADMIT_FREE_MB + prwatch.RUN_PEAK_MB - 1); self.tickets()
         st = {}; prwatch.dispatch_fix(st); prwatch.dispatch_fix(st)
-        self.assertEqual(self.launches, []); self.assertEqual(sum("waits for memory" in m for m in self.logs), 1)
+        self.assertEqual(self.launches, []); self.assertEqual(sum("fix dispatch waits" in m for m in self.logs), 1)
         prwatch.mem_mb = lambda: 11000; prwatch.dispatch_fix(st)
         self.assertEqual(len(self.launches), 1)
     def test_nothing_to_do(self):

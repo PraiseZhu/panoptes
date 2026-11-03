@@ -355,9 +355,18 @@ fi
 # /tmp/argus-run-XXXXXX and is removed on exit (sandboxed runs bind their own dirs explicitly, unaffected).
 RUN_TMP="$(mktemp -d "${TMPDIR:-/tmp}/argus-run-XXXXXX")"
 export TMPDIR="$RUN_TMP"
+# 11-03 (concurrency plan §2.6): on exit, 电脑运维's cleanup hook logs what this run left behind (processes in its group or under
+# RUN_TMP, its temp dirs) to /workspace/box-ops/qa-cleanup.log. Dry run only: QA_HOOK_MODE is forced to dryrun here, never enforce.
+# Rollback: touch "$QA_HOME/qa-cleanup-hook-off" (read on every exit).
+QA_CLEANUP_HOOK="${PANOPTES_QA_CLEANUP_HOOK:-/workspace/box-ops/qa-cleanup-hook.sh}"
+qa_cleanup_hook() {
+  [[ -x "$QA_CLEANUP_HOOK" && ! -e "$QA_HOME/qa-cleanup-hook-off" ]] || return 0
+  QA_HOOK_MODE=dryrun timeout 60 "$QA_CLEANUP_HOOK" "$RUN_TMP" "$(ps -o pgid= -p $$ | tr -d ' ')" </dev/null >/dev/null 2>&1 || true
+}
+# end qa_cleanup_hook
 # Single quotes on purpose: expanded later by eval in the EXIT trap.
 # shellcheck disable=SC2016
-EXTRA_EXIT_CLEANUP='slot_release_priority; rm -f "$BOOT_STATUS"; rm -rf --one-file-system "$RUN_TMP"'
+EXTRA_EXIT_CLEANUP='slot_release_priority; rm -f "$BOOT_STATUS"; qa_cleanup_hook; rm -rf --one-file-system "$RUN_TMP"'
 
 cd "$PANOPTES_DIR/argus"
 LOG="$ARGUS_ROOT/logs/nightly-$(date +%Y%m%dT%H%M%S).log"
