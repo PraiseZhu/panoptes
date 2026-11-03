@@ -167,10 +167,10 @@ class TestPrBotAndVigil(unittest.TestCase):
         watchdog.gh = gh
         st, p = {}, {}
         watchdog.vigil_check(self.now, p, st)
-        self.assertEqual(list(p), ["vigil:stall"]); self.assertIn("#2", p["vigil:stall"]["what"])
-        self.assertNotIn("#3", p["vigil:stall"]["what"]); self.assertNotIn("#1", p["vigil:stall"]["what"])
+        self.assertEqual(list(p), ["vigil:stall:2"]); self.assertIn("#2", p["vigil:stall:2"]["what"])   # 11-03: one key per PR
+        self.assertNotIn("#3", p["vigil:stall:2"]["what"]); self.assertNotIn("#1", p["vigil:stall:2"]["what"])
         p2 = {}; watchdog.vigil_check(self.now, p2, st)
-        self.assertEqual((len(calls), list(p2)), (1, ["vigil:stall"]))                              # cached verdict, no second gh call
+        self.assertEqual((len(calls), list(p2)), (1, ["vigil:stall:2"]))                            # cached verdict, no second gh call
 
 
 class TestHungTest(unittest.TestCase):

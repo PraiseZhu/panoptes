@@ -550,11 +550,16 @@ def prfix_check(now, probs):
 
 
 VIGIL_BAD = ("FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR")
+VIGIL_LEGACY = "vigil:stall"   # pre-11-03 single key for all stuck PRs; still in old state.json, dropped silently on the first run after upgrade
 
 
 def vigil_check(now, probs, st):
-    if time.time() - st.get("vigil_checked_at", 0) < 1800:   # one gh call per 30 min; keep the last verdict in between
-        for k, v in st.get("vigil_probs", {}).items(): probs[k] = v
+    """11-03: one key per stuck PR (vigil:stall:<number>), like janitor:unmarked on 10-30. The old single key vigil:stall
+    never closed when its PR set changed ({1627} -> {1621}): neither new nor recovered, nothing logged, nothing sent."""
+    cached = st.get("vigil_probs", {})
+    legacy = VIGIL_LEGACY in cached
+    if not legacy and time.time() - st.get("vigil_checked_at", 0) < 1800:   # one gh call per 30 min; keep the last verdict in between
+        for k, v in cached.items(): probs[k] = v
         return
     try: prs = gh(["pr", "list", "-R", REPO, "--author", "PraiseZhu", "--state", "open", "--limit", "60",
                    "--json", "number,title,isDraft,updatedAt,statusCheckRollup"])
@@ -567,14 +572,17 @@ def vigil_check(now, probs, st):
         idle = (now - parse_ts(p["updatedAt"]).astimezone(CST)).total_seconds() / 3600
         if red and idle > 4: stuck.append((idle, p["number"], (p.get("title") or "")[:40], red[:2]))
     vp = {}
-    if stuck:
-        stuck.sort(reverse=True)
-        lst = "；".join(f"#{n}「{t}」（{'、'.join(r)} 没过，{h:.0f} 小时没动静）" for h, n, t, r in stuck[:6])
-        vp["vigil:stall"] = PN.item("action", "Mac mini 盯梢那边有 PR 卡了很久", f"{len(stuck)} 个已转正式的 PR 在 GitHub 上很久没动静：{lst}。"
+    for h, n, t, r in sorted(stuck, reverse=True):
+        vp[f"vigil:stall:{n}"] = PN.item("action", f"Mac mini 盯梢那边有 PR 卡了很久：#{n}", f"已转正式的 PR #{n}「{t}」在 GitHub 上很久没动静（{'、'.join(r)} 没过，{h:.0f} 小时没动静）。"
             "可能是盯梢停了（10-23 晚就停过 5 个多小时），也可能它在本地修得比较久、还没推上来。",
-            "盯梢真停了的话，这些 PR 的审查意见、测试失败没人修，合不进去。",
+            "盯梢真停了的话，这个 PR 的审查意见、测试失败没人修，合不进去。",
             todo=["在 Mac mini 上看盯梢还在不在跑（上次停摆是 Keel 插件换了位置，见 vigil PR #48）",
-                  "或者在 Cindy 里让 Mac mini 上的会话直接处理这几个 PR"])
+                  f"或者在 Cindy 里让 Mac mini 上的会话直接处理 #{n}"])
+    if VIGIL_LEGACY in st.get("last_seen", {}):   # upgrade: the old aggregate key already passed the 2-run debounce for these PRs
+        st["last_seen"].update(vp)                 # -> per-PR keys report at once
+    for part in ("open", "last_seen"):             # 11-03 acceptance: drop the legacy key silently -- the per-PR keys replace it;
+        if (st.get(part) or {}).pop(VIGIL_LEGACY, None) is not None:   # left in "open" it was told as 「已恢复…不用管了」 next to 🔴 for the same PRs
+            log("vigil: dropped legacy key", VIGIL_LEGACY, "from", part, "(replaced by per-PR keys, no recovered notice)")
     st["vigil_checked_at"] = time.time(); st["vigil_probs"] = vp; probs.update(vp)
 
 
