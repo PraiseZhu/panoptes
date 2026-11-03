@@ -932,7 +932,11 @@ def main():
                         text = relay_text(a) if t in RELAY_TYPES else (a.get("text") or "")
                         os.makedirs(os.path.dirname(BRIEF_QUEUE()), exist_ok=True)
                         if not brief_queued(k):
-                            with open(BRIEF_QUEUE(), "a") as q: q.write(json.dumps({"at": now_cst().isoformat(timespec="seconds"), "key": k, "job": job, "type": t, "to": a.get("to"), "text": text}, ensure_ascii=False) + "\n")
+                            try:
+                                with open(BRIEF_QUEUE(), "a") as q: q.write(json.dumps({"at": now_cst().isoformat(timespec="seconds"), "key": k, "job": job, "type": t, "to": a.get("to"), "text": text}, ensure_ascii=False) + "\n")
+                            except OSError as e:   # e.g. queue path is a directory: log, leave the key unrecorded (retried next run), keep the run going
+                                log(f"brief-queue append failed ({e.__class__.__name__}: {e}) for {k} -> not briefed, retried next run")
+                                rows.append((job, k, t, "Jasper brief", "FAILED(brief-queue)", e.__class__.__name__)); continue
                         setk(k, {"status": "briefed", "reason": "praise-dm-mute -> jasper brief", "at": now_cst().isoformat(timespec="seconds")})
                     rows.append((job, k, t, "Jasper brief", "BRIEFED", f"queued in {os.path.basename(BRIEF_QUEUE())}")); continue
                 if not o.dry_run:
