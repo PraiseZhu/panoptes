@@ -376,6 +376,35 @@ class TestResolvedConflictBrief(TestResolved):
         self.assertEqual(len(self.acts), 1); a = self.acts[0]
         self.assertFalse(a["key"].startswith("resolved:dirty:")); self.assertIn("#1641", a["text"]); self.assertIn("#1650", a["text"])
 
+class TestRedThenDirtyResolved(T):
+    """#183 gap 1 (11-03): a bot draft first DM'd CI red (switch off) whose same head then conflicts with main gets the dirty DM too;
+    alert() kept the first "red", so the 🟢 went out as a plain resolved:<sha> DM. The conflict wins: resolved:dirty:<sha> (brief
+    queue only). touch <state>/conflict-brief-off -> still the old single resolved:<sha> bundle."""
+    BODY = TestDraftCI.BODY
+    def setUp(self):
+        super().setUp(); self.saved = dict(self.saved, gh=prwatch.gh, REVISE_FLAG=prwatch.REVISE_FLAG, b_on=prwatch.b_on)
+        prwatch.REVISE_FLAG = f"{self.tmp}/takeover/prfix-revise"   # not created: switch off -> the DMs are the only way
+        prwatch.b_on = lambda: True; self.procs({}, 16000); self.prs = []; self.view = {}
+        prwatch.gh = lambda args, js=True: self.prs if args[1] == "list" else self.view[int(args[2])]
+    def run_flow(self):
+        st = {"alerted_backfilled": True}; h = "a" * 40
+        self.prs = [{"number": 1301, "headRefOid": h, "headRefName": "qa-fix/fixpr-1179-mq1-x", "body": self.BODY, "mergeStateStatus": "CLEAN",
+                     "statusCheckRollup": [{"name": "unit", "status": "COMPLETED", "conclusion": "FAILURE"}]}]
+        st["drafts_at"] = 0; prwatch.check_drafts(st)
+        self.prs[0]["mergeStateStatus"] = "DIRTY"; st["drafts_at"] = 0; prwatch.check_drafts(st)
+        self.assertEqual([a["key"].split(":")[0] for a in self.acts], ["cired", "dirty"])
+        self.view = {1301: {"state": "MERGED"}}; prwatch.resolved(st)
+        return [a for a in self.acts if a["key"].startswith("resolved:")]
+    def test_red_then_dirty_green_goes_to_conflict_key(self):
+        got = self.run_flow()
+        self.assertEqual(len(got), 1); self.assertTrue(got[0]["key"].startswith("resolved:dirty:"), got[0]["key"]); self.assertIn("#1301", got[0]["text"])
+    def test_flag_still_restores_plain_bundle(self):
+        wf(prwatch.CONFLICT_BRIEF_OFF(), ""); got = self.run_flow()
+        self.assertEqual(len(got), 1); self.assertFalse(got[0]["key"].startswith("resolved:dirty:"))
+    def test_red_after_dirty_stays_dirty(self):
+        st = {}; prwatch.alert(st, 7, "dirty"); prwatch.alert(st, 7); self.assertEqual(st["alerted"]["7"], "dirty")
+        st = {}; prwatch.alert(st, 8); self.assertEqual(st["alerted"]["8"], "red")
+
 class TestNoSecretsInEnv(T):
     def test_kick_gives_outbound_the_secrets_without_touching_os_environ(self):   # 10-24 security
         # a test-only key name: the real ones may be in the environment that runs the tests, and values are never printed

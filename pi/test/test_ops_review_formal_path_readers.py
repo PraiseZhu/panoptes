@@ -39,6 +39,26 @@ class T(unittest.TestCase):
             os.remove(f"{t}/out/ops/review-{DAY}.md"); os.remove(f"{t}/out/ops/review-2026-11-01.md"); files.clear()   # only .post/.dryrun/.json left
             J.main(); self.assertIsNone(json.loads(files[f"{RUN}.facts.json"])["Mivo QA 运维"]["review_ops_latest"])   # none: None, no IndexError
 
+    def test_jasper_prompt_does_not_call_formal_review_stale(self):
+        # #183 gap 2 (11-03): the pi-mode rule still listed "review-ops" among the Grok-line fields "expected to be stale", and the
+        # shadow-mode rule called every $PI_STATE path shadow -- both told the model to discount the formal out/ops/review-<day>.md (R13)
+        t = self.tmp
+        with isolated(PI_STATE=t):
+            J = load("jasper"); J.BASE = J.QA = t
+            os.makedirs(f"{t}/report/slack"); json.dump({}, open(f"{t}/report/slack/sent.json", "w"))
+            os.makedirs(f"{t}/ledger/daily"); open(f"{t}/ledger/daily/{DAY}.json", "w").write("{}")
+            J.glob = types.SimpleNamespace(glob=lambda p: _glob.glob(self.redirect(p)))
+            J.age = lambda p: None; J.panoptes_backlog = lambda tk: {}; J.today = lambda: RUN
+            J.write_atomic = lambda p, x: None; J.record_actions = lambda *a: None
+            os.makedirs(f"{t}/ws/grokbot-box-check"); open(f"{t}/ws/grokbot-box-check/sync.log", "w").close()   # read only if the real one exists
+            J.jload_ = lambda f, d: d; J.open = lambda f, *a, **k: open(self.redirect(f), *a, **k)
+            prompts = []; J.pi = lambda tier, cwd, prompt, *a, **k: (prompts.append(prompt), ("brief", "t1"))[1]
+            for m in ("pi", "shadow"):
+                J.mode = lambda m=m: m; sys.argv = ["jasper.py", RUN]; J.main()
+                rule = prompts[-1].split("Never guess;")[1]
+                self.assertNotIn("review-ops, ", rule, m)
+                self.assertIn("out/ops/review-<day>.md", rule, m); self.assertIn("review_ops_latest", rule, m)
+
     def test_compare_uses_formal_review_when_no_legacy_file(self):
         t = self.tmp
         with isolated(PI_STATE=t):

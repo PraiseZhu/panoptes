@@ -473,8 +473,12 @@ def launch_revise(st, n, head):
 
 
 def alert(st, n, why="red"):
-    """remember: a DM asked him to act on bot fix PR #n -- why = red (CI) / dirty (conflict) -- (a 🟢 follows once it gets done)."""
-    st.setdefault("alerted", {}).setdefault(str(n), why)
+    """remember: a DM asked him to act on bot fix PR #n -- why = red (CI) / dirty (conflict) -- (a 🟢 follows once it gets done).
+    11-03 (#183 gap 1): a conflict DM wins over an earlier red one -- a PR that was CI-red and then conflicted kept "red", so its 🟢
+    went out as a plain resolved:<sha> DM instead of the brief-queue-only resolved:dirty:<sha> (conflict-brief-off still bundles)."""
+    al = st.setdefault("alerted", {})
+    if why == "dirty": al[str(n)] = why
+    else: al.setdefault(str(n), why)
 
 
 def pr_now(n):
