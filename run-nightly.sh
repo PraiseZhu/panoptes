@@ -359,6 +359,8 @@ export TMPDIR="$RUN_TMP"
 # RUN_TMP, its temp dirs) to /workspace/box-ops/qa-cleanup.log. Dry run only: QA_HOOK_MODE is forced to dryrun here, never enforce.
 # Rollback: touch "$QA_HOME/qa-cleanup-hook-off" (read on every exit).
 QA_CLEANUP_HOOK="${PANOPTES_QA_CLEANUP_HOOK:-/workspace/box-ops/qa-cleanup-hook.sh}"
+# called from the EXIT trap through eval "$EXTRA_EXIT_CLEANUP"
+# shellcheck disable=SC2329
 qa_cleanup_hook() {
   [[ -x "$QA_CLEANUP_HOOK" && ! -e "$QA_HOME/qa-cleanup-hook-off" ]] || return 0
   QA_HOOK_MODE=dryrun timeout 60 "$QA_CLEANUP_HOOK" "$RUN_TMP" "$(ps -o pgid= -p $$ | tr -d ' ')" </dev/null >/dev/null 2>&1 || true
