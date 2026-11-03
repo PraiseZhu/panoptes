@@ -282,6 +282,23 @@ export function bwrapArgs(runDir, { extraRo = [], extraRw = [], chdir = null } =
   return args
 }
 
+// 沙箱自检（QA #1456 回归保护）：在跑任何步骤前，用同一套 bwrapArgs 在沙箱里 `stat -c %u /`，必须等于本次运行的 uid。
+// 不等（例如有人把根改回 `--ro-bind / /`，/ 显示成 65534）→ 抛错：这一轮记 QA 环境问题（qa-error / stage=pipeline，PR 没测到），
+// 不产出产品问题。回滚开关：$QA_HOME/sandbox-selfcheck-off（默认 /workspace/mivo-qa/sandbox-selfcheck-off）存在就跳过自检，每次运行都重新读。
+export const SANDBOX_SELFCHECK_ZH = '沙箱自检失败（QA 环境 / 沙箱问题，不是产品问题）：'
+export const sandboxSelfcheckOffFile = (env = process.env) => join(env.QA_HOME || '/workspace/mivo-qa', 'sandbox-selfcheck-off')
+export async function sandboxSelfCheck(runDir, profile = {}, { env = process.env, exec = run, mode = sandboxMode(profile), uid = process.getuid?.() } = {}) {
+  if (existsSync(sandboxSelfcheckOffFile(env))) return { skipped: 'off-switch' }
+  if (mode !== 'bwrap') return { skipped: mode }
+  const res = await exec(BWRAP, [...bwrapArgs(runDir), '--', 'stat', '-c', '%u', '/'], { env: baseEnv(), timeoutMs: 60_000 })
+  if (res.budgetExceeded) return { skipped: 'budget' }
+  const seen = res.ok ? String(res.tail ?? '').trim().split('\n').pop().trim() : null
+  if (seen === String(uid)) return { ok: true, uid: seen }
+  const msg = `${SANDBOX_SELFCHECK_ZH}沙箱里 / 的属主 uid 是 ${seen ?? `读不到（${String(res.tail ?? '').trim().slice(-200)}）`}，本次运行 uid 是 ${uid}（被测代码的祖先目录校验会误报，见 QA #1456）`
+  log('error', 'sandbox self-check failed: infra/sandbox problem, not a product finding', { runDir, rootUid: seen, runUid: uid, offSwitch: sandboxSelfcheckOffFile(env) })
+  throw new Error(msg)
+}
+
 function sandboxed(argv, runDir, profile, stepRo = []) {
   const mode = sandboxMode(profile)
   if (mode === 'disabled-by-profile' || mode === 'env-only') return argv
@@ -691,6 +708,7 @@ export async function executeOnSha({ repo, jobId, label, sha, profile, stepIds, 
   async function runCheckout() {
     const src = await checkout(mirror, sha, runDir, { repo, lfs: Boolean(profile.lfs), mode: profile.checkoutMode ?? 'worktree' })
     const checkedOutSha = await verifyCheckoutSha(src, sha)
+    await sandboxSelfCheck(runDir, profile)
     return await runSteps(profile, src, runDir, { stepIds, beforeStep, execution: { jobId, runLabel: label, requestedSha: sha, checkedOutSha, diffBase } })
   }
 }
