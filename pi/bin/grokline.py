@@ -329,7 +329,14 @@ def sweep(st=None, now=None):
     def why(t):
         return (stop_why if g == "stop" else f"{STALE_MIN} 分钟没有进展" if stale(t, now) else None)
     back = []
-    if any(t.get("owner") == "grok" and why(t) for t in prfix.load_tickets().get("tickets", {}).values()):   # lock + write only then
+    try:
+        tks = prfix.load_tickets().get("tickets", {})
+        if not (isinstance(tks, dict) and all(isinstance(t, dict) for t in tks.values())): raise ValueError("tickets is not an object of objects")
+    except (OSError, ValueError, AttributeError) as e:
+        # 11-03: tickets.json is the Pi line's shared state. Unreadable (truncated / bad JSON / wrong shape) -> log, skip this round,
+        # never take the lock and never write it (tickets_locked would only re-raise; rewriting it as empty loses every ticket).
+        log(f"grok line: sweep skipped, tickets.json unreadable ({type(e).__name__}: {str(e)[:120]})"); return back
+    if any(t.get("owner") == "grok" and why(t) for t in tks.values()):   # lock + write only then
         with prfix.tickets_locked() as T:
             for k, t in list(T["tickets"].items()):
                 w = t.get("owner") == "grok" and why(t)
