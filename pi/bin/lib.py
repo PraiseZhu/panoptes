@@ -1,4 +1,4 @@
-import json, os, subprocess, sys, glob, datetime as dt, re, shutil, tempfile
+import json, os, subprocess, sys, glob, datetime as dt, re, shutil, tempfile, time
 REPO = "xindong/mivo-canvas-plugin"
 # Where things live (10-24: the Pi line moved into PraiseZhu/panoptes pi/; three kinds of place, see pi/README.md):
 #   PI_CODE   this pi/ directory (code, conf, cron, tests) -- deployed with the /workspace/panoptes checkout
@@ -25,10 +25,28 @@ def utc_window(day):
     f = lambda x: x.strftime("%Y-%m-%dT%H:%M:%SZ")
     return f(a), f(b)
 
-def gh(args, js=True):
-    r = subprocess.run(["gh"] + args, capture_output=True, text=True, timeout=120)
-    if r.returncode != 0: raise RuntimeError(f"gh {' '.join(args)}: {r.stderr.strip()[:300]}")
-    return json.loads(r.stdout) if js else r.stdout
+# 11-03 (prwatch:error:drafts 10:44): one GitHub 5xx / network blip failed a read and the cause was lost -- the full command came
+# first and prwatch cuts errors at 200 chars, so only 'Post "https://api.github.com/g' was left. Now the real stderr comes first
+# (command after it, shortened), and a READ that failed with a 5xx / timeout / dropped connection is retried once. Writes never retry.
+GH_TRANSIENT_RE = re.compile(r"HTTP 5\d\d|\b50[0234]\b|timed? ?out|deadline exceeded|\bEOF\b|connection (?:reset|refused)|"
+                             r"TLS handshake|i/o timeout|stream error|server error", re.I)
+GH_READS = {("pr", "list"), ("pr", "view"), ("pr", "checks"), ("pr", "diff"), ("issue", "list"), ("issue", "view"),
+            ("repo", "view"), ("run", "list"), ("run", "view"), ("label", "list")}
+GH_WRITE_FLAGS = {"-X", "--method", "-f", "-F", "--field", "--raw-field", "--input"}
+def gh_is_read(args):
+    if tuple(args[:2]) in GH_READS: return True
+    return bool(args) and args[0] == "api" and not any(a.split("=", 1)[0] in GH_WRITE_FLAGS for a in args[1:])
+def gh(args, js=True, retries=1):
+    cmd = f"gh {' '.join(args[:2])}"
+    for left in range(retries if gh_is_read(args) else 0, -1, -1):
+        try: r = subprocess.run(["gh"] + args, capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            if left: print(f"{cmd}: timeout after 120s, retrying once", file=sys.stderr, flush=True); continue
+            raise RuntimeError(f"{cmd}: timeout after 120s [{' '.join(args)[:120]}]")
+        if r.returncode == 0: return json.loads(r.stdout) if js else r.stdout
+        err = (r.stderr or "").strip()
+        if left and GH_TRANSIENT_RE.search(err): print(f"{cmd}: {err[:200]} -- retrying once", file=sys.stderr, flush=True); time.sleep(2); continue
+        raise RuntimeError(f"{cmd}: {err[:300]} [{' '.join(args)[:120]}]")
 
 def parse_ts(s):
     if not s: return None
