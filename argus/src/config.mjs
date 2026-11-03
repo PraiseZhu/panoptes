@@ -15,6 +15,17 @@ export function matchesSkipBase(baseRef, patterns = DEFAULT_SKIP_BASE_BRANCHES) 
   return patterns.some((g) => new RegExp('^' + g.split('*').map((x) => x.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$').test(baseRef))
 }
 
+// 11-03 integration-branch QA: one rule for catch-up / mergewatch / watchdog / nightly — test every base except skipBaseBranches.
+// Rollback: PANOPTES_MAIN_ONLY=1 or the flag file $PI_STATE/panoptes-main-only (same file pi/bin/basegate.py reads, re-read each call)
+// → only base main is tested. Contract with Python: tests/fixtures/skip-base-cases.json.
+export function mainOnlyFlagFile(env = process.env) { return join(env.PI_STATE || '/workspace/mivo-qa/pi', 'panoptes-main-only') }
+export function mainOnly(env = process.env) { return env.PANOPTES_MAIN_ONLY === '1' || existsSync(mainOnlyFlagFile(env)) }
+export function shouldTestBase(baseRef, patterns = DEFAULT_SKIP_BASE_BRANCHES, { mainOnly: mo = mainOnly() } = {}) {
+  if (baseRef == null) return true   // field missing counts as main: never drop a test on missing data
+  if (mo) return baseRef === 'main'
+  return !matchesSkipBase(baseRef, patterns)
+}
+
 export function loadRegistry() {
   const reg = JSON.parse(readFileSync(REGISTRY_PATH, 'utf8'))
   if (!reg.owner?.login || !Number.isInteger(reg.owner?.id)) throw new Error(`registry.owner 需要 login 和数字 id，实际 ${JSON.stringify(reg.owner)}`)

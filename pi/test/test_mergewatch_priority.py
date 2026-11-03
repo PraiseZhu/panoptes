@@ -11,7 +11,7 @@ pulls = [
     {"number": 12, "merged_at": "2026-10-26T16:02:00Z", "base": {"ref": "main"}},      # 已有报告
     {"number": 11, "merged_at": None, "base": {"ref": "main"}},                        # 关闭未合并
     {"number": 10, "merged_at": "2026-10-26T15:00:00Z", "base": {"ref": "main"}},      # since 之前
-    {"number": 9, "merged_at": "2026-10-26T16:03:00Z", "base": {"ref": "feature"}},    # 不是 main
+    {"number": 9, "merged_at": "2026-10-26T16:03:00Z", "base": {"ref": "probe-9"}},    # probe-*（skipBaseBranches）不测；11-03 起其他分支都测
 ]
 assert M.fresh_merges(pulls, "2026-10-26T15:30:00+00:00", rd) == [(13, "2026-10-27"), (14, "2026-10-27")]   # 旧的在前，上海日期
 c = M.priority_cmd(13, "2026-10-27")
