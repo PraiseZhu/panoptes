@@ -116,13 +116,13 @@ def fix_rulings(text):
         if len(c) >= 4 and re.fullmatch(r"#?\d+", c[1] or "") and c[3] == "修": s.add(int(c[1].lstrip("#")))
     return s
 
-NOFIX_RULINGS = ("不修", "产品代码不修", "误报", "P3", "已修")
+NOFIX_RULINGS = ("不修", "产品代码不修", "误报", "P3", "已修")   # + any 「结案…」 (p2.py record 结案: already fixed, no ticket)
 def no_fix_rulings(text):
     """PRs whose P2 ruling in fleet-standards/p2-rulings.md says no PR is needed: 不修 / 产品代码不修 / 误报 / P3 / 已修 (fixed elsewhere)."""
     s = set()
     for line in (text or "").splitlines():
         c = [x.strip() for x in line.strip().strip("|").split("|")]
-        if len(c) >= 4 and re.fullmatch(r"#?\d+", c[1] or "") and c[3] in NOFIX_RULINGS: s.add(int(c[1].lstrip("#")))
+        if len(c) >= 4 and re.fullmatch(r"#?\d+", c[1] or "") and (c[3] in NOFIX_RULINGS or c[3].startswith("结案")): s.add(int(c[1].lstrip("#")))
     return s
 
 def is_p0_alert(pr):

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """日报 23:30 duty (Grok routine mivo-qa-ledger, 23:40 here): rebuild the 飞书通知台账 with the Grok tool itself.
-fleet-mode=pi  : REAL rebuild exactly like the Grok routine — `node /workspace/mivo-qa/ledger/build-ledger.mjs <日>` (no
+fleet-mode=pi  : REAL rebuild exactly like the Grok routine — `node <TOOL> <日>` (TOOL below; no
                  --dry-run) writes ledger/daily/<日>.json/.md (+ its own 60-day retention). Before: existing <日>.json/.md are
                  copied to <日>.json.bak-<ts>-prerebuild / <日>.md.bak-<ts>-prerebuild. After: the summary is re-counted from
                  the rows (and the row count compared with the previous ledger); a hard failure restores the backup (or moves
@@ -9,6 +9,13 @@ fleet-mode=grok: unchanged dry-run (--dry-run -> scratch/ledger-dry/, never ledg
 Both: copy to out/ledger/<日>.json/.md and write out/ledger/<日>.diff.md.
 Statuses are the tool's: fixed (only after retest pass) / fix_merged_pending_retest / fix_pr_open / concluded / open(=unfixed).
 usage: ledger.py [日期] [--render-only] [--dry-run] [--force]
+       ledger.py set-fix-pr <行 key> <修复PR号> [--note 说明]
+       ledger.py --help        (只打印本说明，不重建)
+The tool is pi/ledger/build-ledger.mjs (tracked in panoptes, 2026-11-03). Rollback: `touch /workspace/mivo-qa/pi/ledger-tool-legacy`
+  -> the old untracked copy /workspace/mivo-qa/ledger/build-ledger.mjs is used again (re-read every run); `rm` it to go back.
+set-fix-pr: the tool interface for 「这一行的修复 PR 是 #N」 -- writes ledger/overrides.json[<key>] = {status: fixed, fix_pr: N, via, note, at}
+  (other fields of that entry kept; overrides.json backed up first; the key must be a row of the latest ledger). build-ledger applies
+  it at the next rebuild: merged state is read live from GitHub, unmerged -> fix_pr_open, merged -> pending retest until the retest passes.
   --render-only: skip node, just diff existing out/ledger vs ledger/daily;  --dry-run: dry-run even in pi mode;
   --force: keep a real rebuild whose row count dropped >10% vs the previous ledger (other checks still apply).
 Test-only env (never set by cron): PI_QA_HOME (QA dir; also QA_HOME for node), PI_LEDGER_OUT (out/ledger dir)."""
@@ -16,7 +23,9 @@ import sys, shutil
 from lib import *
 QA_HOME = os.environ.get("PI_QA_HOME") or QA
 OUTD = os.environ.get("PI_LEDGER_OUT") or f"{BASE}/out/ledger"
-TOOL = f"{QA_HOME}/ledger/build-ledger.mjs"
+LEGACY_FLAG = f"{BASE}/ledger-tool-legacy"           # rollback switch (运维): exists -> the old untracked QA copy
+TOOL = f"{QA_HOME}/ledger/build-ledger.mjs" if os.path.exists(LEGACY_FLAG) else f"{PI_CODE}/ledger/build-ledger.mjs"
+OVERRIDES = f"{QA_HOME}/ledger/overrides.json"
 DAILY = f"{QA_HOME}/ledger/daily"
 STATUSES = ("fixed", "fix_merged_pending_retest", "fix_pr_open", "concluded", "open")
 DROP_MAX = 0.10                                    # real rebuild losing >10% of the previous ledger's rows = suspect input
@@ -115,7 +124,35 @@ def dry(d, render_only):
     L = [f"# 台账对比 {d}（Pi dry-run vs Grok ledger/daily）"] + diff_lines(f"{DAILY}/{d}.json", f"{OUTD}/{d}.json", "Grok", "Pi")
     write_atomic(f"{OUTD}/{d}.diff.md", "\n".join(L) + "\n")
 
+def backup(f):
+    """f.bak-<ts>[-N]: never overwrites an earlier backup taken in the same second."""
+    b = f"{f}.bak-{now_cst().strftime('%Y%m%d-%H%M%S')}"; n, i = b, 1
+    while os.path.exists(n): n = f"{b}-{i}"; i += 1
+    shutil.copy2(f, n); return n
+
+def set_fix_pr(argv):
+    note = None
+    if "--note" in argv: i = argv.index("--note"); note = argv[i + 1]; argv = argv[:i] + argv[i + 2:]
+    if len(argv) != 2 or not re.fullmatch(r"[\w.-]+/[\w.-]+#\d+:mq1-[0-9a-f]+", argv[0]) or not re.fullmatch(r"#?\d+", argv[1]):
+        sys.exit("usage: ledger.py set-fix-pr <owner/repo#PR:mq1-…> <修复PR号> [--note 说明]")
+    key, pr = argv[0], int(argv[1].lstrip("#"))
+    latest = prev_official("9999-99-99")
+    if not latest or key not in summ(latest)[1]: sys.exit(f"{key} 不在最新台账 {latest} 的行里")
+    ov = jl(OVERRIDES) if os.path.exists(OVERRIDES) else {}
+    if not isinstance(ov, dict): sys.exit(f"{OVERRIDES} 读不出")
+    old = dict(ov.get(key) or {})
+    ov[key] = {**old, "status": "fixed", "fix_pr": pr, "via": "ledger.py set-fix-pr", "note": note or f"修复 PR #{pr}",
+               "at": now_cst().date().isoformat()}
+    for k in ("concluded_reason", "merged"): ov[key].pop(k, None)
+    if os.path.exists(OVERRIDES): log("backup", backup(OVERRIDES))
+    write_atomic(OVERRIDES, json.dumps(ov, ensure_ascii=False, indent=2) + "\n")
+    log("set-fix-pr", key, "old", json.dumps(old, ensure_ascii=False), "new", json.dumps(ov[key], ensure_ascii=False))
+
 def main():
+    if "--help" in sys.argv[1:] or "-h" in sys.argv[1:]: print(__doc__); return
+    if sys.argv[1:2] == ["set-fix-pr"]: return set_fix_pr(sys.argv[2:])
+    unknown = [x for x in sys.argv[1:] if x.startswith("-") and x not in ("--render-only", "--dry-run", "--force")]
+    if unknown: sys.exit(f"unknown option(s) {unknown}\n{__doc__}")
     a = [x for x in sys.argv[1:] if not x.startswith("--")]; d = a[0] if a else today()
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", d): sys.exit(f"bad date {d!r}")
     if mode() == "pi" and "--dry-run" not in sys.argv and "--render-only" not in sys.argv:

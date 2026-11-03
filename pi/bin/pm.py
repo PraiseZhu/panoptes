@@ -40,7 +40,7 @@ def ruled(verdict):
     for line in open(RULINGS):
         c = [x.strip() for x in line.strip().strip("|").split("|")]
         if len(c) >= 4 and re.fullmatch(r"#?\d+", c[1] or ""):
-            v = "不修" if "不修" in c[3] else ("修" if c[3] in ("修", "已修") else c[3])  # 「产品代码不修」→不修，「已修」→修
+            v = "不修" if "不修" in c[3] else ("修" if c[3] in ("修", "已修") or c[3].startswith("结案") else c[3])  # 「产品代码不修」→不修，「已修」「结案…」→修
             if v == verdict: s.add(int(c[1].lstrip("#")))
     return s
 

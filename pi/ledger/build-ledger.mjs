@@ -1,13 +1,21 @@
 #!/usr/bin/env node
 // Mivo QA 飞书通知台账。只读所有源文件；只写 ledger/daily/。不发任何消息。
 import fs from 'node:fs'; import path from 'node:path'; import { execFileSync } from 'node:child_process';
+const USAGE = `usage: build-ledger.mjs [YYYY-MM-DD] [--dry-run]
+  Rebuilds the Mivo QA ledger for the day (default: today, Beijing) into $QA_HOME/ledger/daily/<day>.json/.md
+  (and deletes daily files older than 60 days). --dry-run writes $QA_HOME/scratch/ledger-dry/ instead, no retention.
+  --help / -h: print this and exit; nothing is read or written. Any other argument is an error (exit 2).
+`;
+const args = process.argv.slice(2);
+if (args.includes('--help') || args.includes('-h')) { process.stdout.write(USAGE); process.exit(0); }
+const badArgs = args.filter(a => a !== '--dry-run' && !/^\d{4}-\d{2}-\d{2}$/.test(a));
+if (badArgs.length || args.filter(a => a !== '--dry-run').length > 1) { process.stderr.write(`build-ledger: bad argument(s) ${JSON.stringify(badArgs.length ? badArgs : args)}\n${USAGE}`); process.exit(2); }
 const QA = process.env.QA_HOME || '/workspace/mivo-qa';
 const REPO = 'xindong/mivo-canvas-plugin';
-const OUT = process.argv.includes('--dry-run') ? path.join(QA, 'scratch/ledger-dry') : path.join(QA, 'ledger/daily'); const KEEP_DAYS = 60;
+const OUT = args.includes('--dry-run') ? path.join(QA, 'scratch/ledger-dry') : path.join(QA, 'ledger/daily'); const KEEP_DAYS = 60;
 const now = new Date();
 const sh = d => new Date(d.getTime() + 8 * 3600e3).toISOString().slice(0, 10);
 const shTime = s => s ? new Date(new Date(s).getTime() + 8 * 3600e3).toISOString().slice(0, 16).replace('T', ' ') : null;
-const args = process.argv.slice(2);
 const DRY = args.includes('--dry-run'); // --dry-run: write to scratch/ledger-dry/ instead of ledger/daily/, no retention
 const today = args.find(a => /^\d{4}-\d{2}-\d{2}$/.test(a)) || sh(now);
 const rj = (p, d) => { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return d; } };
@@ -205,8 +213,8 @@ for (const [key, v] of Object.entries(sent)) {
 // 待核实的行带 pending_verification: true
 const RULINGS = process.env.MIVO_QA_P2_RULINGS || '/workspace/fleet-standards/p2-rulings.md';
 const fix2 = new Set(), nofix = new Set();
-const NOFIX = ['不修', '产品代码不修', '误报', 'P3', '已修'];
-try { for (const line of fs.readFileSync(RULINGS, 'utf8').split('\n')) { const c = line.trim().replace(/^\||\|$/g, '').split('|').map(x => x.trim()); if (c.length >= 4 && /^#?\d+$/.test(c[1] || '')) { if (c[3] === '修') fix2.add(+c[1].replace('#', '')); if (NOFIX.includes(c[3])) nofix.add(+c[1].replace('#', '')); } } }
+const NOFIX = ['不修', '产品代码不修', '误报', 'P3', '已修'];  // + any 「结案…」(already fixed, no new ticket; p2.py record 结案)
+try { for (const line of fs.readFileSync(RULINGS, 'utf8').split('\n')) { const c = line.trim().replace(/^\||\|$/g, '').split('|').map(x => x.trim()); if (c.length >= 4 && /^#?\d+$/.test(c[1] || '')) { if (c[3] === '修') fix2.add(+c[1].replace('#', '')); if (NOFIX.includes(c[3]) || c[3].startsWith('结案')) nofix.add(+c[1].replace('#', '')); } } }
 catch { gaps.push(`p2-rulings.md 读不到（${RULINGS}），按没有裁决处理`); }
 // -> { sev, ticket }：sev = 台账要不要留这一行（null = 不留）；ticket = prfix 会不会派活（own_pr_ticket 非空）
 function ownTicket(x, n, pending) {
@@ -258,7 +266,7 @@ for (const r of rows.values()) {
   const row = {
     key: r.key, repo: r.repo, pr: r.pr, fingerprint: r.fingerprint,
     author: st?.login || rep?.author?.login || rep?.author || null,
-    level: f?.severity || null, source: f?.source || null, ...(r.pending || f?._pending ? { pending_verification: true } : {}), ...(r.no_ticket ? { no_ticket: true } : {}),
+    level: f?.severity || null, severity: f?.severity || null, source: f?.source || null, ...(r.pending || f?._pending ? { pending_verification: true } : {}), ...(r.no_ticket ? { no_ticket: true } : {}),
     summary, notice: { dm_sent_at: isDm ? r.sent_at : null, date: notice_date, channels: [...(isDm ? ['dm'] : []), ...(inGroup.length ? ['group'] : []), ...(isDm ? [] : ['report'])], group_dates: inGroup,
       via: r.via, ...(r.dedupe_key ? { dedupe_key: r.dedupe_key } : {}), ...(isDm ? {} : { report_at: r.sent_at }) },
     reminders: st?.reminders ?? null,
@@ -335,6 +343,7 @@ for (const [k, o] of Object.entries(overrides)) {
 //   pass    = 报告显式写了针对原问题的复测通过（prs[].retest / fix_retest 里 fingerprint 匹配且 result=pass）
 //   pending = 修复 PR 未合并 / 尚无报告 / 报告未做原用例复测（panoptes 复测功能上线前的常态）——不改状态
 // fix_round = 该问题已合并的自动修复 PR 个数（不含手工结论）；最多两轮，第三轮（≥3，或第 2 轮复测仍失败）→ needs_human
+// 第三轮不论状态都进「需要你做」（2026-11-02 审计第 4 项：和 pm_extra「第三轮未报出」同一口径，修好了也要人确认结案、不开第 4 轮）
 const HO_RECORDS = HANDOFF_ROUTES.routes.map(rt => ({ repo: rt.repo, file: path.join(QA, 'handoff', rt.repo.split('/')[0], 'issues.json') }));
 const hoByKey = {};
 for (const h of HO_RECORDS) for (const i of (rj(h.file, { issues: [] }).issues || [])) hoByKey[i.key] = { ...i, repo: h.repo };
@@ -382,8 +391,9 @@ for (const row of out) {
   // 规则（2026-10-22）：复测通过前不算已修复。有修复 PR（无论是否合并）但复测未通过 → 修复已合并，待复测（未合并的留在 fixed 下由 fixed_not_merged 统计）
   if (row.status === 'fixed' && !row.retest_confirmed && row.merged === true) Object.assign(row, { status: 'fix_merged_pending_retest', status_zh: STZH.fix_merged_pending_retest });
   else if (row.status === 'fixed' && !row.retest_confirmed) Object.assign(row, { status: 'fix_pr_open', status_zh: STZH.fix_pr_open });
-  row.needs_human = row.status === 'open' && (row.fix_round > MAX_AUTO_ROUNDS || (row.fix_round === MAX_AUTO_ROUNDS && row.retest === 'fail'));
-  if (row.needs_human) needsYou.push({ key: row.key, pr: row.pr, author: row.author, level: row.level, summary: row.summary, fix_round: row.fix_round, fix_prs: fixPrs, handoff_issue: row.handoff_issue?.url || null, reason: `已自动修 ${row.fix_round} 轮仍未通过复测，转人工` });
+  row.needs_human = row.fix_round > MAX_AUTO_ROUNDS || (row.status === 'open' && row.fix_round === MAX_AUTO_ROUNDS && row.retest === 'fail');
+  if (row.needs_human) needsYou.push({ key: row.key, pr: row.pr, author: row.author, level: row.level, severity: row.level, summary: row.summary, fix_round: row.fix_round, fix_prs: fixPrs, handoff_issue: row.handoff_issue?.url || null,
+    reason: row.status === 'open' ? `已自动修 ${row.fix_round} 轮仍未通过复测，转人工` : `已修到第 ${row.fix_round} 轮（${row.status_zh}），请确认结案、不再开第 ${row.fix_round + 1} 轮` });
 }
 const counts = { fixed: 0, fix_merged_pending_retest: 0, fix_pr_open: 0, concluded: 0, open: 0 };
 const openBy = { P0: 0, P1: 0, P2: 0, P3: 0, unknown: 0 };

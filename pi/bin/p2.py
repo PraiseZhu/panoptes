@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Shadow P2 ruling proposals via Pi (tap/anthropic/claude-opus-5-5, read-only tools).
-Never edits fleet-standards/p2-rulings.md. Writes out/p2/<date>.md + out/p2/state.json."""
+Never edits fleet-standards/p2-rulings.md. Writes out/p2/<date>.md + out/p2/state.json.
+usage: p2.py                 shadow proposals (model calls, cron only)
+       p2.py record <报告PR> <问题> <修|不修|结案> <理由> <证据路径...> [--by 会签人] [--status 规则状态]
+         appends one row to p2-rulings.md (backup first, never overwriting a same-second backup); 规则状态 defaults to 「Jasper 已裁」.
+         结案 = already fixed / settled, no new fix ticket (build-ledger, finding_policy, pm and pmnudge treat it like 已修).
+       p2.py --help / -h     print this and exit (no model call, nothing written)"""
 import sys, json, os, re, subprocess, shutil
 from lib import *
 TIER = "judge"  # pi-auto tier (opus-5-5/medium); Praise 2026-10-22: never pass --model/--thinking
@@ -71,15 +76,17 @@ Answer ONLY with a JSON array, one object per finding, keys: key, ruling ("修" 
     return json.loads(j.group(0)), (tid.group(1) if tid else "?")
 
 RULINGS = "/workspace/fleet-standards/p2-rulings.md"
+VERDICTS = ("修", "不修", "结案")
 PENDING = "⚠ P2 裁决规则（只修判「修」的 P2；PM 与 Praise PR 逐个核对代码和 QA 报告证据）是 2026-10-22 Jasper 转述的新规则，Praise 本人尚未确认。"
 
 def record(argv):
-    """p2.py record <报告PR> <问题> <修|不修> <理由> <证据路径...> --by "PM+Praise PR"
+    """p2.py record <报告PR> <问题> <修|不修|结案> <理由> <证据路径...> --by "PM+Praise PR" [--status 规则状态]
     PM 与 Praise PR 会签后才用：追加一行到 p2-rulings.md（日期、报告 PR、问题、裁决、理由、证据、会签、规则状态）。
     模型提议（cron）永不调用这里。"""
-    by = "PM+Praise PR"
+    by, status = "PM+Praise PR", "Jasper 已裁"
     if "--by" in argv: i = argv.index("--by"); by = argv[i + 1]; argv = argv[:i] + argv[i + 2:]
-    if len(argv) < 5 or argv[2] not in ("修", "不修"): sys.exit("usage: p2.py record <PR> <问题> <修|不修> <理由> <证据路径...> [--by 会签人]")
+    if "--status" in argv: i = argv.index("--status"); status = argv[i + 1]; argv = argv[:i] + argv[i + 2:]
+    if len(argv) < 5 or argv[2] not in VERDICTS: sys.exit("usage: p2.py record <PR> <问题> <修|不修|结案> <理由> <证据路径...> [--by 会签人] [--status 规则状态]")
     pr, title, verdict, reason, ev = int(argv[0].lstrip("#")), argv[1], argv[2], argv[3], argv[4:]
     for e in ev:
         if not os.path.exists(e.split(":")[0]) and not e.startswith(("http", "#")): sys.exit(f"证据路径不存在：{e}")
@@ -90,13 +97,18 @@ def record(argv):
     if "| 证据 |" not in txt:
         txt = txt.replace("| 日期 | 报告 PR | 问题 | 裁决 | 理由 |\n|---|---|---|---|---|", "| 日期 | 报告 PR | 问题 | 裁决 | 理由 | 证据 | 会签 | 规则状态 |\n|---|---|---|---|---|---|---|---|")
     if not txt.endswith("\n"): txt += "\n"
-    txt += f"| {dt.datetime.now(CST).date().isoformat()} | #{pr} | {clean(title)} | {verdict} | {clean(reason)} | {'<br>'.join(map(clean, ev))} | {clean(by)} | 待 Praise 确认 |\n"
+    txt += f"| {dt.datetime.now(CST).date().isoformat()} | #{pr} | {clean(title)} | {verdict} | {clean(reason)} | {'<br>'.join(map(clean, ev))} | {clean(by)} | {clean(status)} |\n"
     if os.environ.get("P2_DRY"): print(txt); return
-    shutil.copy(RULINGS, RULINGS + ".bak-" + dt.datetime.now(CST).strftime("%Y%m%d-%H%M%S")) if os.path.exists(RULINGS) else None
+    if os.path.exists(RULINGS):
+        b = RULINGS + ".bak-" + dt.datetime.now(CST).strftime("%Y%m%d-%H%M%S"); n, i = b, 1
+        while os.path.exists(n): n = f"{b}-{i}"; i += 1   # two records in one second keep both backups
+        shutil.copy(RULINGS, n)
     write_atomic(RULINGS, txt)
 
 def main():
+    if "--help" in sys.argv[1:] or "-h" in sys.argv[1:]: print(__doc__); return
     if len(sys.argv) > 1 and sys.argv[1] == "record": return record(sys.argv[2:])
+    if any(x.startswith("-") for x in sys.argv[1:]): sys.exit(f"unknown option(s) {sys.argv[1:]}\n{__doc__}")   # run.sh may pass a data day (ignored)
     subprocess.run(f"find {SRC} -mindepth 1 -maxdepth 1 -type d -mtime +1 -exec chmod -R u+w {{}} \\; -exec rm -rf {{}} +", shell=True)  # keep /tmp small
     today = dt.datetime.now(CST).date().isoformat()
     out = f"{BASE}/out/p2/{today}.md"
