@@ -4,18 +4,20 @@ import os, sys, json, tempfile, types, importlib.util
 _ENV = dict(os.environ)   # runs at import: under unittest discover the env below must not leak into later modules
 # PI_LOCK_DIR: never the live /tmp/pi-fallback-mergewatch.lock (held by the production mergewatch cron -> main() returns 0, no launch)
 tmp = tempfile.mkdtemp(); os.environ.update(PI_STATE=tmp, PI_FLEET_MODE="pi", PI_LOCK_DIR=tmp); os.environ.pop("PI_BASE", None)
-B = os.environ.get("PI_BIN") or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin")
-s = importlib.util.spec_from_file_location("mergewatch", f"{B}/mergewatch.py"); M = importlib.util.module_from_spec(s); s.loader.exec_module(M)
-M.DRY = False; launches = []; head = ["23247021aaaa"]
-M.heartbeat = lambda mode: {"kind": "pause", "start": "2026-10-27T08:37:01+08:00", "end": "2026-10-27T09:18:35+08:00", "gap_min": 41.6}
-M.subprocess = types.SimpleNamespace(run=lambda *a, **k: types.SimpleNamespace(returncode=0, stdout=f"{head[0]}\trefs/heads/main\n"), TimeoutExpired=TimeoutError)
-M.gh_token = lambda: None; M.catchup_running = lambda: False
-M.launch = lambda cmd, sha: launches.append((cmd, sha)) or types.SimpleNamespace(pid=1)
-os.makedirs(M.STATE_DIR); json.dump({"main_sha": head[0], "dirty": False}, open(M.STATE, "w"))
-for _ in range(3): M.main()
-assert launches == [], launches                       # 同一个 sha，停机恢复不重起 catch-up
-head[0] = "96edc713bbbb"; M.main()                    # 停机期间有合并：sha 变了 → 起一次
-assert len(launches) == 1 and "--catch-up" in launches[0][0] and launches[0][1] == head[0], launches
-M.main(); assert len(launches) == 1
-os.environ.clear(); os.environ.update(_ENV)
+try:
+    B = os.environ.get("PI_BIN") or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin")
+    s = importlib.util.spec_from_file_location("mergewatch", f"{B}/mergewatch.py"); M = importlib.util.module_from_spec(s); s.loader.exec_module(M)
+    M.DRY = False; launches = []; head = ["23247021aaaa"]
+    M.heartbeat = lambda mode: {"kind": "pause", "start": "2026-10-27T08:37:01+08:00", "end": "2026-10-27T09:18:35+08:00", "gap_min": 41.6}
+    M.subprocess = types.SimpleNamespace(run=lambda *a, **k: types.SimpleNamespace(returncode=0, stdout=f"{head[0]}\trefs/heads/main\n"), TimeoutExpired=TimeoutError)
+    M.gh_token = lambda: None; M.catchup_running = lambda: False
+    M.launch = lambda cmd, sha: launches.append((cmd, sha)) or types.SimpleNamespace(pid=1)
+    os.makedirs(M.STATE_DIR); json.dump({"main_sha": head[0], "dirty": False}, open(M.STATE, "w"))
+    for _ in range(3): M.main()
+    assert launches == [], launches                       # 同一个 sha，停机恢复不重起 catch-up
+    head[0] = "96edc713bbbb"; M.main()                    # 停机期间有合并：sha 变了 → 起一次
+    assert len(launches) == 1 and "--catch-up" in launches[0][0] and launches[0][1] == head[0], launches
+    M.main(); assert len(launches) == 1
+finally:   # restore even when an assert fails: under unittest discover a leaked PI_STATE/PI_LOCK_DIR breaks later modules
+    os.environ.clear(); os.environ.update(_ENV)
 print("ok test_mergewatch_resume")

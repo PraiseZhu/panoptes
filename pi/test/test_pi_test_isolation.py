@@ -70,19 +70,23 @@ sys.exit(0 if r.wasSuccessful() and r.testsRun == len(names) else 1)"""
 
     def test_mergewatch_resume_ignores_the_live_mergewatch_lock(self):
         """test_mergewatch_resume.py used the live /tmp/pi-fallback-mergewatch.lock (no PI_LOCK_DIR): while the production
-        mergewatch cron held it, main() returned at once and the module failed (selftest). Hold that lock in a private mount
-        namespace (bwrap binds a scratch file over the path; the live lock is never taken) and run the module: it must pass."""
+        mergewatch cron held it, main() returned at once and the module failed (selftest). Runs everywhere (11-04: the bwrap
+        version skipped on CI, where the live lock file does not exist): the child redirects every open() of the live lock
+        path to a scratch file this test holds with flock, so the live lock is never touched. PI_TEST_MW_RESUME_FILE
+        (test-only) runs another copy, e.g. the pre-#191 file, to show the failure."""
         live = "/tmp/pi-fallback-mergewatch.lock"
-        if not (shutil.which("bwrap") and os.path.exists(live)): self.skipTest("needs bwrap and the live lock file as a mount point (box only)")
-        fake = tempfile.mkdtemp(prefix="fake-mw-lock-"); self.addCleanup(shutil.rmtree, fake, True); open(f"{fake}/lock", "w").close()
-        hold = ("import fcntl, subprocess, sys; f = open(sys.argv[1], 'w'); fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); "
-                "sys.exit(subprocess.run([sys.executable, sys.argv[2]]).returncode)")
-        env = {k: v for k, v in os.environ.items() if k != "PI_LOCK_DIR"}
-        p = subprocess.run(["bwrap", "--dev-bind", "/", "/", "--bind", f"{fake}/lock", live, sys.executable, "-c", hold, live,
-                            f"{HERE}/test_mergewatch_resume.py"], cwd=os.path.join(os.path.dirname(HERE), "bin"), env=env,
+        target = os.environ.get("PI_TEST_MW_RESUME_FILE") or f"{HERE}/test_mergewatch_resume.py"
+        fake = tempfile.mkdtemp(prefix="fake-mw-lock-"); self.addCleanup(shutil.rmtree, fake, True)
+        held = open(f"{fake}/lock", "w"); self.addCleanup(held.close)
+        import fcntl; fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)   # = the production cron holding the live lock
+        code = (f"import builtins, runpy; o = builtins.open\n"
+                f"builtins.open = lambda p, *a, **k: o({fake + '/lock'!r} if str(p) == {live!r} else p, *a, **k)\n"
+                f"runpy.run_path({target!r}, run_name='__main__')")
+        env = dict({k: v for k, v in os.environ.items() if k != "PI_LOCK_DIR"}, PI_BIN=os.path.join(os.path.dirname(HERE), "bin"))
+        p = subprocess.run([sys.executable, "-c", code], cwd=os.path.join(os.path.dirname(HERE), "bin"), env=env,
                            capture_output=True, text=True, timeout=120)
-        if "bwrap:" in p.stderr and p.returncode != 0 and "Traceback" not in p.stderr: self.skipTest(p.stderr[-300:])
         self.assertEqual(p.returncode, 0, p.stderr[-1500:])
+        self.assertIn("ok test_mergewatch_resume", p.stdout)
 
 if __name__ == "__main__":
     unittest.main()
