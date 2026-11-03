@@ -11,6 +11,7 @@ with open(_JCONF, "w") as _f: _f.write('{"enforce": false}')
 _os.environ['JANITOR_CONF'] = _JCONF
 import atexit as _ax, shutil as _sh; _ax.register(_sh.rmtree, _os.path.dirname(_JCONF), True)   # no temp dir left behind per run
 import argparse, contextlib, re, datetime as dt, importlib.util, io, json, os, shutil, subprocess, sys, tempfile, textwrap, unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
@@ -831,7 +832,8 @@ class TestFixOneEndToEnd(GitTmp):
 
     def test_success_with_janitor_enforcing_drops_worktree_keeps_patch(self):
         wf(_JCONF, '{"enforce": true}')
-        try: out, res = self.run_fix()
+        try:   # prfix reads $JANITOR_CONF at call time; under unittest discover a later module (test_p2_fp_rulings) re-pointed it
+            with mock.patch.dict(os.environ, JANITOR_CONF=_JCONF): out, res = self.run_fix()
         finally: wf(_JCONF, '{"enforce": false}')
         self.assertEqual(out["status"], "pr_action_written", out)
         self.assertFalse(os.path.isdir(self.wd)); self.assertFalse(prfix.branch_exists(self.br))   # outbound works from its own clone

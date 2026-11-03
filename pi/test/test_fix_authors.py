@@ -4,6 +4,7 @@
 touch <state>/fix-authors-praise-only -> PraiseZhu only again. Scratch state only, no network, no sends.
 Run: python3 test/test_fix_authors.py"""
 import json, os, shutil, sys, tempfile, types, unittest
+from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__)); BIN = os.path.join(os.path.dirname(HERE), "bin"); sys.path.insert(0, BIN)
 sys.path.insert(0, HERE); import isolation  # noqa: E402
 isolation.sandbox_state()
@@ -19,6 +20,9 @@ P2 = lambda c, **kw: {"severity": "P2", "source": "code-review", "verdict": "CON
 
 class Base(unittest.TestCase):
     def setUp(self):
+        # unittest discover imports every test module before running any test: the pop above is undone by later modules'
+        # import-time setdefault('PRFIX_OWNERS', '*') (test_grokline, test_prfix_unit, ...). Own env per test, restored after.
+        e = mock.patch.dict(os.environ); e.start(); self.addCleanup(e.stop); os.environ.pop("PRFIX_OWNERS", None)
         self.tmp = tempfile.mkdtemp(prefix="fix-authors-")
         self.saved = (os.environ.get("PI_STATE"), O.QA, O.BASE, O.P2_RULINGS)
         os.environ["PI_STATE"] = self.tmp; O.QA = f"{self.tmp}/qa"; O.BASE = self.tmp; O.P2_RULINGS = f"{self.tmp}/p2-rulings.md"
