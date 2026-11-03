@@ -61,6 +61,12 @@ def brief_queued(k):   # several writers append here: a torn / bad line is skipp
         if isinstance(r, dict) and r.get("key") == k: return True
     return False
 def BRIEF_ROUTE_OFF(): return f"{BASE}/outbound-brief-route-off"
+# 11-03 step 11: conflict reminders (prwatch dirty:<pr>:<head> slack.dm, pmnudge nudge:<pr>:merge:<since> DIRTY/BEHIND) never DM Praise,
+# with or without praise-dm-mute: they go to the brief queue (or, with BRIEF_ROUTE_OFF, a muted-*.md file bots read). Before, they
+# reached his Slack DM whenever the mute file was absent. Rollback: touch CONFLICT_BRIEF_OFF (re-read every run) -> they follow the mute again.
+CONFLICT_KEY = re.compile(r"^(dirty:|nudge:\d+:merge:)")
+def CONFLICT_BRIEF_OFF(): return f"{BASE}/conflict-brief-off"
+def conflict_brief(k): return bool(CONFLICT_KEY.match(str(k))) and not os.path.exists(CONFLICT_BRIEF_OFF())
 TERMINAL = ("done", "skipped", "gave_up", "uncertain", "briefed", "superseded")  # ledger statuses never retried (uncertain = a send was interrupted:
                                                        # Slack/Feishu cannot be checked remotely, so never re-sent blindly)
 def backoff_left(e):
@@ -926,8 +932,10 @@ def main():
                 if qa in gates():
                     if not o.dry_run: setk(k, {"status": "skipped", "reason": f"gated: {gates()[qa]}", "at": now_cst().isoformat(timespec="seconds")})
                     rows.append((job, k, t, "-", "skipped(gated)", gates()[qa])); continue
-            if (t in RELAY_TYPES or (t == "slack.dm" and (a.get("to") == "Praise" or a.get("user") == PRAISE_SLACK))) and praise_dm_blocked(k):
-                if k.startswith(BRIEF_ROUTED) and not os.path.exists(BRIEF_ROUTE_OFF()):
+            conflict = conflict_brief(k)
+            if (t in RELAY_TYPES or (t == "slack.dm" and (a.get("to") == "Praise" or a.get("user") == PRAISE_SLACK))) and (praise_dm_blocked(k) or conflict):
+                why = "praise-dm-mute" if praise_dm_blocked(k) else "conflict reminder (never a DM)"
+                if (k.startswith(BRIEF_ROUTED) or conflict) and not os.path.exists(BRIEF_ROUTE_OFF()):
                     if not o.dry_run:
                         text = relay_text(a) if t in RELAY_TYPES else (a.get("text") or "")
                         os.makedirs(os.path.dirname(BRIEF_QUEUE()), exist_ok=True)
@@ -937,13 +945,13 @@ def main():
                             except OSError as e:   # e.g. queue path is a directory: log, leave the key unrecorded (retried next run), keep the run going
                                 log(f"brief-queue append failed ({e.__class__.__name__}: {e}) for {k} -> not briefed, retried next run")
                                 rows.append((job, k, t, "Jasper brief", "FAILED(brief-queue)", e.__class__.__name__)); continue
-                        setk(k, {"status": "briefed", "reason": "praise-dm-mute -> jasper brief", "at": now_cst().isoformat(timespec="seconds")})
+                        setk(k, {"status": "briefed", "reason": f"{why} -> jasper brief", "at": now_cst().isoformat(timespec="seconds")})
                     rows.append((job, k, t, "Jasper brief", "BRIEFED", f"queued in {os.path.basename(BRIEF_QUEUE())}")); continue
                 if not o.dry_run:
-                    setk(k, {"status": "skipped", "reason": "praise-dm-mute", "at": now_cst().isoformat(timespec="seconds")})
+                    setk(k, {"status": "skipped", "reason": why, "at": now_cst().isoformat(timespec="seconds")})
                     try: record_muted("outbound", k, relay_text(a) if t in RELAY_TYPES else (a.get("text") or ""))
                     except Exception: pass
-                rows.append((job, k, t, "Praise", "skipped(muted)", "praise-dm-mute")); continue
+                rows.append((job, k, t, "Praise", "skipped(muted)", why)); continue
             if t in RELAY_TYPES:   # Praise 10-23: deliver to his Slack DM (urgent: own DM now; others: one digest per run)
                 age = action_age_h(a, f)
                 if age > RELAY_TTL_H and not resend:
