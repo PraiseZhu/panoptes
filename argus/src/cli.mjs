@@ -21,7 +21,7 @@ import { loadRegistry, loadSecrets } from './config.mjs'
 import { openDb, countByStatus, getMeta } from './db.mjs'
 import { serve, pollOnce, diskFreeGb, processNextOnce } from './control.mjs'
 import { sendDailyReport, sendNotice } from './daily.mjs'
-import { currentUser, appFor } from './github.mjs'
+import { currentIdentity, appFor } from './github.mjs'
 import { probeJev } from './jev.mjs'
 import { ALL_DIRS } from './paths.mjs'
 import { OUTCOMES } from './decide.mjs'
@@ -221,14 +221,14 @@ async function main() {
     case 'doctor': {
       const secrets = loadSecrets()
       const reg = loadRegistry()
-      const me = await currentUser().catch((e) => ({ error: e.message }))
+      const me = await currentIdentity(reg.issueRepo, reg.owner.login).catch((e) => ({ error: e.message }))
       const llm = secrets.ARGUS_LLM_BASE_URL
         ? await fetch(`${secrets.ARGUS_LLM_BASE_URL.replace(/\/$/, '')}/v1/models`, { headers: { authorization: `Bearer ${secrets.ARGUS_LLM_API_KEY}` }, signal: AbortSignal.timeout(20_000) })
           .then(async (r) => ({ status: r.status, hasLuna: JSON.stringify(await r.json()).includes('openai/gpt-6-luna') }))
           .catch((e) => ({ error: e.message }))
         : { error: '未配置' }
       console.log(JSON.stringify({
-        github: me.error ? me : { login: me.login, matchesOwner: me.id === reg.owner.id },
+        github: me.error ? me : { login: me.login, via: me.via, matchesOwner: me.via === 'gh-login' && me.login === reg.owner.login },
         githubApp: await appFor(reg.issueRepo).then((a) => (a ? { botLogin: a.botLogin, repos: [...a.repos] } : '未配置或未覆盖 issue 仓')).catch((e) => ({ error: e.message })),
         llm,
         typesafe: await probeJev(secrets),

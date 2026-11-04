@@ -61,7 +61,7 @@ def gh_rl_until(now=None, f=None):
     now = now or _epoch(); u = gh_rl_state(f).get("until") or 0
     if u > now + GH_RL_MAX_S + 60: log(f"{f or GH_RL_FILE} until is > {GH_RL_MAX_S}s away, ignored"); return 0
     return u if u > now else 0
-def _gh_rl_reset(err):
+def _gh_rl_reset(err, env=None):
     """epoch from Retry-After / X-RateLimit-Reset in err, else from `gh api rate_limit` (free, not counted), else a short default"""
     now = _epoch()
     m = re.search(r"retry-after:?\s*(\d+)", err, re.I)
@@ -70,16 +70,16 @@ def _gh_rl_reset(err):
     if m: return float(m.group(1))
     if re.search(r"secondary|abuse", err, re.I): return now + 60
     try:
-        r = subprocess.run(["gh", "api", "rate_limit"], capture_output=True, text=True, timeout=30)
+        r = subprocess.run(["gh", "api", "rate_limit"], capture_output=True, text=True, timeout=30, env=env)   # env: the identity that hit it
         res = json.loads(r.stdout).get("resources") or {}
         ts = [v.get("reset") or 0 for v in res.values() if isinstance(v, dict) and v.get("remaining") == 0]
         if ts and max(ts) > now: return float(max(ts))
     except Exception: pass
     return now + 900
-def gh_rl_record(err, f=None):
+def gh_rl_record(err, f=None, env=None):
     """err is a GitHub rate limit -> record the reset in GH_RL_FILE (keeping 'since' of an ongoing streak) and return True"""
     if not GH_RL_RE.search(err or ""): return False
-    old = gh_rl_state(f); until = min(_gh_rl_reset(err), _epoch() + GH_RL_MAX_S)
+    old = gh_rl_state(f); until = min(_gh_rl_reset(err, env), _epoch() + GH_RL_MAX_S)
     write_atomic(f or GH_RL_FILE, json.dumps({"since": old.get("since") or _epoch(), "until": until, "error": err[:200]}))
     return True
 def gh_rl_clear(f=None):
@@ -93,26 +93,73 @@ GH_APP_REPOS = {"PraiseZhu/panoptes"}      # + every PraiseZhu/* repo (task B: i
 def gh_app_own_repo(repo): return bool(repo) and (repo in GH_APP_REPOS or (repo.count("/") == 1 and repo.split("/")[0] == "PraiseZhu"))
 def gh_app_flag(): return f"{PI_STATE}/gh-app-enabled"
 def gh_app_rl_file(): return f"{PI_STATE}/gh-ratelimit-praise-qa.json"
-def gh_target_repo(args):
-    """OWNER/REPO a gh call targets: -R/--repo X, `repo view|clone X`, or `api [/]repos/OWNER/REPO/...`; None if unknown"""
+# #214 r4 blocker A: gh takes the LAST -R/--repo when one is repeated (`gh pr view 1 -R a -R b` -> b) while a guard reading the first
+# one would check a different repo. Any second repo selector, in any spelling (-R X, -RX, -R=X, --repo X, --repo=X, mixed), or a
+# github.com/O/R/pull/N selector next to an -R naming another repo, is refused by the red line, the product-write guard and the
+# update-branch lookup, for every caller (gh_repo_selector_dup). gh_target_repo returns None for such a call (never a guessed repo).
+RED_MULTI = "more than one repo selector (-R/--repo repeated, or a URL selector with another -R): gh uses the last, refused"
+def gh_repo_selectors(args):
+    """every -R/--repo value of a non-`api` gh call, in order (every token is scanned; a selector's value is consumed with it)"""
+    a = list(args); out = []; i = 0
+    if a[:1] == ["api"]: return out
+    while i < len(a):
+        x = a[i]; i += 1
+        if x in ("-R", "--repo"): out.append(a[i] if i < len(a) else ""); i += 1
+        elif x.startswith("--repo="): out.append(x.split("=", 1)[1])
+        elif x.startswith("-R") and len(x) > 2 and not x.startswith("--"): out.append(x[2:].lstrip("="))
+    return out
+def _url_selector(args):
+    for x in list(args)[1:]:
+        m = re.match(r"^(?:https?://)?(?:www\.)?github\.com/([^/\s]+/[^/\s]+)/(?:pull|issues|actions/runs)/\d+", x, re.I)
+        if m: return m.group(1)
+    return None
+def gh_repo_selector_dup(args):
+    """RED_MULTI when the call names its repo more than once (see above), else None"""
     a = list(args)
+    if a[:1] == ["api"]: return None   # gh api has no -R: gh_api_parse refuses it as an unknown flag
+    sel = gh_repo_selectors(a)
+    if len(sel) > 1: return f"{RED_MULTI} ({len(sel)} -R/--repo)"
+    u = _url_selector(a)
+    if u and sel and sel[0].lower().split("/")[-2:] != u.lower().split("/")[-2:]: return f"{RED_MULTI} (URL selector + -R)"
+    return None
+def api_placeholder(r):
+    """True when a repos/O/R owner or name is a gh placeholder ({owner}/{repo} or :owner/:repo): gh fills it from GH_REPO / the cwd"""
+    return "{" in r or any(seg.startswith(":") for seg in r.split("/"))
+def gh_target_repo(args):
+    """OWNER/REPO a gh call targets: a github.com/O/R/(pull|issues)/N selector, -R/--repo X (also -RX, -R=X, --repo=X), `repo
+    view|clone X`, or `api <path>` naming repos/OWNER/REPO (full URLs, case and query strings normalized); None if unknown.
+    `repos/{owner}/{repo}` placeholders -> None (gh fills them from GH_REPO / the cwd, which the wrapper resolves)."""
+    a = list(args)
+    if gh_repo_selector_dup(a): return None   # r4 A: never guess which of two repos gh will use
+    if a[:1] != ["api"]:
+        u = _url_selector(a)
+        if u: return u
     for i, x in enumerate(a):
         if x in ("-R", "--repo") and i + 1 < len(a): return a[i + 1]
         if x.startswith("--repo="): return x.split("=", 1)[1]
+        if x.startswith("-R") and len(x) > 2 and not x.startswith("--"): return x[2:].lstrip("=")
     if a[:1] == ["repo"] and len(a) > 2 and a[1] in ("view", "clone") and "/" in a[2]: return a[2]
     if a[:1] == ["api"]:
-        for x in a[1:]:
-            m = re.match(r"/?repos/([^/\s]+/[^/?\s]+)", x)
-            if m: return m.group(1)
+        try: p = gh_api_parse(a)
+        except GhUnparseable: return None
+        r = api_path_repo(p["path"])
+        if r: return None if api_placeholder(r) else r   # r4 B: :owner/:repo too
+        if p["path"].lower() == "graphql":   # 11-04: graphql names its repo in the variables (owner/name, o/n)
+            try: _, vs = gql_query_of(a)
+            except GhUnparseable: return None
+            o = next((vs[k] for k in ("owner", "o", "repoOwner") if vs.get(k)), None)
+            n = next((vs[k] for k in ("name", "n", "repo", "repoName") if vs.get(k)), None)
+            if o and n and "/" not in o and "/" not in n: return f"{o}/{n}"
     return None
 # P3 (11-04, PM 17:00): product-repo READS too, while $PI_STATE/gh-app-product-enabled also exists. Product WRITES stay on the PAT:
 # outbound/prfix dedupe their fix PRs with author:@me and gate pushes on author == PraiseZhu, so an App-authored product PR would be
 # invisible to them (duplicate PRs). Those gates move first, then writes.
 GH_APP_PRODUCT_REPOS = {"xindong/mivo-canvas-plugin"}
 def gh_app_product_flag(): return f"{PI_STATE}/gh-app-product-enabled"
-def gh_app_wanted(args):
-    """True when this call should use the App token (see above and task B below)"""
-    repo = gh_target_repo(args)
+def gh_app_wanted(args, repo=None):
+    """True when this call should use the App token (see above and task B below). repo: explicit target for calls that do not name
+    one (`api rate_limit` checks the quota of the identity that will serve the repo)"""
+    repo = repo or gh_target_repo(args)
     if not os.path.exists(gh_app_flag()): return False
     if any("@me" in x or re.match(r"/?user(?:$|/)", x) for x in args[1:]): return False   # identity-dependent (also inside --search): PAT
     if repo in GH_APP_PRODUCT_REPOS:
@@ -151,19 +198,304 @@ def gh_app_product_writes_on(): return os.path.exists(gh_app_flag()) and os.path
 # Red lines (Praise, unchanged): only Praise merges product PRs, and no bot edits a product PR body. No code path does either, on ANY
 # identity: gh() refuses these before a token is chosen.
 class RedLine(RuntimeError): pass
-def gh_red_line(args):
-    """-> reason if args would merge a product PR or edit a product PR body/title, else None"""
-    if gh_target_repo(args) not in GH_APP_PRODUCT_REPOS: return None
-    a = list(args)
-    if a[:2] == ["pr", "merge"]: return "merging a product PR (only Praise merges)"
-    if a[:2] == ["pr", "edit"] and any(x.split("=", 1)[0] in ("--body", "-b", "--body-file", "-F", "--title", "-t") for x in a[2:]):
-        return "editing a product PR body"
+RED_MERGE = "merging a product PR (only Praise merges)"; RED_EDIT = "editing a product PR body/title"
+RED_BRANCH = "moving a product branch (update-branch / merges / git refs: only Praise)"; RED_PARSE = "gh request that cannot be parsed or classified (fail closed)"
+_ID_LIT = re.compile(r"\b\w*Ids?\s*:\s*(\[[^\]]*\]|\"[^\"]*\"|\$\w+)")
+_ID_KV = re.compile(r"[\"']?\w*Ids?[\"']?\s*[:=]\s*(\[[^\]]*\]|[\"'][^\"']*[\"'])")
+def gql_node_ids(doc, vs):
+    """node ids a mutation document carries: `xxxId: "..."` literals, `xxxId: $v` variables, and xxxId keys inside JSON/dict
+    variables (`input: $input`). -> list, or None when an id-ish argument cannot be read (fail closed)"""
+    ids, bad = [], False
+    def take(v):
+        got = re.findall(r"[\"']([^\"']+)[\"']", v) if v[:1] in "[\"'" else [v]
+        ids.extend(x for x in got if x)
+    for v in _ID_LIT.findall(doc):
+        if v.startswith("$"):
+            if v[1:] in vs and vs[v[1:]]: take(str(vs[v[1:]])) if str(vs[v[1:]])[:1] in "[\"'" else ids.append(str(vs[v[1:]]))
+            else: bad = True
+        else: take(v)
+    for k, v in vs.items():
+        if re.search(r"Ids?$", k) and v and not str(v)[:1] in "[{": ids.append(str(v))
+        for m in _ID_KV.findall(str(v)): take(m)
+    for m in re.findall(r"\binput\s*:\s*\$(\w+)", doc):
+        if m not in vs: bad = True
+    return None if bad else list(dict.fromkeys(ids))
+GQL_NODE_Q = ("query{nodes(ids:%s){__typename ... on Repository{nameWithOwner} ... on PullRequest{repository{nameWithOwner}}"
+              " ... on Issue{repository{nameWithOwner}} ... on Ref{repository{nameWithOwner}} ... on IssueComment{repository{nameWithOwner}}"
+              " ... on PullRequestReview{repository{nameWithOwner}} ... on PullRequestReviewComment{repository{nameWithOwner}}}}")
+def gql_node_repos(ids):
+    """[OWNER/REPO or None per id] by one `nodes(ids:)` query on the real gh (never the wrapper) with the inherited login; any error
+    -> all None. Tests patch this."""
+    try:
+        r = subprocess.run([real_gh(), "api", "graphql", "-f", "query=" + GQL_NODE_Q % json.dumps(list(ids))], capture_output=True, text=True, timeout=30)
+        ns = (json.loads(r.stdout or "{}").get("data") or {}).get("nodes") or []
+    except Exception: return [None] * len(ids)
+    out = [((n or {}).get("nameWithOwner") or ((n or {}).get("repository") or {}).get("nameWithOwner")) for n in ns]
+    return (out + [None] * len(ids))[:len(ids)]
+def is_product_repo(r): return r in GH_APP_PRODUCT_REPOS or (r or "").lower().startswith("xindong/")
+def gql_ids_product(doc, vs):
+    """False = every node id resolves to a non-product repo; True = some id is product; None = no id / unresolvable"""
+    ids = gql_node_ids(doc, vs)
+    if not ids: return None
+    repos = gql_node_repos(ids)
+    if any(is_product_repo(r) for r in repos): return True
+    return None if any(r is None for r in repos) else False
+# ---- #214 acceptance round 2 (11-04, PM): ONE parser for `gh api`, and a DEFAULT-DENY product-repo write guard ----------------------
+# Every spelling gh accepts is parsed (-XPUT, -X=PUT, --method=put, -fk=v, -Fk=v, --raw-field=k=v, --field k=v, bool clusters such
+# as -iXPUT, full https://api.github.com/... URLs, query strings, %-escapes, case). A flag we do not know, a second endpoint, or a
+# body we cannot read (stdin without the wrapper's copy, an unreadable @file) raises GhUnparseable, and every guard refuses it.
+class GhUnparseable(ValueError): pass
+API_VALUE_FLAGS = {"X": "method", "method": "method", "f": "field", "raw-field": "field", "F": "field", "field": "field",
+                   "H": "header", "header": "header", "input": "input", "q": "jq", "jq": "jq", "t": "template", "template": "template",
+                   "hostname": "hostname", "p": "preview", "preview": "preview", "cache": "cache"}
+API_BOOL_FLAGS = {"i", "include", "paginate", "slurp", "silent", "verbose", "h", "help"}
+def gh_api_parse(args):
+    """`gh api ...` -> {method (upper, None if not given), path (normalized, case kept), fields [(k, v)], input (None | path | "-")}"""
+    a = list(args)[1:]; out = {"method": None, "fields": [], "input": None, "endpoint": []}
+    def put(name, v):
+        if name == "method": out["method"] = v.upper()
+        elif name == "field":
+            if "=" not in v: raise GhUnparseable(f"field without '=': {v[:40]}")
+            out["fields"].append(tuple(v.split("=", 1)))
+        elif name == "input": out["input"] = v
+    i = 0
+    while i < len(a):
+        x = a[i]; i += 1
+        if x == "--": out["endpoint"] += a[i:]; break
+        if x.startswith("--"):
+            k, eq, v = x[2:].partition("=")
+            if k in API_BOOL_FLAGS: continue
+            if k not in API_VALUE_FLAGS: raise GhUnparseable(f"unknown flag --{k}")
+            if not eq:
+                if i >= len(a): raise GhUnparseable(f"--{k} without a value")
+                v = a[i]; i += 1
+            put(API_VALUE_FLAGS[k], v); continue
+        if x.startswith("-") and len(x) > 1:
+            j = 1
+            while j < len(x):
+                c = x[j]; j += 1
+                if c in API_BOOL_FLAGS: continue
+                if c not in API_VALUE_FLAGS: raise GhUnparseable(f"unknown flag -{c}")
+                v = x[j:]
+                if v.startswith("="): v = v[1:]
+                if not x[j:]:
+                    if i >= len(a): raise GhUnparseable(f"-{c} without a value")
+                    v = a[i]; i += 1
+                put(API_VALUE_FLAGS[c], v); break
+            continue
+        out["endpoint"].append(x)
+    if len(out["endpoint"]) != 1: raise GhUnparseable(f"{len(out['endpoint'])} endpoints")
+    out["path"] = api_path(out.pop("endpoint")[0])
+    return out
+def api_path(ep):
+    """endpoint -> path without scheme/host (any host, GHE /api/v3), leading /, query string, fragment, %-escapes, // and trailing /"""
+    import urllib.parse
+    p = urllib.parse.unquote(ep.strip())
+    p = re.sub(r"^[a-z][a-z0-9+.-]*://[^/]*", "", p, flags=re.I)
+    p = re.split(r"[?#]", p, maxsplit=1)[0]
+    p = re.sub(r"/+", "/", p).strip("/")
+    return re.sub(r"^api/v3/", "", p, flags=re.I)
+def api_path_repo(path):
+    m = re.match(r"repos/([^/]+/[^/]+)", path, re.I)
+    return m.group(1) if m else None
+def api_target(p, hint=None):
+    """the repo a parsed REST call hits: repos/O/R in its path; repos/{owner}/{repo} or repos/:owner/:repo (#214 r4 B: gh substitutes
+    the colon form too, also :branch) -> hint (gh fills it from GH_REPO / cwd; None when unresolvable = fail closed); else None"""
+    r = api_path_repo(p["path"])
+    return (hint if api_placeholder(r) else r) if r else None
+def api_is_write(p): return bool(p["fields"] or p["input"] is not None or (p["method"] or "GET") not in ("GET", "HEAD"))
+GQL_MERGE_RE = re.compile(r"\b(mergePullRequest|enablePullRequestAutoMerge|enqueuePullRequest|mergeBranch|updatePullRequestBranch|updateRef|updateRefs)\s*\(")
+GQL_EDIT_RE = re.compile(r"\bupdatePullRequest\s*\(")
+def gql_query_of(args, read=open, stdin=None):
+    """the GraphQL document of `gh api graphql ...`: every query= field (also =@file and =@- from stdin) and --input FILE|- (JSON
+    {"query": ...} or raw); comments stripped, whitespace collapsed. -> (query, variables dict). stdin: the text the wrapper read from
+    fd 0 (None = not available). Unreadable stdin/file or an unparseable call -> GhUnparseable (callers refuse)."""
+    p = gh_api_parse(args); q, vs = [], {}
+    def body(src):
+        if src == "-":
+            if stdin is None: raise GhUnparseable("request body on stdin")
+            return stdin
+        try: return read(src).read()
+        except Exception as e: raise GhUnparseable(f"unreadable {src[:60]}") from e
+    for k, v in p["fields"]:
+        if v.startswith("@"): v = body(v[1:])
+        (q.append(v) if k == "query" else vs.__setitem__(k, v))
+    if p["input"] is not None:
+        raw = body(p["input"])
+        try:
+            d = json.loads(raw); q.append(str(d.get("query") or "")); vs.update({k: str(v) for k, v in (d.get("variables") or {}).items()})
+        except Exception: q.append(raw)
+    doc = re.sub(r"#[^\n]*", " ", "\n".join(q)); doc = re.sub(r"\s+", " ", doc)
+    return doc, vs
+def gql_mutation_fields(doc):
+    """the field names a mutation document calls (`name(`), minus the operation keyword"""
+    return {n for n in re.findall(r"\b([A-Za-z_]\w*)\s*\(", doc) if n not in ("mutation", "query", "subscription")}
+RP = r"(?:repos/[^/]+/[^/]+|repositories/\d+)"   # a repo-scoped REST prefix (by name or by numeric id)
+def gh_red_line(args, repo=None, read=open, stdin=None):
+    """-> reason if args would merge a product PR or move a product branch (merge, update-branch, merges, ref PATCH/POST/PUT/DELETE),
+    edit a product PR body/title, or cannot be parsed, else None. Every identity, every caller (allowlisted / PAT pass-through too),
+    lib.gh and the wrapper. repo: the caller's known target (the wrapper passes GH_REPO / the cwd's origin); a merge-class call whose repo
+    cannot be resolved at all is refused too (fail closed)."""
+    a = list(args); tgt = repo or gh_target_repo(a)
     if a[:1] == ["api"]:
-        path = next((x for x in a[1:] if re.match(r"/?repos/", x)), "")
-        meth = next((a[i + 1].upper() for i, x in enumerate(a) if x in ("-X", "--method") and i + 1 < len(a)), "")
-        if re.search(r"/pulls/\d+/merge$", path) and meth in ("PUT", ""): return "merging a product PR (only Praise merges)"
-        if re.search(r"/pulls/\d+$", path) and meth == "PATCH": return "editing a product PR body"
+        try: p = gh_api_parse(a)
+        except GhUnparseable as e: return f"{RED_PARSE} ({e})"
+        if p["path"].lower() == "graphql":
+            try: doc, vs = gql_query_of(a, read, stdin)
+            except GhUnparseable as e: return f"{RED_PARSE} (graphql: {e})"
+            merge, edit = GQL_MERGE_RE.search(doc), GQL_EDIT_RE.search(doc) and (re.search(r"\b(body|title)\s*:", doc) or any(k in vs for k in ("body", "title")))
+            if not (merge or edit): return None
+            # a mutation names its PR by node id, so cwd / GH_REPO / owner+name vars say nothing about the repo it hits: it runs only when
+            # EVERY node id it carries resolves (a `nodes` query) to a non-product repo; no id / unresolvable / product id -> refused.
+            if gql_ids_product(doc, vs) is False: return None
+            return (RED_MERGE if merge else RED_EDIT) + " (graphql, node id not resolved to a non-product repo)"
+        at = api_target(p, repo); path = p["path"].lower()
+        if at is not None and not is_product_repo(at): return None
+        if not api_is_write(p): return None
+        meth = p["method"] or "POST"; fields = {k for k, _ in p["fields"]}
+        if re.match(RP + r"/pulls/\d+/merge$", path): return RED_MERGE
+        if re.match(RP + r"/pulls/\d+/update-branch$", path): return RED_BRANCH + " (update-branch)"
+        if re.match(RP + r"/merges$", path): return RED_BRANCH + " (merges API)"
+        # git refs/objects writes move branches (PATCH refs -F force=true = updateRef). DELETE of a ref is a product WRITE refused by
+        # the wrapper (gh_product_write; janitor's product ref deletes stay refused there, PM ruling), not a lib.gh red line.
+        if re.match(RP + r"/git/", path) and meth != "DELETE": return RED_BRANCH + " (git refs/objects API)"
+        if re.match(RP + r"/pulls/\d+$", path) and meth != "GET": return RED_EDIT
+        if re.match(RP + r"/issues/\d+$", path) and meth != "GET" and (p["input"] is not None or {"title", "body"} & fields): return RED_EDIT + " (issues API)"
+        return None
+    dup = gh_repo_selector_dup(a)
+    if dup: return dup
+    product = is_product_repo(tgt); unknown = tgt is None
+    if not (product or unknown): return None
+    if a[:2] == ["pr", "merge"]: return RED_MERGE
+    if a[:2] == ["pr", "update-branch"]: return RED_BRANCH + " (gh pr update-branch)"
+    if a[:2] in (["pr", "edit"], ["issue", "edit"]) and any(re.match(r"^(--body|--body-file|--title)(=|$)|^-[btF]", x) for x in a[2:]):
+        return RED_EDIT
     return None
+# Product WRITES beyond the red lines (#214 2c, PM ruling; round 2: DEFAULT DENY). On the product repo -- or when the target is unknown
+# (the wrapper would mint the product installation for it) -- a call passes only if it matches PRODUCT_ALLOWED below. Everything else,
+# including any gh subcommand or REST/graphql spelling nobody listed, is refused. No enumeration of bad spellings to keep up to date.
+RED_WRITE = "writing to the product repo (not on the product-write allowlist)"
+PRODUCT_READ_CMDS = {"pr": {"view", "list", "status", "diff", "checks", "checkout"}, "issue": {"view", "list", "status"},
+                     "run": {"view", "list", "watch", "download"}, "workflow": {"view", "list"}, "release": {"view", "list", "download"},
+                     "repo": {"view", "clone"}, "label": {"list"}, "cache": {"list"}, "search": None, "browse": None, "status": None}
+NON_REPO_CMDS = {"auth", "config", "version", "--version", "help", "--help", "completion", "alias", "extension", "extensions", "ext", "gist", "org"}   # alias/extension writes + auth token: gh_wrapper.cli_refusal
+PRODUCT_WRITE_EXCUSABLE = frozenset({("issue", "create"), ("issue", "comment"), ("issue", "close"), ("pr", "comment")})   # never pr close/review
+REVIEW_PR_CMDS = frozenset({("issue", "comment"), ("pr", "comment"), ("pr", "review")})   # B5 ruling: review-pr may approve
+REVIEW_PR_REST = re.compile(r"repos/[^/]+/[^/]+/(issues/\d+/comments|pulls/\d+/comments(/\d+/replies)?|pulls/\d+/reviews"
+                            r"(/\d+(/events|/dismissals)?)?)$")
+REVIEW_PR_REST_METHODS = ("POST", "PUT")
+ACTIONS_RERUN = re.compile(r"repos/[^/]+/[^/]+/actions/(runs/\d+/(rerun|rerun-failed-jobs)|jobs/\d+/rerun)$")
+REVIEW_PR_GQL = frozenset({"addComment", "addPullRequestReview", "submitPullRequestReview", "addPullRequestReviewComment",
+                           "addPullRequestReviewThread"})
+def gh_product_write(args, repo=None, caller=None, read=open, excused=frozenset(), stdin=None):
+    """-> reason unless args are on the product-write allowlist, else None. Applies when the target is the product repo or unknown
+    (graphql mutations: unless every node id resolves to a non-product repo). Allowed: reads (gh read subcommands, REST without method
+    /fields/body, graphql without a mutation); gh pr create --draft; gh pr ready (--undo too); gh run rerun and REST POST actions/runs/N/rerun(-failed-jobs), actions/jobs/N/rerun;
+    excused: the caller x `gh <noun> <verb>` exceptions (gh_wrapper.PRODUCT_WRITE_EXCEPTIONS, within PRODUCT_WRITE_EXCUSABLE);
+    caller review-pr-*: comments and reviews (approve included), gh / REST / graphql."""
+    a = list(args); review_pr = (caller or "").startswith("review-pr-")
+    if a[:1] == ["api"]:
+        try: p = gh_api_parse(a)
+        except GhUnparseable as e: return f"{RED_PARSE} ({e})"
+        path = p["path"].lower()
+        if path == "graphql":
+            try: doc, vs = gql_query_of(a, read, stdin)
+            except GhUnparseable as e: return f"{RED_PARSE} (graphql: {e})"
+            if not re.search(r"\bmutation\b", doc): return None
+            if review_pr and gql_mutation_fields(doc) and gql_mutation_fields(doc) <= REVIEW_PR_GQL: return None
+            return None if gql_ids_product(doc, vs) is False else RED_WRITE + " (graphql mutation; node ids not all resolved to a non-product repo)"
+        at = api_target(p, repo)
+        if at is not None and not is_product_repo(at): return None
+        if not api_is_write(p): return None
+        if at is None and not re.match(r"repos/(\{|:)", path): return RED_WRITE + " (REST write whose target repo is unknown)"
+        # #214 r4 ruling C: of the Actions API only the three rerun endpoints (POST); dispatches, secrets, variables, permissions,
+        # cancel, ... are refused. GETs under /actions/ passed above (not a write).
+        if at is not None and ACTIONS_RERUN.match(path) and (p["method"] or "POST") == "POST": return None
+        if review_pr and (p["method"] or "POST") in REVIEW_PR_REST_METHODS and REVIEW_PR_REST.match(path): return None
+        return RED_WRITE + f" ({p['method'] or 'POST'} {path})"
+    noun = a[0] if a else ""
+    dup = gh_repo_selector_dup(a)
+    if dup: return dup
+    if noun in NON_REPO_CMDS: return None
+    tgt = repo or gh_target_repo(a)
+    if tgt is not None and not is_product_repo(tgt): return None
+    verb = a[1] if len(a) > 1 else ""
+    if noun in PRODUCT_READ_CMDS and (PRODUCT_READ_CMDS[noun] is None or verb in PRODUCT_READ_CMDS[noun]): return None
+    if (noun, verb) == ("pr", "create") and any(x in ("--draft", "-d") or x == "--draft=true" for x in a[2:]): return None
+    if (noun, verb) in (("pr", "ready"), ("run", "rerun")): return None   # r4 ruling D: `pr ready --undo` included
+    if (noun, verb) in excused and (noun, verb) in PRODUCT_WRITE_EXCUSABLE: return None
+    if review_pr and (noun, verb) in REVIEW_PR_CMDS: return None
+    return RED_WRITE + f" (gh {noun} {verb})".rstrip()
+# #214 r3 (PM ruling 1): the ONE update-branch exception. Caller pi/bin/outbound.py (exact realpath suffix, as PRODUCT_WRITE_EXCEPTIONS:
+# the wrapper's script_of(caller_chain()), lib.gh's own process script), shape `gh pr update-branch N` (no --rebase) or REST
+# PUT repos/<product>/pulls/N/update-branch (only expected_head_sha), and a live read of the PR through the real gh: headRefName
+# qa-fix/*, head repo == the product repo (no fork), baseRefName main. Anything else stays the red line (fail closed).
+UB_CALLER = "pi/bin/outbound.py"; UB_HEAD_PREFIX = "qa-fix/"; UB_BASE = "main"
+def update_branch_pr(args, repo=None):
+    """-> (pr, None) when args are an exception-shaped update-branch of the product repo, (None, why) when they are some other
+    update-branch of it, (None, None) when they are no product update-branch at all"""
+    a = list(args)
+    if a[:1] == ["api"]:
+        try: p = gh_api_parse(a)
+        except GhUnparseable: return None, None
+        m = re.match(r"repos/([^/]+/[^/]+)/pulls/(\d+)/update-branch$", p["path"], re.I)
+        if not m: return None, None
+        at = api_target(p, repo)
+        if at is not None and not is_product_repo(at): return None, None
+        if at != PRODUCT_REPO_UB: return None, f"update-branch target {at or 'unknown'} is not {PRODUCT_REPO_UB}"
+        if (p["method"] or "POST") != "PUT": return None, "update-branch not via PUT"
+        if p["input"] is not None or any(k != "expected_head_sha" for k, _ in p["fields"]): return None, "update-branch with a body/field other than expected_head_sha (rebase/update_method refused)"
+        return int(m.group(2)), None
+    if a[:2] != ["pr", "update-branch"]: return None, None
+    dup = gh_repo_selector_dup(a)   # r4 A: the lookup would check one repo and gh would update another
+    if dup: return None, dup
+    tgt = repo or gh_target_repo(a)
+    if tgt is not None and not is_product_repo(tgt): return None, None
+    if tgt != PRODUCT_REPO_UB: return None, f"update-branch target {tgt or 'unknown'} is not {PRODUCT_REPO_UB}"
+    rest, n, i = a[2:], None, 0
+    while i < len(rest):
+        x = rest[i]; i += 1
+        if x in ("-R", "--repo"): i += 1; continue
+        if x.startswith("--repo=") or (x.startswith("-R") and len(x) > 2): continue
+        if x.startswith("-"): return None, f"gh pr update-branch {x.split('=')[0]} refused (only the plain merge form)"
+        if n is not None or not x.isdigit(): return None, "gh pr update-branch needs exactly one PR number"
+        n = int(x)
+    if n is None: return None, "gh pr update-branch without a PR number"
+    return n, None
+PRODUCT_REPO_UB = REPO
+def is_ub_caller(script):
+    s = (script or "").replace("\\", "/")
+    return s == UB_CALLER or s.endswith("/" + UB_CALLER)
+def ub_lookup(n, env=None, run=subprocess.run):
+    """the PR's head/base through the REAL gh (never the wrapper; a read): -> dict, raises on any failure"""
+    r = run([real_gh(env), "pr", "view", str(int(n)), "-R", PRODUCT_REPO_UB, "--json", "headRefName,baseRefName,headRepository,headRepositoryOwner,isCrossRepository"],
+            capture_output=True, text=True, timeout=60, env=env)
+    if r.returncode != 0: raise RuntimeError(f"pr view #{n} failed")
+    return json.loads(r.stdout)
+def update_branch_exception(args, repo=None, script=None, lookup=None):
+    """-> "allow" (skip the red line and the product-write guard), a refusal reason, or None (not a product update-branch)"""
+    n, why = update_branch_pr(args, repo)
+    if n is None and why is None: return None
+    if not is_ub_caller(script): return f"{RED_BRANCH} (update-branch: caller {script or 'unknown'} is not {UB_CALLER})"
+    if why: return f"{RED_BRANCH} ({why})"
+    try: p = (lookup or ub_lookup)(n)
+    except Exception as e: return f"{RED_BRANCH} (update-branch #{n}: PR lookup failed: {e.__class__.__name__})"
+    p = p or {}
+    head = p.get("headRefName") or ""; base = p.get("baseRefName") or ""
+    hrepo = f"{(p.get('headRepositoryOwner') or {}).get('login') or ''}/{(p.get('headRepository') or {}).get('name') or ''}"
+    if not head.startswith(UB_HEAD_PREFIX): return f"{RED_BRANCH} (update-branch #{n}: head {head or '?'} is not {UB_HEAD_PREFIX}*)"
+    if p.get("isCrossRepository") is not False or hrepo.lower() != PRODUCT_REPO_UB.lower(): return f"{RED_BRANCH} (update-branch #{n}: head repo {hrepo} is not {PRODUCT_REPO_UB})"
+    if base != UB_BASE: return f"{RED_BRANCH} (update-branch #{n}: base {base or '?'} is not {UB_BASE})"
+    return "allow"
+def self_script():
+    """lib.gh's caller script: this process's argv[0], realpath'd (outbound.py when run as `python3 .../outbound.py`)"""
+    return os.path.realpath(sys.argv[0]) if sys.argv and sys.argv[0] else None
+def gh_reads_stdin(args):
+    """True when a `gh api` call takes a body from stdin (--input -, a field =@-): the wrapper reads it once, checks it and re-feeds it"""
+    if args[:1] != ["api"]: return False
+    try: p = gh_api_parse(args)
+    except GhUnparseable: return False
+    return p["input"] == "-" or any(v == "@-" for _, v in p["fields"])
 # Explicit identities (task B 4: no @me / `api user` anywhere). Our own PRs are authored by PraiseZhu (PAT, older) or by the App.
 PAT_LOGIN = "PraiseZhu"
 SELF_LOGINS = frozenset({PAT_LOGIN, "praise-qa[bot]", "app/praise-qa", "praise-qa"})   # REST login / gh --json author.login / slug
@@ -186,6 +518,22 @@ APP_LOGIN = "praise-qa[bot]"; APP_AUTHOR = "app/praise-qa"   # how the App shows
 def gh_app_writes_flag(): return f"{PI_STATE}/gh-app-writes-enabled"
 def gh_app_writes_ok(args): return os.path.exists(gh_app_writes_flag())
 def gh_app_writes_on(): return os.path.exists(gh_app_flag()) and os.path.exists(gh_app_writes_flag())
+# 11-04 (#214): PAT health checks bypass the box gh wrapper (pi/bin/gh-praise-qa on PATH as `gh`): the real binary by absolute path,
+# and the PAT explicitly (secrets GITHUB_TOKEN when it is a PAT, else the real gh's own hosts.yml login), never an installation token.
+WRAPPER_NAMES = ("gh-praise-qa", "gh_wrapper.py")
+def real_gh(env=None):
+    env = os.environ if env is None else env
+    if env.get("PRAISE_QA_REAL_GH"): return env["PRAISE_QA_REAL_GH"]
+    for d in (env.get("PATH") or "").split(os.pathsep):
+        c = os.path.join(d, "gh")
+        if os.path.isfile(c) and os.access(c, os.X_OK) and os.path.basename(os.path.realpath(c)) not in WRAPPER_NAMES: return os.path.realpath(c)
+    return "/usr/bin/gh"
+def pat_env(env=None):
+    env = dict(os.environ if env is None else env)
+    for k in ("GH_TOKEN", "GH_ENTERPRISE_TOKEN"): env.pop(k, None)
+    t = env.pop("GITHUB_TOKEN", None)
+    if t and not t.startswith("ghs_"): env["GH_TOKEN"] = t   # the PAT from secrets.env; an installation token is dropped
+    return env
 GIT_NET_READS = ("fetch", "ls-remote", "clone")
 def git_read_env(repo):
     """task B: env for a git network READ (fetch / ls-remote / clone) of repo: the App token through gh's credential helper (GIT_CONFIG_*
@@ -201,12 +549,12 @@ def git_push_env(repo):
     ident, env = gh_env(["repo", "clone", repo])   # "repo clone" is not a read: needs the (product-)writes flag
     if ident != "app": return [], None
     return ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"], env
-def gh_env(args):
+def gh_env(args, repo=None):
     """-> (identity "app"|"pat", env for subprocess or None = inherit). Minting failures fall back to the PAT with one masked line."""
-    if not gh_app_wanted(args): return "pat", None
+    if not gh_app_wanted(args, repo): return "pat", None
     try:
         import ghtoken
-        tok = ghtoken.token(gh_target_repo(args))
+        tok = ghtoken.token(repo or gh_target_repo(args))
     except Exception as e:
         try: import ghtoken as _g; msg = _g.mask(e)
         except Exception: msg = e.__class__.__name__
@@ -219,11 +567,13 @@ def gh_skip(job):
     u = gh_rl_until()
     if u: log(f"{job}: GitHub rate-limited until {dt.datetime.fromtimestamp(u, CST).strftime('%H:%M:%S')} CST, skipping GitHub steps")
     return bool(u)
-def gh(args, js=True, retries=1):
+def gh(args, js=True, retries=1, repo=None):
+    """repo: target for calls that name none (api rate_limit / graphql); picks the identity (and its rate-limit file) of that repo"""
     cmd = f"gh {' '.join(args[:2])}"
-    why = gh_red_line(args)
+    ub = update_branch_exception(args, repo, self_script())
+    why = None if ub == "allow" else (ub or gh_red_line(args, repo))
     if why: raise RedLine(f"{cmd}: refused, red line: {why}")
-    ident, env = gh_env(args)
+    ident, env = gh_env(args, repo)
     rlf = gh_app_rl_file() if ident == "app" else None   # None = GH_RL_FILE (the PAT's)
     u = gh_rl_until(f=rlf)
     if u: raise GhRateLimited(f"{cmd}: GitHub rate-limited until {dt.datetime.fromtimestamp(u, CST).strftime('%H:%M:%S')} CST (not sent)")
@@ -237,9 +587,9 @@ def gh(args, js=True, retries=1):
             return json.loads(r.stdout) if js else r.stdout
         err = (r.stderr or "").strip()
         if ident == "app" and re.search(r"HTTP 401|Bad credentials", err):
-            try: import ghtoken; ghtoken.invalidate(gh_target_repo(args))
+            try: import ghtoken; ghtoken.invalidate(repo or gh_target_repo(args))
             except Exception: pass
-        if gh_rl_record(err, rlf): raise GhRateLimited(f"{cmd}: {err[:300]} [{' '.join(args)[:120]}]")
+        if gh_rl_record(err, rlf, env): raise GhRateLimited(f"{cmd}: {err[:300]} [{' '.join(args)[:120]}]")
         if left and GH_TRANSIENT_RE.search(err): print(f"{cmd}: {err[:200]} -- retrying once", file=sys.stderr, flush=True); time.sleep(2); continue
         raise RuntimeError(f"{cmd}: {err[:300]} [{' '.join(args)[:120]}]")
 

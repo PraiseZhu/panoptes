@@ -484,7 +484,7 @@ def _gh_json(args, t):
     rlf = lib.gh_app_rl_file() if _ident == "app" else None
     if lib.gh_rl_until(f=rlf): raise lib.GhRateLimited(f"gh {' '.join(args[:3])} …: GitHub rate-limited (not sent)")
     r = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=t, stdin=subprocess.DEVNULL, env=_env)
-    if r.returncode and lib.gh_rl_record(r.stderr, rlf): raise lib.GhRateLimited(f"gh {' '.join(args[:3])} …: {(r.stderr or '').strip()[:300]}")
+    if r.returncode and lib.gh_rl_record(r.stderr, rlf, _env): raise lib.GhRateLimited(f"gh {' '.join(args[:3])} …: {(r.stderr or '').strip()[:300]}")
     if r.returncode: raise RuntimeError(f"gh {' '.join(args[:3])} …: {(r.stderr or '').strip()[:300]}")
     return json.loads(r.stdout)
 def pr_list():

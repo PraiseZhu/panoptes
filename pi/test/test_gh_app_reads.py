@@ -69,7 +69,7 @@ class T(unittest.TestCase):
         e, _ = self.run_gh(["pr", "list", "-R", PAN]); self.assertIsNone(e); self.assertEqual(self.runs[-1]["GH_TOKEN"], FAKE)
         e, _ = self.run_gh(["pr", "list", "-R", "xindong/mivo-canvas-plugin"]); self.assertIsInstance(e, lib.GhRateLimited)   # PAT call still skipped
         os.remove(lib.GH_RL_FILE)
-        with mock.patch.object(lib, "_gh_rl_reset", lambda err: lib._epoch() + 300):
+        with mock.patch.object(lib, "_gh_rl_reset", lambda err, env=None: lib._epoch() + 300):
             e, _ = self.run_gh(["pr", "list", "-R", PAN], rc=1, err="HTTP 403: API rate limit exceeded for installation")
         self.assertIsInstance(e, lib.GhRateLimited)
         self.assertTrue(os.path.exists(lib.gh_app_rl_file())); self.assertFalse(os.path.exists(lib.GH_RL_FILE), "App limit must not block PAT calls")

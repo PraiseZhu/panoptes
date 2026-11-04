@@ -265,7 +265,7 @@ def run_round(st):
     """round.mjs runRound (read-only). Returns summary dict."""
     s = {"global": None, "decisions": [], "pick": None, "writable": False, "g": {}, "held": None, "circuit": None, "stall": None}
     try:   # round.mjs rate reserve (shared classic-token budget)
-        rl = api("rate_limit")["resources"]
+        rl = gh(["api", "rate_limit"], repo=REPO)["resources"]   # the quota of the identity serving REPO (App pool while gh-app-merger-enabled)
         if rl["core"]["remaining"] < P["rateReserve"]["core"] or rl["graphql"]["remaining"] < P["rateReserve"]["graphql"]:
             s["skipped"] = "rate-budget"; return s
     except Exception: s["skipped"] = "rate-budget"; return s
