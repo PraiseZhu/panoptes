@@ -364,6 +364,9 @@ def main(argv, env=None, execve=os.execve, run=subprocess.run, caller=None, stdi
         log_allowlisted(name, argv)
         penv = lib.pat_env(env); gh = lib.real_gh(penv)
         return execve(gh, [gh] + list(argv), penv)
+    if lib.pat_rerun(argv, repo):   # G2 (Jasper): product CI rerun -> the PAT (the App has no Actions write); nothing else
+        penv = lib.pat_env(env); gh = lib.real_gh(penv)
+        return execve(gh, [gh] + list(argv), penv)
     if wrapper_on() and not (env.get("GH_TOKEN") or "").startswith("ghs_"):
         tok = app_token(repo, argv)
         if tok:

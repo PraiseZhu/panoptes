@@ -588,8 +588,26 @@ def search_repo(args):
         if r and (gh_app_own_repo(r) or r in GH_APP_PRODUCT_REPOS): return r
     return REPO_APP_DEFAULT
 REPO_APP_DEFAULT = "PraiseZhu/panoptes"
+# G2 (11-05, Jasper ruling): product-repo CI reruns are the ONE PAT exception (the App gets no Actions write). Exactly two shapes, target
+# repo resolved to the product repo (-R / --repo / URL, or repos/<product>/ in the REST path; unknown target -> no exception):
+#   gh run rerun [<id>] [--failed] [--job <id>] ...                         (noun "run", verb "rerun")
+#   gh api POST repos/<product>/actions/runs/<N>/rerun | .../runs/<N>/rerun-failed-jobs | .../jobs/<N>/rerun   (ACTIONS_RERUN, method POST)
+# run cancel / run delete / actions/runs/N/cancel, a GET on a rerun path, any other repo -> not this exception (App or PAT as before).
+def pat_rerun(args, repo=None):
+    a = list(args)
+    if gh_repo_selector_dup(a): return False
+    if a[:1] == ["api"]:
+        try: p = gh_api_parse(a)
+        except GhUnparseable: return False
+        path = api_path(p["path"]).lower()
+        if not api_is_write(p) or (p["method"] or "POST").upper() != "POST" or not ACTIONS_RERUN.fullmatch(path): return False
+        return _rerun_repo(api_path_repo(path))
+    if a[:2] != ["run", "rerun"]: return False
+    return _rerun_repo(repo or gh_target_repo(a))
+def _rerun_repo(r): return bool(r) and r.lower() in {x.lower() for x in GH_APP_PRODUCT_REPOS}
 def gh_env(args, repo=None):
     """-> (identity "app"|"pat", env for subprocess or None = inherit). Minting failures fall back to the PAT with one masked line."""
+    if pat_rerun(args, repo): return "pat", pat_env()   # G2: product CI rerun -> the PAT explicitly (an inherited ghs_ token is dropped)
     if not gh_app_wanted(args, repo): return "pat", None
     try:
         import ghtoken
