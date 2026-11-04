@@ -74,4 +74,16 @@ class Harden(unittest.TestCase):
         line = f"pushed {HEX} onto qa-fix/b (main {HEX[::-1]}) head={HEX}"   # unlabelled shas, and head= is not a secret label
         self.assertEqual(O.clip_err(RuntimeError(line), 300), line)
 
+LEGACY = {   # 11-04 #218 follow-up (accept-218/extra_cases.py): legacy 40-hex tokens, no gh prefix
+    "json token spaced": f'{{"token": "{HEX}"}}', "json access_token": f'{{"access_token":"{HEX}"}}', "json key": f'"key":"{HEX}"',
+    "GITHUB_TOKEN=": f"GITHUB_TOKEN={HEX}", "secret_key=": f"secret_key={HEX}", "bare Bearer": f"Bearer {HEX}",
+}
+class Legacy(unittest.TestCase):
+    def test_masked(self):
+        for name, line in LEGACY.items():
+            with self.subTest(name): self.assertNotIn(HEX, O.clip_err(RuntimeError(line), 200))
+    def test_shas_unmasked(self):
+        for line in (f'{{"sha":"{HEX}"}}', f"head={HEX}", f"commit {HEX}", f"sha:{HEX}", f'{{"head_sha": "{HEX}"}}'):
+            with self.subTest(line): self.assertEqual(O.clip_err(RuntimeError(line), 200), line)
+
 if __name__ == "__main__": unittest.main()
