@@ -239,14 +239,15 @@ const RULINGS = process.env.MIVO_QA_P2_RULINGS || '/workspace/fleet-standards/p2
 // nofix / closed hold a PR number (row without 指纹: the whole PR) or "<PR>:<fingerprint>" (row with 指纹, p2.py record --fp:
 // | 日期 | 报告 PR | 指纹 | 问题 | 裁决 | …; that finding only) -- same rows as finding_policy.ruling_rows. Rollback switch: the file
 // $PI_STATE/p2-fp-rulings-off (re-read every run) -> fingerprint rows count for their whole PR again.
-const fix2 = new Set(), nofix = new Set(), closed = new Set();  // closed = 「结案…」: out of needs_you (PM 2026-11-02 16:22 PST)
-const NOFIX = ['不修', '产品代码不修', '误报', 'P3', '已修'];  // + any 「结案…」(already fixed, no new ticket; p2.py record 结案)
+const fix2 = new Set(), nofix = new Set(), closed = new Set(), drop = new Set();  // drop = 不修 / 产品代码不修 / 误报 / P3: P2 row removed (已修 / 结案… keep the row, no_ticket)  // closed = 「结案…」: out of needs_you (PM 2026-11-02 16:22 PST)
+const NOFIX = ['不修', '产品代码不修', '误报', 'P3', '已修'];
+const DROP = ['不修', '产品代码不修', '误报', 'P3'];  // 11-05 #1409: 已修 / 结案… = fixed elsewhere -> keep the row (no_ticket), never drop it  // + any 「结案…」(already fixed, no new ticket; p2.py record 结案)
 const FP_OFF = fs.existsSync(path.join(process.env.PI_STATE || '/workspace/mivo-qa/pi', 'p2-fp-rulings-off'));
 const signed = (set, n, fp) => set.has(n) || set.has(`${n}:${fp}`);
 try { for (const line of fs.readFileSync(RULINGS, 'utf8').split('\n')) { const c = line.trim().replace(/^\||\|$/g, '').split('|').map(x => x.trim()); if (c.length >= 4 && /^#?\d+$/.test(c[1] || '')) {
   const n = +c[1].replace('#', ''), fpRow = /^mq1-[0-9a-z]+(-pr\d+)?$/.test(c[2]); if (fpRow && c.length < 5) continue;
   const v = fpRow ? c[4] : c[3], k = fpRow && !FP_OFF ? `${n}:${c[2].replace(/-pr\d+$/, '')}` : n;
-  if (v === '修') fix2.add(n); if (NOFIX.includes(v) || v.startsWith('结案')) nofix.add(k); if (v.startsWith('结案')) closed.add(k); } } }
+  if (v === '修') fix2.add(n); if (NOFIX.includes(v) || v.startsWith('结案')) nofix.add(k); if (v.startsWith('结案')) closed.add(k); if (DROP.includes(v)) drop.add(k); } } }
 catch { gaps.push(`p2-rulings.md 读不到（${RULINGS}），按没有裁决处理`); }
 // -> { sev, ticket }：sev = 台账要不要留这一行（null = 不留）；ticket = prfix 会不会派活（own_pr_ticket 非空）
 function ownTicket(x, n, pending) {
@@ -261,7 +262,8 @@ function ownTicket(x, n, pending) {
   if (nofix.has(`${n}:${x.fingerprint}`)) return null;  // 11-04: signed per-fingerprint no-fix row exempts that finding at any level; PR-wide rows stay P2-only (finding_policy.own_pr_ticket)
   if (sev === 'P2') {
     const unconfirmed = pending || !!x.pending_kind || String(x.verdict || '').toUpperCase() === 'PLAUSIBLE';
-    if (signed(nofix, n, x.fingerprint)) return null;
+    if (signed(drop, n, x.fingerprint)) return null;
+    if (signed(nofix, n, x.fingerprint)) return { sev, ticket: false };  // 已修 / 结案…: keep the row, no ticket
     return { sev, ticket: !unconfirmed };
   }
   return { sev, ticket: true };

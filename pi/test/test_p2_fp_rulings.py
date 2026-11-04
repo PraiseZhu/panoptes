@@ -37,6 +37,17 @@ class Switch(unittest.TestCase):
 
 
 class Policy(Switch):
+    def test_pr_wide_fixed_ruling_keeps_row_without_ticket(self):
+        # 11-05 #1409: own_pr_ticket(row=True) mirrors ownTicket -- 已修 / 结案… keep the row, no ticket; 不修 drops it.
+        txt = "# P2\n\n" + HDR + "| 2026-11-03 | #7 | 凭证写入失败 | 已修 | r |\n| 2026-11-03 | #8 | x | 结案 #1 | r |\n| 2026-11-03 | #9 | x | 不修 | r |\n"
+        nf, dr = F.no_fix_rulings(txt), F.drop_rulings(txt)
+        self.assertEqual(dr, {9})
+        for n in (7, 8):
+            self.assertEqual(F.own_pr_ticket(p2(A), n, set(), nofix=nf, drop=dr, row=True), {"sev": "P2", "ticket": False})
+            self.assertIsNone(F.own_pr_ticket(p2(A), n, set(), nofix=nf, drop=dr))   # still no prfix ticket
+        self.assertIsNone(F.own_pr_ticket(p2(A), 9, set(), nofix=nf, drop=dr, row=True))
+        self.assertEqual(F.own_pr_ticket(p2(A), 10, set(), nofix=nf, drop=dr, row=True), {"sev": "P2", "ticket": True})
+
     def test_fp_row_exempts_only_that_finding(self):
         nf = F.no_fix_rulings(ROWS)
         self.assertEqual(nf, {5, (1340, A)})
@@ -147,6 +158,15 @@ class BuildLedger(Switch):
 
     def test_switch_drops_the_whole_pr(self):
         self.switch_off(); self.assertEqual(self.keys(), [])
+
+    def test_pr_wide_fixed_ruling_keeps_row_no_ticket(self):
+        # 11-05 #1409: a PR-wide 已修 / 结案… row keeps the P2 row (no_ticket); 不修 / 误报 / P3 still drop it.
+        for v, kept in (("已修", True), ("结案（#1440 已修）", True), ("不修", False), ("误报", False), ("P3", False)):
+            open(self.rul, "w").write("# P2 裁决记录\n\n" + HDR + f"| 2026-11-03 | #1340 | 凭证写入失败 | {v} | r |\n")
+            doc = self.keys(); self.assertEqual(doc, [f"{REPO}#1340:{A}", f"{REPO}#1340:{B}"] if kept else [], v)
+            if kept:
+                rows = json.load(open(f"{self.qa}/ledger/daily/{DAY}.json"))["rows"]
+                self.assertTrue(all(r.get("no_ticket") for r in rows), v)
 
     def test_p1_fp_row_drops_that_p1_but_pr_wide_row_does_not(self):
         # 11-04 (JS ownTicket mirror of own_pr_ticket): fingerprint row exempts a P1 lead; a PR-wide row never exempts a P1.

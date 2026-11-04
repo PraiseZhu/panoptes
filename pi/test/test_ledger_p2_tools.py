@@ -78,7 +78,8 @@ class BuildLedger(Base):
         self.assertEqual(doc["summary"]["needs_you"], 1)
         ny = doc["needs_you"][0]
         self.assertEqual((ny["pr"], ny["severity"]), (100, "P1")); self.assertIn("确认结案", ny["reason"])
-        self.assertNotIn(300, {x["pr"] for x in doc["rows"]}, "结案 ruling: no row / ticket")
+        r300 = [x for x in doc["rows"] if x["pr"] == 300]   # 11-05 #1409: 结案 / 已修 keep the row, no ticket, not in needs_you
+        self.assertTrue(r300 and all(x.get("no_ticket") and not x.get("needs_human") for x in r300), "结案 ruling: row kept, no_ticket")
         os.environ["PI_QA_HOME"] = self.qa
         import ledger as LG; importlib.reload(LG)
         self.assertEqual(LG.check(doc, DAY), ([], ["GitHub 查询失败：None（修复 PR 未核对，标 unknown）"]) if not doc["github_check"].get("ok") else ([], []))

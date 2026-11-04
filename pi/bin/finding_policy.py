@@ -92,7 +92,7 @@ def effective_severity(pr, new_notice=False):
 
 # ---- our own PRs (Praise 2026-10-23: 只修自己的 PR，测出问题立刻修) ------------------------------------------------
 DISMISSED_RE = re.compile(r"false_positive|misreport|REJECTED", re.I)
-def own_pr_ticket(x, n, fix2, unified=False, nofix=frozenset(), pending=False):
+def own_pr_ticket(x, n, fix2, unified=False, nofix=frozenset(), pending=False, drop=None, row=False):
     """Praise 2026-10-23: 只修自己的 PR，测出问题立刻修。On an own PR every P0/P1 the tests raised is a ticket -- including
     待核实 items (pending_verification, unverified / PLAUSIBLE review, AI-test leads): prfix's first step writes a failing
     test, which IS the verification; no repro -> NOREPRO note, no PR. P2: a confirmed P2 (in findings, not pending, review
@@ -101,6 +101,8 @@ def own_pr_ticket(x, n, fix2, unified=False, nofix=frozenset(), pending=False):
     is no ticket (the ledger keeps the row). Coverage-only (coverage-gate / own-tests) is never a ticket since 2026-10-26 (coverage
     is info only: coverage_gate.blocking false; only a missed stated target, source stated-acceptance, is a P2). Excluded always: dismissed (误报 / REJECTED / pre-existing / flaky), qa-error (the test
     system's own failure -> infrafix lane), checks other than introduced. `unified` is kept for callers but no longer used.
+    11-05 (#1409): `drop` = the part of nofix ruled 不修 / 产品代码不修 / 误报 / P3 (drop_rulings; None = all of nofix, old
+    behaviour). row=True (build-ledger ownTicket mirror) -> {"sev", "ticket"} or None: 已修 / 结案… keep the P2 row, ticket False.
     Returns the severity to work at, or None. Shared by prfix.py (own_sev) and mivo-qa/ledger/build-ledger.mjs (ownTicket, JS copy)."""
     sev = x.get("severity") or x.get("severity_if_confirmed")
     if sev not in AUTHOR_SEV: return None
@@ -113,8 +115,12 @@ def own_pr_ticket(x, n, fix2, unified=False, nofix=frozenset(), pending=False):
     if (n, x.get("fingerprint")) in nofix: return None   # 11-04: a signed per-fingerprint no-fix ruling (p2.py record --fp) exempts that finding at any level (P0/P1 review leads too)
     if sev == "P2":
         unconfirmed = pending or bool(x.get("pending_kind")) or str(x.get("verdict") or "").upper() == "PLAUSIBLE"
-        if unconfirmed or n in nofix or (n, x.get("fingerprint")) in nofix: return None
-    return sev
+        ruled = n in nofix or (n, x.get("fingerprint")) in nofix
+        if not row: return None if unconfirmed or ruled else sev
+        d = nofix if drop is None else drop
+        if n in d or (n, x.get("fingerprint")) in d: return None
+        return {"sev": sev, "ticket": not (unconfirmed or ruled)}
+    return {"sev": sev, "ticket": True} if row else sev
 
 FP_CELL = re.compile(r"mq1-[0-9a-z]+(?:-pr\d+)?")
 def ruling_rows(text):
@@ -151,6 +157,11 @@ def no_fix_rulings(text):
     """P2 rulings in fleet-standards/p2-rulings.md that say no PR is needed: 不修 / 产品代码不修 / 误报 / P3 / 已修 (fixed elsewhere) / 结案….
     PR (whole PR) or (PR, fingerprint) (that finding only), see ruling_keys. Check a finding with `n in s or (n, fp) in s`."""
     return ruling_keys(text, _nofix)
+
+DROP_RULINGS = ("不修", "产品代码不修", "误报", "P3")   # 11-05 #1409: 已修 / 结案… keep the ledger row (no_ticket)
+def drop_rulings(text):
+    """The subset of no_fix_rulings that removes the P2 ledger row (不修 / 产品代码不修 / 误报 / P3); pass as own_pr_ticket(drop=)."""
+    return ruling_keys(text, lambda r: r in DROP_RULINGS)
 
 def no_fix_findings(text):
     """Signed rulings per finding: {"by_fp": {pr_fingerprint: "no_fix"|"fixed"}, "pr_wide": {PR: "no_fix"|"fixed"}}.
