@@ -538,6 +538,7 @@ def prfix_check(now, probs, wst=None):
         try: return (now - dt.datetime.fromisoformat(t.get("updated_at"))).total_seconds() / 3600
         except Exception: return 0.0
     for k, t in T.items():
+        if t.get("pr") and not t.get("action_key") or t.get("status") == "ruled_out": continue   # done by grok / closed by ruling (prfix --close-ruled)
         n, st_ = t.get("qa") or k.split(":")[0], t.get("status")
         what = f"你的 PR #{n} 上的一个问题（{t.get('sev') or ''}，编号 {(t.get('fp') or k.split(':', 1)[-1])[4:12]}）"
         if st_ == "running" and age_h(t) > 3:   # 10-24: a run now feeds every failed check back to the model (up to 4 fix rounds + pre-push rounds)
@@ -548,7 +549,7 @@ def prfix_check(now, probs, wst=None):
             probs[f"prfix:nopr:{k}"] = PN.item("action", "「修 PR bot」修好的修复 PR 没开出来", f"{what}已经修好、测过，要开修复 PR，但 {age_h(t):.0f} 小时了 PR 还没出现。",
                 "修好的代码上不去，这个问题会一直算「在修」。",
                 todo=PN.ask_session(f"prfix 工单 {k} 的开 PR 动作 {t.get('action_key')} {age_h(t):.0f} 小时没执行成功，看 out/outbound/ledger.json 和 outbound 日志（补丁打不上就重排这一单）"))
-        elif st_ in ("push_action_written", "pushed") and 2 < age_h(t) < 24 and t.get("action_key") not in stale and (L.get(t.get("action_key")) or {}).get("status") != "done":   # prfix --revise (10-24)
+        elif st_ in ("push_action_written", "pushed") and 2 < age_h(t) < 24 and t.get("action_key") not in stale and (st_ != "pushed" or t.get("action_key") in L) and (L.get(t.get("action_key")) or {}).get("status") != "done":   # prfix --revise (10-24)
             probs[f"prfix:nopush:{k}"] = PN.item("action", "「修 PR bot」修好的 CI 修正没推上去", f"修复 PR #{t.get('pr')} 的 CI 没过，bot 已经修好，但 {age_h(t):.0f} 小时了还没推到 PR 上。",
                 "这个修复 PR 会一直红着、转不了正式。",
                 todo=PN.ask_session(f"prfix --revise {t.get('pr')} 的推送动作 {t.get('action_key')} {age_h(t):.0f} 小时没执行成功，看 out/outbound/ledger.json 和 outbound 日志"))

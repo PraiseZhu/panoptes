@@ -32,9 +32,33 @@ class T(unittest.TestCase):
         t = {"rev:1724": {"pr": 1724, "qa": 1610, "kind": "revise", "status": "pushed", "action_key": "revise:1724:913953d0f647", "updated_at": self.old}}
         rep = "| job | key | type | to | result | detail |\n|---|---|---|---|---|---|\n| praise-pr | revise:1724:913953d0f647 | gh.pr.push-fix | gh push fix onto #1724 | stale:head moved |  |\n"
         self.assertEqual(self.keys(t, report=rep), [])
+    def test_empty_action_key_with_pr_no_alert(self):
+        t = {"rev:7": {"pr": 7, "status": "push_action_written", "action_key": "", "updated_at": self.old}}
+        self.assertEqual(self.keys(t), [])
+    def test_pushed_key_not_in_ledger_no_nopush_alert(self):
+        t = {"rev:1724": {"pr": 1724, "status": "pushed", "action_key": "revise:1724:913953d0f647", "updated_at": self.old}}
+        self.assertEqual(self.keys(t), [])
+    def test_ruled_out_no_alert(self):
+        t = {"1433:mq1-9be27e51512fbd075277": {"qa": 1433, "fp": "mq1-9be27e51512fbd075277", "status": "ruled_out", "action_key": "fixpr:1433:x:a2", "updated_at": self.old}}
+        self.assertEqual(self.keys(t, {"fixpr:1433:x:a2": {"status": "gave_up"}}), [])
+    def test_close_ruled_then_no_alert(self):
+        import prfix
+        rul = f"{self.tmp}/p2-rulings.md"; open(rul, "w").write("# r\n| 日期 | 报告 PR | 指纹 | 问题 | 裁决 |\n|---|---|---|---|---|\n"
+            "| 2026-11-04 | #1433 | mq1-9be27e51512fbd075277-pr1433 | e2e | 不修 | 误报 |\n")
+        k = "1433:mq1-9be27e51512fbd075277"; t = {k: {"qa": 1433, "fp": "mq1-9be27e51512fbd075277", "status": "pr_action_written", "action_key": "fixpr:a2", "updated_at": self.old},
+                                               "9:mq1-aaaa": {"qa": 9, "fp": "mq1-aaaa", "status": "queued"}}
+        os.makedirs(f"{self.tmp}/pp"); json.dump({"tickets": t}, open(f"{self.tmp}/pp/tickets.json", "w"))
+        saved = (prfix.OUT, prfix.RULINGS); prfix.OUT, prfix.RULINGS = f"{self.tmp}/pp", rul
+        try:
+            for _ in range(2): self.assertEqual(prfix.main(["--close-ruled", "--yes"]), 0)   # idempotent
+        finally: prfix.OUT, prfix.RULINGS = saved
+        got = json.load(open(f"{self.tmp}/pp/tickets.json"))["tickets"]
+        self.assertEqual((got[k]["status"], got[k]["ruling"], got[k]["ruling_source"]), ("ruled_out", "不修", "p2-rulings.md:4"))
+        self.assertEqual(got["9:mq1-aaaa"]["status"], "queued")
+        self.assertEqual(self.keys(got, {"fixpr:a2": {"status": "gave_up"}}), [])
     def test_real_problems_still_alert(self):
         t = {"9": {"qa": 9, "status": "pr_action_written", "action_key": "fixpr:9", "updated_at": self.old},
              "rev:8": {"pr": 8, "status": "pushed", "action_key": "revise:8:abc", "updated_at": self.old}}
-        self.assertEqual(self.keys(t, report="| praise-pr | revise:8:abc | gh.pr.push-fix | x | failed |  |\n"), ["prfix:nopr:9", "prfix:nopush:rev:8"])
+        self.assertEqual(self.keys(t, {"revise:8:abc": {"status": "failed"}}, report="| praise-pr | revise:8:abc | gh.pr.push-fix | x | failed |  |\n"), ["prfix:nopr:9", "prfix:nopush:rev:8"])
 
 if __name__ == "__main__": unittest.main()

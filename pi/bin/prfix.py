@@ -52,7 +52,7 @@ import lib
 import praise_notice as PN
 import workroot as W
 from git_identity import NOREPLY_EMAIL
-from finding_policy import notifiable, own_pr_ticket, no_fix_rulings, fix_authors
+from finding_policy import notifiable, own_pr_ticket, no_fix_rulings, fix_authors, ruling_rows, bare_fp, _nofix
 os.environ["PATH"] = "/usr/local/bin:" + os.environ.get("PATH", "")
 
 _E = os.environ.get
@@ -957,6 +957,36 @@ def stale_scan(tickets=None):
             rows.append({"path": None, "branch": b, "act": "delete" if r is False else "keep",
                          "why": "孤立的 prfix 分支（无 worktree、未推送）" if r is False else "孤立分支，远端有同名或没核实"})
     return rows
+
+RULED = "ruled_out"   # terminal: an open ticket whose finding fleet-standards/p2-rulings.md rules no-fix (--close-ruled)
+
+def ruled_tickets(doc, text, src):
+    """[(key, reason, source)] for tickets (not running, not yet ruled_out) a no_fix_rulings row covers (whole PR or PR+fp)."""
+    nofix = no_fix_rulings(text); line = {}
+    for i, ln in enumerate(text.splitlines(), 1):
+        for n, fp, r in ruling_rows(ln):
+            if _nofix(r): line.setdefault((n, bare_fp(fp) if fp else None), (i, r))
+    out = []
+    for k, t in (doc.get("tickets") or {}).items():
+        n, fp = t.get("qa"), t.get("fp") or (k.split(":", 1)[-1] if ":" in k else "")
+        if t.get("status") in (RULED, "running") or t.get("kind") == "revise" or not isinstance(n, int): continue
+        if n in nofix or (n, fp) in nofix:
+            i, r = line.get((n, fp)) or line.get((n, None)) or (0, "?")
+            out.append((k, r, f"{src}:{i}"))
+    return out
+
+def close_ruled(yes):
+    """--close-ruled [--yes]: move tickets covered by a no-fix P2 ruling to ruled_out (reason + ruling source). Idempotent."""
+    text = _read(RULINGS) if os.path.exists(RULINGS) else ""
+    print(f"# prfix 按裁决结案 {now_cst():%Y-%m-%d %H:%M} 北京（{'写入' if yes else '只列出，加 --yes 才写'}）")
+    with (tickets_locked() if yes else contextlib.nullcontext(load_tickets())) as doc:
+        rows = ruled_tickets(doc, text, os.path.basename(RULINGS))
+        for k, r, src in rows:
+            print(f"- {k}：{doc['tickets'][k].get('status')} -> {RULED}（{r}，{src}）")
+            if yes: doc["tickets"][k].update(status=RULED, ruling=r, ruling_source=src, pid=None, next_retry_at=None,
+                                             updated_at=now_cst().isoformat(timespec="seconds"))
+        if not rows: print("- 无")
+    print("RESULT " + json.dumps({"status": "closed" if yes else "listed", "n": len(rows)}, ensure_ascii=False)); return 0
 
 def cleanup_stale(yes):
     rows = stale_scan()
@@ -2309,6 +2339,7 @@ def main(argv=None):
     ap.add_argument("--supersedes", type=int, help="with --qa: replace closed, unmerged bot fix PR N carrying the same fingerprint (取代 #N)")
     ap.add_argument("--list", action="store_true"); ap.add_argument("--pending-json", action="store_true")
     ap.add_argument("--cleanup-stale", action="store_true"); ap.add_argument("--yes", action="store_true")
+    ap.add_argument("--close-ruled", action="store_true", help="tickets a no-fix P2 ruling covers -> ruled_out (lists; --yes writes)")
     ap.add_argument("--dry-run", action="store_true"); ap.add_argument("--base")
     ap.add_argument("--revise", type=int, help="our own draft fix PR N went red on GitHub CI: fix it (prwatch launches this)")
     ap.add_argument("--allow-sensitive", action="store_true", help="no-op since 10-25 (sensitive files no longer stop the bot); kept so old commands still run")
@@ -2316,6 +2347,7 @@ def main(argv=None):
     if A.fp and not A.qa: ap.error("--fp needs --qa")
     if A.supersedes and not A.qa: ap.error("--supersedes needs --qa")
     if A.cleanup_stale: return cleanup_stale(A.yes)
+    if A.close_ruled: return close_ruled(A.yes)
     if not (A.list or A.pending_json) and lib.gh_skip("prfix"): return 0   # 11-04: rate-limited -> no doomed run, no error ticket
     if A.revise:
         try: return revise(A)
