@@ -129,6 +129,22 @@ class G4NightlyEnv(unittest.TestCase):
         rc, env, err = self.child_env(bad)
         self.assertNotEqual(rc, 0); self.assertEqual(env, {}); self.assertIn("not running on the PAT", err)
 
+    def alert(self): return os.path.join(self.st, "out", "stdcheck", "alerts", "gh_app_token.json")
+
+    def test_mint_failure_writes_the_stdcheck_alert_and_recovery_clears_it(self):
+        """11-05 PM: the no-PAT-fallback exit must be visible: an alert in $PI_STATE/out/stdcheck/alerts (Jasper's brief reads it)"""
+        self.flags("gh-app-enabled", "gh-app-nightly-enabled")
+        bad = os.path.join(self.d, "bad.py"); open(bad, "w").write("import sys; sys.exit(2)\n")
+        self.child_env(bad); self.child_env(bad)
+        doc = json.load(open(self.alert()))
+        self.assertEqual((doc["check"], doc["consecutive_failures"], doc["owner"]), ("gh_app_token", 2, "Pi 线运维"))
+        self.assertIn("xindong/mivo-canvas-plugin", doc["error"]); self.assertTrue(doc["since"] <= doc["last"])
+        self.assertNotIn("ghs_", json.dumps(doc)); self.assertNotIn("ghp_", json.dumps(doc))
+        with isolation.isolated(PI_STATE=self.st, PI_GAPS_FILE=os.path.join(self.st, "gaps.json")):
+            import stdcheck
+            self.assertIn("gh_app_token", [a.get("check") for a in stdcheck.brief_facts("2026-11-05", "2026-11-04")["alerts"]])
+        rc, _, _ = self.child_env(); self.assertEqual(rc, 0); self.assertFalse(os.path.exists(self.alert()))
+
     def test_rollback_flag_off_is_the_old_pat(self):
         self.flags("gh-app-enabled")
         rc, env, _ = self.child_env(); self.assertEqual((rc, env["GH_TOKEN"]), (0, FAKE_PAT))
