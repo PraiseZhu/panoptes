@@ -31,8 +31,10 @@ def headroom_mb(t, mem=None, st=None):
     grow = sum(max(0, run_pk - sum(t[q][1] for q in tree(t, p))) for p in pys) + run_pk * len(waiting)
     disp = dispatch_runs(t)   # fleet Pi tasks share the same RAM: count them up to their peak too
     grow += sum(max(0, TASK_PEAK_MB - sum(t[q][1] for q in tree(t, p))) for p in disp)
-    pan = panoptes_procs(t)
-    if pan: grow += max(0, pan_pk - sum(t[p][1] for p in pan))
+    runs = panoptes_runs(t)
+    # 11-04 (headroom-1104 b): each running test up to its own peak (priority + catch-up at once = two tests, not one)
+    grow += sum(max(0, pan_pk - sum(t[q][1] for q in ps)) for ps in runs.values())
+    pan = bool(runs)
     if flag_on(TEST_RESERVE_OFF):                    # always room for the next merge test, whatever runs now --
         # but with nothing running the first fix is not stacked on a whole test peak (11-03: 9030 + 8687 MB > a 16 GB box)
         grow += pan_pk if (pan or pys or waiting or disp) else min(pan_pk, TEST_RESERVE_CAP_MB)

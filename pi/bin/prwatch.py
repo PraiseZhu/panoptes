@@ -312,7 +312,7 @@ def max_tests():
 
 
 def headroom_mb_1103(t, mem=None, st=None):
-    """the 11-03 headroom_mb, verbatim (rollback target of RESERVE_1104_OFF; test_headroom_1104 checks identical decisions)"""
+    """main's headroom_mb (11-03 rule + #208 per-run test peaks), verbatim (rollback target of RESERVE_1104_OFF; test_headroom_1104 checks identical decisions)"""
     run_pk, pan_pk = learned(st, "fix", RUN_PEAK_MB), learned(st, "panoptes", PANOPTES_PEAK_MB)
     pys, waiting = prfix_runs(t)
     grow = sum(max(0, run_pk - sum(t[q][1] for q in tree(t, p))) for p in pys) + run_pk * len(waiting)
