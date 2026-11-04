@@ -120,7 +120,13 @@ function saveState(file, state) {
 }
 
 // 主流程。runOne(pr) 返回子进程退出码；gh / 时钟 / 目录都可注入，便于测试。
-export function catchUp({ repo, skipBaseBranches = registrySkip(), mainOnly: mo = mainOnly(), now = new Date(), reportsDir = REPORTS_DIR, mergedDir = join(reportsDir, 'merged'), list = (r, d) => listMergedPrs(r, d), runOne, maxAttempts = MAX_ATTEMPTS, active = () => activeRunPrs(), docsOnly = () => false }) {
+// backlog (older-day, non-docs) gaps drained per catch-up round; PANOPTES_CATCHUP_MAX_BACKLOG overrides (0 = none, today's only)
+export function backlogCap(env = process.env) {
+  const v = Number.parseInt(env.PANOPTES_CATCHUP_MAX_BACKLOG ?? '', 10)
+  return Number.isFinite(v) && v >= 0 ? v : 2
+}
+
+export function catchUp({ repo, skipBaseBranches = registrySkip(), mainOnly: mo = mainOnly(), now = new Date(), reportsDir = REPORTS_DIR, mergedDir = join(reportsDir, 'merged'), list = (r, d) => listMergedPrs(r, d), runOne, maxAttempts = MAX_ATTEMPTS, active = () => activeRunPrs(), docsOnly = () => false, maxBacklog = backlogCap() }) {
   const days = catchUpDays(now)
   const merged = list(repo, days)
   const sFile = statePath(reportsDir)
@@ -150,10 +156,20 @@ export function catchUp({ repo, skipBaseBranches = registrySkip(), mainOnly: mo 
   for (const g of gaps) { try { g.docs_only = !!docsOnly(g) } catch { g.docs_only = false } }
   // 11-03: then main before integration / feature branches, so a burst of branch merges never delays main
   const isMain = (g) => Number(g.base_ref == null || g.base_ref === 'main')
-  gaps.sort((a, b) => Number(b.docs_only) - Number(a.docs_only) || isMain(b) - isMain(a))
-  if (!gaps.length) { if (existsSync(sFile)) saveState(sFile, state); return { status: 'nothing-to-do', days, gaps: [], in_progress: inProgress, skipped } }
+  // 11-04 (late-1609-1618 #3): SLA order. A merge from today (Shanghai) can still make its merge-to-test SLA, yesterday's backlog
+  // cannot: today's gaps run before yesterday's (#1618 waited ~4 h behind four 11-02 backlog PRs). Within a day: main first, oldest first.
+  const today = days[days.length - 1]
+  const isToday = (g) => Number(g.day === today)
+  gaps.sort((a, b) => Number(b.docs_only) - Number(a.docs_only) || isToday(b) - isToday(a) || isMain(b) - isMain(a))
+  // and at most maxBacklog non-docs backlog (older-day) gaps per round; the rest wait for the next tick, after that tick's fresh merges
+  const deferred = []
+  { let n = 0
+    const kept = []
+    for (const g of gaps) { if (!g.docs_only && g.day !== today && ++n > maxBacklog) deferred.push(g.number); else kept.push(g) }
+    gaps.splice(0, gaps.length, ...kept) }
+  if (!gaps.length) { if (existsSync(sFile)) saveState(sFile, state); return { status: 'nothing-to-do', days, gaps: [], deferred_backlog: deferred, in_progress: inProgress, skipped } }
 
-  const result = { schema: 'mivo-qa-catch-up/v1', repo, days, started_at: toShanghaiIso(now), gaps: gaps.map((g) => ({ number: g.number, day: g.day, merge_sha: g.merge_sha, reason: g.gap.reason, docs_only: g.docs_only, base_ref: g.base_ref ?? null })), in_progress: inProgress, skipped, runs: [],
+  const result = { schema: 'mivo-qa-catch-up/v1', repo, days, started_at: toShanghaiIso(now), gaps: gaps.map((g) => ({ number: g.number, day: g.day, merge_sha: g.merge_sha, reason: g.gap.reason, docs_only: g.docs_only, base_ref: g.base_ref ?? null })), deferred_backlog: deferred, in_progress: inProgress, skipped, runs: [],
     system_health: { status: 'ok', gave_up: [], qa_tool_failures: [] } }
   for (const g of gaps) {
     const key = String(g.number)

@@ -59,7 +59,7 @@ function pipelineErrorChild (reportsDir) {
     return 3
   }
 }
-const run = (reportsDir, runOne) => catchUp({ repo: 'xindong/mivo-canvas-plugin', now: NOW, reportsDir, list: () => PRS, runOne, active: () => new Set() })
+const run = (reportsDir, runOne) => catchUp({ repo: 'xindong/mivo-canvas-plugin', now: NOW, reportsDir, list: () => PRS, runOne, active: () => new Set(), maxBacklog: Infinity })   // attempt semantics, not the 11-04 per-round backlog cap
 
 test('补测：子运行反复 exit 3（QA 工具故障，PR 一个测试都没跑）不累计尝试、不放弃，工具恢复后照常补上', () => {
   const reportsDir = fixture()
