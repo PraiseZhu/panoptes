@@ -134,3 +134,8 @@ $P --status [--caller <名>]
 改不了的包括：panoptes 部署签出（bot 自己的代码）、人的签出、别的单子的工作树、`/workspace/mivo-qa/pi` 的开关和台账、家目录。
 2026-10-24 实测：mivo 工作树里 vitest、eslint、tsc、git add/stash 在沙箱内外结果一致；一次真实模型调用能在工作树里写文件，写 `/workspace/panoptes` 被拒。
 单测 `test/test_model_env.py`（机器允许 bwrap 时会真的跑一次，按真实磁盘上的结果判断）。`PI_NO_SANDBOX=1` 只用于排查问题。
+
+### stdcheck（11-05，每小时标准检查）
+`bin/stdcheck.py`，cron `:55`（`run.sh stdcheck`，零模型）。开关 `$PI_STATE/stdcheck-enabled`：没有这个文件 = 什么都不做；回滚 = 删掉它。
+检查：合并后 10 分钟内开测（main / integration/* / release/*，mergewatch 日志 + reports/merged 时间）、panoptes 开着的 PR ≤3（App 身份）、Pi 修复 PR 同时 ≤2、pmnudge / 日报 / 台账跑成功（run.sh 记录 + 外发台账 + out/ledger）、Mac mini 盯梢心跳（`$PI_VIGIL_HEARTBEAT`，默认 `$PI_STATE/out/vigil/heartbeat.json`，15 分钟）。
+不达标写 `/workspace/fleet-standards/gaps-open.json`（id `stdcheck:<检查>:<对象>`，带 owner 和 deadline，幂等）；过期未关 → `out/stdcheck/escalations.json`；同一检查连续 2 次失败 → `out/stdcheck/alerts/<检查>.json`；每日通过率 `out/stdcheck/passrate-<日期>.json`。09:05 Jasper 简报读 `stdcheck.brief_facts()`（facts.standards_check）。
