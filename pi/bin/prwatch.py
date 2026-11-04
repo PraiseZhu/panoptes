@@ -309,11 +309,9 @@ def headroom_mb(t, mem=None, st=None):
     # 11-04 (headroom-1104 b): each running test up to its own peak (priority + catch-up at once = two tests, not one)
     grow += sum(max(0, pan_pk - sum(t[q][1] for q in ps)) for ps in runs.values())
     pan = bool(runs)
-    if flag_on(TEST_RESERVE_OFF):                    # room for the next merge test --
-        # 11-04 (headroom-1104 a): while a test runs, that test IS the reserved one (its remaining growth is counted above); the next
-        # merge waits for the slot or is memory-admitted by qa-slot.sh, so no second whole peak on top (was -4232 MB at 11:02).
-        # With nothing running the first fix is not stacked on a whole test peak (11-03: 9030 + 8687 MB > a 16 GB box).
-        if not pan: grow += pan_pk if (pys or waiting or disp) else min(pan_pk, TEST_RESERVE_CAP_MB)
+    if flag_on(TEST_RESERVE_OFF):                    # always room for the next merge test, whatever runs now --
+        # but with nothing running the first fix is not stacked on a whole test peak (11-03: 9030 + 8687 MB > a 16 GB box)
+        grow += pan_pk if (pan or pys or waiting or disp) else min(pan_pk, TEST_RESERVE_CAP_MB)
     elif not pan and (pys or waiting or disp): grow += pan_pk
     return (mem_mb() if mem is None else mem) - grow
 
@@ -440,6 +438,7 @@ def dispatch_fix(st):
     try: pending = json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else None   # whole stdout is one JSON array
     except ValueError: pending = None
     if pending is None:
+        if r.returncode == 0 and "rate-limited" in (r.stderr or ""): qlog("prfix --pending-json skipped: GitHub rate-limited"); return   # 11-04: a skip
         qlog(f"prfix --pending-json failed rc={r.returncode}: {(r.stderr or r.stdout)[-160:]}"); return
     pending = [x for x in pending if not x.get("reason_if_skipped")]   # running tickets and entries for a human carry a reason
     st["fix_inputs"] = sig; st["fix_more"] = len(pending) > 1; st["fix_pending"] = len(pending)

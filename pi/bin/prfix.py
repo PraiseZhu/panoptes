@@ -1445,6 +1445,9 @@ def pr_body(c, res, tests, src, pf, docs_ok, issue_url, plat):
     return "\n".join(L)
 
 # ---------------------------------------------------------------- one ticket
+# git fetch / clone of a ref the remote no longer has (11-04 #200 follow-up 1)
+BASE_GONE_RE = re.compile(r"couldn't find remote ref|Remote branch .* not found|no such ref|not our ref", re.I)
+
 def source_base(n):
     """baseRefName of source PR #n (11-04: #1682/#1710 went to main while their source #1597 is on integration/canvas-s2)."""
     try: b = (_gh_json(["pr", "view", str(n), "-R", REPO, "--json", "baseRefName"], 120) or {}).get("baseRefName")
@@ -1483,11 +1486,18 @@ def fix_one(c, A, d):
                 log("leftover of this ticket ->", drop_worktree(wd, None if A.dry_run else branch))
             src_base = source_base(n); res["base_ref"] = src_base   # 11-04: the fix PR targets the source PR's base, not always main
             rc, o = git("fetch", "-q", "origin", f"+refs/heads/{src_base}:refs/remotes/origin/{src_base}")
+            if rc and BASE_GONE_RE.search(o or ""):   # 11-04 #200 follow-up (1): a deleted base never comes back on retry
+                log("base gone", f"QA{n}", src_base, "-> hard stop, no PR")
+                raise Deterministic(f"base gone：源 PR #{n} 的 base {src_base!r} 在远端已不存在（分支被删），硬停不开 PR")
             if rc: raise Transient(f"git fetch 失败 rc={rc}：{tail(o, 2)}")
             base = A.base or git("rev-parse", f"origin/{src_base}")[1].strip()
             if not re.fullmatch(r"[0-9a-f]{40}", base):
                 rc, o = git("rev-parse", base); base = o.strip()
                 if rc or not re.fullmatch(r"[0-9a-f]{40}", base): raise Transient(f"base 解析失败：{tail(o, 2)}")
+            if A.base:   # 11-04 #200 follow-up (4): an explicit --base must lie on the source PR's base, or the fix PR targets one branch from another's code
+                rc, o = git("merge-base", "--is-ancestor", base, f"origin/{src_base}")
+                if rc == 1: raise Deterministic(f"--base {base[:12]} 不在源 PR #{n} 的 base {src_base!r} 上（不可达），硬停不开 PR")
+                if rc: raise Transient(f"--base 可达性检查失败 rc={rc}：{tail(o, 2)}")
             res["base"] = base
             rc, o = git("worktree", "add", "-q", *(["--detach", wd, base] if A.dry_run else ["-b", branch, wd, base]))
             if rc: raise Transient(f"worktree add 失败：{tail(o, 3)}")
@@ -2404,6 +2414,9 @@ def main(argv=None):
     try:
         try:
             ctx = gather()
+        except lib.GhRateLimited as e:   # 11-04 #200 follow-up (6): rate limit = skip this round (rc 0, no JSON), not a failure
+            if A.list or A.pending_json: print(f"prfix: skipped, GitHub rate-limited: {str(e)[:200]}", file=sys.stderr); return 0
+            return finish({"status": "error", "error": f"读输入失败：{str(e)[:300]}"}, 1, A)
         except Exception as e:
             if A.list or A.pending_json: print(f"prfix: 读输入失败：{e}", file=sys.stderr); return 1
             return finish({"status": "error", "error": f"读输入失败：{str(e)[:300]}"}, 1, A)

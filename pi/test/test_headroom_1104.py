@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""11-04 pi-work/headroom-1104 FINDINGS (a)(b) and the #201 rulings-path override. Local only, no processes, no network.
-(a) a running nightly is counted once (its remaining growth), not growth + a whole reserved peak
+"""11-04 pi-work/headroom-1104 FINDINGS (b) and the #201 rulings-path override. Local only, no processes, no network.
 (b) a priority run and a catch-up run at once are two tests (each up to its own peak), not one
 #201: PRFIX_RULINGS overrides prfix's P2 rulings path (read at call time)"""
 import os, sys, shutil, tempfile, unittest
@@ -23,16 +22,11 @@ class Headroom(unittest.TestCase):
         prwatch.TEST_RESERVE_OFF = f"{self.tmp}/prwatch-test-reserve-off"   # absent: reserve rule on (production)
     def tearDown(self): prwatch.TEST_RESERVE_OFF = self.saved; shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_a_running_nightly_is_not_counted_twice(self):
-        pk = prwatch.PANOPTES_PEAK_MB
-        t = {100: (1, 1400, PRIO)}
-        self.assertEqual(prwatch.headroom_mb(t, mem=9700), 9700 - (pk - 1400))
-
     def test_b_priority_and_catchup_are_two_runs(self):
         pk = prwatch.PANOPTES_PEAK_MB
         t = {100: (1, 1000, PRIO), 200: (1, 50, CU), 201: (200, 50, NODE), 202: (201, 900, CHILD)}
         self.assertEqual(sorted(prwatch.panoptes_runs(t)), [100, 200])                  # nested catch-up child is part of run 200
-        self.assertEqual(prwatch.headroom_mb(t, mem=20000), 20000 - (pk - 1000) - (pk - 1000))
+        self.assertEqual(prwatch.headroom_mb(t, mem=20000), 20000 - (pk - 1000) - (pk - 1000) - pk)   # + the 11-03 next-test reserve (unchanged here)
 
 
 class Rulings(unittest.TestCase):
