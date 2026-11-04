@@ -15,7 +15,7 @@ import base64, calendar, fcntl, json, os, re, subprocess, sys, tempfile, time, u
 
 APP_ID_DEFAULT = "5055491"
 INSTALLATIONS = {"PraiseZhu/panoptes": 164262283, "xindong/mivo-canvas-plugin": 178486896}
-OWNER_INSTALLATIONS = {"PraiseZhu": 164262283}   # every repo of this owner (all-repositories installation)
+OWNER_INSTALLATIONS = {"PraiseZhu": 164262283, "xindong": 178486896}   # every repo of the owner (11-04 PM: xindong/* -> 178486896)
 DEFAULT_REPO = "PraiseZhu/panoptes"
 MARGIN_S = 600          # re-mint when less than 10 min is left (tokens live 1 h)
 TOKEN_RE = re.compile(r"\b(gh[pousr]|github_pat)_[A-Za-z0-9_]+")

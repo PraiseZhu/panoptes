@@ -1,0 +1,3 @@
+#!/bin/sh
+# `gh` on PATH for the box (installed by 电脑运维 as /usr/local/bin/gh -> this file): pi/bin/gh_wrapper.py
+exec python3 "$(dirname "$(readlink -f "$0")")/gh_wrapper.py" "$@"

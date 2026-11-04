@@ -146,7 +146,18 @@ async function apiGet(path) {
 }
 
 // 写请求不自动重试：结果不明由发布器的回查逻辑处理
+// 11-04 red lines (= panoptes pi/bin/lib.py gh_red_line): never merge a product (xindong/*) PR, never edit a product PR/issue title/body
+export function redLine(method, path, body) {
+  const m = /^\/?repos\/([^/]+)\/([^/]+)\/(pulls|issues)\/(\d+)(\/merge)?\/?(\?.*)?$/.exec(path || '')
+  if (!m || m[1].toLowerCase() !== 'xindong') return null
+  if (m[3] === 'pulls' && m[5] && method.toUpperCase() === 'PUT') return 'merging a product PR (only Praise merges)'
+  if (!m[5] && method.toUpperCase() === 'PATCH' && body && ('title' in body || 'body' in body)) return 'editing a product PR body/title'
+  return null
+}
+
 async function apiSend(method, path, body) {
+  const why = redLine(method, path, body)
+  if (why) throw Object.assign(new Error(`refused, red line: ${why}`), { httpStatus: 0, redLine: true })
   const app = await appFor(repoOf(path))
   if (app) return httpJson(method, `${API}/${path}`, { token: app.token, body })
   const out = await gh(['api', '-X', method, '-H', 'Accept: application/vnd.github+json', path, '--input', '-'], { input: JSON.stringify(body) })

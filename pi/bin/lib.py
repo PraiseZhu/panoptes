@@ -61,7 +61,7 @@ def gh_rl_until(now=None, f=None):
     now = now or _epoch(); u = gh_rl_state(f).get("until") or 0
     if u > now + GH_RL_MAX_S + 60: log(f"{f or GH_RL_FILE} until is > {GH_RL_MAX_S}s away, ignored"); return 0
     return u if u > now else 0
-def _gh_rl_reset(err):
+def _gh_rl_reset(err, env=None):
     """epoch from Retry-After / X-RateLimit-Reset in err, else from `gh api rate_limit` (free, not counted), else a short default"""
     now = _epoch()
     m = re.search(r"retry-after:?\s*(\d+)", err, re.I)
@@ -70,16 +70,16 @@ def _gh_rl_reset(err):
     if m: return float(m.group(1))
     if re.search(r"secondary|abuse", err, re.I): return now + 60
     try:
-        r = subprocess.run(["gh", "api", "rate_limit"], capture_output=True, text=True, timeout=30)
+        r = subprocess.run(["gh", "api", "rate_limit"], capture_output=True, text=True, timeout=30, env=env)   # env: the identity that hit it
         res = json.loads(r.stdout).get("resources") or {}
         ts = [v.get("reset") or 0 for v in res.values() if isinstance(v, dict) and v.get("remaining") == 0]
         if ts and max(ts) > now: return float(max(ts))
     except Exception: pass
     return now + 900
-def gh_rl_record(err, f=None):
+def gh_rl_record(err, f=None, env=None):
     """err is a GitHub rate limit -> record the reset in GH_RL_FILE (keeping 'since' of an ongoing streak) and return True"""
     if not GH_RL_RE.search(err or ""): return False
-    old = gh_rl_state(f); until = min(_gh_rl_reset(err), _epoch() + GH_RL_MAX_S)
+    old = gh_rl_state(f); until = min(_gh_rl_reset(err, env), _epoch() + GH_RL_MAX_S)
     write_atomic(f or GH_RL_FILE, json.dumps({"since": old.get("since") or _epoch(), "until": until, "error": err[:200]}))
     return True
 def gh_rl_clear(f=None):
@@ -104,15 +104,21 @@ def gh_target_repo(args):
         for x in a[1:]:
             m = re.match(r"/?repos/([^/\s]+/[^/?\s]+)", x)
             if m: return m.group(1)
+        if "graphql" in [x.lstrip("/") for x in a[1:]]:   # 11-04: graphql names its repo in the variables (owner/name, o/n)
+            _, vs = gql_query_of(a)
+            o = next((vs[k] for k in ("owner", "o", "repoOwner") if vs.get(k)), None)
+            n = next((vs[k] for k in ("name", "n", "repo", "repoName") if vs.get(k)), None)
+            if o and n and "/" not in o and "/" not in n: return f"{o}/{n}"
     return None
 # P3 (11-04, PM 17:00): product-repo READS too, while $PI_STATE/gh-app-product-enabled also exists. Product WRITES stay on the PAT:
 # outbound/prfix dedupe their fix PRs with author:@me and gate pushes on author == PraiseZhu, so an App-authored product PR would be
 # invisible to them (duplicate PRs). Those gates move first, then writes.
 GH_APP_PRODUCT_REPOS = {"xindong/mivo-canvas-plugin"}
 def gh_app_product_flag(): return f"{PI_STATE}/gh-app-product-enabled"
-def gh_app_wanted(args):
-    """True when this call should use the App token (see above and task B below)"""
-    repo = gh_target_repo(args)
+def gh_app_wanted(args, repo=None):
+    """True when this call should use the App token (see above and task B below). repo: explicit target for calls that do not name
+    one (`api rate_limit` checks the quota of the identity that will serve the repo)"""
+    repo = repo or gh_target_repo(args)
     if not os.path.exists(gh_app_flag()): return False
     if any("@me" in x or re.match(r"/?user(?:$|/)", x) for x in args[1:]): return False   # identity-dependent (also inside --search): PAT
     if repo in GH_APP_PRODUCT_REPOS:
@@ -151,18 +157,63 @@ def gh_app_product_writes_on(): return os.path.exists(gh_app_flag()) and os.path
 # Red lines (Praise, unchanged): only Praise merges product PRs, and no bot edits a product PR body. No code path does either, on ANY
 # identity: gh() refuses these before a token is chosen.
 class RedLine(RuntimeError): pass
-def gh_red_line(args):
-    """-> reason if args would merge a product PR or edit a product PR body/title, else None"""
-    if gh_target_repo(args) not in GH_APP_PRODUCT_REPOS: return None
-    a = list(args)
-    if a[:2] == ["pr", "merge"]: return "merging a product PR (only Praise merges)"
-    if a[:2] == ["pr", "edit"] and any(x.split("=", 1)[0] in ("--body", "-b", "--body-file", "-F", "--title", "-t") for x in a[2:]):
-        return "editing a product PR body"
+RED_MERGE = "merging a product PR (only Praise merges)"; RED_EDIT = "editing a product PR body/title"
+GQL_MERGE_RE = re.compile(r"\b(mergePullRequest|enablePullRequestAutoMerge|enqueuePullRequest|mergeBranch)\s*\(")
+GQL_EDIT_RE = re.compile(r"\bupdatePullRequest\s*\(")
+def gql_query_of(args, read=open):
+    """the GraphQL document of `gh api graphql ...`: every -f/-F/--raw-field/--field query=... (also =@file) and --input FILE|- (JSON
+    {"query": ...} or raw); comments stripped, whitespace collapsed. -> (query, variables dict)"""
+    a, q, vs = list(args), [], {}
+    def val(x):
+        if x.startswith("@") and x != "@-":
+            try: return read(x[1:]).read()
+            except Exception: return ""
+        return x
+    for i, x in enumerate(a):
+        kv = None
+        if x in ("-f", "-F", "--raw-field", "--field") and i + 1 < len(a): kv = a[i + 1]
+        elif re.match(r"^(--raw-field|--field)=", x): kv = x.split("=", 1)[1]
+        elif re.match(r"^-[fF].+=", x): kv = x[2:]
+        if kv and "=" in kv:
+            k, v = kv.split("=", 1); v = val(v)
+            (q.append(v) if k == "query" else vs.__setitem__(k, v))
+        if x == "--input" and i + 1 < len(a) and a[i + 1] != "-":
+            try: raw = read(a[i + 1]).read()
+            except Exception: raw = ""
+            try:
+                d = json.loads(raw); q.append(str(d.get("query") or "")); vs.update({k: str(v) for k, v in (d.get("variables") or {}).items()})
+            except Exception: q.append(raw)
+    doc = re.sub(r"#[^\n]*", " ", "\n".join(q)); doc = re.sub(r"\s+", " ", doc)
+    return doc, vs
+def gh_red_line(args, repo=None, read=open):
+    """-> reason if args would merge a product PR or edit a product PR body/title, else None. repo: the caller's known target (the
+    wrapper passes the cwd's origin); a merge/edit whose repo cannot be resolved at all is refused too (fail closed)."""
+    a = list(args); tgt = repo or gh_target_repo(a)
+    product = tgt in GH_APP_PRODUCT_REPOS or (tgt or "").lower().startswith("xindong/")
+    unknown = tgt is None
+    if a[:2] == ["pr", "merge"] and (product or unknown): return RED_MERGE
+    if a[:2] in (["pr", "edit"], ["issue", "edit"]) and (product or unknown) and any(x.split("=", 1)[0] in ("--body", "-b", "--body-file", "-F", "--title", "-t") for x in a[2:]):
+        return RED_EDIT
     if a[:1] == ["api"]:
+        if "graphql" in [x.lstrip("/") for x in a[1:]]:
+            doc, vs = gql_query_of(a, read)
+            if not re.search(r"\bmutation\b", doc) and not (GQL_MERGE_RE.search(doc) or GQL_EDIT_RE.search(doc)): return None
+            # a mutation names its PR by node id: the repo is unknowable from the call, so (fail closed) only a call that names a
+            # non-product repo explicitly (-R/repo= of an own repo) may run it
+            owner = str(vs.get("owner") or vs.get("repoOwner") or ""); allowed = tgt is not None and not product and owner.lower() != "xindong"
+            if GQL_MERGE_RE.search(doc) and not allowed: return RED_MERGE + " (graphql)"
+            if GQL_EDIT_RE.search(doc) and re.search(r"\b(body|title)\s*:", doc) and not allowed: return RED_EDIT + " (graphql)"
+            if GQL_EDIT_RE.search(doc) and not allowed and any(k in vs for k in ("body", "title")): return RED_EDIT + " (graphql)"
+            return None
+        if not (product or unknown): return None
         path = next((x for x in a[1:] if re.match(r"/?repos/", x)), "")
         meth = next((a[i + 1].upper() for i, x in enumerate(a) if x in ("-X", "--method") and i + 1 < len(a)), "")
-        if re.search(r"/pulls/\d+/merge$", path) and meth in ("PUT", ""): return "merging a product PR (only Praise merges)"
-        if re.search(r"/pulls/\d+$", path) and meth == "PATCH": return "editing a product PR body"
+        meth = meth or next((x.split("=", 1)[1].upper() for x in a if x.startswith("--method=")), "")
+        if re.search(r"/pulls/\d+/merge/?(\?.*)?$", path) and meth in ("PUT", ""): return RED_MERGE
+        if re.search(r"/pulls/\d+/?(\?.*)?$", path) and meth == "PATCH": return RED_EDIT
+        fields = [a[i + 1].split("=", 1)[0] for i, x in enumerate(a) if x in ("-f", "-F", "--raw-field", "--field") and i + 1 < len(a)]
+        body_in = "--input" in a   # JSON body: contents unknown -> treat as an edit (fail closed)
+        if re.search(r"/issues/\d+/?(\?.*)?$", path) and meth == "PATCH" and (body_in or {"title", "body"} & set(fields)): return RED_EDIT + " (issues API)"
     return None
 # Explicit identities (task B 4: no @me / `api user` anywhere). Our own PRs are authored by PraiseZhu (PAT, older) or by the App.
 PAT_LOGIN = "PraiseZhu"
@@ -201,12 +252,12 @@ def git_push_env(repo):
     ident, env = gh_env(["repo", "clone", repo])   # "repo clone" is not a read: needs the (product-)writes flag
     if ident != "app": return [], None
     return ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"], env
-def gh_env(args):
+def gh_env(args, repo=None):
     """-> (identity "app"|"pat", env for subprocess or None = inherit). Minting failures fall back to the PAT with one masked line."""
-    if not gh_app_wanted(args): return "pat", None
+    if not gh_app_wanted(args, repo): return "pat", None
     try:
         import ghtoken
-        tok = ghtoken.token(gh_target_repo(args))
+        tok = ghtoken.token(repo or gh_target_repo(args))
     except Exception as e:
         try: import ghtoken as _g; msg = _g.mask(e)
         except Exception: msg = e.__class__.__name__
@@ -219,11 +270,12 @@ def gh_skip(job):
     u = gh_rl_until()
     if u: log(f"{job}: GitHub rate-limited until {dt.datetime.fromtimestamp(u, CST).strftime('%H:%M:%S')} CST, skipping GitHub steps")
     return bool(u)
-def gh(args, js=True, retries=1):
+def gh(args, js=True, retries=1, repo=None):
+    """repo: target for calls that name none (api rate_limit / graphql); picks the identity (and its rate-limit file) of that repo"""
     cmd = f"gh {' '.join(args[:2])}"
-    why = gh_red_line(args)
+    why = gh_red_line(args, repo)
     if why: raise RedLine(f"{cmd}: refused, red line: {why}")
-    ident, env = gh_env(args)
+    ident, env = gh_env(args, repo)
     rlf = gh_app_rl_file() if ident == "app" else None   # None = GH_RL_FILE (the PAT's)
     u = gh_rl_until(f=rlf)
     if u: raise GhRateLimited(f"{cmd}: GitHub rate-limited until {dt.datetime.fromtimestamp(u, CST).strftime('%H:%M:%S')} CST (not sent)")
@@ -237,9 +289,9 @@ def gh(args, js=True, retries=1):
             return json.loads(r.stdout) if js else r.stdout
         err = (r.stderr or "").strip()
         if ident == "app" and re.search(r"HTTP 401|Bad credentials", err):
-            try: import ghtoken; ghtoken.invalidate(gh_target_repo(args))
+            try: import ghtoken; ghtoken.invalidate(repo or gh_target_repo(args))
             except Exception: pass
-        if gh_rl_record(err, rlf): raise GhRateLimited(f"{cmd}: {err[:300]} [{' '.join(args)[:120]}]")
+        if gh_rl_record(err, rlf, env): raise GhRateLimited(f"{cmd}: {err[:300]} [{' '.join(args)[:120]}]")
         if left and GH_TRANSIENT_RE.search(err): print(f"{cmd}: {err[:200]} -- retrying once", file=sys.stderr, flush=True); time.sleep(2); continue
         raise RuntimeError(f"{cmd}: {err[:300]} [{' '.join(args)[:120]}]")
 
