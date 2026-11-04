@@ -11,9 +11,34 @@ const GH = process.env.ARGUS_GH_BIN ?? 'gh'
 const RETRY_MS = Number(process.env.ARGUS_GH_RETRY_MS ?? 10_000)
 const API = process.env.ARGUS_GH_API ?? 'https://api.github.com'
 
+// 11-04 task B (panoptes): run-nightly.sh hands over the Praise QA App token as PRAISE_QA_GH_TOKEN for the repos in PRAISE_QA_GH_REPOS
+// while $PI_STATE/gh-app-nightly-enabled is on. Only gh calls / git fetches targeting those repos use it; everything else (the issue
+// repo, Argus's own App repos) keeps the inherited login. Flag off -> both vars unset -> exactly as before.
+export function praiseQaTokenFor(repo) {
+  const tok = process.env.PRAISE_QA_GH_TOKEN
+  const repos = (process.env.PRAISE_QA_GH_REPOS || '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean)
+  if (tok && repo && repos.includes(String(repo).toLowerCase())) return tok
+  const own = process.env.PRAISE_QA_GH_OWN_TOKEN   // installation 164262283 covers every PraiseZhu/* repo (the issue repo included)
+  return own && repo && /^praisezhu\/[^/]+$/i.test(String(repo)) ? own : null
+}
+export function ghTargetRepo(args) {
+  for (let i = 0; i < args.length; i++) {
+    if ((args[i] === '-R' || args[i] === '--repo') && args[i + 1]) return args[i + 1]
+    if (args[0] === 'api') { const m = /^\/?repos\/([^/\s]+\/[^/?\s]+)/.exec(args[i]); if (m) return m[1] }
+  }
+  return null
+}
+export function ghEnvFor(args) {
+  const tok = praiseQaTokenFor(ghTargetRepo(args))
+  if (!tok) return process.env
+  const e = { ...process.env, GH_TOKEN: tok }
+  delete e.GITHUB_TOKEN
+  return e
+}
+
 function gh(args, { input, timeoutMs = 60_000 } = {}) {
   return new Promise((resolve, reject) => {
-    const child = execFile(GH, args, { maxBuffer: 64 * 1024 * 1024, timeout: timeoutMs, env: process.env }, (err, stdout, stderr) => {
+    const child = execFile(GH, args, { maxBuffer: 64 * 1024 * 1024, timeout: timeoutMs, env: ghEnvFor(args) }, (err, stdout, stderr) => {
       if (err) {
         const e = new Error(`gh ${args.slice(0, 4).join(' ')} 失败：${String(stderr || err.message).slice(0, 600)}`)
         e.stderr = String(stderr ?? '')
@@ -95,7 +120,7 @@ export async function publisherLogin(repo, fallbackLogin) {
 
 // git 取码凭证：App 覆盖的仓用安装令牌，否则 null（调用方用 gh 的凭证助手）
 export async function gitTokenFor(repo) {
-  return (await appFor(repo))?.token ?? null
+  return (await appFor(repo))?.token ?? praiseQaTokenFor(repo) ?? null
 }
 
 // 只读请求遇到网络错误或 5xx 时重试；4xx 是确定性错误，直接抛

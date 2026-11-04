@@ -84,6 +84,7 @@ def main():
     else:
         st = f"{od}/state-copy-{d}-{kind}.json"; shutil.copy(f"{QA}/followup/state.json", st); env["MIVO_QA_FOLLOWUP_STATE"] = st
     log(f"mode={'live' if live else 'shadow'}: {' '.join(args[1:])}")
+    env.update(gh_component_node_env("ledgers"))   # task B: product reads of track-followups via the App while gh-app-ledgers-enabled
     r = subprocess.run(args, capture_output=True, text=True, timeout=900, env=env)
     log("track-followups rc", r.returncode, r.stderr[-300:])
     try: s = json.loads(r.stdout[r.stdout.index("{"):])

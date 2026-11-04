@@ -52,7 +52,7 @@ class T(unittest.TestCase):
     def test_writes_other_repos_and_identity_calls_stay_on_pat(self):
         self.flag_on()
         for args in (["pr", "create", "-R", PAN, "--title", "t"], ["api", "-X", "POST", f"repos/{PAN}/issues/1/comments", "-f", "body=x"],
-                     ["pr", "list", "-R", "xindong/mivo-canvas-plugin"], ["pr", "list", "-R", "PraiseZhu/pr-qa-agent-deploy"],
+                     ["pr", "list", "-R", "xindong/mivo-canvas-plugin"], ["pr", "list", "-R", "someone/else"],
                      ["pr", "list", "-R", PAN, "--author", "@me"], ["api", "user"]):
             self.run_gh(args); self.assertIsNone(self.runs[-1], args)
 

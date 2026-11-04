@@ -135,7 +135,8 @@ def _write(p, data, mode="w"):
     with open(p, mode) as f: f.write(data)
 def _rjson(p): return json.loads(_read(p))
 def tail(s, n=60): return "\n".join((s or "").rstrip().splitlines()[-n:])
-def git(*a, cwd=None, t=600): return run(["git", *a], cwd=cwd or PANOPTES, t=t)
+def git(*a, cwd=None, t=600):   # task B: network reads of the panoptes clone via the App while flagged
+    return run(["git", *a], cwd=cwd or PANOPTES, t=t, env=lib.git_read_env(PANOPTES_REPO) if a and a[0] in lib.GIT_NET_READS else None)
 def sig8(sig): return (sig or "")[5:13]
 def iso(t): return t.astimezone(CST).isoformat(timespec="seconds") if t else None
 def ts(s):

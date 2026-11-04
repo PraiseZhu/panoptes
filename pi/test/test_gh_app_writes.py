@@ -55,10 +55,10 @@ class Writes(Base):
         self.on(); os.remove(self.flags[0])
         for a in WRITES + (["pr", "list", "-R", PAN],): self.assertIsNone(self.env_of(a), a)
 
-    def test_product_and_deploy_repo_writes_stay_on_pat(self):
-        self.on()
+    def test_product_writes_stay_on_pat_deploy_repo_moves(self):
+        self.on()   # product writes need gh-app-product-writes-enabled (task B); pr-qa-agent-deploy is in installation 164262283 now
         self.assertIsNone(self.env_of(["pr", "create", "-R", "xindong/mivo-canvas-plugin", "--title", "t"]))
-        self.assertIsNone(self.env_of(["issue", "create", "-R", "PraiseZhu/pr-qa-agent-deploy", "--title", "t"]))
+        self.assertIsNotNone(self.env_of(["issue", "create", "-R", "PraiseZhu/pr-qa-agent-deploy", "--title", "t"]))
 
     def test_git_push_env(self):
         self.assertEqual(lib.git_push_env(PAN), ([], None))
@@ -103,8 +103,8 @@ class Janitor(Base):
         with mock.patch.object(J, "gh", gh), mock.patch.object(J, "REMOTE", {"panoptes": J.REMOTE["panoptes"]}):
             try: J.Run.remote(self_)
             except Exception: pass
-        authors = [a[a.index("--author") + 1] for a in calls if "--author" in a]
-        self.assertEqual(authors, ["@me", lib.APP_AUTHOR])
+        searches = [a[a.index("--search") + 1] for a in calls if "--search" in a]   # task B: explicit identities, no @me
+        self.assertEqual([q.split("author:")[1] for q in searches], ["PraiseZhu", lib.APP_AUTHOR])
 
 
 if __name__ == "__main__": unittest.main()

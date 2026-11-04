@@ -45,9 +45,13 @@ def ms(s):
 def api(path, paginate=False, q=None):
     a = ["api"] + (["--paginate"] if paginate else []) + [path] + (["-q", q] if q else [])
     return gh(a)
+def _gh(args, **kw):
+    """raw gh call routed like lib.gh: the App while gh-app-merger-enabled (main() names this job "merger"), else the merger PAT"""
+    if gh_red_line(args): raise RedLine(f"gh {' '.join(args[:2])}: refused, red line: {gh_red_line(args)}")
+    return subprocess.run(["gh", *args], env=gh_env(args)[1], **kw)
 def api_list(path, key=None):
     """paginate; key = items key for wrapped lists (check_runs, workflow_runs, jobs, artifacts)."""
-    r = subprocess.run(["gh", "api", "--paginate", path] + (["-q", f".{key}[]"] if key else ["-q", ".[]"]), capture_output=True, text=True, timeout=180)
+    r = _gh(["api", "--paginate", path] + (["-q", f".{key}[]"] if key else ["-q", ".[]"]), capture_output=True, text=True, timeout=180)
     if r.returncode: raise RuntimeError(r.stderr.strip()[:200])
     return [json.loads(l) for l in r.stdout.splitlines() if l.strip()]
 def attempt(snap, field, fn):
@@ -57,17 +61,23 @@ def attempt(snap, field, fn):
 
 # ---------------- global (collect.mjs collectGlobal) ----------------
 def read_var(name):
-    r = subprocess.run(["gh", "api", f"repos/{REPO}/actions/variables/{name}"], capture_output=True, text=True, timeout=60)
+    r = _gh(["api", f"repos/{REPO}/actions/variables/{name}"], capture_output=True, text=True, timeout=60)
     if r.returncode:
         if "404" in r.stderr or "Not Found" in r.stderr: return {"value": None, "updatedAt": None}
         raise RuntimeError(r.stderr.strip()[:200])
     d = json.loads(r.stdout); return {"value": d.get("value"), "updatedAt": ms(d.get("updated_at"))}
 def identity():
-    r = subprocess.run(["gh", "api", "-i", "user"], capture_output=True, text=True, timeout=60)
+    """task B: explicit identity, no `api user`. App (gh-app-merger-enabled) -> {login: praise-qa[bot], scopes: []}: that is NOT the
+    policy tokenLogin, so the global gate STOPs identity and the merger stays a read-only shadow (product merges are a red line anyway,
+    lib.gh_red_line). PAT -> login PAT_LOGIN, scopes from the X-OAuth-Scopes header of a repo read (same header /user returned)."""
+    args = ["api", "-i", f"repos/{REPO}"]
+    ident, env = gh_env(args)
+    if ident == "app": return {"login": APP_LOGIN, "scopes": [], "via": "app"}
+    r = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=60, env=env)
     if r.returncode: raise RuntimeError("identity read failed")
-    head, _, body = r.stdout.partition("\r\n\r\n") if "\r\n\r\n" in r.stdout else r.stdout.partition("\n\n")
+    head = r.stdout.split("\r\n\r\n" if "\r\n\r\n" in r.stdout else "\n\n", 1)[0]
     sc = next((l.split(":", 1)[1] for l in head.splitlines() if l.lower().startswith("x-oauth-scopes:")), None)
-    return {"login": json.loads(body).get("login"), "scopes": None if sc is None else sorted(s.strip() for s in sc.split(",") if s.strip())}
+    return {"login": PAT_LOGIN, "scopes": None if sc is None else sorted(x.strip() for x in sc.split(",") if x.strip())}
 def read_main_ci(main_head):
     runs = api_list(f"repos/{REPO}/actions/workflows/{P['mainCiWorkflow']}/runs?branch={P['base']}&event=push&head_sha={main_head}", "workflow_runs")
     if not runs: return {"status": "missing", "conclusion": None, "runAttempt": 0, "failedJobs": []}
@@ -158,7 +168,7 @@ def read_timeline(evs):
         if e.get("event") in P["baseChangeEvents"] and at > (tl["baseChangedAt"] if tl["baseChangedAt"] is not None else -1): tl["baseChangedAt"] = at
     return tl
 def read_ghost(sha):
-    r = subprocess.run(["gh", "api", "-H", "Accept: application/vnd.github.raw+json", f"repos/{REPO}/contents/{P['ghostJsonPath']}?ref={sha}"], capture_output=True, text=True, timeout=60)
+    r = _gh(["api", "-H", "Accept: application/vnd.github.raw+json", f"repos/{REPO}/contents/{P['ghostJsonPath']}?ref={sha}"], capture_output=True, text=True, timeout=60)
     if r.returncode: raise RuntimeError("ghost read failed")
     return json.loads(r.stdout)
 def collect_pr(n, st, now, require_clean=True):
@@ -234,7 +244,7 @@ def fetch_review_result(pr):
     arts = api_list(f"repos/{REPO}/actions/runs/{rid}/artifacts", "artifacts")
     art = next((a for a in arts if a["name"] == f"review-pr-{pr['number']}" and not a["expired"]), None)
     if not art: return None
-    z = subprocess.run(["gh", "api", f"repos/{REPO}/actions/artifacts/{art['id']}/zip"], capture_output=True, timeout=120)
+    z = _gh(["api", f"repos/{REPO}/actions/artifacts/{art['id']}/zip"], capture_output=True, timeout=120)
     if z.returncode: raise RuntimeError("artifact download failed")
     with zipfile.ZipFile(io.BytesIO(z.stdout)) as zf:
         return json.loads(zf.read("result.json")) if "result.json" in zf.namelist() else None
@@ -375,7 +385,8 @@ def jload_(f):
     except Exception: return {}
 
 def main():
-    use_merger_token()
+    gh_component("merger")   # task B: rm $PI_STATE/gh-app-merger-enabled -> the merger token (PAT) as before
+    if not gh_component_on("merger"): use_merger_token()
     d = today(); t = now_cst(); out = f"{BASE}/out/merger/{d}.md"
     st = jload_(STATE); s = run_round(st); write_atomic(STATE, json.dumps(st, indent=1))
     g = s["g"]; paused = os.path.exists(PAUSED)

@@ -105,7 +105,7 @@ def scan_reports(st):
         except ValueError: continue          # still being written: read it again next minute
         seen[k] = {"m": m, "h": h}
         for p in doc.get("prs", []):
-            if (p.get("author") or "") not in fix_authors(): continue   # Praise 11-02: PraiseZhu + kirozeng; others' PRs go to their handoff repos
+            if (p.get("author") or "") not in fix_authors() and not is_self(p.get("author")): continue   # Praise 11-02: PraiseZhu + kirozeng; others' PRs go to their handoff repos
             xs = [dict(x, severity=x.get("severity") or x.get("severity_if_confirmed")) for x in (p.get("findings") or []) + (p.get("pending_verification") or [])]
             xs = [x for x in xs if x.get("severity") in ("P0", "P1") and x.get("fingerprint") not in notified]
             if not xs: continue
@@ -603,8 +603,7 @@ def red_dm(st, n, qa, tag, red, how):
 def check_drafts(st):
     if time.time() - st.get("drafts_at", 0) < 110: return
     st["drafts_at"] = time.time()
-    prs = gh(["pr", "list", "-R", REPO, "--author", "PraiseZhu", "--draft", "--state", "open", "--limit", "50",
-              "--json", "number,headRefOid,headRefName,body,statusCheckRollup,mergeStateStatus"])
+    prs = self_pr_list(REPO, "open", "number,headRefOid,headRefName,body,statusCheckRollup,mergeStateStatus", limit=50, extra=["--draft"], run=gh)
     done = st.setdefault("draft_seen", {}); ub = st.setdefault("update_branch_day", {}); day = today()
     # 10-24 (plan S2): a bot draft that left this list was merged / closed / readied -> janitor right away (branches, worktrees)
     ours = sorted(p["number"] for p in prs if is_bot_fixpr(p))

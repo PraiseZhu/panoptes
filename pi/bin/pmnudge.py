@@ -44,7 +44,7 @@ def merged_refs():
     """QA 单号 -> 修掉它的已合并 PraiseZhu PR 号（最近 100 个）"""
     out = {}
     try:
-        for p in gh(["pr", "list", "-R", REPO, "--author", "PraiseZhu", "--state", "merged", "--limit", "100", "--json", "number,body"]):
+        for p in self_pr_list(REPO, "merged", "number,body", run=gh):
             for r in re.findall(r"QA[:：]\s*#(\d+)", p.get("body") or ""): out.setdefault(int(r), p["number"])
     except Exception: pass
     return out
@@ -153,8 +153,7 @@ def main():
     dry = "--dry-run" in sys.argv
     d = today(); hh = now_cst().strftime("%H:%M")
     try:
-        prs = gh(["pr", "list", "-R", REPO, "--author", "PraiseZhu", "--state", "open", "--limit", "100",
-                  "--json", FIELDS])
+        prs = self_pr_list(REPO, "open", FIELDS, run=gh)   # task B: PraiseZhu + App PRs
     except Exception as e:   # gh 挂了：不崩、不催、不动进展文件；11-04：仍写一节说明时间、原因、下次重试，每小时都有记录
         log("pmnudge: gh pr list 失败，本轮跳过：", str(e)[:200])
         fail_section(d, hh, e, dry); return
