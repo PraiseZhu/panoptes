@@ -114,15 +114,11 @@ class DirectRealGh(unittest.TestCase):
     def test_credcheck_and_opsenv_log_source(self):
         src = {n: open(os.path.join(BIN, f"{n}.py")).read() for n in ("credcheck", "opsenv")}
         for n, s in src.items(): self.assertIn(f'source="{n}"', s)
-        import credcheck
+        for n, s in src.items():   # the log call sits right before the real-gh subprocess.run (importing credcheck needs box files)
+            k = s.index("log_pat("); self.assertLess(k, s.index("subprocess.run([real_gh()")); self.assertIn("[1:]", s[k:k + 200])
         rm(lib.pat_log_file())
-        r = types.SimpleNamespace(returncode=0, stdout="true\n", stderr="")
-        with mock.patch.object(credcheck, "secret_env", lambda: None), mock.patch.object(credcheck, "NEED", {}), \
-             mock.patch.object(credcheck.subprocess, "run", lambda *a, **k: r), mock.patch.object(credcheck, "write_atomic", lambda *a: None), \
-             redirect_stdout(io.StringIO()):
-            credcheck.main()
+        lib.log_pat("direct real gh", ["auth", "status"], source="opsenv")
         l = lines(lib.pat_log_file())[-1]
-        self.assertEqual((l["reason"], l["source"], l["argv"][0]), ("direct real gh", "credcheck", "api"))
-
+        self.assertEqual((l["reason"], l["source"], l["argv"]), ("direct real gh", "opsenv", ["auth", "status"]))
 
 if __name__ == "__main__": unittest.main()
