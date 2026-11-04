@@ -541,6 +541,29 @@ def pmnudge_gh_check(now, probs):
         "这些轮次没有催任何 PR；已记入 gaps-open.json。", todo=PN.ask_session(f"pmnudge 的 gh pr list 一直失败（{a.get('error', '')[:120]}），查 GitHub 额度/凭证"))
 
 
+SLOT_WAIT_DIR = f"{QA}/argus-root/slot-wait-alerts"
+SLOT_WAIT_KEEP_S, SLOT_WAIT_SWEEP_S = 3600, 86400
+def slot_wait_check(now, probs, d=None):
+    """11-05 (gap qa_start:PR-1718): a run waited > 8 min for a QA slot (scripts/qa-slot.sh slot_wait_tick writes
+    argus-root/slot-wait-alerts/<pid>.json). One slot:wait item while any alert is live or < 1 h old (a short wait between two
+    */5 ticks is still reported once); files older than 24 h are swept."""
+    d = d or SLOT_WAIT_DIR; t = time.time(); rows = []
+    for f in sorted(glob.glob(os.path.join(d, "*.json"))):
+        try: age = t - os.path.getmtime(f); a = json.load(open(f))
+        except Exception: continue
+        if age > SLOT_WAIT_SWEEP_S:
+            try: os.remove(f)
+            except OSError: pass
+            continue
+        if a.get("state") == "waiting" or age <= SLOT_WAIT_KEEP_S: rows.append(a)
+    if not rows: return
+    desc = "；".join(f"{a.get('id')}（{a.get('kind')}）{'仍在等' if a.get('state') == 'waiting' else '已拿到槽位'}，等了 {int(a.get('waited_s', 0)) // 60} 分钟"
+                    for a in rows[-6:])
+    probs["slot:wait"] = PN.item("action", "合并即测排队等测试槽位超过 8 分钟", desc,
+        "测试槽位满了（上限没变），新合并的 PR 要等前面的跑完，合并到开测会超过 10 分钟。",
+        todo=PN.ask_session(f"QA 槽位等待超过 8 分钟：{desc[:200]}，看 /workspace/mivo-qa/argus-root/logs/control.log 里的 slot wait 行"))
+
+
 def prfix_check(now, probs, wst=None):
     T = jload(PRFIX_TICKETS, {}).get("tickets", {}); L = jload(LEDGER, {}); stale = outbound_stale_keys()
     def age_h(t):
@@ -671,7 +694,7 @@ def main():
                lambda: backup_check(now, probs), lambda: backup_rules_check(now, probs), lambda: panoptes_check(now, probs, st),
                lambda: infra_check(now, probs), lambda: prfix_check(now, probs, st), lambda: vigil_check(now, probs, st),
                lambda: outbound_health_check(now, probs), lambda: janitor_check(now, probs), lambda: gh_ratelimit_check(now, probs),
-               lambda: pmnudge_gh_check(now, probs)):
+               lambda: pmnudge_gh_check(now, probs), lambda: slot_wait_check(now, probs)):
         try: fn()
         except Exception as e: probs[f"watchdog:{getattr(fn, '__name__', 'check')}"] = PN.item("action", "「看门狗」自己出错了",
             "专门盯各个自动化有没有停摆的看门狗，自己的一项检查出错了。", "那一项坏了也不会有人告诉你。",
