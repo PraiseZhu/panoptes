@@ -93,15 +93,47 @@ GH_APP_REPOS = {"PraiseZhu/panoptes"}      # + every PraiseZhu/* repo (task B: i
 def gh_app_own_repo(repo): return bool(repo) and (repo in GH_APP_REPOS or (repo.count("/") == 1 and repo.split("/")[0] == "PraiseZhu"))
 def gh_app_flag(): return f"{PI_STATE}/gh-app-enabled"
 def gh_app_rl_file(): return f"{PI_STATE}/gh-ratelimit-praise-qa.json"
+# #214 r4 blocker A: gh takes the LAST -R/--repo when one is repeated (`gh pr view 1 -R a -R b` -> b) while a guard reading the first
+# one would check a different repo. Any second repo selector, in any spelling (-R X, -RX, -R=X, --repo X, --repo=X, mixed), or a
+# github.com/O/R/pull/N selector next to an -R naming another repo, is refused by the red line, the product-write guard and the
+# update-branch lookup, for every caller (gh_repo_selector_dup). gh_target_repo returns None for such a call (never a guessed repo).
+RED_MULTI = "more than one repo selector (-R/--repo repeated, or a URL selector with another -R): gh uses the last, refused"
+def gh_repo_selectors(args):
+    """every -R/--repo value of a non-`api` gh call, in order (every token is scanned; a selector's value is consumed with it)"""
+    a = list(args); out = []; i = 0
+    if a[:1] == ["api"]: return out
+    while i < len(a):
+        x = a[i]; i += 1
+        if x in ("-R", "--repo"): out.append(a[i] if i < len(a) else ""); i += 1
+        elif x.startswith("--repo="): out.append(x.split("=", 1)[1])
+        elif x.startswith("-R") and len(x) > 2 and not x.startswith("--"): out.append(x[2:].lstrip("="))
+    return out
+def _url_selector(args):
+    for x in list(args)[1:]:
+        m = re.match(r"^(?:https?://)?(?:www\.)?github\.com/([^/\s]+/[^/\s]+)/(?:pull|issues|actions/runs)/\d+", x, re.I)
+        if m: return m.group(1)
+    return None
+def gh_repo_selector_dup(args):
+    """RED_MULTI when the call names its repo more than once (see above), else None"""
+    a = list(args)
+    if a[:1] == ["api"]: return None   # gh api has no -R: gh_api_parse refuses it as an unknown flag
+    sel = gh_repo_selectors(a)
+    if len(sel) > 1: return f"{RED_MULTI} ({len(sel)} -R/--repo)"
+    u = _url_selector(a)
+    if u and sel and sel[0].lower().split("/")[-2:] != u.lower().split("/")[-2:]: return f"{RED_MULTI} (URL selector + -R)"
+    return None
+def api_placeholder(r):
+    """True when a repos/O/R owner or name is a gh placeholder ({owner}/{repo} or :owner/:repo): gh fills it from GH_REPO / the cwd"""
+    return "{" in r or any(seg.startswith(":") for seg in r.split("/"))
 def gh_target_repo(args):
     """OWNER/REPO a gh call targets: a github.com/O/R/(pull|issues)/N selector, -R/--repo X (also -RX, -R=X, --repo=X), `repo
     view|clone X`, or `api <path>` naming repos/OWNER/REPO (full URLs, case and query strings normalized); None if unknown.
     `repos/{owner}/{repo}` placeholders -> None (gh fills them from GH_REPO / the cwd, which the wrapper resolves)."""
     a = list(args)
+    if gh_repo_selector_dup(a): return None   # r4 A: never guess which of two repos gh will use
     if a[:1] != ["api"]:
-        for x in a[1:]:
-            m = re.match(r"^(?:https?://)?(?:www\.)?github\.com/([^/\s]+/[^/\s]+)/(?:pull|issues|actions/runs)/\d+", x, re.I)
-            if m: return m.group(1)
+        u = _url_selector(a)
+        if u: return u
     for i, x in enumerate(a):
         if x in ("-R", "--repo") and i + 1 < len(a): return a[i + 1]
         if x.startswith("--repo="): return x.split("=", 1)[1]
@@ -111,7 +143,7 @@ def gh_target_repo(args):
         try: p = gh_api_parse(a)
         except GhUnparseable: return None
         r = api_path_repo(p["path"])
-        if r: return None if "{" in r else r
+        if r: return None if api_placeholder(r) else r   # r4 B: :owner/:repo too
         if p["path"].lower() == "graphql":   # 11-04: graphql names its repo in the variables (owner/name, o/n)
             try: _, vs = gql_query_of(a)
             except GhUnparseable: return None
@@ -267,9 +299,10 @@ def api_path_repo(path):
     m = re.match(r"repos/([^/]+/[^/]+)", path, re.I)
     return m.group(1) if m else None
 def api_target(p, hint=None):
-    """the repo a parsed REST call hits: repos/O/R in its path; repos/{owner}/{repo} -> hint (gh fills it from GH_REPO / cwd); else None"""
+    """the repo a parsed REST call hits: repos/O/R in its path; repos/{owner}/{repo} or repos/:owner/:repo (#214 r4 B: gh substitutes
+    the colon form too, also :branch) -> hint (gh fills it from GH_REPO / cwd; None when unresolvable = fail closed); else None"""
     r = api_path_repo(p["path"])
-    return (hint if "{" in r else r) if r else None
+    return (hint if api_placeholder(r) else r) if r else None
 def api_is_write(p): return bool(p["fields"] or p["input"] is not None or (p["method"] or "GET") not in ("GET", "HEAD"))
 GQL_MERGE_RE = re.compile(r"\b(mergePullRequest|enablePullRequestAutoMerge|enqueuePullRequest|mergeBranch|updatePullRequestBranch|updateRef|updateRefs)\s*\(")
 GQL_EDIT_RE = re.compile(r"\bupdatePullRequest\s*\(")
@@ -329,6 +362,8 @@ def gh_red_line(args, repo=None, read=open, stdin=None):
         if re.match(RP + r"/pulls/\d+$", path) and meth != "GET": return RED_EDIT
         if re.match(RP + r"/issues/\d+$", path) and meth != "GET" and (p["input"] is not None or {"title", "body"} & fields): return RED_EDIT + " (issues API)"
         return None
+    dup = gh_repo_selector_dup(a)
+    if dup: return dup
     product = is_product_repo(tgt); unknown = tgt is None
     if not (product or unknown): return None
     if a[:2] == ["pr", "merge"]: return RED_MERGE
@@ -343,18 +378,19 @@ RED_WRITE = "writing to the product repo (not on the product-write allowlist)"
 PRODUCT_READ_CMDS = {"pr": {"view", "list", "status", "diff", "checks", "checkout"}, "issue": {"view", "list", "status"},
                      "run": {"view", "list", "watch", "download"}, "workflow": {"view", "list"}, "release": {"view", "list", "download"},
                      "repo": {"view", "clone"}, "label": {"list"}, "cache": {"list"}, "search": None, "browse": None, "status": None}
-NON_REPO_CMDS = {"auth", "config", "version", "--version", "help", "--help", "completion", "alias", "extension", "gist", "org"}
+NON_REPO_CMDS = {"auth", "config", "version", "--version", "help", "--help", "completion", "alias", "extension", "extensions", "ext", "gist", "org"}   # alias/extension writes + auth token: gh_wrapper.cli_refusal
 PRODUCT_WRITE_EXCUSABLE = frozenset({("issue", "create"), ("issue", "comment"), ("issue", "close"), ("pr", "comment")})   # never pr close/review
 REVIEW_PR_CMDS = frozenset({("issue", "comment"), ("pr", "comment"), ("pr", "review")})   # B5 ruling: review-pr may approve
 REVIEW_PR_REST = re.compile(r"repos/[^/]+/[^/]+/(issues/\d+/comments|pulls/\d+/comments(/\d+/replies)?|pulls/\d+/reviews"
                             r"(/\d+(/events|/dismissals)?)?)$")
 REVIEW_PR_REST_METHODS = ("POST", "PUT")
+ACTIONS_RERUN = re.compile(r"repos/[^/]+/[^/]+/actions/(runs/\d+/(rerun|rerun-failed-jobs)|jobs/\d+/rerun)$")
 REVIEW_PR_GQL = frozenset({"addComment", "addPullRequestReview", "submitPullRequestReview", "addPullRequestReviewComment",
                            "addPullRequestReviewThread"})
 def gh_product_write(args, repo=None, caller=None, read=open, excused=frozenset(), stdin=None):
     """-> reason unless args are on the product-write allowlist, else None. Applies when the target is the product repo or unknown
     (graphql mutations: unless every node id resolves to a non-product repo). Allowed: reads (gh read subcommands, REST without method
-    /fields/body, graphql without a mutation); gh pr create --draft; gh pr ready; gh run rerun and REST repos/O/R/actions/...;
+    /fields/body, graphql without a mutation); gh pr create --draft; gh pr ready (--undo too); gh run rerun and REST POST actions/runs/N/rerun(-failed-jobs), actions/jobs/N/rerun;
     excused: the caller x `gh <noun> <verb>` exceptions (gh_wrapper.PRODUCT_WRITE_EXCEPTIONS, within PRODUCT_WRITE_EXCUSABLE);
     caller review-pr-*: comments and reviews (approve included), gh / REST / graphql."""
     a = list(args); review_pr = (caller or "").startswith("review-pr-")
@@ -371,18 +407,22 @@ def gh_product_write(args, repo=None, caller=None, read=open, excused=frozenset(
         at = api_target(p, repo)
         if at is not None and not is_product_repo(at): return None
         if not api_is_write(p): return None
-        if at is None and not re.match(r"repos/\{", path): return RED_WRITE + " (REST write whose target repo is unknown)"
-        if at is not None and re.match(r"repos/[^/]+/[^/]+/actions/", path): return None   # CI reruns and other Actions calls
+        if at is None and not re.match(r"repos/(\{|:)", path): return RED_WRITE + " (REST write whose target repo is unknown)"
+        # #214 r4 ruling C: of the Actions API only the three rerun endpoints (POST); dispatches, secrets, variables, permissions,
+        # cancel, ... are refused. GETs under /actions/ passed above (not a write).
+        if at is not None and ACTIONS_RERUN.match(path) and (p["method"] or "POST") == "POST": return None
         if review_pr and (p["method"] or "POST") in REVIEW_PR_REST_METHODS and REVIEW_PR_REST.match(path): return None
         return RED_WRITE + f" ({p['method'] or 'POST'} {path})"
     noun = a[0] if a else ""
+    dup = gh_repo_selector_dup(a)
+    if dup: return dup
     if noun in NON_REPO_CMDS: return None
     tgt = repo or gh_target_repo(a)
     if tgt is not None and not is_product_repo(tgt): return None
     verb = a[1] if len(a) > 1 else ""
     if noun in PRODUCT_READ_CMDS and (PRODUCT_READ_CMDS[noun] is None or verb in PRODUCT_READ_CMDS[noun]): return None
     if (noun, verb) == ("pr", "create") and any(x in ("--draft", "-d") or x == "--draft=true" for x in a[2:]): return None
-    if (noun, verb) in (("pr", "ready"), ("run", "rerun")): return None
+    if (noun, verb) in (("pr", "ready"), ("run", "rerun")): return None   # r4 ruling D: `pr ready --undo` included
     if (noun, verb) in excused and (noun, verb) in PRODUCT_WRITE_EXCUSABLE: return None
     if review_pr and (noun, verb) in REVIEW_PR_CMDS: return None
     return RED_WRITE + f" (gh {noun} {verb})".rstrip()
@@ -407,6 +447,8 @@ def update_branch_pr(args, repo=None):
         if p["input"] is not None or any(k != "expected_head_sha" for k, _ in p["fields"]): return None, "update-branch with a body/field other than expected_head_sha (rebase/update_method refused)"
         return int(m.group(2)), None
     if a[:2] != ["pr", "update-branch"]: return None, None
+    dup = gh_repo_selector_dup(a)   # r4 A: the lookup would check one repo and gh would update another
+    if dup: return None, dup
     tgt = repo or gh_target_repo(a)
     if tgt is not None and not is_product_repo(tgt): return None, None
     if tgt != PRODUCT_REPO_UB: return None, f"update-branch target {tgt or 'unknown'} is not {PRODUCT_REPO_UB}"

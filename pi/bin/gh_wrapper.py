@@ -59,6 +59,23 @@ PRODUCT_WRITE_EXCEPTIONS = (
 )
 
 
+# #214 r4 ruling E: gh commands that change what a later `gh <x>` runs, or print the login token, refused in the wrapper (exit 4):
+#   alias set/import (an alias can expand to anything later), every extension subcommand except list/search/browse (install /
+#   upgrade / exec / create / remove: an extension runs arbitrary code with the login), and `auth token` / `auth status
+#   --show-token|-t` unless the caller is on CALLER_ALLOWLIST (box grep 11-04: no allowlisted caller uses it; see the PR body).
+EXTENSION_NOUNS = ("extension", "extensions", "ext"); EXTENSION_READS = frozenset({"list", "ls", "search", "browse"})
+def cli_refusal(argv, allowlisted_name=None):
+    """-> reason when the wrapper refuses this gh command for this caller (ruling E above), else None"""
+    a = list(argv); noun = a[0] if a else ""; verb = a[1] if len(a) > 1 else ""
+    if noun == "alias" and verb in ("set", "import"): return f"gh alias {verb} (an alias can expand to any command later)"
+    if noun in EXTENSION_NOUNS and verb not in EXTENSION_READS: return f"gh {noun} {verb or ''} (extensions run arbitrary code with the login)".replace("  ", " ")
+    if noun == "auth" and not allowlisted_name:
+        if verb == "token": return "gh auth token (prints the login token; only CALLER_ALLOWLIST callers)"
+        if verb == "status" and any(x in ("-t", "--show-token") or x.startswith("--show-token=") or (x.startswith("-") and not x.startswith("--") and "t" in x[1:]) for x in a[2:]):
+            return "gh auth status --show-token (prints the login token; only CALLER_ALLOWLIST callers)"
+    return None
+
+
 def write_exceptions(cmdline):
     """frozenset of (noun, verb) product writes excused for the caller's SCRIPT (exact path-suffix match), else empty"""
     s = script_of(cmdline)
@@ -238,7 +255,7 @@ def main(argv, env=None, execve=os.execve, run=subprocess.run, caller=None, stdi
         except Exception: body = None   # unreadable -> the guards see no body -> refused (fail closed)
     # every caller, allowlisted (PAT pass-through) and excused ones included, goes through both guards first
     ub = lib.update_branch_exception(argv, repo, script_of(chain))   # #214 r3: outbound's qa-fix/* update-branch only
-    why = None if ub == "allow" else ub or lib.gh_red_line(argv, repo, stdin=body) or lib.gh_product_write(argv, repo, name, excused=write_exceptions(chain), stdin=body)
+    why = cli_refusal(argv, name) or (None if ub == "allow" else ub or lib.gh_red_line(argv, repo, stdin=body) or lib.gh_product_write(argv, repo, name, excused=write_exceptions(chain), stdin=body))
     if why:
         print(f"gh-wrapper: refused, red line: {why} (repo {repo or 'unknown'}); nothing was sent", file=sys.stderr)
         return EXIT_RED_LINE

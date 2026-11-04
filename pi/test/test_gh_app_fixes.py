@@ -566,4 +566,95 @@ class AcceptanceRound3(Base):
         self.assertEqual(W.write_exceptions(["python3", "-X", "dev", "/a/pi/bin/outbound.py"]), W.PRODUCT_WRITE_EXCEPTIONS[0][2])
 
 
+class AcceptanceRound4(Base):
+    """#214 round 4: (A) a repeated repo selector, any spelling, refused (gh uses the last); (B) :owner/:repo/:branch placeholders =
+    {owner}/{repo}/{branch}; (C) Actions writes only the three reruns; (D) pr ready --undo; (E) wrapper refuses alias set/import,
+    extension writes/exec and auth token (except CALLER_ALLOWLIST callers)"""
+    wrap = Wrapper.wrap
+    OUT = AcceptanceRound3.OUT; look = AcceptanceRound3.look; GOOD = AcceptanceRound3.GOOD
+    CALLERS = ([], ["node", "/x/foo.mjs"], OUT, ["node", "/x/review-pr/scripts/signoff-hold.mjs"])
+    def dups(self, verb, n="1"):
+        O = "xindong/other"
+        return ([*verb, n, "-R", PAN, "-R", PROD], [*verb, n, "--repo", PAN, "--repo", PROD], [*verb, n, f"-R{PAN}", "-R", PROD],
+                [*verb, n, f"-R={PAN}", f"--repo={PROD}"], [*verb, n, "--repo", PAN, f"-R{PROD}"], [*verb, n, "-R", PROD, "-R", O],
+                [*verb, n, "-R", O, "-R", PROD], [*verb, n, "-R", PROD, "-R", PROD], [*verb, f"https://github.com/{PROD}/pull/{n}", "-R", PAN],
+                [*verb, f"https://github.com/{PAN}/pull/{n}", "-R", PROD])
+
+    def test_r4_a_repeated_repo_selector_refused_red_line_and_product_write(self):
+        for a in self.dups(["pr", "merge"]) + self.dups(["pr", "close"]) + self.dups(["pr", "view"]) + self.dups(["issue", "comment"]):
+            self.assertIsNotNone(lib.gh_repo_selector_dup(a), a); self.assertIsNone(lib.gh_target_repo(a), a)
+            self.assertIn("more than one repo selector", lib.gh_red_line(a) or "", a)
+            self.assertIn("more than one repo selector", lib.gh_product_write(a, None, "review-pr-signoff-hold", excused=frozenset({("issue", "comment")})) or "", a)
+            for c in self.CALLERS:
+                rc, call, err = self.wrap(a, caller=c); self.assertEqual((rc, call), (4, None), (a, c))
+            with self.assertRaises(lib.RedLine): lib.gh(a)
+        # a single selector, and URL + the same repo, are unchanged
+        for a in (["pr", "view", "1", "-R", PROD], ["pr", "view", "1", f"--repo={PAN}"], ["pr", "view", f"https://github.com/{PROD}/pull/1", "-R", PROD]):
+            self.assertIsNone(lib.gh_repo_selector_dup(a), a); self.assertIsNone(lib.gh_red_line(a), a)
+
+    def test_r4_a_update_branch_lookup_cannot_be_spoofed(self):
+        for a in self.dups(["pr", "update-branch"], "5"):
+            with self.look():
+                n, why = lib.update_branch_pr(a); self.assertIsNone(n, a); self.assertIn("more than one repo selector", why or "", a)
+                rc, call, err = self.wrap(a, caller=self.OUT); self.assertEqual((rc, call), (4, None), a)
+                self.assertEqual(self.seen, [], "no lookup is made for an ambiguous target")
+        with self.look():
+            self.assertIsNotNone(self.wrap(["pr", "update-branch", "5", "-R", PROD], caller=self.OUT)[1])
+
+    def test_r4_b_colon_placeholders_resolve_to_the_hint_repo(self):
+        url = "https://github.com/xindong/mivo-canvas-plugin.git"
+        writes = (["api", "-XPUT", "repos/:owner/:repo/pulls/1/merge"], ["api", "-XPUT", "repos/:owner/:repo/pulls/1/update-branch"],
+                  ["api", "-XPATCH", "repos/:owner/:repo/git/refs/heads/:branch", "-fsha=x", "-Fforce=true"],
+                  ["api", "-XPATCH", "repos/:owner/:repo/git/refs/heads/main", "-fsha=x", "-Fforce=true"],
+                  ["api", "-XPOST", "repos/:owner/:repo/issues", "-ftitle=x"], ["api", "-XPOST", "repos/xindong/:repo/issues", "-ftitle=x"],
+                  ["api", "-XPATCH", "repos/:owner/:repo/pulls/1", "-fbody=x"])
+        for a in writes:
+            self.assertIsNone(lib.gh_target_repo(a), a)
+            self.assertEqual(lib.api_target(lib.gh_api_parse(a), PROD), PROD); self.assertIsNone(lib.api_target(lib.gh_api_parse(a)), a)
+            self.assertTrue(lib.gh_red_line(a, PROD) or lib.gh_product_write(a, PROD), a)
+            self.assertTrue(lib.gh_red_line(a) or lib.gh_product_write(a), ("unresolvable", a))
+            for c in self.CALLERS[:2] + self.CALLERS[3:]:
+                for env, cw in (({"GH_REPO": PROD}, ""), ({}, url), ({}, "")):
+                    rc, call, _ = self.wrap(a, env=env, cwd_url=cw, caller=c); self.assertEqual((rc, call), (4, None), (a, c, env, cw))
+        # own repo through the placeholder: still allowed; reads allowed
+        self.assertIsNotNone(self.wrap(["api", "-XPOST", "repos/:owner/:repo/issues", "-ftitle=x"], env={"GH_REPO": PAN})[1])
+        self.assertIsNotNone(self.wrap(["api", "repos/:owner/:repo/pulls"], env={"GH_REPO": PROD})[1])
+
+    def test_r4_c_actions_writes_only_reruns(self):
+        R = f"repos/{PROD}/actions"
+        for ep in ("runs/12/rerun", "runs/12/rerun-failed-jobs", "jobs/34/rerun"):
+            self.assertIsNone(lib.gh_product_write(["api", "-XPOST", f"{R}/{ep}"], PROD), ep)
+            self.assertIsNotNone(self.wrap(["api", "-XPOST", f"{R}/{ep}"], caller=["node", "/x/foo.mjs"])[1], ep)
+            self.assertIsNotNone(lib.gh_product_write(["api", "-XDELETE", f"{R}/{ep}"], PROD), ep)
+        for a in (["api", "-XPOST", f"{R}/workflows/x.yml/dispatches", "-fref=main"], ["api", "-XPUT", f"{R}/secrets/X", "-fencrypted_value=x"],
+                  ["api", "-XPOST", f"{R}/variables", "-fname=X", "-fvalue=y"], ["api", "-XPATCH", f"{R}/variables/X", "-fvalue=y"],
+                  ["api", "-XPUT", f"{R}/permissions", "-fenabled=false"], ["api", "-XPOST", f"{R}/runs/12/cancel"], ["api", "-XPOST", f"{R}/runs/12/force-cancel"],
+                  ["api", "-XDELETE", f"{R}/runs/12"], ["api", "-XDELETE", f"{R}/caches?key=x"], ["api", "-XPUT", f"{R}/workflows/1/disable"],
+                  ["api", "-XPOST", f"{R}/runs/12/approve"], ["api", "-XPOST", f"{R}/runs/12/rerun/x"], ["api", "-XPOST", "repos/:owner/:repo/actions/workflows/x/dispatches"]):
+            self.assertIsNotNone(lib.gh_product_write(a, PROD), a)
+            for c in self.CALLERS: self.assertEqual(self.wrap(a, env={"GH_REPO": PROD}, caller=c)[:2], (4, None), (a, c))
+        for a in (["api", f"{R}/runs"], ["api", f"{R}/secrets"], ["api", "-XGET", f"{R}/runs/12/jobs"]):
+            self.assertIsNone(lib.gh_product_write(a, PROD), a)
+
+    def test_r4_d_pr_ready_undo_allowed(self):
+        for a in (["pr", "ready", "1", "--undo", "-R", PROD], ["pr", "ready", "--undo", "1", "-R", PROD], ["pr", "ready", "1", "-R", PROD]):
+            self.assertIsNone(lib.gh_red_line(a), a); self.assertIsNone(lib.gh_product_write(a), a)
+            self.assertIsNotNone(self.wrap(a, caller=["node", "/x/foo.mjs"])[1], a)
+
+    def test_r4_e_wrapper_refuses_alias_extension_and_auth_token(self):
+        import gh_wrapper as W
+        AL = ["node", "/x/review-pr/scripts/signoff-hold.mjs"]
+        for a in (["alias", "set", "m", "pr merge"], ["alias", "import", "f.yml"], ["alias", "import", "-"], ["extension", "install", "evil/gh-x"],
+                  ["extension", "upgrade", "--all"], ["extension", "exec", "x", "merge"], ["ext", "install", "evil/gh-x"], ["extensions", "upgrade", "x"],
+                  ["extension", "create", "x"], ["extension", "remove", "x"], ["extension"]):
+            for c in self.CALLERS:
+                rc, call, err = self.wrap(a, caller=c); self.assertEqual((rc, call), (4, None), (a, c)); self.assertIn("refused", err)
+        for a in (["auth", "token"], ["auth", "token", "--hostname", "github.com"], ["auth", "status", "--show-token"], ["auth", "status", "-t"]):
+            for c in self.CALLERS[:3]: self.assertEqual(self.wrap(a, caller=c)[:2], (4, None), (a, c))
+            self.assertIsNotNone(W.cli_refusal(a, None), a); self.assertIsNone(W.cli_refusal(a, "review-pr-signoff-hold"), a)
+            rc, call, _ = self.wrap(a, caller=AL); self.assertIsNotNone(call, a)   # allowlisted: the real gh, PAT env
+        for a in (["alias", "list"], ["alias", "delete", "m"], ["extension", "list"], ["ext", "search", "x"], ["auth", "status"]):
+            self.assertIsNone(W.cli_refusal(a, None), a); self.assertIsNotNone(self.wrap(a, caller=["node", "/x/foo.mjs"])[1], a)
+
+
 if __name__ == "__main__": unittest.main()
