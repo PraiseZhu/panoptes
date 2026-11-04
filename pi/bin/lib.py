@@ -386,6 +386,68 @@ def gh_product_write(args, repo=None, caller=None, read=open, excused=frozenset(
     if (noun, verb) in excused and (noun, verb) in PRODUCT_WRITE_EXCUSABLE: return None
     if review_pr and (noun, verb) in REVIEW_PR_CMDS: return None
     return RED_WRITE + f" (gh {noun} {verb})".rstrip()
+# #214 r3 (PM ruling 1): the ONE update-branch exception. Caller pi/bin/outbound.py (exact realpath suffix, as PRODUCT_WRITE_EXCEPTIONS:
+# the wrapper's script_of(caller_chain()), lib.gh's own process script), shape `gh pr update-branch N` (no --rebase) or REST
+# PUT repos/<product>/pulls/N/update-branch (only expected_head_sha), and a live read of the PR through the real gh: headRefName
+# qa-fix/*, head repo == the product repo (no fork), baseRefName main. Anything else stays the red line (fail closed).
+UB_CALLER = "pi/bin/outbound.py"; UB_HEAD_PREFIX = "qa-fix/"; UB_BASE = "main"
+def update_branch_pr(args, repo=None):
+    """-> (pr, None) when args are an exception-shaped update-branch of the product repo, (None, why) when they are some other
+    update-branch of it, (None, None) when they are no product update-branch at all"""
+    a = list(args)
+    if a[:1] == ["api"]:
+        try: p = gh_api_parse(a)
+        except GhUnparseable: return None, None
+        m = re.match(r"repos/([^/]+/[^/]+)/pulls/(\d+)/update-branch$", p["path"], re.I)
+        if not m: return None, None
+        at = api_target(p, repo)
+        if at is not None and not is_product_repo(at): return None, None
+        if at != PRODUCT_REPO_UB: return None, f"update-branch target {at or 'unknown'} is not {PRODUCT_REPO_UB}"
+        if (p["method"] or "POST") != "PUT": return None, "update-branch not via PUT"
+        if p["input"] is not None or any(k != "expected_head_sha" for k, _ in p["fields"]): return None, "update-branch with a body/field other than expected_head_sha (rebase/update_method refused)"
+        return int(m.group(2)), None
+    if a[:2] != ["pr", "update-branch"]: return None, None
+    tgt = repo or gh_target_repo(a)
+    if tgt is not None and not is_product_repo(tgt): return None, None
+    if tgt != PRODUCT_REPO_UB: return None, f"update-branch target {tgt or 'unknown'} is not {PRODUCT_REPO_UB}"
+    rest, n, i = a[2:], None, 0
+    while i < len(rest):
+        x = rest[i]; i += 1
+        if x in ("-R", "--repo"): i += 1; continue
+        if x.startswith("--repo=") or (x.startswith("-R") and len(x) > 2): continue
+        if x.startswith("-"): return None, f"gh pr update-branch {x.split('=')[0]} refused (only the plain merge form)"
+        if n is not None or not x.isdigit(): return None, "gh pr update-branch needs exactly one PR number"
+        n = int(x)
+    if n is None: return None, "gh pr update-branch without a PR number"
+    return n, None
+PRODUCT_REPO_UB = REPO
+def is_ub_caller(script):
+    s = (script or "").replace("\\", "/")
+    return s == UB_CALLER or s.endswith("/" + UB_CALLER)
+def ub_lookup(n, env=None, run=subprocess.run):
+    """the PR's head/base through the REAL gh (never the wrapper; a read): -> dict, raises on any failure"""
+    r = run([real_gh(env), "pr", "view", str(int(n)), "-R", PRODUCT_REPO_UB, "--json", "headRefName,baseRefName,headRepository,headRepositoryOwner,isCrossRepository"],
+            capture_output=True, text=True, timeout=60, env=env)
+    if r.returncode != 0: raise RuntimeError(f"pr view #{n} failed")
+    return json.loads(r.stdout)
+def update_branch_exception(args, repo=None, script=None, lookup=None):
+    """-> "allow" (skip the red line and the product-write guard), a refusal reason, or None (not a product update-branch)"""
+    n, why = update_branch_pr(args, repo)
+    if n is None and why is None: return None
+    if not is_ub_caller(script): return f"{RED_BRANCH} (update-branch: caller {script or 'unknown'} is not {UB_CALLER})"
+    if why: return f"{RED_BRANCH} ({why})"
+    try: p = (lookup or ub_lookup)(n)
+    except Exception as e: return f"{RED_BRANCH} (update-branch #{n}: PR lookup failed: {e.__class__.__name__})"
+    p = p or {}
+    head = p.get("headRefName") or ""; base = p.get("baseRefName") or ""
+    hrepo = f"{(p.get('headRepositoryOwner') or {}).get('login') or ''}/{(p.get('headRepository') or {}).get('name') or ''}"
+    if not head.startswith(UB_HEAD_PREFIX): return f"{RED_BRANCH} (update-branch #{n}: head {head or '?'} is not {UB_HEAD_PREFIX}*)"
+    if p.get("isCrossRepository") is not False or hrepo.lower() != PRODUCT_REPO_UB.lower(): return f"{RED_BRANCH} (update-branch #{n}: head repo {hrepo} is not {PRODUCT_REPO_UB})"
+    if base != UB_BASE: return f"{RED_BRANCH} (update-branch #{n}: base {base or '?'} is not {UB_BASE})"
+    return "allow"
+def self_script():
+    """lib.gh's caller script: this process's argv[0], realpath'd (outbound.py when run as `python3 .../outbound.py`)"""
+    return os.path.realpath(sys.argv[0]) if sys.argv and sys.argv[0] else None
 def gh_reads_stdin(args):
     """True when a `gh api` call takes a body from stdin (--input -, a field =@-): the wrapper reads it once, checks it and re-feeds it"""
     if args[:1] != ["api"]: return False
@@ -466,7 +528,8 @@ def gh_skip(job):
 def gh(args, js=True, retries=1, repo=None):
     """repo: target for calls that name none (api rate_limit / graphql); picks the identity (and its rate-limit file) of that repo"""
     cmd = f"gh {' '.join(args[:2])}"
-    why = gh_red_line(args, repo)
+    ub = update_branch_exception(args, repo, self_script())
+    why = None if ub == "allow" else (ub or gh_red_line(args, repo))
     if why: raise RedLine(f"{cmd}: refused, red line: {why}")
     ident, env = gh_env(args, repo)
     rlf = gh_app_rl_file() if ident == "app" else None   # None = GH_RL_FILE (the PAT's)

@@ -15,6 +15,9 @@ def fake_node_repos(ids):
     NODE_CALLS.append(list(ids))
     return [PAN if i.startswith("PAN_") else PROD if i.startswith("PROD_") else None for i in ids]
 lib.gql_node_repos = fake_node_repos
+# the update-branch exception's PR lookup (#214 r3) never touches the network in tests: unmocked -> a lookup failure (refused)
+def _no_lookup(n, *a, **k): raise RuntimeError("no network in tests")
+lib.ub_lookup = _no_lookup
 
 PROD, PAN = "xindong/mivo-canvas-plugin", "PraiseZhu/panoptes"
 FAKE = {PROD: "ghs_" + "P" * 36, PAN: "ghs_" + "O" * 36}
@@ -427,12 +430,6 @@ class AcceptanceRound2(Base):
             self.assertIsNotNone(lib.gh_red_line(a), a)   # lib.gh (merger, outbound) too, not only the wrapper
         self.blocked_for_all(["api", "-X", "DELETE", f"repos/{R}/git/refs/heads/x"])   # ref delete: wrapper product-write (janitor stays refused)
 
-    def test_b3_outbound_update_branch_call_is_refused(self):
-        # outbound.py h_update_branch (gh.pr.update-branch) sends exactly these on REPO = the product repo: refused as ordered (PM 11-04)
-        for a in (["api", "-X", "PUT", f"repos/{lib.REPO}/pulls/7/update-branch", "-f", "expected_head_sha=abc"], ["api", "-X", "PUT", f"repos/{lib.REPO}/pulls/7/update-branch"]):
-            self.assertIn("update-branch", lib.gh_red_line(a) or "", a)
-            with self.assertRaises(lib.RedLine): lib.gh(a, js=False)
-
     def test_b4_every_flag_spelling_is_parsed(self):
         R = PROD
         for a in (["api", "-XDELETE", f"repos/{R}/git/refs/heads/x"], ["api", "-X=DELETE", f"repos/{R}/git/refs/heads/x"], ["api", "--method", "delete", f"repos/{R}/git/refs/heads/x"],
@@ -480,6 +477,93 @@ class AcceptanceRound2(Base):
         for a in (["pr", "close", "1", "-R", R], ["api", "-X", "PATCH", f"repos/{R}/pulls/1", "-f", "state=closed"], ["issue", "create", "-R", R, "-t", "x"],
                   self.gql('mutation{addPullRequestReview(input:{pullRequestId:"PROD_1"}){clientMutationId} closePullRequest(input:{pullRequestId:"PROD_1"}){clientMutationId}}')):
             rc, c, err = self.wrap(a, caller=self.RP); self.assertEqual((rc, c), (4, None), a); self.assertNotIn("allowlisted caller", err)   # PAT pass-through: guard first
+
+
+class AcceptanceRound3(Base):
+    """#214 round 3 (PM rulings 11-04): (1) the narrow outbound qa-fix/* update-branch exception, wrapper AND lib.gh; (3) review
+    dismissals/events only for review-pr callers; (4) script_of = the script the interpreter executes (preloads skipped)"""
+    wrap = Wrapper.wrap
+    OUT = ["python3", "/x/panoptes/pi/bin/outbound.py", "--once"]
+    GOOD = {"headRefName": "qa-fix/fixpr-1-a", "baseRefName": "main", "headRepository": {"name": "mivo-canvas-plugin"},
+            "headRepositoryOwner": {"login": "xindong"}, "isCrossRepository": False}
+    OK_CALLS = (["pr", "update-branch", "7", "-R", PROD], ["api", "-X", "PUT", f"repos/{PROD}/pulls/7/update-branch", "-f", "expected_head_sha=abc"],
+                ["api", "-X", "PUT", f"repos/{PROD}/pulls/7/update-branch"])
+    def look(self, pr=None, fail=False):
+        seen = []
+        def f(n):
+            seen.append(n)
+            if fail: raise RuntimeError("HTTP 502")
+            return dict(self.GOOD, **(pr or {}))
+        self.seen = seen; return mock.patch.object(lib, "ub_lookup", f)
+
+    def test_r3_outbound_qa_fix_update_branch_allowed_wrapper(self):
+        for a in self.OK_CALLS:
+            with self.look():
+                rc, c, err = self.wrap(a, caller=self.OUT)
+            self.assertIsNotNone(c, (a, err)); self.assertEqual(c[1][1:], a); self.assertEqual(self.seen, [7])
+        with self.look():   # repos/{owner}/{repo} filled from the cwd's origin = the product repo
+            self.assertIsNotNone(self.wrap(["api", "-X", "PUT", "repos/{owner}/{repo}/pulls/7/update-branch"], cwd_url="https://github.com/xindong/mivo-canvas-plugin.git", caller=self.OUT)[1])
+
+    def test_r3_outbound_qa_fix_update_branch_allowed_lib_gh(self):
+        # outbound.py:723-724 h_update_branch -> lib.gh(["api", "-X", "PUT", .../update-branch, ("-f", "expected_head_sha=..")]): caller = this process
+        for a in self.OK_CALLS[1:]:
+            with self.look(), mock.patch.object(lib, "self_script", lambda: "/x/panoptes/pi/bin/outbound.py"), \
+                 mock.patch.object(lib.subprocess, "run", lambda cmd, **k: types.SimpleNamespace(returncode=0, stdout="{}", stderr="")) as _:
+                self.assertEqual(lib.gh(a, js=False), "{}")
+            with self.look(), mock.patch.object(lib, "self_script", lambda: "/x/panoptes/pi/bin/prwatch.py"):
+                with self.assertRaises(lib.RedLine): lib.gh(a, js=False)
+            with self.look(fail=True), mock.patch.object(lib, "self_script", lambda: "/x/panoptes/pi/bin/outbound.py"):
+                with self.assertRaises(lib.RedLine): lib.gh(a, js=False)
+
+    def test_r3_update_branch_refusals(self):
+        bad_pr = ({"headRefName": "fix/qa-1-x"}, {"headRefName": "main"}, {"baseRefName": "release"}, {"isCrossRepository": True},
+                  {"headRepositoryOwner": {"login": "someone"}}, {"headRepository": {"name": "fork"}}, {"headRefName": None})
+        for pr in bad_pr:
+            for a in self.OK_CALLS:
+                with self.look(pr): self.assertEqual(self.wrap(a, caller=self.OUT)[:2], (4, None), (a, pr))
+        for a in self.OK_CALLS:
+            with self.look(fail=True): self.assertEqual(self.wrap(a, caller=self.OUT)[:2], (4, None), a)   # lookup failure
+            for caller in ([], ["python3", "/x/panoptes/pi/bin/prwatch.py"], ["python3", "/x/pi/bin/outbound.py.bak"], ["python3", "/x/notpi/bin/outbound.py2"],
+                           ["node", "/x/review-pr/scripts/merge-reviewed-pr.mjs"], ["node", "/x/review-pr/scripts/signoff-hold.mjs"],
+                           ["python3", "-c", "x", "/x/panoptes/pi/bin/outbound.py"], ["node", "--require", "/x/pi/bin/outbound.py", "/y/z.mjs"]):
+                with self.look(): self.assertEqual(self.wrap(a, caller=caller)[:2], (4, None), (a, caller))
+                self.assertEqual(self.seen, [], (a, caller))   # never looked up for another caller
+        for a in (["pr", "update-branch", "7", "--rebase", "-R", PROD], ["pr", "update-branch", "--rebase=true", "7", "-R", PROD], ["pr", "update-branch", "-R", PROD],
+                  ["pr", "update-branch", "qa-fix/x", "-R", PROD], ["pr", "update-branch", "7", "8", "-R", PROD],
+                  ["api", "-X", "PUT", f"repos/{PROD}/pulls/7/update-branch", "-f", "update_method=rebase"],
+                  ["api", "-X", "PUT", f"repos/{PROD}/pulls/7/update-branch", "-f", "expected_head_sha=a", "-f", "update_method=merge"],
+                  ["api", "-X", "PUT", f"repos/{PROD}/pulls/7/update-branch", "--input", "-"], ["api", "-X", "POST", f"repos/{PROD}/pulls/7/update-branch"],
+                  ["api", f"repos/{PROD}/pulls/7/update-branch", "-f", "expected_head_sha=a"], ["api", "-X", "PUT", f"repos/xindong/other/pulls/7/update-branch"],
+                  ["api", "-X", "PUT", f"repos/{PROD}/merges"], ["api", "-X", "PUT", f"repos/{PROD}/pulls/7/merge"]):
+            with self.look(), mock.patch.object(sys, "stdin", io.StringIO("{}")): self.assertEqual(self.wrap(a, caller=self.OUT)[:2], (4, None), a)
+            with self.look(), mock.patch.object(lib, "self_script", lambda: "/x/panoptes/pi/bin/outbound.py"):
+                with self.assertRaises(lib.RedLine): lib.gh(a, js=False)
+
+    def test_r3_review_dismissals_and_events_only_for_review_pr(self):
+        R = PROD; RP = ["node", "/x/review-pr/scripts/dismiss-own-review.mjs"]
+        for a in (["api", "-X", "PUT", f"repos/{R}/pulls/1/reviews/9/dismissals", "-f", "message=x"], ["api", "-X", "POST", f"repos/{R}/pulls/1/reviews/9/events", "-f", "event=APPROVE"]):
+            self.assertIsNotNone(self.wrap(a, caller=RP)[1], a)
+            self.assertIsNone(lib.gh_product_write(a, R, "review-pr-dismiss-own-review"))
+            for caller in ([], self.OUT, ["node", "/x/cindy/bin/cindy-watcher.mjs"], ["node", "/x/scripts/loops/lifeline/tick.mjs"],
+                           ["node", "/x/mivo/bin/mivo-watcher.mjs"], ["node", "--require", "/x/review-pr/scripts/dismiss-own-review.mjs", "/y/z.mjs"]):
+                self.assertEqual(self.wrap(a, caller=caller)[:2], (4, None), (a, caller))
+            for name in (None, "vigil-cindy-watcher", "lifeline-tick", "panoptes-outbound"): self.assertIsNotNone(lib.gh_product_write(a, R, name), (a, name))
+
+    def test_r3_script_of_skips_preloads(self):
+        import gh_wrapper as W
+        self.assertIsNone(W.allowlisted(["node", "--require", "/a/review-pr/scripts/signoff-hold.mjs", "x.mjs"]))
+        self.assertTrue(W.script_of(["node", "--require", "/a/review-pr/scripts/signoff-hold.mjs", "/b/x.mjs"]).endswith("/b/x.mjs"))
+        for c in (["node", "-r", "/a/review-pr/scripts/signoff-hold.mjs", "/b/x.mjs"], ["node", "--import", "/a/review-pr/scripts/signoff-hold.mjs", "/b/x.mjs"],
+                  ["node", "--loader", "/a/review-pr/scripts/signoff-hold.mjs", "/b/x.mjs"], ["node", "--experimental-loader", "/a/review-pr/scripts/signoff-hold.mjs", "/b/x.mjs"],
+                  ["node", "--import=/a/review-pr/scripts/signoff-hold.mjs", "/b/x.mjs"], ["node", "-r/a/review-pr/scripts/signoff-hold.mjs", "/b/x.mjs"]):
+            self.assertEqual(W.script_of(c), "/b/x.mjs", c); self.assertIsNone(W.allowlisted(c), c)
+        for c in (["node", "-e", "1", "/a/review-pr/scripts/signoff-hold.mjs"], ["node", "-p", "1", "/a/review-pr/scripts/signoff-hold.mjs"],
+                  ["node", "--eval=1", "/a/review-pr/scripts/signoff-hold.mjs"], ["python3", "-m", "x", "/a/pi/bin/outbound.py"], ["python3", "-c", "1", "/a/pi/bin/outbound.py"],
+                  ["python3", "-Im", "x", "/a/pi/bin/outbound.py"], ["bash", "-c", "x", "/a/verify.d/60-gh-auth.sh"], ["node", "-", "/a/review-pr/scripts/signoff-hold.mjs"]):
+            self.assertIsNone(W.script_of(c), c); self.assertIsNone(W.allowlisted(c), c)
+        self.assertEqual(W.allowlisted(["node", "--require", "/b/x.mjs", "/a/review-pr/scripts/signoff-hold.mjs"]), "review-pr-signoff-hold")
+        self.assertEqual(W.script_of(["python3", "-u", "-W", "ignore", "/a/pi/bin/outbound.py"]), "/a/pi/bin/outbound.py")
+        self.assertEqual(W.write_exceptions(["python3", "-X", "dev", "/a/pi/bin/outbound.py"]), W.PRODUCT_WRITE_EXCEPTIONS[0][2])
 
 
 if __name__ == "__main__": unittest.main()

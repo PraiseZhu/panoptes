@@ -4,7 +4,8 @@
 Installed by 电脑运维 as `gh` ahead of the real gh on PATH (see the PR / docs). Every call:
   1. red lines first, on every identity and caller (allowlisted PAT pass-through too) and with the flag off: product PR merges,
      branch moves (pr update-branch, REST update-branch / merges / git refs), PR title/body edits, and any `gh api` call that cannot
-     be parsed -> exit 4, nothing sent. Same function as lib.gh (lib.gh_red_line). Then lib.gh_product_write (wrapper only), DEFAULT
+     be parsed -> exit 4, nothing sent. One exception (#214 r3, PM): pi/bin/outbound.py's plain update-branch of a qa-fix/* PR
+     (head repo = product, base main; checked by a real-gh read first), lib.update_branch_exception. Same function as lib.gh (lib.gh_red_line). Then lib.gh_product_write (wrapper only), DEFAULT
      DENY on the product repo (or an unknown target): only reads, pr create --draft, pr ready, run rerun, REST .../actions/...,
      PRODUCT_WRITE_EXCEPTIONS and review-pr comments/reviews pass. A body on stdin is read, checked, and re-fed to the real gh.
   2. flag on ($PI_STATE/gh-app-enabled AND $PI_STATE/gh-app-wrapper-enabled): GH_TOKEN = a Praise QA installation token for the
@@ -102,14 +103,44 @@ def caller_chain(pid=None):
     return []
 
 
+# #214 r3 (PM ruling 4): options that take a VALUE (skipped with it: a preload is never the script) and options that mean "no script"
+NODE_VALUE_OPTS = frozenset({"-r", "--require", "--import", "--loader", "--experimental-loader", "--env-file", "--input-type", "-C",
+                             "--conditions", "--title", "--inspect-port", "--max-old-space-size", "--stack-size", "--watch-path",
+                             "--experimental-config-file", "--localstorage-file", "--disable-warning"})
+NO_SCRIPT_OPTS = frozenset({"-e", "--eval", "-p", "--print", "-c", "-m", "-i", "--interactive", "-"})
+PY_VALUE_OPTS = frozenset({"-W", "-X", "-Q"})
+SHELL_VALUE_OPTS = frozenset({"-o", "-O", "+o", "+O", "--rcfile", "--init-file"})
+
+
 def script_of(cmdline):
-    """the first executable script of a cmdline: argv[1+] after an interpreter (skipping its -options), else argv[0]; realpath'd.
-    `sh -c ...` / `python -c` / `node -e` have no script -> None"""
+    """the script the interpreter actually EXECUTES, realpath'd: argv[0] when it is no interpreter, else the first operand after the
+    interpreter's options, skipping preload options AND their values (node --require/-r/--import/--loader/..., python -W/-X, sh -o).
+    -e/-p/--eval/--print/-c (inline code), python -m (a module), -i, stdin ("-") -> None. Unknown --opt=value is one token."""
     if not cmdline: return None
     if not INTERPRETERS.match(os.path.basename(cmdline[0])): return os.path.realpath(cmdline[0]) if "/" in cmdline[0] else cmdline[0]
-    for x in cmdline[1:]:
-        if x in ("-c", "-e", "--eval", "-p", "--print", "-m"): return None
-        if x.startswith("-"): continue
+    base = os.path.basename(cmdline[0])
+    py = base.startswith("python"); shell = base in SHELLS
+    value_opts = PY_VALUE_OPTS if py else SHELL_VALUE_OPTS if shell else NODE_VALUE_OPTS
+    a = cmdline[1:]; i = 0
+    while i < len(a):
+        x = a[i]; i += 1
+        if x == "--":
+            return os.path.realpath(a[i]) if i < len(a) else None
+        if x in NO_SCRIPT_OPTS: return None
+        if x.startswith("--"):
+            if x.split("=", 1)[0] in NO_SCRIPT_OPTS: return None   # --eval=code / --print=code
+            if "=" in x: continue
+            if x in value_opts: i += 1
+            continue
+        if x.startswith("-") or (shell and x.startswith("+")):
+            if py and len(x) > 2 and x[1] in "WXQ": continue                 # -Werror, -Xdev: value attached
+            if py and any(c in x[1:] for c in "cm"): return None           # -c / -m (also bundled: -Ic, -um)
+            if not py and not shell and len(x) > 2 and x[:2] in ("-e", "-p"): return None   # -e'code' / -pcode
+            if not py and not shell and len(x) > 2 and x[:2] in ("-r", "-C"): continue       # -r./preload.js: value attached
+            if shell and "c" in x[1:]: return None
+            if x in value_opts: i += 1
+            continue
+        if base in ("deno", "bun") and x in ("run", "x") and i < len(a): continue   # `deno run [opts] script`
         return os.path.realpath(x)
     return None
 
@@ -206,7 +237,8 @@ def main(argv, env=None, execve=os.execve, run=subprocess.run, caller=None, stdi
         try: body = sys.stdin.read() if stdin is None else stdin
         except Exception: body = None   # unreadable -> the guards see no body -> refused (fail closed)
     # every caller, allowlisted (PAT pass-through) and excused ones included, goes through both guards first
-    why = lib.gh_red_line(argv, repo, stdin=body) or lib.gh_product_write(argv, repo, name, excused=write_exceptions(chain), stdin=body)
+    ub = lib.update_branch_exception(argv, repo, script_of(chain))   # #214 r3: outbound's qa-fix/* update-branch only
+    why = None if ub == "allow" else ub or lib.gh_red_line(argv, repo, stdin=body) or lib.gh_product_write(argv, repo, name, excused=write_exceptions(chain), stdin=body)
     if why:
         print(f"gh-wrapper: refused, red line: {why} (repo {repo or 'unknown'}); nothing was sent", file=sys.stderr)
         return EXIT_RED_LINE
