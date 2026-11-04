@@ -412,7 +412,8 @@ def h_fixpr(a):
         if why: raise RuntimeError(f"refused: gated ({why})")
         d = W.mkdtemp("pi-fixpr-")   # PI_WORK/tmp: janitor removes what a killed run leaves
         try:
-            run(["gh", "repo", "clone", REPO, d, "--", "--depth", "50", "-q"])
+            bref = a.get("base_ref")   # 11-04: the source PR's base (prfix checked it); legacy actions without it: default branch
+            run(["gh", "repo", "clone", REPO, d, "--", "--depth", "50", "-q", *(["--branch", bref] if bref else [])])
             br = "qa-fix/" + a["key"].replace(":", "-")[:60]
             run(["git", "-C", d, "config", "user.name", GIT_NAME]); run(["git", "-C", d, "config", "user.email", GIT_EMAIL])  # repo-local
             run(["git", "-C", d, "checkout", "-b", br]); apply_fix_patch(d, patch, a.get("base"), br)
@@ -420,7 +421,7 @@ def h_fixpr(a):
             title = a.get("title") or f"fix: QA follow-up ({must})"
             run(["git", "-C", d, "commit", "-m", title, "-m", pi_open_trailer(a["key"])]); run(["git", "-C", d, "push", "-u", "origin", br])
             body = (open(md).read() if md and os.path.exists(md) else "") + f"\n\n{must}\n<!-- pi-line {a['key']} -->"
-            created = gh(["pr", "create", "-R", REPO, "--draft", "--head", br, "--title", title, "--body", body], js=False).strip()
+            created = gh(["pr", "create", "-R", REPO, "--draft", *(["--base", bref] if bref else []), "--head", br, "--title", title, "--body", body], js=False).strip()
             real = fixpr_real_number(created)                                       # (2) docs/pr/<pred> -> docs/pr/<real>
             try: note = fixpr_docs_rename(d, br, a, real) if real else "docs rename skipped: no PR number in gh output"
             except Exception as e:   # the PR exists now: never fail the action, queue a retry instead

@@ -653,7 +653,8 @@ class TestFixOneEndToEnd(GitTmp):
             if grep -q FIXED src/foo.js; then echo " ✓ 1 passed"; exit 0; else printf '\033[41m FAIL \033[49m src/foo.test.js > bug\n'; exit 1; fi
         """)
         os.environ["FAKE_LOG"] = f"{self.tmp}/npx.log"
-        self.orig = {k: getattr(prfix, k) for k in ("pi", "predict_pr", "record_actions", "orig_pr_diff")}
+        self.orig = {k: getattr(prfix, k) for k in ("pi", "predict_pr", "record_actions", "orig_pr_diff", "source_base")}
+        prfix.source_base = lambda n: "main"   # 11-04: no gh in tests; the source PR is on main
         self.acts = []; prfix.record_actions = lambda job, day, acts: self.acts.extend(acts)
         prfix.predict_pr = lambda *a, **k: 4242
         prfix.orig_pr_diff = lambda n, f=None: "diff --git a/src/foo.js b/src/foo.js\n+module.exports = () => 1"
