@@ -12,8 +12,8 @@
       pr.severity, pr.verdict (only needs-attention/review-suggested/clean; others left + flagged), summary
       prs_by_severity/findings_by_severity, and when no unrejected code-review P0/P1 remains: code_review.status/gate
       → passed with gate.calibrated_from and verdict.status passed.
-  opsfix.py retest [--day YYYY-MM-DD | --since ISO] [--pr N ...] [--execute] [--max-model 8] [--keep] [--wait-lock S] [--no-handoff]
-  Fix-PR original-case retest; logic + write-back format in opsfix_retest.py. Default dry-run (plan only).
+  opsfix.py retest [--day YYYY-MM-DD | --since ISO] [--pr N ...] [--execute] [--max-model 12] [--keep] [--wait-lock S] [--no-handoff]
+      Fix-PR original-case retest; logic + write-back format in opsfix_retest.py. Default dry-run (plan only).
       Scope (10-23): fix PRs (body "QA: #N") merged after the last successful run — watermark + done/retry sets in
       out/ops/retest-state.json (seeded from manual-runs.jsonl on first use); --day = that data day only (watermark kept);
       --since overrides the watermark. Fix PRs whose targets stay blocked are retried (max 3 runs; model-cap blocks free).
@@ -119,7 +119,7 @@ b.add_argument("--execute", action="store_true"); b.add_argument("--rerun", acti
 c = s.add_parser("calibrate"); c.add_argument("--pr", type=int, required=True); c.add_argument("--match", required=True)
 c.add_argument("--to", required=True, choices=["P1", "P2", "P3", "误报"]); c.add_argument("--reason", required=True); c.add_argument("--apply", action="store_true")
 r = s.add_parser("retest"); r.add_argument("--day"); r.add_argument("--pr", type=int, nargs="*")
-r.add_argument("--execute", action="store_true"); r.add_argument("--max-model", type=int, default=8); r.add_argument("--keep", action="store_true")
+r.add_argument("--execute", action="store_true"); r.add_argument("--max-model", type=int, default=12); r.add_argument("--keep", action="store_true")
 r.add_argument("--since", help="ISO time; overrides the watermark in out/ops/retest-state.json")
 r.add_argument("--wait-lock", type=int, default=1200, help="seconds to wait for the panoptes QA lock before rc 75")
 r.add_argument("--no-handoff", action="store_true", help="do not record handoff issue close/reopen actions")
