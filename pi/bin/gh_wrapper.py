@@ -24,14 +24,7 @@ def wrapper_on(): return os.path.exists(lib.gh_app_flag()) and os.path.exists(wr
 def unresolved_log(): return f"{lib.PI_STATE}/out/gh-wrapper/unresolved.jsonl"
 
 
-def real_gh(env=os.environ):
-    if env.get("PRAISE_QA_REAL_GH"): return env["PRAISE_QA_REAL_GH"]
-    me = os.path.realpath(sys.argv[0] if sys.argv and sys.argv[0] else __file__)
-    mine = {me, os.path.realpath(__file__), os.path.realpath(os.path.join(os.path.dirname(__file__), "gh-praise-qa"))}
-    for d in (env.get("PATH") or "").split(os.pathsep):
-        c = os.path.join(d, "gh")
-        if os.path.isfile(c) and os.access(c, os.X_OK) and os.path.realpath(c) not in mine: return c
-    return "/usr/bin/gh"
+def real_gh(env=os.environ): return lib.real_gh(env)   # first `gh` on PATH that is not this wrapper (or $PRAISE_QA_REAL_GH)
 
 
 def repo_from_url(url):

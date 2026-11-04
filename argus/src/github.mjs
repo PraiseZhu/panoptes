@@ -317,7 +317,14 @@ export async function listQaIssues(repo, { maxPages = 5 } = {}) {
 
 export const reopenIssue = (repo, number) => apiSend('PATCH', `repos/${repo}/issues/${number}`, { state: 'open' })
 
-export const currentUser = () => apiGet('user')
+// 11-04: explicit identity, no GET /user (an installation token cannot call it, so it breaks under the box gh wrapper / Praise QA App).
+// The identity that serves `repo`: the Praise QA App, Argus's own App, or the gh login (named by the caller, e.g. registry owner).
+export async function currentIdentity(repo, ghLogin) {
+  if (praiseQaTokenFor(repo)) return { login: 'praise-qa[bot]', via: 'praise-qa-app' }
+  const app = await appFor(repo).catch(() => null)
+  if (app) return { login: app.botLogin, via: 'argus-app' }
+  return { login: ghLogin, via: 'gh-login' }
+}
 
 // 夜间 QA 的 PR 发现：上海时区某一天 [day 00:00, 次日 00:00)，不限作者。
 // 收两类：① 当天合并的 PR；② 当前仍开着、且当天有过更新的 PR。

@@ -148,6 +148,50 @@ class Wrapper(Base):
         self.assertNotIn("GH_TOKEN", c[2]); self.assertIn("inherited gh login", err)
 
 
+class PatChecksBypassTheWrapper(unittest.TestCase):
+    def test_real_gh_skips_the_wrapper_on_path(self):
+        d = tempfile.mkdtemp(); os.makedirs(f"{d}/local"); os.makedirs(f"{d}/usr")
+        os.symlink(os.path.join(BIN, "gh-praise-qa"), f"{d}/local/gh")             # 电脑运维's install: /usr/local/bin/gh -> wrapper
+        open(f"{d}/usr/gh", "w").write("#!/bin/sh\n"); os.chmod(f"{d}/usr/gh", 0o755)
+        self.assertEqual(lib.real_gh({"PATH": f"{d}/local:{d}/usr"}), os.path.realpath(f"{d}/usr/gh"))
+
+    def test_pat_env_is_the_pat_never_an_installation_token(self):
+        self.assertEqual(lib.pat_env({"GH_TOKEN": "ghs_x", "GITHUB_TOKEN": "ghp_pat", "A": "1"}), {"GH_TOKEN": "ghp_pat", "A": "1"})
+        self.assertEqual(lib.pat_env({"GH_TOKEN": "ghs_x", "GITHUB_TOKEN": "ghs_y"}), {}, "no PAT in env -> the real gh's hosts.yml login")
+
+    def test_credcheck_and_opsenv_call_the_real_gh_with_the_pat(self):
+        import ast
+        for f in ("credcheck.py", "opsenv.py"):
+            t = ast.parse(open(os.path.join(BIN, f)).read()); hits = []
+            for c in ast.walk(t):
+                if isinstance(c, ast.Call) and getattr(c.func, "attr", "") == "run" and c.args and isinstance(c.args[0], ast.List) and c.args[0].elts:
+                    e0 = c.args[0].elts[0]
+                    if isinstance(e0, ast.Constant) and e0.value == "gh": self.fail(f"{f}:{c.lineno} bare gh")
+                    if isinstance(e0, ast.Call) and getattr(e0.func, "id", "") == "real_gh":
+                        hits.append(any(k.arg == "env" and isinstance(k.value, ast.Call) and getattr(k.value.func, "id", "") == "pat_env" for k in c.keywords))
+            self.assertTrue(hits and all(hits), f)
+            self.assertNotIn('sh("gh ', open(os.path.join(BIN, f)).read(), f)
+
+    def test_credcheck_runs_real_gh_not_the_wrapper(self):
+        sys.modules.setdefault("merger", types.SimpleNamespace(FIELDS="number", blockers=lambda p: []))
+        import credcheck as C
+        seen = []
+        fake = lambda cmd, **k: seen.append((cmd, k.get("env"))) or types.SimpleNamespace(returncode=0, stdout="true", stderr="")
+        with mock.patch.object(C, "secret_env", lambda: None), mock.patch.object(C, "NEED", {}), mock.patch.object(C.subprocess, "run", fake), \
+             mock.patch.object(C, "real_gh", lambda: "/usr/bin/gh"), mock.patch.dict(os.environ, {"GH_TOKEN": "ghs_wrapper", "GITHUB_TOKEN": "ghp_pat"}), \
+             mock.patch.object(C, "write_atomic", lambda *a: None), redirect_stdout(io.StringIO()):
+            C.main()
+        cmd, env = seen[-1]
+        self.assertEqual(cmd[0], "/usr/bin/gh"); self.assertEqual(env["GH_TOKEN"], "ghp_pat"); self.assertNotIn("GITHUB_TOKEN", env)
+
+    def test_argus_doctor_identity_is_explicit(self):
+        js = ("import('%s/argus/src/github.mjs').then(async m => console.log(JSON.stringify(await m.currentIdentity('PraiseZhu/pr-qa-agent-deploy', 'PraiseZhu'))))" % ROOT)
+        env = {**os.environ, "PRAISE_QA_GH_OWN_TOKEN": "O", "ARGUS_SECRETS_FILE": "/nonexistent"}
+        r = subprocess.run(["node", "--input-type=module", "-e", js], capture_output=True, text=True, cwd=os.path.join(ROOT, "argus"), env=env)
+        self.assertEqual(json.loads(r.stdout.strip().splitlines()[-1]), {"login": "praise-qa[bot]", "via": "praise-qa-app"}, r.stderr[-400:])
+        src = open(os.path.join(ROOT, "argus/src/github.mjs")).read(); self.assertNotIn("apiGet('user')", src)
+
+
 class CredentialHelper(Base):
     def get(self, text):
         import importlib.machinery, importlib.util

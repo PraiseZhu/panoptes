@@ -237,6 +237,22 @@ APP_LOGIN = "praise-qa[bot]"; APP_AUTHOR = "app/praise-qa"   # how the App shows
 def gh_app_writes_flag(): return f"{PI_STATE}/gh-app-writes-enabled"
 def gh_app_writes_ok(args): return os.path.exists(gh_app_writes_flag())
 def gh_app_writes_on(): return os.path.exists(gh_app_flag()) and os.path.exists(gh_app_writes_flag())
+# 11-04 (#214): PAT health checks bypass the box gh wrapper (pi/bin/gh-praise-qa on PATH as `gh`): the real binary by absolute path,
+# and the PAT explicitly (secrets GITHUB_TOKEN when it is a PAT, else the real gh's own hosts.yml login), never an installation token.
+WRAPPER_NAMES = ("gh-praise-qa", "gh_wrapper.py")
+def real_gh(env=None):
+    env = os.environ if env is None else env
+    if env.get("PRAISE_QA_REAL_GH"): return env["PRAISE_QA_REAL_GH"]
+    for d in (env.get("PATH") or "").split(os.pathsep):
+        c = os.path.join(d, "gh")
+        if os.path.isfile(c) and os.access(c, os.X_OK) and os.path.basename(os.path.realpath(c)) not in WRAPPER_NAMES: return os.path.realpath(c)
+    return "/usr/bin/gh"
+def pat_env(env=None):
+    env = dict(os.environ if env is None else env)
+    for k in ("GH_TOKEN", "GH_ENTERPRISE_TOKEN"): env.pop(k, None)
+    t = env.pop("GITHUB_TOKEN", None)
+    if t and not t.startswith("ghs_"): env["GH_TOKEN"] = t   # the PAT from secrets.env; an installation token is dropped
+    return env
 GIT_NET_READS = ("fetch", "ls-remote", "clone")
 def git_read_env(repo):
     """task B: env for a git network READ (fetch / ls-remote / clone) of repo: the App token through gh's credential helper (GIT_CONFIG_*

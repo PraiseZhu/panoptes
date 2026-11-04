@@ -28,7 +28,10 @@ def checks():
             "repo": os.path.isdir(f"{P}/.git") and os.access(f"{P}/run-nightly.sh", os.X_OK)}
     L.append("- 抽查: " + ", ".join(f"{k}={'ok' if v else 'MISSING'}" for k, v in spot.items()))
     fails += [f"missing: {k}" for k, v in spot.items() if not v and not any(k.split()[0] in m for m in miss)]
-    rc, o = sh("gh auth status 2>&1 | grep -E 'Logged in' | head -1"); L.append(f"- gh: {'ok' if 'Logged in' in o else 'NOT OK'}")
+    # 11-04 (#214): `gh auth status` validates the login through /user; under the box gh wrapper (installation token) that fails, so this
+    # check of the box's own gh login (the PAT fallback) calls the real gh with the PAT explicitly
+    r = subprocess.run([real_gh(), "auth", "status"], capture_output=True, text=True, timeout=120, env=pat_env())
+    o = next((l.strip() for l in (r.stdout + r.stderr).splitlines() if "Logged in" in l), ""); L.append(f"- gh: {'ok' if 'Logged in' in o else 'NOT OK'}")
     if 'Logged in' not in o: fails.append("gh auth not logged in")
     _, head = sh(f"git -C {P} rev-parse HEAD"); _, br = sh(f"git -C {P} rev-parse --abbrev-ref HEAD")
     _, rem = sh(f"git -C {P} ls-remote origin refs/heads/{br}", 60)
