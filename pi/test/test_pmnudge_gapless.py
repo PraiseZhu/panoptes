@@ -26,6 +26,8 @@ def test_ratelimit_still_writes_section():
     os.remove(rf)
 
 def test_other_failure_still_writes_section():
+    p = f"{M.BASE}/out/pm/{M.today()}.md"
+    if os.path.exists(p): os.remove(p)   # 同一小时只写一节（#199 验收 3）：换个干净的当天文件
     txt = run_fail(RuntimeError("gh pr: timeout after 120s"))
     assert txt.rsplit("## 白天催办", 1)[1].count("gh 失败（非限流）") == 1 and "timeout" in txt, txt
 

@@ -76,9 +76,11 @@ def progress_sig(p):
 
 def last_activity(p, now):
     """11-04：新 PR / 有进展 -> 从 PR 自己的最后活动时间（updatedAt）起算，而不是脚本第一次看到它的时间（#1710/#1725 没被催）；没有 / 解析失败 / 在未来 -> now"""
-    try: t = parse_ts(p["updatedAt"])
-    except Exception: return now.isoformat()
-    return t.isoformat() if t <= now else now.isoformat()
+    try:
+        t = parse_ts(p.get("updatedAt"))   # "" / None -> None；无时区 -> 视为无效
+        if t is not None and t.tzinfo is not None and t <= now: return t.isoformat()
+    except Exception: pass
+    return now.isoformat()
 
 def stalls(prs, state, now):
     """返回 (本轮要催的停滞列表 [(pr, 小时数, since_iso)], 新 state)。新 PR / 指纹变了 -> 从 now 重新计时、清 nudged；
@@ -125,11 +127,13 @@ FIELDS = "number,title,isDraft,createdAt,updatedAt,body,headRefName,headRefOid,c
 
 def next_retry(now, e):
     """下一轮 cron（北京 09–22 点 :05）；限流时不早于 lib.gh 记录的重置时间（#198 的 gh-ratelimit.json，没有则只看 cron）"""
-    t = now.replace(minute=5, second=0, microsecond=0)
-    if t <= now: t += dt.timedelta(hours=1)
+    def slot(x):   # 第一个不早于 x 的 :05
+        s = x.replace(minute=5, second=0, microsecond=0)
+        return s if s >= x else s + dt.timedelta(hours=1)
+    t = slot(now + dt.timedelta(microseconds=1))
     try: u = gh_rl_until()
     except Exception: u = 0
-    if u: t = max(t, dt.datetime.fromtimestamp(u, CST))
+    if u: t = max(t, slot(dt.datetime.fromtimestamp(u, CST)))
     while not 9 <= t.hour <= 22: t = (t + dt.timedelta(hours=1)).replace(minute=5)
     return t, u
 
@@ -142,6 +146,7 @@ def fail_section(d, hh, e, dry):
     if dry: print(txt); return
     for pth in [f"{BASE}/out/pm/{d}.md"] + ([f"/workspace/fleet-standards/pm-daily/{d}.md"] if mode() == "pi" else []):
         old = open(pth).read() if os.path.exists(pth) else ""
+        if re.search(rf"^## 白天催办 {hh[:2]}:\d\d（Pi 线；gh pr list 失败，本轮未催）", old, re.M): continue   # 同一小时只写一节
         write_atomic(pth, old + ("\n" if old and not old.endswith("\n\n") else "") + txt)
 
 def main():
