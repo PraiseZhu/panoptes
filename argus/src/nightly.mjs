@@ -364,8 +364,11 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   const lowWater = startMemLowWater()   // 10-28：从首轮到判定之间的 MemAvailable 最低值（跌破 1.5G → 环境问题）
   let first = await executeOnSha({ ...common, label: 'h1', sha, stepIds: plan.stepIds, beforeStep })
   if (setupFailed(first)) {
-    health.qa_tool_failures.push({ pr: number, stage: 'setup', message: 'dependency install failed, retrying once', detail: tail(redact(first.find((r) => r.kind === 'setup')?.tail ?? ''), 600) })
+    const installFailure = { pr: number, stage: 'setup', message: 'dependency install failed, retrying once', detail: tail(redact(first.find((r) => r.kind === 'setup')?.tail ?? ''), 600) }
     first = await executeOnSha({ ...common, label: 'h1r', sha, stepIds: plan.stepIds, beforeStep })
+    // 重试就装好了 = 已恢复的环境故障（11-05 PR #1788 磁盘满）：条目留在报告里，但要标 transient，
+    // 否则 persistentHealthEntries / infrafix 会把这一次自愈当成 panoptes 自己的持久安装故障去开 ticket
+    health.qa_tool_failures.push(setupFailed(first) ? installFailure : { ...installFailure, transient: true })
   }
   // 不适用于这个版本的步骤（appliesIf 不满足）：不进 checks、不参与判定，记进 skipped_steps
   for (const r of first.filter((x) => x.notApplicable)) plan.skipped.push({ id: r.id, nameZh: r.nameZh, reason: `not applicable to this revision: ${r.notApplicableReason}` })
