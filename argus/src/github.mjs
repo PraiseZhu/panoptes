@@ -48,7 +48,19 @@ export function ghTargetRepo(args) {
   }
   return null
 }
+// 11-05: orgs/<org>/teams/... needs org members:read, which the App installation lacks (404). Same as panoptes pi/bin/gh_wrapper.py
+// TEAM_MEMBERS -> lib.pat_env(): drop GH_TOKEN / GH_ENTERPRISE_TOKEN, use GITHUB_TOKEN (the PAT) unless it is an installation token
+export function patEnv(env = process.env) {
+  const e = { ...env }
+  delete e.GH_TOKEN; delete e.GH_ENTERPRISE_TOKEN
+  const t = e.GITHUB_TOKEN
+  delete e.GITHUB_TOKEN
+  if (t && !t.startsWith('ghs_')) e.GH_TOKEN = t
+  return e
+}
+const isTeamPath = (args) => args[0] === 'api' && args.some((a) => /^\/?orgs\/[^/]+\/teams\//.test(a))
 export function ghEnvFor(args) {
+  if (isTeamPath(args)) return patEnv()
   const tok = praiseQaTokenFor(ghTargetRepo(args))
   if (!tok) return process.env
   const e = { ...process.env, GH_TOKEN: tok }
