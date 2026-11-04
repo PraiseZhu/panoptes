@@ -1,9 +1,9 @@
 // GitHub 访问：个人仓走 GitHub App（Argus QA PraiseZhu，最小权限：读代码 / 读 PR / 写 issue），
 // App 没装到的仓（如 xindong 组织的 Mivo）仍走 Mini 上已登录的 gh
 import { execFile, execFileSync } from 'node:child_process'
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync, realpathSync, accessSync, statSync, constants as fsc } from 'node:fs'
 import { createSign } from 'node:crypto'
-import { join } from 'node:path'
+import { join, basename, delimiter } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { loadSecrets } from './config.mjs'
 import { APP_DIR } from './paths.mjs'
@@ -59,6 +59,27 @@ export function patEnv(env = process.env) {
   return e
 }
 const isTeamPath = (args) => args[0] === 'api' && args.some((a) => /^\/?orgs\/[^/]+\/teams\//.test(a))
+// 11-05 (#242 follow-up): patEnv alone is not enough. With the App flags on, scripts/gh-app-env.sh unsets GITHUB_TOKEN, so patEnv
+// yields no GH_TOKEN, and the `gh` on PATH is /usr/local/bin/gh = pi/bin/gh_wrapper.py, which mints the App token for such a call
+// (gh_wrapper.py main: wrapper_on and GH_TOKEN not ghs_) -> 404 again. Like the wrapper's allowlisted PAT pass-through
+// (lib.pat_env + lib.real_gh), team calls go to the REAL gh with patEnv; no PAT there either -> an explicit error, never the App token.
+const WRAPPER_NAMES = ['gh-praise-qa', 'gh_wrapper.py']
+const isExe = (f) => { try { accessSync(f, fsc.X_OK); return statSync(f).isFile() } catch { return false } }
+export function realGh(env = process.env) {   // = pi/bin/lib.py real_gh
+  if (env.PRAISE_QA_REAL_GH) return env.PRAISE_QA_REAL_GH
+  for (const d of (env.PATH || '').split(delimiter)) {
+    const c = join(d, 'gh')
+    if (isExe(c) && !WRAPPER_NAMES.includes(basename(realpathSync(c)))) return realpathSync(c)
+  }
+  return isExe('/usr/bin/gh') ? '/usr/bin/gh' : null
+}
+export const NO_MEMBER_PAT = 'team members: no member PAT available'
+export function memberPatGh(env = process.env) {
+  const e = patEnv(env), bin = realGh(e)
+  if (!bin) return null
+  if (e.GH_TOKEN) return { bin, env: e }
+  try { execFileSync(bin, ['auth', 'status', '--hostname', 'github.com'], { env: e, stdio: 'ignore', timeout: 30_000 }); return { bin, env: e } } catch { return null }
+}
 export function ghEnvFor(args) {
   if (isTeamPath(args)) return patEnv()
   const tok = praiseQaTokenFor(ghTargetRepo(args))
@@ -70,7 +91,9 @@ export function ghEnvFor(args) {
 
 function gh(args, { input, timeoutMs = 60_000 } = {}) {
   return new Promise((resolve, reject) => {
-    const child = execFile(GH, args, { maxBuffer: 64 * 1024 * 1024, timeout: timeoutMs, env: ghEnvFor(args) }, (err, stdout, stderr) => {
+    const pat = isTeamPath(args) ? memberPatGh() : undefined
+    if (pat === null) { reject(Object.assign(new Error(`${NO_MEMBER_PAT} (real gh has no PAT / login; not using the App token)`), { httpStatus: null, noMemberPat: true })); return }
+    const child = execFile(pat?.bin ?? GH, args, { maxBuffer: 64 * 1024 * 1024, timeout: timeoutMs, env: pat?.env ?? ghEnvFor(args) }, (err, stdout, stderr) => {
       if (err) {
         const e = new Error(`gh ${args.slice(0, 4).join(' ')} 失败：${String(stderr || err.message).slice(0, 600)}`)
         e.stderr = String(stderr ?? '')
@@ -161,7 +184,7 @@ async function withRetry(fn, attempts = 3) {
     try {
       return await fn()
     } catch (err) {
-      const transient = !err.httpStatus || err.httpStatus >= 500
+      const transient = !err.noMemberPat && (!err.httpStatus || err.httpStatus >= 500)
       if (!transient || i >= attempts) throw err
       await new Promise((r) => setTimeout(r, i * RETRY_MS))
     }
