@@ -46,19 +46,20 @@ GH_RL_FILE = f"{PI_STATE}/gh-ratelimit.json"
 GH_RL_ALERT_H = 2
 GH_RL_MAX_S = 2 * 3600   # a recorded reset is never further away than this (a bogus Retry-After / reset must not wedge every job)
 class GhRateLimited(RuntimeError): pass
-def gh_rl_state():
+def gh_rl_state(f=None):
     """the state dict; a missing file is {}, a corrupt one (not a dict / non-numeric until or since) is ignored with one log line"""
-    try: d = json.load(open(GH_RL_FILE))
+    GH_RL_FILE_ = f or GH_RL_FILE
+    try: d = json.load(open(GH_RL_FILE_))
     except FileNotFoundError: return {}
-    except (OSError, ValueError) as e: log(f"{GH_RL_FILE} unreadable ({e.__class__.__name__}), ignored"); return {}
+    except (OSError, ValueError) as e: log(f"{GH_RL_FILE_} unreadable ({e.__class__.__name__}), ignored"); return {}
     num = lambda v: v is None or (isinstance(v, (int, float)) and not isinstance(v, bool))
-    if not isinstance(d, dict) or not num(d.get("until")) or not num(d.get("since")): log(f"{GH_RL_FILE} malformed, ignored"); return {}
+    if not isinstance(d, dict) or not num(d.get("until")) or not num(d.get("since")): log(f"{GH_RL_FILE_} malformed, ignored"); return {}
     return d
-def gh_rl_until(now=None):
+def gh_rl_until(now=None, f=None):
     """epoch the GitHub calls may resume, or 0 when not rate-limited. Writes cap until at now+GH_RL_MAX_S, so a stored until further
     out is bogus: ignored (one log line), never clamped on read -- a read clamp would roll forward to now+2h forever"""
-    now = now or _epoch(); u = gh_rl_state().get("until") or 0
-    if u > now + GH_RL_MAX_S + 60: log(f"{GH_RL_FILE} until is > {GH_RL_MAX_S}s away, ignored"); return 0
+    now = now or _epoch(); u = gh_rl_state(f).get("until") or 0
+    if u > now + GH_RL_MAX_S + 60: log(f"{f or GH_RL_FILE} until is > {GH_RL_MAX_S}s away, ignored"); return 0
     return u if u > now else 0
 def _gh_rl_reset(err):
     """epoch from Retry-After / X-RateLimit-Reset in err, else from `gh api rate_limit` (free, not counted), else a short default"""
@@ -75,15 +76,54 @@ def _gh_rl_reset(err):
         if ts and max(ts) > now: return float(max(ts))
     except Exception: pass
     return now + 900
-def gh_rl_record(err):
+def gh_rl_record(err, f=None):
     """err is a GitHub rate limit -> record the reset in GH_RL_FILE (keeping 'since' of an ongoing streak) and return True"""
     if not GH_RL_RE.search(err or ""): return False
-    old = gh_rl_state(); until = min(_gh_rl_reset(err), _epoch() + GH_RL_MAX_S)
-    write_atomic(GH_RL_FILE, json.dumps({"since": old.get("since") or _epoch(), "until": until, "error": err[:200]}))
+    old = gh_rl_state(f); until = min(_gh_rl_reset(err), _epoch() + GH_RL_MAX_S)
+    write_atomic(f or GH_RL_FILE, json.dumps({"since": old.get("since") or _epoch(), "until": until, "error": err[:200]}))
     return True
-def gh_rl_clear():
-    try: os.remove(GH_RL_FILE)
+def gh_rl_clear(f=None):
+    try: os.remove(f or GH_RL_FILE)
     except FileNotFoundError: pass
+
+# 11-04 (pi-work/gh-app-1104 P1): GitHub App "Praise QA" for PraiseZhu/panoptes READS, behind the flag file $PI_STATE/gh-app-enabled
+# (read at call time). Flag absent, a repo without an App route, an identity-dependent call (@me, /user) or a token that cannot be
+# minted -> the default gh login (PAT), exactly as before. The App has its own quota, so its rate-limit marker is a separate file.
+GH_APP_REPOS = {"PraiseZhu/panoptes"}      # P3 (product repo) is not part of this; ghtoken knows its installation already
+def gh_app_flag(): return f"{PI_STATE}/gh-app-enabled"
+def gh_app_rl_file(): return f"{PI_STATE}/gh-ratelimit-praise-qa.json"
+def gh_target_repo(args):
+    """OWNER/REPO a gh call targets: -R/--repo X, `repo view|clone X`, or `api [/]repos/OWNER/REPO/...`; None if unknown"""
+    a = list(args)
+    for i, x in enumerate(a):
+        if x in ("-R", "--repo") and i + 1 < len(a): return a[i + 1]
+        if x.startswith("--repo="): return x.split("=", 1)[1]
+    if a[:1] == ["repo"] and len(a) > 2 and a[1] in ("view", "clone") and "/" in a[2]: return a[2]
+    if a[:1] == ["api"]:
+        for x in a[1:]:
+            m = re.match(r"/?repos/([^/\s]+/[^/?\s]+)", x)
+            if m: return m.group(1)
+    return None
+def gh_app_wanted(args):
+    """True when this call should use the App token (see above); writes are P2 (gh_app_writes_ok)"""
+    repo = gh_target_repo(args)
+    if repo not in GH_APP_REPOS or not os.path.exists(gh_app_flag()): return False
+    if any(x == "@me" or re.match(r"/?user(?:$|/)", x) for x in args[1:]): return False   # identity-dependent: stays the PAT's
+    return gh_is_read(args) or gh_app_writes_ok(args)
+def gh_app_writes_ok(args): return False   # P1: every write stays on the PAT
+def gh_env(args):
+    """-> (identity "app"|"pat", env for subprocess or None = inherit). Minting failures fall back to the PAT with one masked line."""
+    if not gh_app_wanted(args): return "pat", None
+    try:
+        import ghtoken
+        tok = ghtoken.token(gh_target_repo(args))
+    except Exception as e:
+        try: import ghtoken as _g; msg = _g.mask(e)
+        except Exception: msg = e.__class__.__name__
+        log(f"gh app token unavailable ({str(msg)[:160]}); using the default gh login for this call"); return "pat", None
+    env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN")}
+    env["GH_TOKEN"] = tok
+    return "app", env
 def gh_skip(job):
     """True (and one log line) when GitHub is rate-limited: the caller skips its GitHub steps this run"""
     u = gh_rl_until()
@@ -91,18 +131,23 @@ def gh_skip(job):
     return bool(u)
 def gh(args, js=True, retries=1):
     cmd = f"gh {' '.join(args[:2])}"
-    u = gh_rl_until()
+    ident, env = gh_env(args)
+    rlf = gh_app_rl_file() if ident == "app" else None   # None = GH_RL_FILE (the PAT's)
+    u = gh_rl_until(f=rlf)
     if u: raise GhRateLimited(f"{cmd}: GitHub rate-limited until {dt.datetime.fromtimestamp(u, CST).strftime('%H:%M:%S')} CST (not sent)")
     for left in range(retries if gh_is_read(args) else 0, -1, -1):
-        try: r = subprocess.run(["gh"] + args, capture_output=True, text=True, timeout=120)
+        try: r = subprocess.run(["gh"] + args, capture_output=True, text=True, timeout=120, env=env)
         except subprocess.TimeoutExpired:
             if left: print(f"{cmd}: timeout after 120s, retrying once", file=sys.stderr, flush=True); continue
             raise RuntimeError(f"{cmd}: timeout after 120s [{' '.join(args)[:120]}]")
         if r.returncode == 0:
-            if os.path.exists(GH_RL_FILE): gh_rl_clear()
+            if os.path.exists(rlf or GH_RL_FILE): gh_rl_clear(rlf)
             return json.loads(r.stdout) if js else r.stdout
         err = (r.stderr or "").strip()
-        if gh_rl_record(err): raise GhRateLimited(f"{cmd}: {err[:300]} [{' '.join(args)[:120]}]")
+        if ident == "app" and re.search(r"HTTP 401|Bad credentials", err):
+            try: import ghtoken; ghtoken.invalidate(gh_target_repo(args))
+            except Exception: pass
+        if gh_rl_record(err, rlf): raise GhRateLimited(f"{cmd}: {err[:300]} [{' '.join(args)[:120]}]")
         if left and GH_TRANSIENT_RE.search(err): print(f"{cmd}: {err[:200]} -- retrying once", file=sys.stderr, flush=True); time.sleep(2); continue
         raise RuntimeError(f"{cmd}: {err[:300]} [{' '.join(args)[:120]}]")
 
