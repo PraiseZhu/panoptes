@@ -16,7 +16,13 @@ Installed by 电脑运维 as `gh` ahead of the real gh on PATH (see the PR / doc
      the call keeps the PAT: the real gh with lib.pat_env(), one line {at, caller, cmd} in $PI_STATE/out/gh-wrapper/allowlist.jsonl.
      Red lines (1) still apply. Each entry is tracked as gh-allowlist:<name> in fleet-standards/gaps-open.json, to be removed.
   3. flag off, or a mint failure (one masked stderr line) -> the inherited login (PAT), exactly as without the wrapper.
-Then exec the real gh ($PRAISE_QA_REAL_GH, else the first `gh` on PATH that is not this wrapper)."""
+Then exec the real gh ($PRAISE_QA_REAL_GH, else the first `gh` on PATH that is not this wrapper).
+
+Install (电脑运维, at wrapper install time; see also pi/README.md "gh wrapper 安装"):
+  - install this file as `gh` ahead of the real gh on PATH (name or symlink target gh-praise-qa / gh_wrapper.py, lib.WRAPPER_NAMES);
+  - REQUIRED: `git config --global credential.useHttpPath true`. Without it git sends no `path=` in the credential request,
+    credential_repo() returns None and `auth git-credential get` never reaches the App path (it falls back to the box login).
+  - git's `store` / `erase` from non-CALLER_ALLOWLIST callers exit 0 silently (no-op); an unknown or missing op exits 4."""
 import json, os, re, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import lib  # noqa: E402
@@ -27,13 +33,13 @@ EXIT_RED_LINE = 4
 
 # (name, calling-script path suffix): one entry per caller; suffix match so copies/checkouts match too. Tracked as gh-allowlist:<name>.
 CALLER_ALLOWLIST = (
+    # 11-04: grokbot-box-60-gh-auth removed (grokbot-box ebcda7536: verify.d/60-gh-auth.sh calls the real gh directly, explicit identity).
     # 11-04: vigil-cindy-watcher/-repair and vigil-mivo-watcher/-handoff removed (vigil#274 merged; vigil runs only on the Mac mini, not via this wrapper).
     ("lifeline-tick", "scripts/loops/lifeline/tick.mjs"),
     ("lifeline-report", "scripts/loops/lifeline/report.mjs"),
     # mivo-merger's app/scripts/ops/... must precede lifeline's scripts/ops/... (a shorter suffix of it): first match wins.
     ("mivo-merger-org-market-open-company-pr", "app/scripts/ops/org-market-open-company-pr.mjs"),
     ("lifeline-org-market-open-company-pr", "scripts/ops/org-market-open-company-pr.mjs"),
-    ("grokbot-box-60-gh-auth", "verify.d/60-gh-auth.sh"),
     ("review-pr-target-branch-reminder", "review-pr/scripts/target-branch-reminder"),
     ("review-pr-request-changes-reviewed-pr", "review-pr/scripts/request-changes-reviewed-pr"),
     ("review-pr-merge-reviewed-pr", "review-pr/scripts/merge-reviewed-pr"),
@@ -83,9 +89,25 @@ def split_verb(rest):
         if not x.startswith("--") and len(x) > 2 and x[:2] in PRE_VERB_VALUE: i += 1; continue   # -hgithub.com
         return None
     return "", []
+CRED_HOST_FLAGS = ("-h", "--hostname")
 def credential_op(rest):
-    """args after `auth git-credential` -> the operation (get/store/erase/...): first non-flag word, "" when none"""
-    return next((x for x in rest if not x.startswith("-")), "")
+    """args after `auth git-credential` -> the operation (get/store/erase/...): first non-flag word, "" when none.
+    --hostname/-h and its value are skipped (`-h x`, `--hostname x`, `--hostname=x`, `-hx`): the host is never taken for the op."""
+    a = list(rest); i = 0
+    while i < len(a):
+        x = a[i]
+        if x in CRED_HOST_FLAGS: i += 2; continue
+        if x.startswith("-"): i += 1; continue
+        return x
+    return ""
+CRED_NOOP_OPS = frozenset({"store", "erase"})
+def git_credential_noop(argv):
+    """True for `gh [flags] auth [flags] git-credential [flags] store|erase`: for a non-CALLER_ALLOWLIST caller this is git's own
+    bookkeeping after an auth (push/fetch); the wrapper exits 0 silently, sends nothing, keeps nothing (F2, 11-04)"""
+    a = list(argv)
+    if a[:1] != ["auth"]: return False
+    sv = split_verb(a[1:])
+    return bool(sv) and sv[0] == "git-credential" and credential_op(sv[1]) in CRED_NOOP_OPS
 def git_credential_get(argv):
     """True for `gh [flags] auth [flags] git-credential [flags] get`"""
     a = list(argv)
@@ -123,8 +145,8 @@ def cli_refusal(argv, allowlisted_name=None):
         if verb not in CONFIG_READS: return f"gh config {verb or ''} (only config get/list for non-CALLER_ALLOWLIST callers)".replace("  ", " ")
         return None
     if verb == "git-credential":   # 11-04 #222: git's credential.helper (`!gh auth git-credential`) runs as every caller
-        if credential_op(rest) == "get": return None
-        return f"gh auth git-credential {credential_op(rest) or ''} (changes stored git credentials; only get for non-CALLER_ALLOWLIST callers)".replace("  ", " ")
+        if credential_op(rest) in ("get",) or credential_op(rest) in CRED_NOOP_OPS: return None   # store/erase: silent no-op in main
+        return f"gh auth git-credential {credential_op(rest) or ''} (unknown or missing credential op; only get, and store/erase as no-ops, for non-CALLER_ALLOWLIST callers)".replace("  ", " ")
     if verb not in AUTH_READS:
         if verb == "token": return "gh auth token (prints the login token; only CALLER_ALLOWLIST callers)"
         return f"gh auth {verb or ''} (changes the box login / git credentials; only auth status for non-CALLER_ALLOWLIST callers)".replace("  ", " ")
@@ -315,6 +337,10 @@ def main(argv, env=None, execve=os.execve, run=subprocess.run, caller=None, stdi
     if why:
         print(f"gh-wrapper: refused, red line: {why} (repo {repo or 'unknown'}); nothing was sent", file=sys.stderr)
         return EXIT_RED_LINE
+    if not name and git_credential_noop(argv):
+        try: sys.stdin.read() if stdin is None else None   # drain git's request; nothing is stored, nothing is sent
+        except Exception: pass
+        return 0
     if not name and git_credential_get(argv):
         # same design as git-credential-praise-qa: App token only for the request's repo when it has an installation (never the
         # cwd repo, never the PRODUCT fallback); otherwise the real gh answers with the box login, stdin re-fed untouched
