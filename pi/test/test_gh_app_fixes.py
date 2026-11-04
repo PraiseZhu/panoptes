@@ -154,12 +154,24 @@ class Wrapper(Base):
     def test_allowlisted_caller_gets_the_pat_and_the_real_gh(self):
         import gh_wrapper as W
         self.on("gh-app-wrapper-enabled")
-        for caller in (["node", "/home/x/vigil/cindy/bin/cindy-watcher.mjs"], ["bash", "/opt/box/verify.d/60-gh-auth.sh"],
+        for caller in (["node", "/home/x/lifeline/scripts/loops/lifeline/tick.mjs"], ["bash", "/opt/box/verify.d/60-gh-auth.sh"],
                        ["/usr/bin/python3", "/Users/j/review-pr/scripts/merge-reviewed-pr.py"], ["node", "/srv/app/scripts/ops/org-market-open-company-pr.mjs"]):
             _, c, err = self.wrap(["pr", "list", "-R", PROD], env={"GITHUB_TOKEN": "ghp_pat", "GH_TOKEN": "ghs_old"}, caller=caller)
             self.assertEqual(c[0], "/real/gh", caller); self.assertEqual(c[2].get("GH_TOKEN"), "ghp_pat", caller); self.assertIn("allowlisted caller", err)
         self.assertEqual(json.loads(open(W.allowlist_log()).read().splitlines()[-1])["caller"], "mivo-merger-org-market-open-company-pr")
         self.assertEqual(len({n for n, _ in W.CALLER_ALLOWLIST}), len(W.CALLER_ALLOWLIST))
+
+    def test_vigil_callers_no_longer_allowlisted(self):
+        """11-04: vigil#274 merged; the 4 vigil entries are gone. A vigil watcher path gets None and the App token, not the PAT."""
+        import gh_wrapper as W
+        names = {n for n, _ in W.CALLER_ALLOWLIST}
+        for n in ("vigil-cindy-watcher", "vigil-cindy-repair", "vigil-mivo-watcher", "vigil-mivo-handoff"): self.assertNotIn(n, names)
+        self.assertIn("grokbot-box-60-gh-auth", names)
+        self.on("gh-app-wrapper-enabled")
+        for p in ("/home/x/vigil/watchers/cindy/bin/cindy-watcher.mjs", "/x/cindy/bin/cindy-repair.mjs", "/x/mivo/bin/mivo-watcher.mjs", "/x/mivo/bin/mivo-handoff.mjs"):
+            self.assertIsNone(W.allowlisted(["node", p]), p)
+            _, c, err = self.wrap(["pr", "list", "-R", PROD], env={"GITHUB_TOKEN": "ghp_pat"}, caller=["node", p])
+            self.assertEqual(c[2]["GH_TOKEN"], FAKE[PROD], p); self.assertNotIn("allowlisted", err)
 
     def test_org_market_open_company_pr_is_attributed_to_the_right_repo(self):
         import gh_wrapper as W
@@ -178,7 +190,7 @@ class Wrapper(Base):
 
     def test_red_lines_still_block_allowlisted_callers(self):
         for a in (["pr", "merge", "1", "-R", PROD], ["pr", "edit", "1", "--body", "x", "-R", PROD]):
-            rc, c, err = self.wrap(a, caller=["node", "/x/mivo/bin/mivo-handoff.mjs"]); self.assertEqual((rc, c), (4, None), a); self.assertIn("red line", err)
+            rc, c, err = self.wrap(a, caller=["node", "/x/scripts/loops/lifeline/report.mjs"]); self.assertEqual((rc, c), (4, None), a); self.assertIn("red line", err)
 
     def test_mint_failure_falls_back(self):
         self.on("gh-app-wrapper-enabled"); self.mint_fail = True
@@ -290,23 +302,23 @@ class AcceptanceRound1(Base):
     def test_allowlist_matches_only_the_script_longest_suffix_first(self):
         import gh_wrapper as W
         self.assertEqual(W.allowlisted(["node", "/workspace/mivo-merger/app/scripts/ops/org-market-open-company-pr.mjs"]), "mivo-merger-org-market-open-company-pr")
-        for c in (["vim", "/tmp/evil/cindy/bin/cindy-watcher.mjs"], ["node", "x.mjs", "--note", "review-pr/scripts/signoff-hold"],
-                  ["node", "/tmp/a.mjs", "/x/cindy/bin/cindy-watcher.mjs"], ["sh", "-c", "gh pr list"], ["node", "-e", "x", "/x/cindy/bin/cindy-watcher.mjs"], []):
+        for c in (["vim", "/tmp/evil/scripts/loops/lifeline/tick.mjs"], ["node", "x.mjs", "--note", "review-pr/scripts/signoff-hold"],
+                  ["node", "/tmp/a.mjs", "/x/scripts/loops/lifeline/tick.mjs"], ["sh", "-c", "gh pr list"], ["node", "-e", "x", "/x/scripts/loops/lifeline/tick.mjs"], []):
             self.assertIsNone(W.allowlisted(c), c)
-        self.assertEqual(W.allowlisted(["node", "--no-warnings", "/x/cindy/bin/cindy-watcher.mjs", "--once"]), "vigil-cindy-watcher")
+        self.assertEqual(W.allowlisted(["node", "--no-warnings", "/x/scripts/loops/lifeline/tick.mjs", "--once"]), "lifeline-tick")
         self.assertEqual(W.allowlisted(["/x/review-pr/scripts/signoff-hold", "1"]), "review-pr-signoff-hold")
-        d = tempfile.mkdtemp(); os.makedirs(f"{d}/real/cindy/bin"); open(f"{d}/real/cindy/bin/cindy-watcher.mjs", "w").close()
-        os.symlink(f"{d}/real/cindy/bin/cindy-watcher.mjs", f"{d}/innocent.mjs")
-        self.assertEqual(W.allowlisted(["node", f"{d}/innocent.mjs"]), "vigil-cindy-watcher")   # realpath of the script
+        d = tempfile.mkdtemp(); os.makedirs(f"{d}/real/scripts/loops/lifeline"); open(f"{d}/real/scripts/loops/lifeline/tick.mjs", "w").close()
+        os.symlink(f"{d}/real/scripts/loops/lifeline/tick.mjs", f"{d}/innocent.mjs")
+        self.assertEqual(W.allowlisted(["node", f"{d}/innocent.mjs"]), "lifeline-tick")   # realpath of the script
 
     def test_sh_c_parent_walks_up_at_most_three_levels(self):
         import gh_wrapper as W
-        procs = {10: (["sh", "-c", "gh pr list"], 11), 11: (["bash", "-c", "sh -c x"], 12), 12: (["node", "/x/cindy/bin/cindy-watcher.mjs"], 1)}
+        procs = {10: (["sh", "-c", "gh pr list"], 11), 11: (["bash", "-c", "sh -c x"], 12), 12: (["node", "/x/scripts/loops/lifeline/tick.mjs"], 1)}
         with mock.patch.object(W, "parent_cmdline", lambda p=None: procs.get(p, ([], 0))[0]), mock.patch.object(W, "parent_pid", lambda p: procs.get(p, ([], 0))[1]):
-            self.assertEqual(W.allowlisted(W.caller_chain(10)), "vigil-cindy-watcher")
-            procs.update({12: (["sh", "-c", "a"], 13), 13: (["sh", "-c", "b"], 14), 14: (["node", "/x/cindy/bin/cindy-watcher.mjs"], 1)})
+            self.assertEqual(W.allowlisted(W.caller_chain(10)), "lifeline-tick")
+            procs.update({12: (["sh", "-c", "a"], 13), 13: (["sh", "-c", "b"], 14), 14: (["node", "/x/scripts/loops/lifeline/tick.mjs"], 1)})
             self.assertIsNone(W.allowlisted(W.caller_chain(10)))   # 4 shells deep: not walked
-            self.assertEqual(W.caller_chain(14), ["node", "/x/cindy/bin/cindy-watcher.mjs"])
+            self.assertEqual(W.caller_chain(14), ["node", "/x/scripts/loops/lifeline/tick.mjs"])
 
     def test_product_writes_refused_except_review_pr_comments_and_ci_rerun(self):
         R = PROD; rp = ["node", "/x/review-pr/scripts/signoff-hold.mjs"]
@@ -323,7 +335,7 @@ class AcceptanceRound1(Base):
         for a in always:
             for caller in ([], rp): self.assertEqual(self.wrap(a, caller=caller)[0], 4, (a, caller))
         for a in comments:
-            self.assertEqual(self.wrap(a)[0], 4, a); self.assertEqual(self.wrap(a, caller=["node", "/x/cindy/bin/cindy-watcher.mjs"])[0], 4, a)
+            self.assertEqual(self.wrap(a)[0], 4, a); self.assertEqual(self.wrap(a, caller=["node", "/x/scripts/loops/lifeline/report.mjs"])[0], 4, a)
             self.assertIsNotNone(self.wrap(a, caller=rp)[1], a)
         for a in (["run", "rerun", "123", "-R", R], ["run", "rerun", "123", "--failed", "-R", R], ["api", "-X", "POST", f"repos/{R}/actions/runs/1/rerun"],
                   ["api", "-X", "POST", f"repos/{R}/actions/runs/1/rerun-failed-jobs"], ["api", "-X", "POST", f"repos/{R}/actions/jobs/1/rerun"],
@@ -367,7 +379,7 @@ class ProductWriteExceptions(Base):
         ops = (["issue", "create", "-R", R, "-t", "x"], ["pr", "comment", "1", "-R", R, "-b", "x"], ["issue", "close", "1", "-R", R],
                ["issue", "comment", "1", "-R", R, "-b", "x"])
         for caller in ([], ["python3", "/x/other/outbound.py"], ["python3", "/x/pi/bin/my_outbound.py"], ["python3", "/x/pi/bin/outbound.py.bak"],
-                       ["python3", "-c", "import outbound"], ["sh", "-c", "python3 /x/pi/bin/outbound.py"], ["node", "/x/cindy/bin/cindy-watcher.mjs"],
+                       ["python3", "-c", "import outbound"], ["sh", "-c", "python3 /x/pi/bin/outbound.py"], ["node", "/x/scripts/loops/lifeline/report.mjs"],
                        ["python3", "/tmp/evil.py", "/x/panoptes/pi/bin/outbound.py"]):
             for a in ops: self.assertEqual(self.wrap(a, caller=caller)[:2], (4, None), (caller, a))
         self.assertEqual(self.wrap(["issue", "comment", "1", "-R", R, "-b", "x"], caller=["python3", "/x/panoptes/pi/bin/infra_outbound.py.old"])[:2], (4, None))
@@ -380,7 +392,7 @@ class AcceptanceRound2(Base):
     gql = AcceptanceRound1.gql
     M = 'mutation{mergePullRequest(input:{pullRequestId:"PROD_1"}){clientMutationId}}'
     ALLOW = ["node", "/x/review-pr/scripts/merge-reviewed-pr.mjs"]; OUT = ProductWriteExceptions.OUT; RP = ["node", "/x/review-pr/scripts/signoff-hold.mjs"]
-    CALLERS = ([], ["node", "/x/cindy/bin/cindy-watcher.mjs"], ALLOW, OUT, RP)
+    CALLERS = ([], ["node", "/x/scripts/loops/lifeline/report.mjs"], ALLOW, OUT, RP)
     def blocked_for_all(self, a, stdin=None, **kw):
         import gh_wrapper as W
         for caller in self.CALLERS:
@@ -452,7 +464,7 @@ class AcceptanceRound2(Base):
                   ["api", "-X", "PUT", f"repos/{R}/contents/a.txt", "-f", "message=x"], ["api", "-X", "POST", "markdown", "-f", "text=x"],
                   self.gql('mutation{createLabel(input:{repositoryId:"PROD_R", name:"x"}){clientMutationId}}'), self.gql("mutation{ createGist { id } }")):
             for caller in self.CALLERS: self.assertEqual(self.wrap(a, caller=caller)[:2], (4, None), (a, caller))
-        for caller in ([], self.OUT, ["node", "/x/cindy/bin/cindy-watcher.mjs"]):   # review-pr callers may comment (B5)
+        for caller in ([], self.OUT, ["node", "/x/scripts/loops/lifeline/report.mjs"]):   # review-pr callers may comment (B5)
             self.assertEqual(self.wrap(self.gql('mutation{addComment(input:{subjectId:"UNKNOWN", body:"x"}){clientMutationId}}'), caller=caller)[:2], (4, None))
         self.assertEqual(self.wrap(["issue", "create", "-t", "x"])[:2], (4, None))   # no -R, no GH_REPO, no cwd remote: unknown -> refused
 
@@ -473,7 +485,7 @@ class AcceptanceRound2(Base):
                   self.gql('mutation{addPullRequestReview(input:{pullRequestId:"PROD_1", event:APPROVE}){clientMutationId}}')):
             for caller in (self.RP, self.ALLOW):
                 _, c, err = self.wrap(a, caller=caller); self.assertIsNotNone(c, (a, caller)); self.assertIn("allowlisted caller", err)
-            for caller in ([], self.OUT, ["node", "/x/cindy/bin/cindy-watcher.mjs"]): self.assertEqual(self.wrap(a, caller=caller)[:2], (4, None), (a, caller))
+            for caller in ([], self.OUT, ["node", "/x/scripts/loops/lifeline/report.mjs"]): self.assertEqual(self.wrap(a, caller=caller)[:2], (4, None), (a, caller))
         for a in (["pr", "close", "1", "-R", R], ["api", "-X", "PATCH", f"repos/{R}/pulls/1", "-f", "state=closed"], ["issue", "create", "-R", R, "-t", "x"],
                   self.gql('mutation{addPullRequestReview(input:{pullRequestId:"PROD_1"}){clientMutationId} closePullRequest(input:{pullRequestId:"PROD_1"}){clientMutationId}}')):
             rc, c, err = self.wrap(a, caller=self.RP); self.assertEqual((rc, c), (4, None), a); self.assertNotIn("allowlisted caller", err)   # PAT pass-through: guard first
@@ -544,10 +556,10 @@ class AcceptanceRound3(Base):
         for a in (["api", "-X", "PUT", f"repos/{R}/pulls/1/reviews/9/dismissals", "-f", "message=x"], ["api", "-X", "POST", f"repos/{R}/pulls/1/reviews/9/events", "-f", "event=APPROVE"]):
             self.assertIsNotNone(self.wrap(a, caller=RP)[1], a)
             self.assertIsNone(lib.gh_product_write(a, R, "review-pr-dismiss-own-review"))
-            for caller in ([], self.OUT, ["node", "/x/cindy/bin/cindy-watcher.mjs"], ["node", "/x/scripts/loops/lifeline/tick.mjs"],
-                           ["node", "/x/mivo/bin/mivo-watcher.mjs"], ["node", "--require", "/x/review-pr/scripts/dismiss-own-review.mjs", "/y/z.mjs"]):
+            for caller in ([], self.OUT, ["node", "/x/scripts/loops/lifeline/report.mjs"], ["node", "/x/scripts/loops/lifeline/tick.mjs"],
+                           ["node", "--require", "/x/review-pr/scripts/dismiss-own-review.mjs", "/y/z.mjs"]):
                 self.assertEqual(self.wrap(a, caller=caller)[:2], (4, None), (a, caller))
-            for name in (None, "vigil-cindy-watcher", "lifeline-tick", "panoptes-outbound"): self.assertIsNotNone(lib.gh_product_write(a, R, name), (a, name))
+            for name in (None, "lifeline-report", "lifeline-tick", "panoptes-outbound"): self.assertIsNotNone(lib.gh_product_write(a, R, name), (a, name))
 
     def test_r3_script_of_skips_preloads(self):
         import gh_wrapper as W
