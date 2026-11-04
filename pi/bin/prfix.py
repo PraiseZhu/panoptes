@@ -69,7 +69,8 @@ GATES = _E("PRFIX_GATES") or f"{PI_CODE}/conf/gates.json"
 CI_RULES = _E("PRFIX_CI_RULES") or f"{PI_CODE}/conf/ci-rules"   # <repo name>.md: the target repo's CI rules brief (10-25)
 # lazy on purpose: read env at call time, not import, so a test (or a later PI_STATE/PI_WORK_ROOT) never gets a path frozen to the real box; an assigned module attribute (tests) wins
 def _QA_LOCK(): return globals()["QA_LOCK"] if "QA_LOCK" in globals() else (_E("PRFIX_QA_LOCK") or f"{QA}/argus-root/nightly.lock")   # read at call time; a test may set QA_LOCK   # the flock panoptes run-nightly.sh takes (exec 9>)
-RULINGS = "/workspace/fleet-standards/p2-rulings.md"
+# 11-04 (#201 follow-up): PRFIX_RULINGS overrides the P2 rulings file, read at call time like the paths above; an assigned module attribute (tests) wins
+def _RULINGS(): return globals()["RULINGS"] if "RULINGS" in globals() else (_E("PRFIX_RULINGS") or "/workspace/fleet-standards/p2-rulings.md")
 LEDGER_DIR = f"{QA}/ledger/daily"
 GIT_ID = ["-c", "user.name=Praise", "-c", f"user.email={NOREPLY_EMAIL}"]   # = repo-local config of /workspace/mivo-canvas-plugin
 DEFAULT_GATES = {923: "Praise 闸：#923 修复 PR 不得创建"}               # used only while conf/gates.json does not exist
@@ -532,8 +533,8 @@ def gather():
     sent = _rjson(f"{QA}/feishu-sent.json") if os.path.exists(f"{QA}/feishu-sent.json") else {}
     return {"gates": gates, "gate_warn": gate_warn, "ledger_file": lf, "ledger": ledger, "reports": load_reports(),
             "dms": dm_assignments(sent),
-            "fix2": fix_rulings(_read(RULINGS)) if os.path.exists(RULINGS) else set(),
-            "nofix": no_fix_rulings(_read(RULINGS)) if os.path.exists(RULINGS) else set(),
+            "fix2": fix_rulings(_read(_RULINGS())) if os.path.exists(_RULINGS()) else set(),
+            "nofix": no_fix_rulings(_read(_RULINGS())) if os.path.exists(_RULINGS()) else set(),
             "notes": sorted(f for f in os.listdir(NOTES) if os.path.isfile(os.path.join(NOTES, f)) and note_claims(os.path.join(NOTES, f)))
                      if os.path.isdir(NOTES) else [],
             "prs": prs, "receipts": receipts, "links": links, "owner": owner, "repo_of": repo_of,
@@ -988,11 +989,11 @@ RULED_SAVE = ("pid", "next_retry_at")   # fields close_ruled clears; kept in pre
 def close_ruled(key, yes):
     """--close-ruled [KEY] [--yes]: move ONE ticket a no-fix P2 ruling covers to ruled_out (reason + ruling source; previous
     status/fields kept for --reopen-ruled). Without --yes it only lists (all matches when KEY is omitted). Idempotent."""
-    text = _read(RULINGS) if os.path.exists(RULINGS) else ""
+    text = _read(_RULINGS()) if os.path.exists(_RULINGS()) else ""
     print(f"# prfix 按裁决结案 {now_cst():%Y-%m-%d %H:%M} 北京（{'写入' if yes else '只列出，加 --yes 才写'}）")
     if yes and not key:
         print("prfix: --close-ruled --yes 必须指定一个工单 key（--close-ruled KEY --yes）；没有写任何东西", file=sys.stderr); return 2
-    rows = [x for x in ruled_tickets(load_tickets(), text, os.path.basename(RULINGS)) if not key or x[0] == key]
+    rows = [x for x in ruled_tickets(load_tickets(), text, os.path.basename(_RULINGS())) if not key or x[0] == key]
     for k, r, src, amb in rows: print(f"- {k}：-> {RULED}（{r}，{src}）" + ("  ✗ 裁决行没写 mq1 指纹，该 PR 有多个工单" if amb else ""))
     if not rows: print("- 无")
     if any(x[3] for x in rows):
@@ -2442,5 +2443,5 @@ if __name__ == "__main__": sys.exit(main())
 
 # lazy on purpose: keeps old `module.X` reads working while X itself is resolved at use (see the _X() accessors)
 def __getattr__(name):   # GIT WT_ROOT TMPROOT QA_LOCK: resolved lazily (env read at use, not at import), old attribute reads keep working
-    if name in ('GIT', 'WT_ROOT', 'TMPROOT', 'QA_LOCK'): return globals()["_" + name]()
+    if name in ('GIT', 'WT_ROOT', 'TMPROOT', 'QA_LOCK', 'RULINGS'): return globals()["_" + name]()
     raise AttributeError(name)

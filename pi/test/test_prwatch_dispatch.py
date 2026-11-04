@@ -91,6 +91,14 @@ class TestDispatch(T):
         self.assertEqual(self.launches, []); self.assertEqual(sum("fix dispatch waits" in m for m in self.logs), 1)
         prwatch.mem_mb = lambda: 11000; prwatch.dispatch_fix(st)
         self.assertEqual(len(self.launches), 1)
+    def test_wait_clear_is_logged(self):   # 11-04 headroom-1104 (c): the log shows when the gate opened, not only when it closed
+        self.procs({}, prwatch.ADMIT_FREE_MB + prwatch.RUN_PEAK_MB - 1); self.tickets()
+        st = {}; prwatch.dispatch_fix(st)
+        self.assertTrue(any("fix dispatch waits" in m for m in self.logs), self.logs)
+        prwatch.mem_mb = lambda: 11000; prwatch.dispatch_fix(st)
+        cleared = [m for m in self.logs if "wait cleared" in m]
+        self.assertEqual(len(cleared), 1, self.logs); self.assertIn("headroom", cleared[0])
+        prwatch.dispatch_fix(st); self.assertEqual(sum("wait cleared" in m for m in self.logs), 1)   # once per wait
     def test_nothing_to_do(self):
         self.pending = [{"qa": 1, "fp": "f", "sev": "P1", "reason_if_skipped": "运行中（pid 9）"}]
         self.procs({}, 11000); self.tickets(); prwatch.dispatch_fix(st := {})
