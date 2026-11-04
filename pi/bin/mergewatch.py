@@ -299,11 +299,12 @@ def main():
     poll_due = time.time() - st.get('last_poll_ts', 0) >= POLL_S
     tok = gh_token() if st.get('dirty') or poll_due else None
     if (st.get('dirty') or poll_due) and tok:
-        st['last_poll_ts'] = time.time()
         # 合并即测插队：每个新合并的 PR 单独起一个 --priority 运行（不等 catch-up.lock / 顺序队列，槽位上限 1，见 scripts/qa-slot.sh）
         since = st.get('merged_seen') or (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=2)).isoformat()
         try:
             pulls = fetch_pulls(tok)
+            # 11-04：拉取成功才记 last_poll_ts。原来先记再拉，URLError 后要再等满 10 分钟，合进 feat/* 的 PR 最坏 20 分钟才被发现
+            st['last_poll_ts'] = time.time()
             bases = {p.get('number'): (p.get('base') or {}).get('ref', 'main') for p in pulls or []}
             for n, day in fresh_merges(pulls, since):
                 if n not in busy and str(n) not in inflight:
