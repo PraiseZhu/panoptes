@@ -476,9 +476,11 @@ def note_claims(path):
     try: return not PARKED_NOTE.search(open(path, errors="replace").read(4000))
     except OSError: return True
 def _gh_json(args, t):
-    if lib.gh_rl_until(): raise lib.GhRateLimited(f"gh {' '.join(args[:3])} …: GitHub rate-limited (not sent)")
-    r = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=t, stdin=subprocess.DEVNULL)
-    if r.returncode and lib.gh_rl_record(r.stderr): raise lib.GhRateLimited(f"gh {' '.join(args[:3])} …: {(r.stderr or '').strip()[:300]}")
+    _ident, _env = lib.gh_env(args)   # 11-04 P3: product reads via the App while the flags are on (writes / @me stay on the PAT)
+    rlf = lib.gh_app_rl_file() if _ident == "app" else None
+    if lib.gh_rl_until(f=rlf): raise lib.GhRateLimited(f"gh {' '.join(args[:3])} …: GitHub rate-limited (not sent)")
+    r = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=t, stdin=subprocess.DEVNULL, env=_env)
+    if r.returncode and lib.gh_rl_record(r.stderr, rlf): raise lib.GhRateLimited(f"gh {' '.join(args[:3])} …: {(r.stderr or '').strip()[:300]}")
     if r.returncode: raise RuntimeError(f"gh {' '.join(args[:3])} …: {(r.stderr or '').strip()[:300]}")
     return json.loads(r.stdout)
 def pr_list():

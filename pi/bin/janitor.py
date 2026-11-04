@@ -222,6 +222,11 @@ class Run:
             try:
                 prs = gh(["pr", "list", "-R", R["gh"], "--state", "closed", "--author", "@me", "--limit", "100", "--search", f"closed:>={since}",
                           "--json", "number,headRefName,headRefOid,mergedAt,body"])
+                if R["gh"] in GH_APP_REPOS and gh_app_writes_on():   # 11-04 P2: infra PRs opened by the App are authored by app/praise-qa
+                    seen = {p.get("number") for p in prs or []}
+                    prs = list(prs or []) + [p for p in gh(["pr", "list", "-R", R["gh"], "--state", "closed", "--author", APP_AUTHOR, "--limit", "100",
+                                                           "--search", f"closed:>={since}", "--json", "number,headRefName,headRefOid,mergedAt,body"]) or []
+                                             if p.get("number") not in seen]
             except Exception as e: self.r["remote_kept"].append({"repo": repo, "why": f"gh 查不到 PR 列表，远端一律不删：{str(e)[:120]}"}); continue
             for p in prs or []:
                 br, head = p.get("headRefName") or "", p.get("headRefOid") or ""
