@@ -51,6 +51,26 @@ CALLER_ALLOWLIST = (
     ("review-pr-notify-author-resolve", "review-pr/scripts/notify-author-resolve"),
     ("review-pr-signoff-hold", "review-pr/scripts/signoff-hold"),
 )
+# 11-05 allowlist audit: why each lifeline / review-pr entry still needs the PAT. App installation perms (gh-app-1104/PLAN.md):
+# actions/checks/statuses/metadata read, contents/issues/pull_requests write; nothing at org level. Not expanded here.
+# A caller leaves CALLER_ALLOWLIST only when its reason is gone; test_gh_allowlist_audit.py keeps this table and the allowlist in step.
+API_USER = "GET /user (`gh api user` viewer login): installation tokens get 403, no App permission grants it"
+TEAM_MEMBERS = "GET orgs/{org}/teams/{team}[/members|/repos] (maintainer authority): org permission members:read"
+PRODUCT_WRITE = "wrapper default-deny (lib.gh_product_write) refuses this caller's product writes on the App path"
+PAT_KEEP_REASONS = {
+    "lifeline-tick": ("`pr list --author @me`: @me becomes praise-qa[bot], PraiseZhu-authored lifeline PRs vanish (identity, not a permission)",),
+    "lifeline-report": (API_USER, "checkPrOwnership compares PR author to the /user login (PraiseZhu)"),
+    "review-pr-target-branch-reminder": (API_USER, PRODUCT_WRITE + ": pr comment"),
+    "review-pr-request-changes-reviewed-pr": (API_USER, TEAM_MEMBERS, PRODUCT_WRITE + ": POST pulls/{n}/reviews, pulls/{n}/comments"),
+    "review-pr-merge-reviewed-pr": (API_USER, TEAM_MEMBERS, PRODUCT_WRITE + ": pr merge", "merging a PR that changes .github/workflows: workflows:write"),
+    "review-pr-approve-reviewed-pr": (API_USER, TEAM_MEMBERS, PRODUCT_WRITE + ": POST pulls/{n}/reviews"),
+    "review-pr-dismiss-own-review": (API_USER, PRODUCT_WRITE + ": PUT reviews/{id}/dismissals (own = PraiseZhu's reviews)"),
+    "review-pr-pr-write-guard": (API_USER, TEAM_MEMBERS),
+    "review-pr-signoff-release": (API_USER, PRODUCT_WRITE + ": pr comment"),
+    "review-pr-dismiss-stale-reviews": (API_USER, PRODUCT_WRITE + ": PUT reviews/{id}/dismissals"),
+    "review-pr-notify-author-resolve": (API_USER, PRODUCT_WRITE + ": pr comment"),
+    "review-pr-signoff-hold": ("writes go through pr-write-guard (" + API_USER + ")", PRODUCT_WRITE + ": pr comment, issue create"),
+}
 # 11-04 (#214, PM ruling): product-write exceptions per caller x operation, never a whole script. The caller is the calling SCRIPT
 # (script_of(caller_chain()), realpath, path suffix as for CALLER_ALLOWLIST). These callers are NOT PAT pass-through (not allowlisted):
 # only the listed `gh <noun> <verb>` skips lib.gh_product_write; pr close / review / merge / ref delete / REST / graphql stay refused.
