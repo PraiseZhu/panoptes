@@ -98,6 +98,13 @@ bot 建的、用完就扔的东西只放在 `/workspace/pi-work/`（`bin/workroo
 
 公共模块（不单独跑）：`lib`、`jsonrec`、`gate_diff`、`gate_port`、`praise_notice`、`finding_policy`、`dm_compat`、`infra_outbound`、`run.sh`、`switch.sh`、`selftest.sh`、`pi-noskills.sh`、`pstack_sync.py`。
 
+## gh wrapper 安装（gh-praise-qa，11-04）
+
+由电脑运维在安装 wrapper 时执行（本仓库的 PR 和 bot 都不执行）：
+1. 把 `pi/bin/gh_wrapper.py` 装成 PATH 上排在真 gh 前面的 `gh`（文件名或软链目标用 `gh-praise-qa` / `gh_wrapper.py`，见 `lib.WRAPPER_NAMES`）。
+2. **必须执行** `git config --global credential.useHttpPath true`。不执行的话，git 的 credential 请求里不带 `path=`，`credential_repo()` 认不出仓库，`gh auth git-credential get` 就永远走不到 App token，只会退回本机登录。
+3. 不在 CALLER_ALLOWLIST 里的调用方，`auth git-credential store` / `erase` 直接 exit 0，不输出、什么也不做（这是 git push 之后自己的记账）；op 缺失或不认识的 exit 4。
+
 ## 调用 Pi：全机器人并行派任务（10-27）
 
 任何 bot 随时都能派一个或多个 Pi 任务，入口 `bin/pi-dispatch`（`pi_dispatch.py`）。每个任务是单独的后台进程，走 `lib.pi`（沙箱、环境白名单、按档位选模型），带 pstack。
