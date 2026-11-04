@@ -1,4 +1,4 @@
-"""python3 test/test_pmnudge_stall2.py — #81 跟进：每段停滞只催一次（跨小时 / 跨天）、只在真催时写 .md、review 算进展、gh 失败不崩不误催、首跑 main() 写文件。"""
+"""python3 test/test_pmnudge_stall2.py — #81 跟进：每段停滞只催一次（跨小时 / 跨天）、只在真催时写 .md、review 算进展、gh 失败不崩不误催（只写失败说明节）、首跑 main() 写文件。"""
 import os, sys, json, tempfile, importlib.util, datetime as dt, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from isolation import isolated, assert_inside  # noqa: E402
@@ -30,8 +30,9 @@ def script():   # was module level (ran at pytest collection and leaked env / fr
     run = lambda: (sys.argv.__setitem__(slice(1, None), []), M.main())
     md = lambda d: open(f"{S}/out/pm/{d}.md").read() if os.path.exists(f"{S}/out/pm/{d}.md") else ""
     acts = lambda d: [a for a in json.load(open(f"{S}/out/pm/{d}.nudges.actions.json"))] if os.path.exists(f"{S}/out/pm/{d}.nudges.actions.json") else []
-    # gh 失败：不崩、不写文件
-    calls["fail"] = True; run(); assert not os.path.exists(f"{S}/out/pm"), os.listdir(S); calls["fail"] = False
+    # gh 失败：不崩、不写进展 / actions；11-04 起只写一节失败说明（时间、原因、下次重试）
+    calls["fail"] = True; run(); assert sorted(os.listdir(f"{S}/out/pm")) == ["2026-10-28.md"], os.listdir(f"{S}/out/pm"); calls["fail"] = False
+    assert "本轮未催" in md("2026-10-28") and "下次重试：10-28 22:05" in md("2026-10-28"), md("2026-10-28")
     # 首跑：写 .md、actions、进展文件；不催
     run(); D = "2026-10-28"
     assert os.path.exists(f"{S}/out/pm/pmnudge-progress.json") and "白天催办" in md(D) and "催 #7" not in md(D)
