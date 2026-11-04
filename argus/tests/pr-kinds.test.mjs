@@ -123,7 +123,7 @@ test('docs-only：仍做代码审查（merge-base..merge commit 的本地 diff�
   assert.equal(out.reviewed_sha, mergeSha, 'review looks at the merge commit')
   assert.equal(out.review_base_sha, baseSha, 'diff base = first parent (merge-base)')
   assert.equal(out.review_diff_source, 'local git diff base_sha..merge_sha')
-  assert.equal(out.tested_sha, null, 'nothing was tested')
+  assert.equal(out.tested_sha, mergeSha, 'docs-only report covers the merge commit (tested_sha, 11-04); tested stays false')
   assert.equal(out.sha_consistent, true)
   assert.equal(out.code_review.status, 'unavailable', 'review attempted (no LLM configured in tests)')
   assert.deepEqual(h.llm_errors.map((e) => e.stage), ['code-review'])

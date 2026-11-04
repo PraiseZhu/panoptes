@@ -34,13 +34,39 @@ slot_check_cap() {
   [[ "$cap" == 1 ]] || { echo "[panoptes] PANOPTES_QA_SLOTS=$cap not supported (only 1; see scripts/qa-slot.sh)" >&2; return 1; }
 }
 
+# 11-04 (late-1609-1618 #4): queue tickets. A waiting normal run (catch-up child, --wait-lock) drops priority/q-<epoch>-<pid> and keeps
+# its place: waiters take the slot oldest ticket first, and once the oldest ticket has waited PANOPTES_SLOT_STARVE_S (default 1800)
+# it goes ahead of later priority / on-merge requests for the free slot (11-03: #1610 waited ~93 min while 5 on-merge runs took the
+# lock). On-merge runs can still borrow a parked slot or run concurrently under the memory rules.
+SLOT_STARVE_S="${PANOPTES_SLOT_STARVE_S:-1800}"
+# oldest live ticket file ("" when none); dead tickets are swept
+slot_oldest_ticket() {
+  local f pid best=""
+  for f in "$(slot_dir)"/q-*; do
+    [[ -e "$f" ]] || continue
+    pid="${f##*-}"
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then [[ -z "$best" || "$(basename "$f")" < "$(basename "$best")" ]] && best="$f"; else rm -f "$f"; fi
+  done
+  printf '%s\n' "$best"
+}
+# 0 when the oldest waiting ticket has waited >= SLOT_STARVE_S (it owns the next free slot)
+slot_ticket_starving() {
+  local t; t=$(slot_oldest_ticket); [[ -n "$t" ]] || return 1
+  local at; at=$(basename "$t"); at=${at#q-}; at=${at%%-*}
+  (( $(date +%s) - 10#$at >= SLOT_STARVE_S ))
+}
+
 # slot_acquire_normal FD WAIT_S (WAIT_S empty = do not wait). 0 = got the slot, 1 = gave up.
 slot_acquire_normal() {
-  local fd="$1" wait="$2" start=$SECONDS
+  local fd="$1" wait="$2" start=$SECONDS t mine=""
   slot_check_cap || return 1
+  if [[ -n "$wait" ]]; then mkdir -p "$(slot_dir)"; mine="$(slot_dir)/q-$(printf '%012d' "$(date +%s)")-$$"; : >"$mine"; fi
   while :; do
-    if (( $(slot_live req) == 0 )) && flock -n "$fd"; then return 0; fi
-    [[ -n "$wait" ]] && (( SECONDS - start < wait )) || return 1
+    t=$(slot_oldest_ticket)
+    if [[ -z "$mine" || "$t" == "$mine" ]] && { (( $(slot_live req) == 0 )) || { [[ -n "$mine" ]] && slot_ticket_starving; }; } && flock -n "$fd"; then
+      [[ -n "$mine" ]] && rm -f "$mine"; return 0
+    fi
+    [[ -n "$wait" ]] && (( SECONDS - start < wait )) || { [[ -n "$mine" ]] && rm -f "$mine"; return 1; }
     sleep "$SLOT_POLL_S"
   done
 }
@@ -53,7 +79,7 @@ slot_acquire_priority() {
   SLOT_REQ="$(slot_dir)/req-$$"; : >"$SLOT_REQ"   # before priority.lock: a parked run stays parked across back-to-back merges
   flock -w "$wait" "$pfd" || { rm -f "$SLOT_REQ"; return 1; }
   while :; do
-    if flock -n "$fd"; then SLOT_MODE=lock; return 0; fi
+    if ! slot_ticket_starving && flock -n "$fd"; then SLOT_MODE=lock; return 0; fi
     if (( $(slot_live yield) > 0 )); then SLOT_MODE=borrowed; return 0; fi
     (( SECONDS - start < wait )) || { rm -f "$SLOT_REQ"; return 1; }
     sleep "$SLOT_POLL_S"
@@ -76,7 +102,7 @@ slot_acquire_onmerge() {
   flock -n "$SLOT_PR_FD" || { echo "[panoptes] on-merge run for PR #$pr already active" >&2; return 1; }
   SLOT_REQ="$(slot_dir)/req-$$"; : >"$SLOT_REQ"
   while :; do
-    if flock -n "$fd"; then SLOT_MODE=lock; return 0; fi
+    if ! slot_ticket_starving && flock -n "$fd"; then SLOT_MODE=lock; return 0; fi
     if (( $(slot_live yield) > 0 )); then SLOT_MODE=borrowed; return 0; fi
     if slot_mem_ok && slot_balloon_ok && (( $(slot_live conc) < ${PANOPTES_ONMERGE_MAX_CONC:-2} )); then
       SLOT_CONC="$(slot_dir)/conc-$$"; : >"$SLOT_CONC"; SLOT_MODE=concurrent; return 0

@@ -287,6 +287,9 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     { const t = aiTestTier({ files: allFiles, riskClass }); out.ai_test_tier = t.tier; out.ai_test_caps = t.caps }
     settleHandoff(out.handoff, null, 'docs-only')
     Object.assign(out, dimensionsOf([])); out.tested = false; out.verdict = 'docs-only'; out.outcome = 'docs_only'; out.outcome_reason = classReason
+    // 11-04 (late-1609-1618 #5): docs-only reports carry tested_sha = the commit this report covers (merge commit / head), so the
+    // watchdog and every tested_sha reader see #1609-style reports as covering the merge. tested stays false: no tests ran.
+    out.tested_sha = merged ? pr.merge_commit_sha : pr.head.sha
     // 文档改动也做代码审查（同一提交规则：merged → merge-base..merge commit；open → merge-base..head）；不跑测试，覆盖率门禁不适用
     out.coverage_gate = DOCS_ONLY_COVERAGE_GATE()
     if (!opts.noReview && !files.length) out.code_review = { status: 'skipped', reason: 'only PR handoff files (docs/pr/**) changed' }
