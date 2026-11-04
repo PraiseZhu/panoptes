@@ -14,9 +14,10 @@ function ghTargetRepo(args) {
 function ghExec(args, opts = {}) { return execFileSync('gh', args, { ...opts, env: ghEnvFor(args) }) }
 function ghEnvFor(args) {
   const tok = process.env.PRAISE_QA_GH_TOKEN, repos = (process.env.PRAISE_QA_GH_REPOS || '').split(',').filter(Boolean)
-  const r = ghTargetRepo(args)
-  if (!tok || !r || !repos.includes(r)) return process.env
-  const e = { ...process.env, GH_TOKEN: tok }; delete e.GITHUB_TOKEN; return e
+  const r = ghTargetRepo(args), own = process.env.PRAISE_QA_GH_OWN_TOKEN
+  const t = tok && r && repos.includes(r) ? tok : own && r && /^PraiseZhu\/[^/]+$/.test(r) ? own : null   // own = every PraiseZhu/* repo
+  if (!t) return process.env
+  const e = { ...process.env, GH_TOKEN: t }; delete e.GITHUB_TOKEN; return e
 }
 const USAGE = `usage: build-ledger.mjs [YYYY-MM-DD] [--dry-run]
   Rebuilds the Mivo QA ledger for the day (default: today, Beijing) into $QA_HOME/ledger/daily/<day>.json/.md

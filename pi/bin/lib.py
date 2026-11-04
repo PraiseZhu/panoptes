@@ -140,7 +140,8 @@ def gh_component_node_env(name, repo=REPO):
     if not gh_component_on(name): return {}
     try:
         import ghtoken
-        return {"PRAISE_QA_GH_TOKEN": ghtoken.token(repo), "PRAISE_QA_GH_REPOS": repo}
+        # + PRAISE_QA_GH_OWN_TOKEN for every PraiseZhu/* repo (installation 164262283: handoff / deploy issue repos)
+        return {"PRAISE_QA_GH_TOKEN": ghtoken.token(repo), "PRAISE_QA_GH_REPOS": repo, "PRAISE_QA_GH_OWN_TOKEN": ghtoken.token("PraiseZhu/panoptes")}
     except Exception as e:
         try: import ghtoken as _g; msg = _g.mask(e)
         except Exception: msg = e.__class__.__name__
@@ -185,6 +186,15 @@ APP_LOGIN = "praise-qa[bot]"; APP_AUTHOR = "app/praise-qa"   # how the App shows
 def gh_app_writes_flag(): return f"{PI_STATE}/gh-app-writes-enabled"
 def gh_app_writes_ok(args): return os.path.exists(gh_app_writes_flag())
 def gh_app_writes_on(): return os.path.exists(gh_app_flag()) and os.path.exists(gh_app_writes_flag())
+GIT_NET_READS = ("fetch", "ls-remote", "clone")
+def git_read_env(repo):
+    """task B: env for a git network READ (fetch / ls-remote / clone) of repo: the App token through gh's credential helper (GIT_CONFIG_*
+    env, so no .git/config is edited) while that repo's App read route is on (lib.gh_app_wanted of a read), else None = default creds"""
+    ident, env = gh_env(["api", f"repos/{repo}"])
+    if ident != "app": return None
+    env.update(GIT_TERMINAL_PROMPT="0", GIT_CONFIG_COUNT="2", GIT_CONFIG_KEY_0="credential.helper", GIT_CONFIG_VALUE_0="",
+               GIT_CONFIG_KEY_1="credential.helper", GIT_CONFIG_VALUE_1="!gh auth git-credential")
+    return env
 def git_push_env(repo):
     """-> (git -c args, env) for a git push to repo: the App token through gh's credential helper while the write flags are on,
     else ([], None) = the box's default credentials (PAT) exactly as before"""

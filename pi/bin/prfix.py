@@ -248,7 +248,7 @@ def tail(s, n=60): return "\n".join((s or "").rstrip().splitlines()[-n:])
 def git(*a, cwd=None, t=600):
     if cwd is None and not os.path.exists(_GIT()) and os.path.abspath(_GIT()) == W.clone_dir("mivo"):
         W.ensure_clone("mivo")      # 10-24: the bot clone, made on first use (a test pointing GIT elsewhere never gets here)
-    return run(["git", *a], cwd=cwd or _GIT(), t=t)
+    return run(["git", *a], cwd=cwd or _GIT(), t=t, env=lib.git_read_env(REPO) if a and a[0] in lib.GIT_NET_READS else None)   # task B
 def fp8(fp): return (fp or "")[4:12]
 def iso(t): return t.astimezone(CST).isoformat(timespec="seconds") if t else None
 def ts(s):

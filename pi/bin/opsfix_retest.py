@@ -239,7 +239,7 @@ def worktree(sha):
         if os.path.isdir(f"{d}/.git") or os.path.isfile(f"{d}/.git"):
             W.retake(d); return d                         # kept from an earlier run: this run's now (janitor leaves it alone)
         os.makedirs(WORK, exist_ok=True)
-        sh(["git", "fetch", "-q", "origin", sha], cwd=MIVO, timeout=600)
+        import lib; sh(["git", "fetch", "-q", "origin", sha], cwd=MIVO, timeout=600, env=lib.git_read_env(REPO))   # task B: App while flagged
         rc, o, e = sh(["git", "worktree", "add", "--detach", "-f", d, sha], cwd=MIVO, timeout=900)
         if rc == 0: W.mark(d, "opsfix", repo="mivo", clone=MIVO, ticket=sha[:12], base_sha=sha, lock=RUN_LOCK)
     finally: lk.close()

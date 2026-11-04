@@ -8,6 +8,7 @@
 //      把放弃记录写进本次结果文件的 system_health，下一次夜间日报的 system_health 也会带上（stage 'catch-up'）。
 //   没有缺口时立即安静退出（不输出、不写文件）。
 import { spawnSync } from 'node:child_process'
+import { ghEnvFor } from './github.mjs'   // task B: the Praise QA App for PRAISE_QA_GH_REPOS / PraiseZhu/* while gh-app-nightly-enabled
 import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, renameSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { REPORTS_DIR } from './paths.mjs'
@@ -37,7 +38,8 @@ export function catchUpDays(now = new Date()) {
 export function listMergedPrs(repo, days, { gh = process.env.ARGUS_GH_BIN ?? 'gh', run = spawnSync } = {}) {
   const windows = days.map(shanghaiDayWindow)
   const since = new Date(windows[0].startMs - 86400_000).toISOString().slice(0, 10)
-  const r = run(gh, ['pr', 'list', '-R', repo, '--state', 'merged', '--search', `merged:>=${since}`, '--limit', '200', '--json', 'number,title,mergedAt,mergeCommit,baseRefName'], { encoding: 'utf8', timeout: 120_000 })
+  const la = ['pr', 'list', '-R', repo, '--state', 'merged', '--search', `merged:>=${since}`, '--limit', '200', '--json', 'number,title,mergedAt,mergeCommit,baseRefName']
+  const r = run(gh, la, { encoding: 'utf8', timeout: 120_000, env: ghEnvFor(la) })
   let rows
   if (r.status === 0) rows = JSON.parse(r.stdout || '[]')
   else {
@@ -58,7 +60,8 @@ export function listMergedViaRest(repo, since, { gh = 'gh', run = spawnSync, max
   const sinceMs = Date.parse(`${since}T00:00:00Z`)
   const rows = []
   for (let page = 1; page <= maxPages; page++) {
-    const r = run(gh, ['api', `repos/${repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=${page}`, '--jq', '[.[] | {number, title, merged_at, merge_commit_sha, updated_at, base: {ref: .base.ref}}]'], { encoding: 'utf8', timeout: 120_000, maxBuffer: 64 * 1024 * 1024 })
+    const aa = ['api', `repos/${repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=${page}`, '--jq', '[.[] | {number, title, merged_at, merge_commit_sha, updated_at, base: {ref: .base.ref}}]']
+    const r = run(gh, aa, { encoding: 'utf8', timeout: 120_000, maxBuffer: 64 * 1024 * 1024, env: ghEnvFor(aa) })
     if (r.status !== 0) throw new Error(`gh api pulls exit ${r.status}${r.error ? ` (${r.error.code ?? r.error.message})` : ''}: ${String(r.stderr ?? '').trim().slice(0, 200)}`)
     const items = JSON.parse(r.stdout || '[]')
     for (const p of items) if (p.merged_at && Date.parse(p.merged_at) >= sinceMs) rows.push({ number: p.number, title: p.title, mergedAt: p.merged_at, mergeCommit: p.merge_commit_sha ? { oid: p.merge_commit_sha } : null, baseRefName: p.base?.ref ?? null })
@@ -237,7 +240,8 @@ export function docsOnlyOf(repo, { gh = process.env.ARGUS_GH_BIN ?? 'gh', run = 
   let prof = profile
   return (pr) => {
     if (!prof) { try { const p = loadRegistry().projects.find((x) => x.repo === repo); prof = p?.profileData ?? {} } catch { prof = {} } }
-    const r = run(gh, ['api', '--paginate', `repos/${repo}/pulls/${pr.number}/files`, '--jq', '.[] | {filename, status, additions, deletions, patch}'], { encoding: 'utf8', timeout: 30_000 })
+    const fa = ['api', '--paginate', `repos/${repo}/pulls/${pr.number}/files`, '--jq', '.[] | {filename, status, additions, deletions, patch}']
+    const r = run(gh, fa, { encoding: 'utf8', timeout: 30_000, env: ghEnvFor(fa) })
     if (r.status !== 0 || !r.stdout) return false
     const files = r.stdout.trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
     return files.length > 0 && classifyChange(files, prof).riskClass === 'A'

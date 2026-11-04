@@ -17,7 +17,9 @@ const API = process.env.ARGUS_GH_API ?? 'https://api.github.com'
 export function praiseQaTokenFor(repo) {
   const tok = process.env.PRAISE_QA_GH_TOKEN
   const repos = (process.env.PRAISE_QA_GH_REPOS || '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean)
-  return tok && repo && repos.includes(String(repo).toLowerCase()) ? tok : null
+  if (tok && repo && repos.includes(String(repo).toLowerCase())) return tok
+  const own = process.env.PRAISE_QA_GH_OWN_TOKEN   // installation 164262283 covers every PraiseZhu/* repo (the issue repo included)
+  return own && repo && /^praisezhu\/[^/]+$/i.test(String(repo)) ? own : null
 }
 export function ghTargetRepo(args) {
   for (let i = 0; i < args.length; i++) {

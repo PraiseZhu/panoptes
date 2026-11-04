@@ -119,7 +119,25 @@ class Flags(Base):
     def test_node_env_only_with_flag(self):
         self.assertEqual(lib.gh_component_node_env("ledgers"), {})
         self.on("gh-app-ledgers-enabled")
-        self.assertEqual(lib.gh_component_node_env("ledgers"), {"PRAISE_QA_GH_TOKEN": FAKE, "PRAISE_QA_GH_REPOS": PROD})
+        self.assertEqual(lib.gh_component_node_env("ledgers"), {"PRAISE_QA_GH_TOKEN": FAKE, "PRAISE_QA_GH_REPOS": PROD, "PRAISE_QA_GH_OWN_TOKEN": FAKE})
+
+    def test_node_tools_route_only_listed_and_own_repos(self):
+        import subprocess, json
+        root = os.path.dirname(os.path.dirname(BIN))
+        js = ("import('%s/argus/src/github.mjs').then(m => console.log(JSON.stringify(['-R xindong/mivo-canvas-plugin', 'api repos/PraiseZhu/pr-qa-agent-deploy/issues',"
+              " '-R someone/else'].map(a => m.ghEnvFor(a.split(' ')).GH_TOKEN || null))))" % root)
+        env = {**os.environ, "PRAISE_QA_GH_TOKEN": "P", "PRAISE_QA_GH_REPOS": PROD, "PRAISE_QA_GH_OWN_TOKEN": "O"}; env.pop("GH_TOKEN", None)
+        r = subprocess.run(["node", "--input-type=module", "-e", js], capture_output=True, text=True, env=env, cwd=os.path.join(root, "argus"))
+        self.assertEqual(json.loads(r.stdout.strip().splitlines()[-1]), ["P", "O", None], r.stderr[-500:])
+
+    def test_git_reads_of_clones_follow_the_flag(self):
+        self.assertIsNone(lib.git_read_env(PROD))
+        self.on(); e = lib.git_read_env("PraiseZhu/grokbot-box")
+        self.assertEqual((e["GH_TOKEN"], e["GIT_CONFIG_VALUE_1"]), (FAKE, "!gh auth git-credential"))
+        self.assertIsNone(lib.git_read_env(PROD), "product reads need gh-app-product-enabled")
+        self.on("gh-app-product-enabled"); self.assertEqual(lib.git_read_env(PROD)["GH_TOKEN"], FAKE)
+        src = {f: open(os.path.join(BIN, f)).read() for f in ("boxcheck.py", "infrafix.py", "prfix.py", "workroot.py", "opsfix_retest.py", "p2.py")}
+        for f, t in src.items(): self.assertIn("git_read_env(", t, f)
 
     def test_every_praisezhu_repo_in_installation(self):
         sys.modules.pop("ghtoken", None)
