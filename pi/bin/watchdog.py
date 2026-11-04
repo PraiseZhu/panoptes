@@ -513,6 +513,17 @@ PRWATCH_ERR_STREAK = 3   # prwatch.run_step 记的 error_counts[name]（连续�
 PRWATCH_ERR_ALERT_ONCE = f"{BASE}/prwatch-error-alert-once"   # touch = 旧行为：15 分钟内出错一次就报；rm = 连续 3 次才报
 
 
+def gh_ratelimit_check(now, probs):
+    """11-04: GitHub calls skipped (lib.GH_RL_FILE) for more than GH_RL_ALERT_H hours -> one gh:ratelimit item. It stays the same
+    open key while skipping lasts, so the debounce/open logic in main sends it once (new), not every run; recovery clears it."""
+    import lib
+    s = lib.gh_rl_state(); since = s.get("since") or 0
+    if not lib.gh_rl_until() or time.time() - since <= lib.GH_RL_ALERT_H * 3600: return
+    probs["gh:ratelimit"] = PN.item("action", "GitHub 调用额度用完，Pi 线已暂停 GitHub 步骤",
+        f"从 {dt.datetime.fromtimestamp(since, CST).strftime('%m-%d %H:%M')} 起 PraiseZhu 的 GitHub API 额度一直超限，prwatch / prfix 等跳过了所有 GitHub 步骤。",
+        "PR 的红 CI、冲突、新问题都没人看、不会自动修。", todo=PN.ask_session(f"PraiseZhu 的 GitHub 额度超限超过 {lib.GH_RL_ALERT_H} 小时（{s.get('error', '')[:120]}），查是谁在用这个账号的额度"))
+
+
 def prfix_check(now, probs, wst=None):
     T = jload(PRFIX_TICKETS, {}).get("tickets", {}); L = jload(LEDGER, {})
     def age_h(t):
@@ -641,7 +652,7 @@ def main():
     for fn in (lambda: job_checks(now, probs, since), lambda: mergewatch_check(now, probs), lambda: merge_sla_check(now, probs), lambda: merge_report_check(now, probs, st),
                lambda: backup_check(now, probs), lambda: backup_rules_check(now, probs), lambda: panoptes_check(now, probs, st),
                lambda: infra_check(now, probs), lambda: prfix_check(now, probs, st), lambda: vigil_check(now, probs, st),
-               lambda: outbound_health_check(now, probs), lambda: janitor_check(now, probs)):
+               lambda: outbound_health_check(now, probs), lambda: janitor_check(now, probs), lambda: gh_ratelimit_check(now, probs)):
         try: fn()
         except Exception as e: probs[f"watchdog:{getattr(fn, '__name__', 'check')}"] = PN.item("action", "「看门狗」自己出错了",
             "专门盯各个自动化有没有停摆的看门狗，自己的一项检查出错了。", "那一项坏了也不会有人告诉你。",
