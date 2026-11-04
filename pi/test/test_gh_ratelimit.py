@@ -91,8 +91,9 @@ class T(unittest.TestCase):
         os.environ["GHF_ERR"] = "HTTP 403: secondary rate limit\nRetry-After: 1000000000"
         with self.assertRaises(RuntimeError): lib.gh(READ)
         self.assertLessEqual(lib.gh_rl_until(), time.time() + 2 * 3600 + 5)
-        json.dump({"since": time.time(), "until": time.time() + 1e9}, open(self.f, "w"))   # already on disk: clamped on read too
-        self.assertLessEqual(lib.gh_rl_until(), time.time() + 2 * 3600 + 5)
+        json.dump({"since": time.time(), "until": time.time() + 1e9}, open(self.f, "w"))   # already on disk: ignored, calls go out
+        self.assertEqual(lib.gh_rl_until(), 0)
+        os.environ["GHF_ERR"] = ""; self.assertEqual(lib.gh(READ), [{"number": 1}]); self.assertFalse(os.path.exists(self.f))
     def test_expired_until_sends_and_clears(self):
         json.dump({"since": time.time() - 9999, "until": time.time() - 5}, open(self.f, "w"))
         self.assertEqual(lib.gh_rl_until(), 0)

@@ -55,9 +55,11 @@ def gh_rl_state():
     if not isinstance(d, dict) or not num(d.get("until")) or not num(d.get("since")): log(f"{GH_RL_FILE} malformed, ignored"); return {}
     return d
 def gh_rl_until(now=None):
-    """epoch the GitHub calls may resume (at most now+GH_RL_MAX_S), or 0 when not rate-limited"""
+    """epoch the GitHub calls may resume, or 0 when not rate-limited. Writes cap until at now+GH_RL_MAX_S, so a stored until further
+    out is bogus: ignored (one log line), never clamped on read -- a read clamp would roll forward to now+2h forever"""
     now = now or _epoch(); u = gh_rl_state().get("until") or 0
-    return min(u, now + GH_RL_MAX_S) if u > now else 0
+    if u > now + GH_RL_MAX_S + 60: log(f"{GH_RL_FILE} until is > {GH_RL_MAX_S}s away, ignored"); return 0
+    return u if u > now else 0
 def _gh_rl_reset(err):
     """epoch from Retry-After / X-RateLimit-Reset in err, else from `gh api rate_limit` (free, not counted), else a short default"""
     now = _epoch()
