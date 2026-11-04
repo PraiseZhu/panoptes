@@ -1229,6 +1229,10 @@ export function checkDiskInodes(health) {
   health.env_problems.push({ message: `low inodes: ${free.toLocaleString('en-US')} free of ${total.toLocaleString('en-US')} (${pct.toFixed(1)}% free): mkdir fails with ENOSPC even while disk_free_gb still shows free space` })
 }
 
+// 建目录被操作系统拒绝（ENOSPC：字节或 inode 用满；EDQUOT：配额用满）是箱子的环境问题，不是 panoptes 代码故障。
+// 上层包装 / redact 之后只剩消息（报告里存的就是 message），所以 code / errno 丢了也要按消息认出来（11-05 #1729 / #1789）
+export const isDiskExhaustedError = (err) => ['ENOSPC', 'EDQUOT'].includes(err?.code) || /enospc|no space left on device|disk quota exceeded/i.test(String(err?.message ?? ''))
+
 // 实际 umask 不是 0022 → env_problem（测试夹具权限会变，权限相关断言可能假失败）
 export function checkUmask(health) {
   const want = fmtUmask(PINNED_UMASK)
@@ -1676,6 +1680,12 @@ export async function processTargets(targets, { opts = {}, health, startedAt = n
           result = notTestedEntry(t, 'version-gone', `这个版本没法测：${msg}`)
           health.notes ??= []
           health.notes.push(`PR #${t.number}: not tested, the version is gone from the mirror — ${msg}`)
+        } else if (isDiskExhaustedError(err)) {
+          // 箱子建不出目录（磁盘 / inode / 配额用满）：记 env_problems，没测到的运行按 infra_failed → qa-env-problem 收场
+          // （和内存低水位同一条路）。不进 stage=pipeline —— 否则同一次耗尽按失败那一步的目录名产出不同的「panoptes 机制有 bug」工单。
+          health.env_problems.push({ pr: t.number, message: `cannot create directories on the QA box (disk or inode exhausted: mkdir returns ENOSPC even while disk_free_gb still shows free space): ${msg} — the box needs cleanup` })
+          result = { number: t.number, ...(t.meta ?? {}), discovery_reason: t.reason, verdict: 'qa-env-problem', severity: 'untested', tested: false, outcome: 'infra_failed', outcome_reason: '环境问题：箱子建不出目录（磁盘 / inode 用满），这个 PR 没测到', error: msg, memory_gate: memoryGate(), failed_checks: [], checks: [], coverage_gate: null, test_started_at: beat.started_at, tested_at: null,
+            findings: [], pending_verification: [] }
         } else {
           health.qa_tool_failures.push({ pr: t.number, stage: 'pipeline', message: msg })
           const fp = fingerprintOf(repo ?? '', ['qa-error', 'pipeline', msg])
