@@ -51,4 +51,27 @@ class T(unittest.TestCase):
         out = O.clip_err(RuntimeError(f"remote: bad {TOK} https://u:{TOK}@github.com/a/b github_pat_{'Q'*30}"), 300)
         self.assertNotIn(TOK, out); self.assertNotIn("Q" * 30, out)
 
+HEX = "0123456789abcdef" * 2 + "01234567"
+B64 = "eC1hY2Nlc3MtdG9rZW46Z2hzX0ExYjJDM2Q0QTFiMkMzZDRBMWIyQzNkNEExYjJDM2Q0QTFiMkMzZDQ="
+HARDEN = {   # 11-04 #217 follow-up (accept-217/adversarial_redact.py): each must come out masked
+    "bare 40-hex after key=": (f"remote: token={HEX}", HEX),
+    "40-hex in url": (f"remote: https://x-access-token:{HEX}@github.com", HEX),
+    "x-access-token outside url": (f"remote: x-access-token:{HEX}", HEX),
+    "authorization basic": (f"remote: Authorization: Basic {B64}", B64[:20]),
+    "authorization bearer": (f"remote: Authorization: Bearer {TOK}", TOK),
+    "sk- key": ("remote: sk-" + "z" * 32, "z" * 32),
+    "uppercase url creds": (f"remote: HTTPS://User:Tok{HEX[:8]}@github.com/x", "Tok" + HEX[:8]),
+    "token-only url": (f"remote: https://{TOK}@github.com/x", TOK),
+    "git+https url": (f"remote: git+https://x-access-token:{TOK}@github.com", TOK),
+}
+class Harden(unittest.TestCase):
+    def test_every_case_masked(self):
+        for name, (line, secret) in HARDEN.items():
+            with self.subTest(name):
+                out = O.clip_err(RuntimeError(line), 200)
+                self.assertNotIn(secret, out); self.assertIn("remote:", out)
+    def test_plain_commit_shas_stay_readable(self):
+        line = f"pushed {HEX} onto qa-fix/b (main {HEX[::-1]}) head={HEX}"   # unlabelled shas, and head= is not a secret label
+        self.assertEqual(O.clip_err(RuntimeError(line), 300), line)
+
 if __name__ == "__main__": unittest.main()

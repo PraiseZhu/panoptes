@@ -25,7 +25,19 @@ class NoInstallation(KeyError): pass
 class MintError(RuntimeError): pass
 
 
-def mask(s): return TOKEN_RE.sub(lambda m: m.group(1) + "_***", str(s))
+# 11-04 #217 follow-up: the shared redaction (outbound clip_err / _redact use it). A bare 40-hex is only masked after a key= / key:
+# label: unlabelled 40-hex strings are commit shas in normal log lines and stay readable.
+_MASKS = [
+    (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/@\s]+@"), r"\1***@"),                           # scheme://user:tok@ / tok@, any case
+    (re.compile(r"(?i)\b(authorization\s*:\s*(?:basic|bearer|token)\s+)\S+"), r"\1***"),         # Authorization headers
+    (re.compile(r"(?i)\b(x-access-token\s*[:=]\s*)[^\s@]+"), r"\1***"),                         # x-access-token:<tok> outside a URL
+    (re.compile(r"(?i)\b((?:access_?|auth_?|api_?)?(?:token|key|secret|password|passwd|pat)\s*[=:]\s*[\"']?)[0-9a-f]{40}\b"), r"\1***"),
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"), "sk-***"),                                             # sk- API keys
+]
+def mask(s):
+    s = TOKEN_RE.sub(lambda m: m.group(1) + "_***", str(s))
+    for rx, rep in _MASKS: s = rx.sub(rep, s)
+    return s
 def _app_id(): return os.environ.get("PRAISE_QA_APP_ID") or APP_ID_DEFAULT
 def _key(): return os.environ.get("PRAISE_QA_KEY") or "/home/box/.secrets/praise-qa/app.pem"
 def _cache_dir(): return os.environ.get("PRAISE_QA_CACHE") or os.path.expanduser("~/.cache/praise-qa")
