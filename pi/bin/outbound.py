@@ -166,11 +166,10 @@ def _run_route(cmd):
             gc, env = git_push_env(m.group(1))
             if env: return cmd[:3] + gc + cmd[3:], env
     return cmd, None
-_CRED_URL_RE = re.compile(r"(https?://)[^/@\s:]*(?::[^/@\s]*)?@")
 def _redact(s):
-    """tokens never reach the log: gh*_ / github_pat_ (ghtoken.mask) and credentials embedded in remote URLs."""
+    """tokens never reach the log: ghtoken.mask (gh*_ / github_pat_, URL credentials, auth headers, x-access-token, sk-, key=<40hex>)."""
     import ghtoken
-    return _CRED_URL_RE.sub(r"\1***@", ghtoken.mask(s))
+    return ghtoken.mask(s)
 def clip_err(s, n):
     """str(s)[:n] for the ledger / outbound log, except git push's 'remote:' lines (e.g. GH013 rule violations) are kept verbatim
     after the cap so the rejection reason survives (11-04 outbound-2026-11-04.log:9777 cut it at '-> qa-'). Always redacted."""
