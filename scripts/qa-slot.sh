@@ -149,8 +149,10 @@ slot_release_priority() { [[ -n "${SLOT_REQ:-}" ]] && rm -f "$SLOT_REQ"; [[ -n "
 # 10-28 (merge-to-test SLA p95 <= 2 min; #1345 waited 21 min, #1315 31 min behind one lock):
 # slot_acquire_onmerge FD PR WAIT_S. On-merge runs lock per PR (priority/pr-<N>.lock: the same PR never runs twice) instead of
 # serializing on priority.lock. Order each poll: free slot -> SLOT_MODE=lock; holder parked -> borrowed; else, when memory
-# admission passes (slot_mem_ok: at least 1 shard fits per slot_shards_for_mem, 10-28 PM) and fewer than PANOPTES_ONMERGE_MAX_CONC
-# (default 2) concurrent runs are live -> SLOT_MODE=concurrent (priority/conc-<pid>, caller limits ARGUS_MAX_PARALLEL=1).
+# admission passes (slot_mem_ok: at least 1 shard fits per slot_shards_for_mem, 10-28 PM), balloon is ok and slot_conc_room
+# allows another concurrent run (11-05 qa_start:PR-1718: below PANOPTES_ONMERGE_MAX_CONC (2) always; up to the hard cap
+# PANOPTES_ONMERGE_MAX_CONC_HARD (3) only with memory headroom, a 10-min gap since the last one and no balloon) -> SLOT_MODE=concurrent
+# (priority/conc-<pid>, caller limits ARGUS_MAX_PARALLEL=1). Rollback: PANOPTES_ONMERGE_MAX_CONC_HARD=2.
 # Not enough memory: keep waiting for the slot exactly as before (then run-nightly's own gate: normal / degraded / skip).
 slot_acquire_onmerge() {
   local fd="$1" pr="$2" wait="${3:-14400}" start=$SECONDS
@@ -163,8 +165,8 @@ slot_acquire_onmerge() {
     if slot_is_head; then   # 11-05: only the head of the priority-ordered queue takes a slot (merge before rerun, aging)
       if ! slot_ticket_starving && flock -n "$fd"; then SLOT_MODE=lock; slot_onmerge_got; return 0; fi
       if (( $(slot_live yield) > 0 )); then SLOT_MODE=borrowed; slot_onmerge_got; return 0; fi
-      if slot_mem_ok && slot_balloon_ok && (( $(slot_live conc) < ${PANOPTES_ONMERGE_MAX_CONC:-2} )); then
-        SLOT_CONC="$(slot_dir)/conc-$$"; : >"$SLOT_CONC"; SLOT_MODE=concurrent; slot_onmerge_got; return 0
+      if slot_mem_ok && slot_balloon_ok && slot_conc_room; then
+        SLOT_CONC="$(slot_dir)/conc-$$"; : >"$SLOT_CONC"; slot_conc_mark; SLOT_MODE=concurrent; slot_onmerge_got; return 0
       fi
     fi
     (( SECONDS - start < wait )) || { rm -f "$SLOT_REQ"; slot_wait_done gave-up; return 1; }
@@ -195,6 +197,24 @@ slot_balloon_ok() {
 }
 # 10-28 PM: on-merge admission reuses the shard table (no separate 8G + 4G rule that could diverge): admit iff >= 1 shard fits
 slot_mem_ok() { (( $(slot_shards_for_mem) >= 1 )); }
+# gap qa_start:PR-1718 (11-05, 电脑运维 reviewed): the concurrency cap scales with memory instead of a fixed 2.
+#   fewer than PANOPTES_ONMERGE_MAX_CONC (default 2) live concurrent runs -> room, exactly as before;
+#   at or above PANOPTES_ONMERGE_MAX_CONC_HARD (default 3) -> no room;
+#   in between -> room only when ALL hold: MemAvailable >= 1-shard need (slot_shard_mem_mb 1) + PANOPTES_CONC_HEADROOM_MB (3072),
+#   the last concurrent admission (priority/last-parallel-start, epoch s, slot_conc_mark) is >= PANOPTES_CONC_MIN_GAP_S (600) ago,
+#   and the host balloon is 0 (slot_balloon_mb). run-nightly's own slot_mem_gate still sizes / degrades / skips the run after.
+# Rollback: PANOPTES_ONMERGE_MAX_CONC_HARD=2 (the old fixed cap).
+slot_conc_room() {
+  local n last; n=$(slot_live conc)
+  (( n < ${PANOPTES_ONMERGE_MAX_CONC:-2} )) && return 0
+  (( n >= ${PANOPTES_ONMERGE_MAX_CONC_HARD:-3} )) && return 1
+  (( $(slot_mem_avail_kb) / 1024 >= $(slot_shard_mem_mb 1) + ${PANOPTES_CONC_HEADROOM_MB:-3072} )) || return 1
+  last=$(cat "$(slot_dir)/last-parallel-start" 2>/dev/null || echo 0); [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  (( $(slot_now) - last >= ${PANOPTES_CONC_MIN_GAP_S:-600} )) || return 1
+  (( $(slot_balloon_mb) == 0 ))
+}
+# records the admission time of a concurrent run for the min-gap rule above (tmp + rename; never fails the caller)
+slot_conc_mark() { local f; f="$(slot_dir)/last-parallel-start"; { slot_now >"$f.$$" && mv -f "$f.$$" "$f"; } 2>/dev/null || true; }
 
 # 10-28 shard <-> memory mapping (index = unit shards, value = MemAvailable needed in MiB; SwapFree >= 4G always required).
 # Normal run = 2 shards (argus/src/shard.mjs hard cap ARGUS_SHARD_MAX default 2; mivo profile perShardGb 1.2), first round
