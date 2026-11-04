@@ -692,14 +692,14 @@ export async function cleanupRun(mirror, runDir) {
 }
 
 // 一次完整执行：检出 → 跑步骤 → 清理；清理失败只记日志，由 janitor 兜底
-export async function executeOnSha({ repo, jobId, label, sha, profile, stepIds, extraRefspecs = [], keepTo = null, diffBase = null, beforeStep = null }) {
+export async function executeOnSha({ repo, jobId, label, sha, profile, stepIds, extraRefspecs = [], keepTo = null, diffBase = null, beforeStep = null, onEvidenceError = null }) {
   const mirror = await ensureMirror(repo, sha, { extraRefspecs })
   const runDir = newRunDir(jobId, label)
   try {
     if (keepTo) {
       // 清理 run 目录前把日志和检查报告留作证据（不含源码与依赖）
       const src = join(runDir, 'src')
-      try { return await runCheckout() } finally { keepEvidence(runDir, join(keepTo, label), src) }
+      try { return await runCheckout() } finally { const err = keepEvidence(runDir, join(keepTo, label), src); if (err) onEvidenceError?.(err) }
     }
     return await runCheckout()
   } finally {
@@ -721,7 +721,7 @@ function keepEvidence(runDir, dest, src) {
       if (['src', 'home', 'assets', 'tools', MANIFEST].includes(name)) continue
       cpSync(join(runDir, name), join(dest, name), { recursive: true, filter: (from) => { try { const st = lstatSync(from); return !st.isSymbolicLink() && (st.isDirectory() || st.size <= KEEP_MAX_BYTES) } catch { return false } } })
     }
-  } catch (err) { log('error', 'keep evidence failed', { runDir, err: err.message }) }
+  } catch (err) { log('error', 'keep evidence failed', { runDir, err: err.message }); return err }
 }
 
 // 不把“请求检出某版本”当成“实际测了该版本”：在任何测试执行前验证 worktree HEAD。

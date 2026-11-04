@@ -345,7 +345,10 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   // 先算出来：按 diff 范围工作的检查（verify:design 的 MIVO_GUARD_BASE_SHA、gitleaks 的 base..HEAD）每一轮都用它（${DIFF_BASE_SHA}）
   const baseSha = await reviewBaseSha({ repo, pr, sha, merged, extraRefspecs })
   out.base_sha = baseSha
-  const common = { repo, jobId: `n${number}`, profile, extraRefspecs, keepTo: evDir, diffBase: baseSha }
+  // 留证据失败（磁盘 / inode 用满、权限、同名占位…）：证据一个字节也没留下，但报告的 evidence_dir 照旧指向它，
+  // 所以必须进这一轮的报告。不进 qa_tool_failures[stage=pipeline]：那不是测试工具自己崩了、PR 也不是没测到（11-05 #1729 / #1788 / #1789）
+  const common = { repo, jobId: `n${number}`, profile, extraRefspecs, keepTo: evDir, diffBase: baseSha,
+    onEvidenceError: (err) => health.env_problems.push({ pr: number, message: `evidence for this run was not kept, so evidence_dir is empty or partial: ${redact(err.message).slice(0, 400)}` }) }
 
   // 覆盖率轮次：独立检出、只跑单测（带 --coverage），与首轮并行；它的通过 / 失败不参与任何判定
   const covStep = profile.steps.find((x) => x.coverage && x.coverage.kind !== 'v8' && plan.stepIds.includes(x.id))
