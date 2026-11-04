@@ -6,6 +6,8 @@ import json, os, sys, tempfile, types, unittest
 from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bin")); sys.path.insert(0, HERE)
 import test_gh_app_fixes as G  # noqa: E402  (sandboxed PI_STATE, ghtoken mocks, wrapper harness)
+if not os.path.exists("/workspace/mivo-merger/app/scripts/loops/automerge/policy.json"):   # CI: no box merger data (h_fixpr never uses it)
+    sys.modules.setdefault("merger", types.SimpleNamespace(FIELDS="number", blockers=lambda p: []))
 import lib, outbound, prwatch, stdcheck  # noqa: E402
 
 MARK = "<!-- pi-line fixpr: t1 -->"
