@@ -30,6 +30,10 @@ R=/workspace/panoptes/pi/bin/run.sh
 # remote branches of closed bot PRs. conf/janitor.json enforce=false: decisions only (24 h rehearsal). Zero-model, light
 7-59/10 * * * * box $R janitor
 45 * * * * box $R boxcheck
+# 11-05 stdcheck: hourly fleet-standards check (QA start <=10 min after merge, panoptes PRs <=3, Pi fix PRs <=2, pmnudge/daily/ledger
+# ran clean, Mac mini vigil heartbeat) -> gaps-open.json, alerts, escalations, daily pass rate for the 09:05 brief. Zero-model.
+# Off unless $PI_STATE/stdcheck-enabled exists (the script re-checks it). Rollback: rm /workspace/mivo-qa/pi/stdcheck-enabled
+55 * * * * box [ ! -e /workspace/mivo-qa/pi/stdcheck-enabled ] || $R stdcheck
 # --- daily, minute :HH gated by Beijing hour ---
 5  * * * * box $R handoff @00
 20 * * * * box $R handoff @06,15

@@ -65,6 +65,9 @@ def main():
         }
         facts["pi_line_evidence"]["Praise PR"]["panoptes_backlog"] = panoptes_backlog(jload_(f"{BASE}/out/infrafix/tickets.json", {}).get("tickets", {}))
     facts["muted_for_brief"] = muted_for_brief(d, y)
+    try:   # 11-05 stdcheck (hourly standards checker): pass rate, 2-in-a-row alerts, overdue-gap escalations
+        import stdcheck; facts["standards_check"] = stdcheck.brief_facts(d, y)
+    except Exception as e: facts["standards_check"] = f"未核实：{type(e).__name__}: {str(e)[:80]}"
     ydaily = f"{BASE}/out/daily/{y}.md"
     if os.path.exists(ydaily): facts["pi_daily_headline"] = open(ydaily).read().splitlines()[1]
     pm = f"{BASE}/out/pm/{y}.md"
@@ -80,6 +83,7 @@ def main():
         txt, tid = pi("work", "/tmp", f"""Write Praise's 9:00 fleet brief in Chinese (<=15 lines) using ONLY facts in {fj} (read it; you may also read files it names, read-only).
 Format: 一句话总览；然后每个 bot 一行：状态 ✓/⚠ + 证据路径；最后「需要你定」(only if facts show something needs a decision; else 无).
 If facts.pi_line_evidence["Praise PR"].panoptes_backlog shows awaiting_merge_prs or more than 3 open_prs, list it under 需要你定 with the count and url (DMs to Praise are muted: this brief is the only way he hears it).
+If facts.standards_check.enabled is true: add a section 「标准检查」: yesterday's passrate overall + any check with rate < 1, then every item in alerts (check, consecutive_failures, error) and escalations (id, owner, deadline, item) -- escalations go under 需要你定.
 If facts.muted_for_brief.count > 0, add a section 「静音期间的催办和汇总」: the count, then one short line per item (key + gist of text); this section may go past the 15-line limit.
 Never guess; if a fact is missing say 未核实. {RULE} Today {d}, data day {y} (Beijing time).""", f"pi-line-jasper-{d}", timeout=400)
     except Exception as e: txt, tid = f"brief 生成失败：{e}", "?"
