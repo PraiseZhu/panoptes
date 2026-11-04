@@ -464,6 +464,12 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     const step = stepById[stepId] ?? { id: stepId, kind: r?.kind }
     let { status, why } = classifyKey(key, { first, rerun, base, latest, latestIsSame, skipLatest: Boolean(step.noLatestRecheck) })
     if (r?.timedOut) { status = 'timeout'; why = 'check timed out; no comparable failure evidence' }
+    // 试运行检查（bench）在基线版本上同样失败（PR #1686 #1713 #1720）：只说明这台机器 / 这套阈值测不出东西，既不是 PR 的问题，
+    // 也不证明主线坏了。按试运行约定只记「拿不准」交 QA 自查：不进 findings、不置 pre_existing、不定级。
+    if (step.trialOnly && status === 'pre-existing') {
+      status = 'unverified'
+      why = 'also failed on the base revision: a trial-only check cannot tell a product regression from this machine / these thresholds, so QA self-checks it first'
+    }
     const named = test !== '*'
     const fp = fingerprintOf(repo, ['check', stepId, named ? test : wholeStepSignature(r)])
     const type = r?.failureDetails?.find((f) => f.name === test)?.type ?? null
