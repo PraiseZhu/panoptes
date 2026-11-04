@@ -370,4 +370,116 @@ class ProductWriteExceptions(Base):
         self.assertEqual(self.wrap(["issue", "comment", "1", "-R", R, "-b", "x"], caller=["python3", "/x/panoptes/pi/bin/infra_outbound.py.old"])[:2], (4, None))
 
 
+class AcceptanceRound2(Base):
+    """#214 acceptance round 2 (11-04): default-deny product-write guard; B1 stdin/@file bodies, B2 full URLs, B3 branch moves,
+    B4 every flag spelling, B5 review-pr approve allowed"""
+    wrap = Wrapper.wrap
+    gql = AcceptanceRound1.gql
+    M = 'mutation{mergePullRequest(input:{pullRequestId:"PROD_1"}){clientMutationId}}'
+    ALLOW = ["node", "/x/review-pr/scripts/merge-reviewed-pr.mjs"]; OUT = ProductWriteExceptions.OUT; RP = ["node", "/x/review-pr/scripts/signoff-hold.mjs"]
+    CALLERS = ([], ["node", "/x/cindy/bin/cindy-watcher.mjs"], ALLOW, OUT, RP)
+    def blocked_for_all(self, a, stdin=None, **kw):
+        import gh_wrapper as W
+        for caller in self.CALLERS:
+            for env, url in (({}, ""), ({}, AcceptanceRound1.PANCWD), ({"GH_REPO": PAN}, "")):
+                with mock.patch.object(W, "refeed_stdin", lambda d: self.fail("re-fed a refused call")), mock.patch.object(sys, "stdin", io.StringIO(stdin or "")):
+                    rc, c, err = self.wrap(a, env=env, cwd_url=url, caller=caller)
+                self.assertEqual((rc, c), (4, None), (a, caller, env, url)); self.assertIn("refused", err)
+
+    def test_b1_graphql_body_from_stdin_or_file_is_read_and_checked(self):
+        body = json.dumps({"query": self.M}); d = tempfile.mkdtemp(); jf = f"{d}/b.json"; open(jf, "w").write(body); qf = f"{d}/q.graphql"; open(qf, "w").write(self.M)
+        for a, sin in ((["api", "graphql", "--input", "-"], body), (["api", "graphql", "--input=-"], body), (["api", "graphql", "-F", "query=@-"], self.M),
+                       (["api", "graphql", "-Fquery=@-"], self.M), (["api", "graphql", "--field=query=@-"], self.M),
+                       (["api", "graphql", "--input", jf], None), (["api", "graphql", "-F", f"query=@{qf}"], None)):
+            self.blocked_for_all(a, sin)
+        for a in (["api", "graphql", "--input", "-"], ["api", "graphql", "-F", "query=@-"], ["api", "graphql", "--input", f"{d}/missing.json"]):
+            self.assertIn("cannot be parsed", lib.gh_red_line(a, repo=PAN) or "", a)   # lib.gh has no stdin copy: unparseable -> refused
+
+    def test_b1_stdin_read_query_passes_and_is_refed_to_the_real_gh(self):
+        import gh_wrapper as W
+        fed = []
+        q = json.dumps({"query": "query{ viewer { login } }"})
+        with mock.patch.object(W, "refeed_stdin", fed.append), mock.patch.object(sys, "stdin", io.StringIO(q)):
+            rc, c, _ = self.wrap(["api", "graphql", "--input", "-"], cwd_url=AcceptanceRound1.PANCWD)
+        self.assertIsNotNone(c); self.assertEqual(fed, [q])
+        with mock.patch.object(sys, "stdin", io.StringIO(q)):
+            self.assertIsNone(lib.gh_product_write(["api", "graphql", "--input", "-"], PROD, stdin=q))
+
+    def test_b2_full_urls_query_strings_and_case_are_normalized(self):
+        R = PROD
+        for a in (["api", "-X", "PUT", f"https://api.github.com/repos/{R}/pulls/1/merge"], ["api", "-X", "PUT", f"HTTPS://API.GITHUB.COM/REPOS/XINDONG/MIVO-CANVAS-PLUGIN/PULLS/1/MERGE"],
+                  ["api", "-X", "PUT", f"/repos/{R}/pulls/1/merge?x=1"], ["api", "-X", "PUT", f"repos/{R}//pulls/1/merge/"], ["api", "-X", "PUT", f"repos/xindong%2Fmivo-canvas-plugin/pulls/1/merge"],
+                  ["api", "-X", "PUT", f"https://github.example.com/api/v3/repos/{R}/pulls/1/merge"], ["api", "-X", "POST", f"https://api.github.com/repos/{R}/issues", "-f", "title=x"],
+                  ["api", "-X", "PUT", "repos/{owner}/{repo}/pulls/1/merge"], ["api", "-X", "PUT", "repositories/123/pulls/1/merge"],
+                  ["api", "https://api.github.com/graphql", "-f", f"query={self.M}"], ["pr", "merge", f"https://github.com/{R}/pull/1"]):
+            for caller in self.CALLERS: self.assertEqual(self.wrap(a, caller=caller)[:2], (4, None), (a, caller))
+        self.assertEqual(lib.gh_target_repo(["api", f"https://api.github.com/repos/{R}/issues?state=all"]), R)
+        self.assertIsNotNone(self.wrap(["api", f"https://api.github.com/repos/{R}/pulls?state=open"])[1])   # a read
+        self.assertIsNotNone(self.wrap(["api", "-X", "PUT", "repos/{owner}/{repo}/pulls/1/merge"], cwd_url=AcceptanceRound1.PANCWD)[1])   # placeholder -> cwd = own repo
+
+    def test_b3_branch_moves_refused_for_every_caller_and_lib_gh(self):
+        R = PROD
+        for a in (["pr", "update-branch", "1", "-R", R], ["pr", "update-branch", "1", "--rebase", "-R", R], ["api", "-X", "PUT", f"repos/{R}/pulls/1/update-branch"],
+                  ["api", "-X", "PUT", f"repos/{R}/pulls/1/update-branch", "-f", "expected_head_sha=abc"], ["api", "-X", "POST", f"repos/{R}/merges", "-f", "base=main", "-f", "head=x"],
+                  ["api", "-X", "PATCH", f"repos/{R}/git/refs/heads/main", "-f", "sha=x", "-F", "force=true"], ["api", "-X", "POST", f"repos/{R}/git/refs", "-f", "ref=refs/heads/x"],
+                  self.gql('mutation{updateRef(input:{refId:"PROD_r", oid:"x", force:true}){clientMutationId}}')):
+            self.blocked_for_all(a)
+            self.assertIsNotNone(lib.gh_red_line(a), a)   # lib.gh (merger, outbound) too, not only the wrapper
+        self.blocked_for_all(["api", "-X", "DELETE", f"repos/{R}/git/refs/heads/x"])   # ref delete: wrapper product-write (janitor stays refused)
+
+    def test_b3_outbound_update_branch_call_is_refused(self):
+        # outbound.py h_update_branch (gh.pr.update-branch) sends exactly these on REPO = the product repo: refused as ordered (PM 11-04)
+        for a in (["api", "-X", "PUT", f"repos/{lib.REPO}/pulls/7/update-branch", "-f", "expected_head_sha=abc"], ["api", "-X", "PUT", f"repos/{lib.REPO}/pulls/7/update-branch"]):
+            self.assertIn("update-branch", lib.gh_red_line(a) or "", a)
+            with self.assertRaises(lib.RedLine): lib.gh(a, js=False)
+
+    def test_b4_every_flag_spelling_is_parsed(self):
+        R = PROD
+        for a in (["api", "-XDELETE", f"repos/{R}/git/refs/heads/x"], ["api", "-X=DELETE", f"repos/{R}/git/refs/heads/x"], ["api", "--method", "delete", f"repos/{R}/git/refs/heads/x"],
+                  ["api", "--method=PATCH", f"repos/{R}/issues/1", "-f", "state=closed"], ["api", f"repos/{R}/issues", "-ftitle=x"], ["api", f"repos/{R}/issues", "--raw-field=title=x"],
+                  ["api", f"repos/{R}/issues", "--raw-field", "title=x"], ["api", f"repos/{R}/issues", "-F", "title=x"], ["api", f"repos/{R}/issues", "--field", "title=x"],
+                  ["api", f"repos/{R}/issues", "-Ftitle=x"], ["api", f"repos/{R}/issues/1", "-X", "PATCH", "-fstate=closed"], ["api", "-iXPUT", f"repos/{R}/pulls/1/merge"],
+                  ["api", f"repos/{R}/issues", "--input", "/dev/null"], ["api", "-X", "PUT", "--", f"repos/{R}/pulls/1/merge"],
+                  ["api", f"repos/{R}/issues", "--unknown-flag", "x"], ["api", f"repos/{R}/issues", f"repos/{R}/pulls"], ["api", f"repos/{R}/issues", "-f", "noequals"]):
+            for caller in self.CALLERS: self.assertEqual(self.wrap(a, caller=caller)[:2], (4, None), (a, caller))
+        p = lib.gh_api_parse(["api", "-iXput", "--raw-field=a=1", "-Fb=2", "--field", "c=3", "-H", "Accept: x", "https://api.github.com/repos/O/R/x?y=1"])
+        self.assertEqual((p["method"], p["path"], p["fields"]), ("PUT", "repos/O/R/x", [("a", "1"), ("b", "2"), ("c", "3")]))
+        self.assertIn("editing", lib.gh_red_line(["pr", "edit", "1", "-R", R, "-bx"]) or ""); self.assertIn("editing", lib.gh_red_line(["pr", "edit", "1", "-R", R, "--title=x"]) or "")
+
+    def test_default_deny_unlisted_product_ops_and_unknown_targets(self):
+        R = PROD
+        for a in (["issue", "edit", "1", "-R", R, "--add-label", "x"], ["issue", "reopen", "1", "-R", R], ["pr", "reopen", "1", "-R", R], ["pr", "create", "-R", R, "--title", "x"],
+                  ["label", "create", "x", "-R", R], ["release", "create", "v1", "-R", R], ["repo", "edit", R], ["repo", "delete", R], ["workflow", "run", "x", "-R", R],
+                  ["run", "cancel", "1", "-R", R], ["secret", "set", "X", "-R", R], ["something-new", "verb", "-R", R], ["pr", "lock", "1", "-R", R],
+                  ["api", "-X", "PUT", f"repos/{R}/topics", "-f", "names[]=x"], ["api", "-X", "POST", f"repos/{R}/labels", "-f", "name=x"],
+                  ["api", "-X", "PUT", f"repos/{R}/contents/a.txt", "-f", "message=x"], ["api", "-X", "POST", "markdown", "-f", "text=x"],
+                  self.gql('mutation{createLabel(input:{repositoryId:"PROD_R", name:"x"}){clientMutationId}}'), self.gql("mutation{ createGist { id } }")):
+            for caller in self.CALLERS: self.assertEqual(self.wrap(a, caller=caller)[:2], (4, None), (a, caller))
+        for caller in ([], self.OUT, ["node", "/x/cindy/bin/cindy-watcher.mjs"]):   # review-pr callers may comment (B5)
+            self.assertEqual(self.wrap(self.gql('mutation{addComment(input:{subjectId:"UNKNOWN", body:"x"}){clientMutationId}}'), caller=caller)[:2], (4, None))
+        self.assertEqual(self.wrap(["issue", "create", "-t", "x"])[:2], (4, None))   # no -R, no GH_REPO, no cwd remote: unknown -> refused
+
+    def test_allowed_set_still_passes(self):
+        R = PROD
+        for a in (["pr", "view", "1", "-R", R], ["pr", "list", "-R", R], ["pr", "checks", "1", "-R", R], ["issue", "list", "-R", R], ["repo", "view", R], ["label", "list", "-R", R],
+                  ["pr", "create", "-R", R, "--draft", "--base", "main", "--head", "x", "--title", "t", "--body", "b"], ["pr", "ready", "1", "-R", R],
+                  ["run", "rerun", "1", "--failed", "-R", R], ["run", "view", "1", "-R", R], ["api", f"repos/{R}/pulls/1"], ["api", f"repos/{R}/commits/abc", "-q", ".sha"],
+                  ["api", "-X", "POST", f"repos/{R}/actions/runs/1/rerun-failed-jobs"], ["api", "-X", "POST", f"https://api.github.com/repos/{R}/actions/jobs/1/rerun"],
+                  ["api", "rate_limit"], ["api", "graphql", "-f", "query=query{ repository(owner:\"xindong\",name:\"mivo-canvas-plugin\"){ id } }"],
+                  ["search", "prs", "x"], ["auth", "status"], ["pr", "merge", "1", "-R", PAN], ["api", "-X", "PUT", f"repos/{PAN}/pulls/1/update-branch"]):
+            rc, c, err = self.wrap(a); self.assertIsNotNone(c, (a, err))
+
+    def test_b5_review_pr_may_approve_and_pat_passthrough_goes_through_the_guard(self):
+        R = PROD
+        for a in (["pr", "review", "1", "-R", R, "--approve"], ["api", "-X", "POST", f"repos/{R}/pulls/1/reviews", "-f", "event=APPROVE"],
+                  ["api", f"repos/{R}/pulls/1/reviews", "-fevent=APPROVE"], ["api", "-X", "PUT", f"repos/{R}/pulls/1/reviews/9/dismissals", "-f", "message=x"],
+                  self.gql('mutation{addPullRequestReview(input:{pullRequestId:"PROD_1", event:APPROVE}){clientMutationId}}')):
+            for caller in (self.RP, self.ALLOW):
+                _, c, err = self.wrap(a, caller=caller); self.assertIsNotNone(c, (a, caller)); self.assertIn("allowlisted caller", err)
+            for caller in ([], self.OUT, ["node", "/x/cindy/bin/cindy-watcher.mjs"]): self.assertEqual(self.wrap(a, caller=caller)[:2], (4, None), (a, caller))
+        for a in (["pr", "close", "1", "-R", R], ["api", "-X", "PATCH", f"repos/{R}/pulls/1", "-f", "state=closed"], ["issue", "create", "-R", R, "-t", "x"],
+                  self.gql('mutation{addPullRequestReview(input:{pullRequestId:"PROD_1"}){clientMutationId} closePullRequest(input:{pullRequestId:"PROD_1"}){clientMutationId}}')):
+            rc, c, err = self.wrap(a, caller=self.RP); self.assertEqual((rc, c), (4, None), a); self.assertNotIn("allowlisted caller", err)   # PAT pass-through: guard first
+
+
 if __name__ == "__main__": unittest.main()

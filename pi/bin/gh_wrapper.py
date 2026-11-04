@@ -2,11 +2,11 @@
 """Box-global gh wrapper (11-04, PM/Jasper: the whole test line stops using Praise's account, bot sessions included).
 
 Installed by 电脑运维 as `gh` ahead of the real gh on PATH (see the PR / docs). Every call:
-  1. red lines first, on every identity and with the flag off too: product-repo PR merges and PR title/body edits are refused (gh pr
-     merge / pr edit --title|--body, REST PUT .../merge / PATCH pulls/N, graphql mergePullRequest / enablePullRequestAutoMerge /
-     updatePullRequest) -> exit 4, nothing sent. Same function as lib.gh (lib.gh_red_line). graphql merge/edit mutations run only when
-     every node id resolves (a `nodes` query) to a non-product repo. Wrapper only (lib.gh_product_write): product issue create/comment,
-     PR comment/review/close, ref delete; allowlisted review-pr callers may comment/review; CI reruns pass.
+  1. red lines first, on every identity and caller (allowlisted PAT pass-through too) and with the flag off: product PR merges,
+     branch moves (pr update-branch, REST update-branch / merges / git refs), PR title/body edits, and any `gh api` call that cannot
+     be parsed -> exit 4, nothing sent. Same function as lib.gh (lib.gh_red_line). Then lib.gh_product_write (wrapper only), DEFAULT
+     DENY on the product repo (or an unknown target): only reads, pr create --draft, pr ready, run rerun, REST .../actions/...,
+     PRODUCT_WRITE_EXCEPTIONS and review-pr comments/reviews pass. A body on stdin is read, checked, and re-fed to the real gh.
   2. flag on ($PI_STATE/gh-app-enabled AND $PI_STATE/gh-app-wrapper-enabled): GH_TOKEN = a Praise QA installation token for the
      target repo (-R/--repo, GH_REPO, `api repos/O/R`, `repo clone O/R`, else the cwd's origin): xindong/* -> 178486896,
      PraiseZhu/* -> 164262283. Unresolvable -> 178486896, and one line {at, cmd, repo} in $PI_STATE/out/gh-wrapper/unresolved.jsonl
@@ -188,15 +188,29 @@ def app_token(repo, argv, no_install_is_none=False):
         return None
 
 
-def main(argv, env=None, execve=os.execve, run=subprocess.run, caller=None):
+def refeed_stdin(data):
+    """put the request body the wrapper read from fd 0 back on fd 0 for the real gh (an in-memory file; nothing on disk)"""
+    fd = os.memfd_create("gh-wrapper-stdin")
+    os.write(fd, data.encode() if isinstance(data, str) else data); os.lseek(fd, 0, os.SEEK_SET)
+    os.dup2(fd, 0); os.close(fd)
+
+
+def main(argv, env=None, execve=os.execve, run=subprocess.run, caller=None, stdin=None):
     env = dict(os.environ if env is None else env)
     repo = target(argv, env, run)
     chain = caller_chain() if caller is None else caller
     name = allowlisted(chain)
-    why = lib.gh_red_line(argv, repo) or lib.gh_product_write(argv, repo, name, excused=write_exceptions(chain))
+    # #214 r2 B1: a body on stdin (--input -, field=@-) is read here, checked like any other body, then re-fed to the real gh
+    body = None
+    if lib.gh_reads_stdin(argv):
+        try: body = sys.stdin.read() if stdin is None else stdin
+        except Exception: body = None   # unreadable -> the guards see no body -> refused (fail closed)
+    # every caller, allowlisted (PAT pass-through) and excused ones included, goes through both guards first
+    why = lib.gh_red_line(argv, repo, stdin=body) or lib.gh_product_write(argv, repo, name, excused=write_exceptions(chain), stdin=body)
     if why:
         print(f"gh-wrapper: refused, red line: {why} (repo {repo or 'unknown'}); nothing was sent", file=sys.stderr)
         return EXIT_RED_LINE
+    if body is not None: refeed_stdin(body)
     if name:
         log_allowlisted(name, argv)
         penv = lib.pat_env(env); gh = lib.real_gh(penv)
