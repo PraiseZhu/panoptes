@@ -18,6 +18,62 @@ SLOT_POLL_S="${PANOPTES_SLOT_POLL_S:-2}"
 
 slot_dir() { printf '%s\n' "$ARGUS_ROOT/priority"; }
 
+# 11-05 (stdcheck gap qa_start:PR-1718: #1718 waited 10 min 51 s for a slot with nothing logged): every waiter logs when its wait
+# starts and when it gets the slot (SLOT_ID e.g. PR-1718, SLOT_KIND merge|rerun|catch-up|manual, set by run-nightly.sh). A wait
+# longer than PANOPTES_SLOT_WAIT_ALERT_S (default 480 = 8 min) raises one alert: control.log warn line + the state file
+# $ARGUS_ROOT/slot-wait-alerts/<pid>.json, which watchdog.slot_wait_check turns into one slot:wait item (existing DM path).
+SLOT_WAIT_ALERT_S="${PANOPTES_SLOT_WAIT_ALERT_S:-480}"
+# epoch seconds; PANOPTES_TEST_CLOCK (a file holding an epoch) overrides it only with PANOPTES_TEST=1 (tests: simulated clock)
+slot_now() { if [[ "${PANOPTES_TEST:-}" == 1 && -n "${PANOPTES_TEST_CLOCK:-}" ]]; then cat "$PANOPTES_TEST_CLOCK"; else date +%s; fi; }
+slot_log() { echo "[panoptes] $1 ($2)" >&2; if declare -F ctl >/dev/null; then ctl "$1" "$2" "${3:-info}"; fi; return 0; }
+slot_who() { printf '"id":"%s","kind":"%s"' "${SLOT_ID:--}" "${SLOT_KIND:-manual}"; }
+slot_alert_file() { printf '%s\n' "$ARGUS_ROOT/slot-wait-alerts/$$.json"; }
+slot_alert_write() {   # state waited_s
+  local f; f=$(slot_alert_file); mkdir -p "${f%/*}"
+  printf '{"id":"%s","kind":"%s","pid":%d,"wait_start":%d,"waited_s":%d,"state":"%s","t":%d}\n' \
+    "${SLOT_ID:--}" "${SLOT_KIND:-manual}" "$$" "$SLOT_WAIT_T0" "$2" "$1" "$(slot_now)" >"$f.tmp" && mv -f "$f.tmp" "$f"
+}
+# called after every failed attempt: first call logs the wait start; past SLOT_WAIT_ALERT_S raises the alert once
+slot_wait_tick() {
+  if [[ -z "${SLOT_WAIT_T0:-}" ]]; then SLOT_WAIT_T0=$(slot_now); SLOT_WAIT_ALERTED=""; slot_log "run-nightly slot wait start" "$(slot_who)"; return 0; fi
+  local w=$(( $(slot_now) - SLOT_WAIT_T0 ))
+  if [[ -z "$SLOT_WAIT_ALERTED" ]] && (( w > SLOT_WAIT_ALERT_S )); then
+    SLOT_WAIT_ALERTED=1; slot_alert_write waiting "$w"
+    slot_log "run-nightly slot wait alert" "$(slot_who),\"waited_s\":$w,\"limit_s\":$SLOT_WAIT_ALERT_S" warn
+  fi
+  return 0
+}
+# end of a wait: acquired MODE | gave-up. Logs always (waited_s 0 = no wait); an alerted wait updates its state file.
+slot_wait_done() {
+  local w=0; [[ -n "${SLOT_WAIT_T0:-}" ]] && w=$(( $(slot_now) - SLOT_WAIT_T0 ))
+  if [[ "$1" == gave-up ]]; then slot_log "run-nightly slot wait gave up" "$(slot_who),\"waited_s\":$w" warn
+  else slot_log "run-nightly slot acquired" "$(slot_who),\"mode\":\"$1\",\"waited_s\":$w"; fi
+  [[ -n "${SLOT_WAIT_ALERTED:-}" ]] && slot_alert_write "$([[ "$1" == gave-up ]] && echo gave-up || echo acquired)" "$w"
+  SLOT_WAIT_T0=""; SLOT_WAIT_ALERTED=""; return 0
+}
+
+# 11-05: priority order among on-merge waiters (no higher cap). The request file req-<pid> holds "<tier> <since> <id>": tier 0 =
+# fresh merge (SLOT_KIND merge), 1 = rerun (mergewatch requeue, try >= 2) or anything else. Only the head of the queue (lowest
+# tier, then oldest since, then pid) may take a slot. Starvation-safe: a request that has waited >= SLOT_STARVE_S counts as tier 0
+# (aging), so a rerun is passed by at most that long. Empty req files (slot_acquire_priority) are not part of the order.
+# on-merge run got its slot: the req file stays (normal runs keep yielding, a parked holder keeps waiting) but leaves the order
+slot_onmerge_got() { printf 'run - %s\n' "${SLOT_ID:--}" >"$SLOT_REQ"; slot_wait_done "$SLOT_MODE"; }
+slot_tier() { [[ "${SLOT_KIND:-merge}" == merge ]] && echo 0 || echo 1; }
+slot_is_head() {
+  local f pid tier since rest now best="" key; now=$(slot_now)
+  for f in "$(slot_dir)"/req-*; do
+    [[ -e "$f" ]] || continue
+    pid="${f##*-}"
+    if ! [[ "$pid" =~ ^[0-9]+$ ]] || ! kill -0 "$pid" 2>/dev/null; then rm -f "$f"; continue; fi
+    read -r tier since rest <"$f" 2>/dev/null || true
+    [[ "$tier" =~ ^[0-9]+$ && "$since" =~ ^[0-9]+$ ]] || continue
+    (( now - since >= SLOT_STARVE_S )) && tier=0
+    key=$(printf '%d %012d %012d' "$tier" "$since" "$pid")
+    [[ -z "$best" || "$key" < "$best" ]] && best="$key"
+  done
+  [[ -z "$best" || "${best##* }" == "$(printf '%012d' "$$")" ]]
+}
+
 # live files of a kind (req|yield); removes files whose pid is gone
 slot_live() {
   local kind="$1" f pid n=0
@@ -64,9 +120,10 @@ slot_acquire_normal() {
   while :; do
     t=$(slot_oldest_ticket)
     if [[ -z "$mine" || "$t" == "$mine" ]] && { (( $(slot_live req) == 0 )) || { [[ -n "$mine" ]] && slot_ticket_starving; }; } && flock -n "$fd"; then
-      [[ -n "$mine" ]] && rm -f "$mine"; return 0
+      [[ -n "$mine" ]] && rm -f "$mine"; [[ -n "$wait" ]] && slot_wait_done lock; return 0
     fi
-    [[ -n "$wait" ]] && (( SECONDS - start < wait )) || { [[ -n "$mine" ]] && rm -f "$mine"; return 1; }
+    [[ -n "$wait" ]] && (( SECONDS - start < wait )) || { [[ -n "$mine" ]] && { rm -f "$mine"; slot_wait_done gave-up; }; return 1; }
+    slot_wait_tick
     sleep "$SLOT_POLL_S"
   done
 }
@@ -79,9 +136,10 @@ slot_acquire_priority() {
   SLOT_REQ="$(slot_dir)/req-$$"; : >"$SLOT_REQ"   # before priority.lock: a parked run stays parked across back-to-back merges
   flock -w "$wait" "$pfd" || { rm -f "$SLOT_REQ"; return 1; }
   while :; do
-    if ! slot_ticket_starving && flock -n "$fd"; then SLOT_MODE=lock; return 0; fi
-    if (( $(slot_live yield) > 0 )); then SLOT_MODE=borrowed; return 0; fi
-    (( SECONDS - start < wait )) || { rm -f "$SLOT_REQ"; return 1; }
+    if ! slot_ticket_starving && flock -n "$fd"; then SLOT_MODE=lock; slot_wait_done lock; return 0; fi
+    if (( $(slot_live yield) > 0 )); then SLOT_MODE=borrowed; slot_wait_done borrowed; return 0; fi
+    (( SECONDS - start < wait )) || { rm -f "$SLOT_REQ"; slot_wait_done gave-up; return 1; }
+    slot_wait_tick
     sleep "$SLOT_POLL_S"
   done
 }
@@ -100,14 +158,17 @@ slot_acquire_onmerge() {
   mkdir -p "$(slot_dir)"
   exec {SLOT_PR_FD}>"$(slot_dir)/pr-$pr.lock"
   flock -n "$SLOT_PR_FD" || { echo "[panoptes] on-merge run for PR #$pr already active" >&2; return 1; }
-  SLOT_REQ="$(slot_dir)/req-$$"; : >"$SLOT_REQ"
+  SLOT_REQ="$(slot_dir)/req-$$"; printf '%d %d %s\n' "$(slot_tier)" "$(slot_now)" "${SLOT_ID:--}" >"$SLOT_REQ"
   while :; do
-    if ! slot_ticket_starving && flock -n "$fd"; then SLOT_MODE=lock; return 0; fi
-    if (( $(slot_live yield) > 0 )); then SLOT_MODE=borrowed; return 0; fi
-    if slot_mem_ok && slot_balloon_ok && (( $(slot_live conc) < ${PANOPTES_ONMERGE_MAX_CONC:-2} )); then
-      SLOT_CONC="$(slot_dir)/conc-$$"; : >"$SLOT_CONC"; SLOT_MODE=concurrent; return 0
+    if slot_is_head; then   # 11-05: only the head of the priority-ordered queue takes a slot (merge before rerun, aging)
+      if ! slot_ticket_starving && flock -n "$fd"; then SLOT_MODE=lock; slot_onmerge_got; return 0; fi
+      if (( $(slot_live yield) > 0 )); then SLOT_MODE=borrowed; slot_onmerge_got; return 0; fi
+      if slot_mem_ok && slot_balloon_ok && (( $(slot_live conc) < ${PANOPTES_ONMERGE_MAX_CONC:-2} )); then
+        SLOT_CONC="$(slot_dir)/conc-$$"; : >"$SLOT_CONC"; SLOT_MODE=concurrent; slot_onmerge_got; return 0
+      fi
     fi
-    (( SECONDS - start < wait )) || { rm -f "$SLOT_REQ"; return 1; }
+    (( SECONDS - start < wait )) || { rm -f "$SLOT_REQ"; slot_wait_done gave-up; return 1; }
+    slot_wait_tick
     sleep "$SLOT_POLL_S"
   done
 }

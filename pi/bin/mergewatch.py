@@ -224,7 +224,7 @@ def priority_cmd(number, day):
             '--no-issues', '--trigger', 'event', '--out', os.path.join(REPORTS, 'catch-up', f'PR-{number}.json')]
 
 
-def launch(cmd, sha):
+def launch(cmd, sha, env=None):
     with open(LAUNCH_LOG, 'a') as lf:
         lf.write(f'=== {now()} mergewatch launch for main {sha[:8]}: {" ".join(cmd[1:])}\n')
         lf.flush()
@@ -232,7 +232,7 @@ def launch(cmd, sha):
                                 start_new_session=True, cwd='/workspace/panoptes',
                                 env={**os.environ, 'QA_HOME': QA_HOME,
                                      'ARGUS_PR_TIMEOUT_MIN': os.environ.get('ARGUS_PR_TIMEOUT_MIN', '90'),  # one stuck PR must not block the queue for hours; 10-28 Praise raised 45 -> 90 because low-memory degraded runs (#1340, #1385) exceed 45 min; mergewatch requeue() relaunches a timed-out PR
-                                     'PATH': '/usr/local/bin:/usr/bin:/bin'})
+                                     'PATH': '/usr/local/bin:/usr/bin:/bin', **(env or {})})
 
 
 def heartbeat(mode):
@@ -284,8 +284,9 @@ def main():
         cmd = priority_cmd(n, day)
         if DRY:
             return log('DRY: would launch ' + ' '.join(cmd))
-        p = launch(cmd, sha or st.get('main_sha') or '')
         e = inflight.setdefault(str(n), {'day': day, 'tries': 0, 'base': base})
+        # 11-05: a requeue (try >= 2) waits behind fresh merges for a QA slot (scripts/qa-slot.sh slot_is_head)
+        p = launch(cmd, sha or st.get('main_sha') or '', {'PANOPTES_SLOT_KIND': 'rerun' if e['tries'] else 'merge'})
         e['tries'] += 1
         e['next_at'] = time.time() + BACKOFF_S[min(e['tries'], len(BACKOFF_S)) - 1]
         busy.add(n)

@@ -11,7 +11,7 @@ try:
     M.heartbeat = lambda mode: {"kind": "pause", "start": "2026-10-27T08:37:01+08:00", "end": "2026-10-27T09:18:35+08:00", "gap_min": 41.6}
     M.subprocess = types.SimpleNamespace(run=lambda *a, **k: types.SimpleNamespace(returncode=0, stdout=f"{head[0]}\trefs/heads/main\n"), TimeoutExpired=TimeoutError)
     M.gh_token = lambda: None; M.catchup_running = lambda: False
-    M.launch = lambda cmd, sha: launches.append((cmd, sha)) or types.SimpleNamespace(pid=1)
+    M.launch = lambda cmd, sha, env=None: launches.append((cmd, sha)) or types.SimpleNamespace(pid=1)
     os.makedirs(M.STATE_DIR); json.dump({"main_sha": head[0], "dirty": False}, open(M.STATE, "w"))
     for _ in range(3): M.main()
     assert launches == [], launches                       # 同一个 sha，停机恢复不重起 catch-up
