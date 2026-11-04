@@ -64,19 +64,55 @@ PRODUCT_WRITE_EXCEPTIONS = (
 #   upgrade / exec / create / remove: an extension runs arbitrary code with the login), and `auth token` / `auth status
 #   --show-token|-t` unless the caller is on CALLER_ALLOWLIST (box grep 11-04: no allowlisted caller uses it; see the PR body).
 # 11-04: `config set` and the login-changing auth verbs are CALLER_ALLOWLIST-only too; reads (config get/list, auth status) stay open.
-AUTH_WRITES = frozenset({"login", "setup-git", "switch", "refresh"})
+# 11-04 acceptance (#222): gh/cobra skips flags (and their values) before the verb, so `gh auth -h github.com login` runs login.
+# The verb is the first non-flag word after the noun; flags before it must be known (PRE_VERB_*), else the command is unparseable
+# and refused. For auth / config only known reads pass for non-allowlisted callers (config get/list, auth status without -t).
+PRE_VERB_VALUE = frozenset({"-h", "--hostname", "--host", "-R", "--repo"}); PRE_VERB_BOOL = frozenset({"--help"})
+AUTH_READS = frozenset({"status"}); CONFIG_READS = frozenset({"get", "list", "ls"})
 EXTENSION_NOUNS = ("extension", "extensions", "ext"); EXTENSION_READS = frozenset({"list", "ls", "search", "browse"})
+GUARDED_NOUNS = frozenset({"auth", "config", "alias", *EXTENSION_NOUNS})
+def split_verb(rest):
+    """rest = argv after the noun -> (verb, args after the verb), verb "" when there is none; None when a flag before the verb is
+    unknown, `--`, or a value flag misses its value (unparseable: callers refuse)."""
+    i = 0
+    while i < len(rest):
+        x = rest[i]
+        if not x.startswith("-") or x == "-": return x, rest[i + 1:]
+        if x in PRE_VERB_BOOL: i += 1; continue
+        if x in PRE_VERB_VALUE:
+            if i + 1 >= len(rest): return None
+            i += 2; continue
+        if "=" in x and x.split("=", 1)[0] in PRE_VERB_VALUE and x.startswith("--"): i += 1; continue
+        if not x.startswith("--") and len(x) > 2 and x[:2] in PRE_VERB_VALUE: i += 1; continue   # -hgithub.com
+        return None
+    return "", []
+def shows_token(args):
+    return any(x in ("-t", "--show-token") or x.startswith("--show-token=") or (x.startswith("-") and not x.startswith("--") and "t" in x[1:]) for x in args)
 def cli_refusal(argv, allowlisted_name=None):
     """-> reason when the wrapper refuses this gh command for this caller (ruling E above), else None"""
-    a = list(argv); noun = a[0] if a else ""; verb = a[1] if len(a) > 1 else ""
-    if noun == "alias" and verb in ("set", "import"): return f"gh alias {verb} (an alias can expand to any command later)"
-    if noun in EXTENSION_NOUNS and verb not in EXTENSION_READS: return f"gh {noun} {verb or ''} (extensions run arbitrary code with the login)".replace("  ", " ")
-    if noun == "config" and verb == "set" and not allowlisted_name: return "gh config set (changes how every later gh call runs; only CALLER_ALLOWLIST callers)"
-    if noun == "auth" and not allowlisted_name:
-        if verb in AUTH_WRITES: return f"gh auth {verb} (changes the box login / git credentials; only CALLER_ALLOWLIST callers)"
+    a = list(argv); noun = a[0] if a else ""
+    if noun.startswith("-") and GUARDED_NOUNS & set(a) and not allowlisted_name:
+        return "gh flags before the command name (unparseable; only CALLER_ALLOWLIST callers)"
+    if noun not in GUARDED_NOUNS: return None
+    sv = split_verb(a[1:])
+    if noun == "alias":
+        if sv is None: return "gh alias with unknown flags before the verb (unparseable)"
+        if sv[0] in ("set", "import"): return f"gh alias {sv[0]} (an alias can expand to any command later)"
+        return None
+    if noun in EXTENSION_NOUNS:
+        if sv is None: return f"gh {noun} with unknown flags before the verb (unparseable; extensions run arbitrary code with the login)"
+        if sv[0] not in EXTENSION_READS: return f"gh {noun} {sv[0]} (extensions run arbitrary code with the login)".replace("  ", " ")
+        return None
+    if allowlisted_name: return None
+    if sv is None: return f"gh {noun} with unknown flags before the verb (unparseable; only CALLER_ALLOWLIST callers)"
+    verb, rest = sv
+    if noun == "config":
+        if verb not in CONFIG_READS: return f"gh config {verb or ''} (only config get/list for non-CALLER_ALLOWLIST callers)".replace("  ", " ")
+        return None
+    if verb not in AUTH_READS:
         if verb == "token": return "gh auth token (prints the login token; only CALLER_ALLOWLIST callers)"
-        if verb == "status" and any(x in ("-t", "--show-token") or x.startswith("--show-token=") or (x.startswith("-") and not x.startswith("--") and "t" in x[1:]) for x in a[2:]):
-            return "gh auth status --show-token (prints the login token; only CALLER_ALLOWLIST callers)"
+        return f"gh auth {verb or ''} (changes the box login / git credentials; only auth status for non-CALLER_ALLOWLIST callers)".replace("  ", " ")
+    if shows_token(a[1:]): return "gh auth status --show-token (prints the login token; only CALLER_ALLOWLIST callers)"
     return None
 
 

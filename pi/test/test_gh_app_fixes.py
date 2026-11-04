@@ -671,4 +671,27 @@ class AcceptanceRound4(Base):
                   ["auth", "status", "--hostname", "github.com"]):
             self.assertIsNone(W.cli_refusal(a, None), a); self.assertIsNotNone(self.wrap(a, caller=OTHER)[1], a)
 
+    def test_flags_before_verb_cannot_bypass_auth_config_alias_extension(self):
+        # #222 acceptance: gh skips flags (and values) before the verb; the verb is not simply argv[1]
+        import gh_wrapper as W
+        AL = ["node", "/x/review-pr/scripts/signoff-hold.mjs"]; OTHER = ["node", "/x/foo.mjs"]
+        refused = (["auth", "-h", "github.com", "login", "--with-token"], ["auth", "--hostname", "github.com", "login", "--with-token"],
+                   ["auth", "-h", "github.com", "setup-git"], ["auth", "--hostname=github.com", "setup-git"], ["auth", "-hgithub.com", "switch"],
+                   ["config", "--host", "github.com", "set", "editor", "x"], ["config", "-h", "github.com", "set", "editor", "x"],
+                   ["auth", "-h", "github.com", "status", "--show-token"], ["auth", "-h", "github.com", "status", "-at"], ["auth", "-h", "github.com", "token"],
+                   ["auth", "--bogus", "status"], ["auth", "-x", "github.com", "status"], ["auth", "-h"], ["auth", "--", "status"], ["config", "--weird", "get", "x"],
+                   ["auth", "logout"], ["auth", "git-credential", "get"], ["auth"], ["config", "clear-cache"], ["config"],
+                   ["alias", "-h", "x", "set", "m", "pr merge"], ["alias", "--bogus", "import", "f.yml"],
+                   ["extension", "-R", "o/r", "install", "evil/gh-x"], ["ext", "--help", "install", "evil/gh-x"], ["extension", "--bogus", "list"],
+                   ["--help", "auth", "login"], ["-R", "o/r", "config", "set", "x", "y"])
+        for a in refused:
+            self.assertIsNotNone(W.cli_refusal(a, None), a)
+            for c in ([], OTHER, ["python3", "/x/pi/bin/outbound.py"]):
+                rc, call, err = self.wrap(a, caller=c); self.assertEqual((rc, call), (4, None), (a, c)); self.assertIn("refused", err)
+        for a in refused[:10]: self.assertIsNone(W.cli_refusal(a, "review-pr-signoff-hold"), a); self.assertIsNotNone(self.wrap(a, caller=AL)[1], a)
+        for a in (["alias", "-h", "x", "set", "m", "x"], ["ext", "--help", "install", "x"]): self.assertIsNotNone(W.cli_refusal(a, "review-pr-signoff-hold"), a)
+        for a in (["auth", "-h", "github.com", "status"], ["auth", "--hostname", "github.com", "status", "-a"], ["config", "--host", "github.com", "get", "editor"],
+                  ["config", "-h", "github.com", "list"], ["alias", "--help", "list"], ["extension", "-R", "o/r", "list"], ["auth", "--help", "status"]):
+            self.assertIsNone(W.cli_refusal(a, None), a); self.assertIsNotNone(self.wrap(a, caller=OTHER)[1], a)
+
 if __name__ == "__main__": unittest.main()
