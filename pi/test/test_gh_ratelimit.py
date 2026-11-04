@@ -86,4 +86,32 @@ class T(unittest.TestCase):
         json.dump({"since": time.time() - 9 * 3600, "until": time.time() - 1}, open(self.f, "w"))
         p = {}; watchdog.gh_ratelimit_check(now, p); self.assertNotIn("gh:ratelimit", p) # reset passed -> recovers
 
+    # ---- #198 acceptance 3(a) ----
+    def test_huge_until_clamped(self):
+        os.environ["GHF_ERR"] = "HTTP 403: secondary rate limit\nRetry-After: 1000000000"
+        with self.assertRaises(RuntimeError): lib.gh(READ)
+        self.assertLessEqual(lib.gh_rl_until(), time.time() + 2 * 3600 + 5)
+        json.dump({"since": time.time(), "until": time.time() + 1e9}, open(self.f, "w"))   # already on disk: clamped on read too
+        self.assertLessEqual(lib.gh_rl_until(), time.time() + 2 * 3600 + 5)
+    def test_expired_until_sends_and_clears(self):
+        json.dump({"since": time.time() - 9999, "until": time.time() - 5}, open(self.f, "w"))
+        self.assertEqual(lib.gh_rl_until(), 0)
+        self.assertEqual(lib.gh(READ), [{"number": 1}]); self.assertEqual(len(self.calls()), 1); self.assertFalse(os.path.exists(self.f))
+    def test_corrupt_state_ignored(self):
+        for bad in ({"until": "x"}, [1, 2], {"until": time.time() + 600, "since": "y"}):
+            json.dump(bad, open(self.f, "w"))
+            self.assertEqual(lib.gh_rl_until(), 0)
+            self.assertEqual(lib.gh(READ), [{"number": 1}])
+            p = {}; watchdog.gh_ratelimit_check(watchdog.now_cst(), p); self.assertEqual(p, {})
+    def test_pr_number_429_is_not_a_rate_limit(self):
+        for err in ("GraphQL: Could not resolve to a PullRequest with the number of 429. (repository.pullRequest)",
+                    "pull request #429 is not mergeable"):
+            os.environ["GHF_ERR"] = err
+            with self.assertRaises(RuntimeError): lib.gh(READ)
+            self.assertFalse(os.path.exists(self.f), err)
+    def test_http_429_status_is_a_rate_limit(self):
+        os.environ["GHF_ERR"] = "HTTP 429: Too Many Requests (https://api.github.com/graphql)"
+        with self.assertRaises(RuntimeError): lib.gh(READ)
+        self.assertTrue(os.path.exists(self.f))
+
 if __name__ == "__main__": unittest.main()

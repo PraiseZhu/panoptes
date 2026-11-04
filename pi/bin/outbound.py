@@ -913,6 +913,12 @@ def main():
         if cur is None: cur = dict(ledger)
         cur.update(changes); write_atomic(LEDGER, json.dumps(cur, ensure_ascii=False, indent=1))
     def setk(k, v): ledger[k] = v; changes[k] = v; persist()
+    def dropk(k):   # undo a "sending" mark on a row that had no ledger entry before (rate limit: as if never tried)
+        ledger.pop(k, None); changes.pop(k, None)
+        if o.dry_run: return
+        cur = jload(LEDGER, None)
+        if cur is None: cur = dict(ledger)
+        cur.update(changes); cur.pop(k, None); write_atomic(LEDGER, json.dumps(cur, ensure_ascii=False, indent=1))
     picked = {}   # one row per key: a key re-emitted on a later day (overdue:) is handled once, from the newest file
     for f in sorted(glob.glob(f"{BASE}/out/*/*.actions.json")):
         job = f.split("/")[-2]; day = os.path.basename(f)[:10]
@@ -994,6 +1000,7 @@ def main():
             if not h: rows.append((job, k, t, "?", "unsupported", "no executor; not counted as a failure")); unsupported += 1; continue
             who, state, validate, do = h
             try: st = state()
+            except GhRateLimited as e: rows.append((job, k, t, who, "rate-limited", str(e)[:120])); continue   # 11-04: ledger untouched
             except Exception as e: st = f"state?:{str(e)[:120]}"
             if st.startswith("state?:") and state_error_skips(t): rows.append((job, k, t, who, "stale:" + st, "")); continue
             if st == "done":
@@ -1015,6 +1022,10 @@ def main():
                 setk(k, {**prev, "status": "sending", "at": now_cst().isoformat(timespec="seconds")})   # on disk BEFORE the side effect
                 res = do(); setk(k, {"status": "done", "at": now_cst().isoformat(timespec="seconds"), "by": "resend" if resend else "pi-line", "result": res[-200:]})
                 rows.append((job, k, t, who, "SENT", res[-120:]))
+            except GhRateLimited as e:   # 11-04: not a failure (no fails+1, never gave_up); the row goes back to what it was
+                if prev: setk(k, prev)
+                else: dropk(k)
+                rows.append((job, k, t, who, "rate-limited", str(e)[:160]))
             except GiveUp as e:   # the producer re-plans (prfix: a fix PR whose patch no longer applies is fixed again on main)
                 setk(k, {**prev, "status": "gave_up", "last_error": str(e)[:200], "at": now_cst().isoformat(timespec="seconds")})
                 # no DM (Praise 10-24): prfix re-fixes it on main by itself and only a second give-up reaches him

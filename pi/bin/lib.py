@@ -41,17 +41,23 @@ def gh_is_read(args):
 # GH_RL_FILE; until then gh() raises GhRateLimited WITHOUT calling GitHub, jobs skip their GitHub steps (one log line, never an
 # error/streak) and watchdog reports one gh:ratelimit item once skipping has lasted > GH_RL_ALERT_H. The next success removes the file.
 from time import time as _epoch   # not lib.time.time: tests stub lib.time with a sleep-only object
-GH_RL_RE = re.compile(r"rate limit|HTTP 429|\b429\b|abuse detection|retry-after", re.I)
+GH_RL_RE = re.compile(r"rate limit|HTTP 429|status(?: code)?:? 429|\b429 Too Many Requests|abuse detection|retry-after", re.I)
 GH_RL_FILE = f"{PI_STATE}/gh-ratelimit.json"
 GH_RL_ALERT_H = 2
+GH_RL_MAX_S = 2 * 3600   # a recorded reset is never further away than this (a bogus Retry-After / reset must not wedge every job)
 class GhRateLimited(RuntimeError): pass
 def gh_rl_state():
-    try: return json.load(open(GH_RL_FILE))
-    except (OSError, ValueError): return {}
+    """the state dict; a missing file is {}, a corrupt one (not a dict / non-numeric until or since) is ignored with one log line"""
+    try: d = json.load(open(GH_RL_FILE))
+    except FileNotFoundError: return {}
+    except (OSError, ValueError) as e: log(f"{GH_RL_FILE} unreadable ({e.__class__.__name__}), ignored"); return {}
+    num = lambda v: v is None or (isinstance(v, (int, float)) and not isinstance(v, bool))
+    if not isinstance(d, dict) or not num(d.get("until")) or not num(d.get("since")): log(f"{GH_RL_FILE} malformed, ignored"); return {}
+    return d
 def gh_rl_until(now=None):
-    """epoch the GitHub calls may resume, or 0 when not rate-limited"""
-    u = gh_rl_state().get("until") or 0
-    return u if u > (now or _epoch()) else 0
+    """epoch the GitHub calls may resume (at most now+GH_RL_MAX_S), or 0 when not rate-limited"""
+    now = now or _epoch(); u = gh_rl_state().get("until") or 0
+    return min(u, now + GH_RL_MAX_S) if u > now else 0
 def _gh_rl_reset(err):
     """epoch from Retry-After / X-RateLimit-Reset in err, else from `gh api rate_limit` (free, not counted), else a short default"""
     now = _epoch()
@@ -70,7 +76,7 @@ def _gh_rl_reset(err):
 def gh_rl_record(err):
     """err is a GitHub rate limit -> record the reset in GH_RL_FILE (keeping 'since' of an ongoing streak) and return True"""
     if not GH_RL_RE.search(err or ""): return False
-    old = gh_rl_state(); until = _gh_rl_reset(err)
+    old = gh_rl_state(); until = min(_gh_rl_reset(err), _epoch() + GH_RL_MAX_S)
     write_atomic(GH_RL_FILE, json.dumps({"since": old.get("since") or _epoch(), "until": until, "error": err[:200]}))
     return True
 def gh_rl_clear():
