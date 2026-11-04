@@ -1,6 +1,23 @@
 #!/usr/bin/env node
 // Mivo QA 飞书通知台账。只读所有源文件；只写 ledger/daily/。不发任何消息。
 import fs from 'node:fs'; import path from 'node:path'; import { execFileSync } from 'node:child_process';
+
+// 11-04 task B: the Praise QA App token (PRAISE_QA_GH_TOKEN, set by the Python caller while its gh-app-<job>-enabled flag is on) is used
+// ONLY for gh calls whose target repo is in PRAISE_QA_GH_REPOS; every other call, and the flag off, inherit the default login (PAT).
+function ghTargetRepo(args) {
+  for (let i = 0; i < args.length; i++) {
+    if ((args[i] === '-R' || args[i] === '--repo') && args[i + 1]) return args[i + 1]
+    const m = /^\/?repos\/([^/\s]+\/[^/?\s]+)/.exec(args[i]); if (args[0] === 'api' && m) return m[1]
+  }
+  return null
+}
+function ghExec(args, opts = {}) { return execFileSync('gh', args, { ...opts, env: ghEnvFor(args) }) }
+function ghEnvFor(args) {
+  const tok = process.env.PRAISE_QA_GH_TOKEN, repos = (process.env.PRAISE_QA_GH_REPOS || '').split(',').filter(Boolean)
+  const r = ghTargetRepo(args)
+  if (!tok || !r || !repos.includes(r)) return process.env
+  const e = { ...process.env, GH_TOKEN: tok }; delete e.GITHUB_TOKEN; return e
+}
 const USAGE = `usage: build-ledger.mjs [YYYY-MM-DD] [--dry-run]
   Rebuilds the Mivo QA ledger for the day (default: today, Beijing) into $QA_HOME/ledger/daily/<day>.json/.md
   (and deletes daily files older than 60 days). --dry-run writes $QA_HOME/scratch/ledger-dry/ instead, no retention.
@@ -71,7 +88,7 @@ for (const d of fs.existsSync(sentDir) ? fs.readdirSync(sentDir) : []) {
 let ghPRs = null, ghErr = null;
 for (let i = 0; i < 3 && !ghPRs; i++) {
   try {
-    ghPRs = JSON.parse(execFileSync('gh', ['pr', 'list', '-R', REPO, '--state', 'all', '--limit', '400',
+    ghPRs = JSON.parse(ghExec(['pr', 'list', '-R', REPO, '--state', 'all', '--limit', '400',
       '--json', 'number,title,body,state,mergedAt,createdAt'], { encoding: 'utf8', timeout: 120000, maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] }));
     ghErr = null;
   } catch (e) { ghErr = String(e.stderr || e.message).split('\n')[0].slice(0, 200); execFileSync('sleep', [String(5 * (i + 1))]); }
@@ -83,7 +100,7 @@ const prInfoCache = {};
 function prInfo(n) {
   if (n in prInfoCache) return prInfoCache[n];
   let v = null;
-  try { v = JSON.parse(execFileSync('gh', ['pr', 'view', String(n), '-R', REPO, '--json', 'number,title,body,files'], { encoding: 'utf8', timeout: 60000, maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] })); }
+  try { v = JSON.parse(ghExec(['pr', 'view', String(n), '-R', REPO, '--json', 'number,title,body,files'], { encoding: 'utf8', timeout: 60000, maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] })); }
   catch (e) { gaps.push(`#${n} 修复 PR 详情查询失败，无法核对其对应的问题`); }
   return (prInfoCache[n] = v);
 }
@@ -115,7 +132,7 @@ const HANDOFF_REPOS = HANDOFF_ROUTES.routes.map(r => r.repo);
 const HANDOFF_REPO = HANDOFF_REPOS[0];
 let hoIssues = null;
 for (const repo of HANDOFF_REPOS) {
-  try { for (const i of JSON.parse(execFileSync('gh', ['issue', 'list', '-R', repo, '--state', 'all', '--limit', '200', '--json', 'number,state,labels,url'], { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'pipe'] }))) { hoIssues ??= {}; hoIssues[`${repo}#${i.number}`] = i; if (repo === HANDOFF_REPO) hoIssues[i.number] = i; } }
+  try { for (const i of JSON.parse(ghExec(['issue', 'list', '-R', repo, '--state', 'all', '--limit', '200', '--json', 'number,state,labels,url'], { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'pipe'] }))) { hoIssues ??= {}; hoIssues[`${repo}#${i.number}`] = i; if (repo === HANDOFF_REPO) hoIssues[i.number] = i; } }
   catch (e) { gaps.push(`交接仓 ${repo} issue 查询失败，回执只按 followup/state.json`); }
 }
 function handoffReceipt(st, fp) {
@@ -153,6 +170,7 @@ for (const v of Object.values(state)) for (const fp of v.fingerprints || []) {
 //    touch $PI_STATE/fix-authors-praise-only (default /workspace/mivo-qa/pi/) -> PraiseZhu only.
 //    (env MIVO_QA_LEDGER_OWNERS="login,login" overrides; empty string disables)
 const FIX_AUTHORS = ['PraiseZhu', 'kirozeng'];
+const SELF_BOTS = ['app/praise-qa', 'praise-qa[bot]', 'praise-qa'];   // = pi/bin/lib.py SELF_LOGINS (the Praise QA App)
 const praiseOnly = fs.existsSync(path.join(process.env.PI_STATE || path.join(QA, 'pi'), 'fix-authors-praise-only'));
 const OWNERS = (process.env.MIVO_QA_LEDGER_OWNERS ?? (praiseOnly ? FIX_AUTHORS.slice(0, 1) : FIX_AUTHORS).join(',')).split(',').map(s => s.trim()).filter(Boolean);
 const loginOf = p => (p?.author && typeof p.author === 'object' ? p.author.login : p?.author) || null;
@@ -248,7 +266,7 @@ function ownTicket(x, n, pending) {
   return { sev, ticket: true };
 }
 for (const [n, rep] of Object.entries(reports)) {
-  if (!OWNERS.includes(loginOf(rep))) continue;
+  if (!OWNERS.includes(loginOf(rep)) && !(OWNERS.includes('PraiseZhu') && SELF_BOTS.includes(loginOf(rep)))) continue;   // task B: App-authored fix PRs are Praise's too
   const at = reportAt[n] || rep.merged_at || null; if (!at) { gaps.push(`#${n}（${loginOf(rep)}）报告无生成时间，本人问题未入账`); continue; }
   const pv = new Set(rep.pending_verification || []);
   for (const f of [...(rep.findings || []), ...(rep.pending_verification || [])]) {

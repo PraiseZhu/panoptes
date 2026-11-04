@@ -42,7 +42,7 @@ class T(unittest.TestCase):
     def test_installation_by_repo(self):
         self.assertEqual(G.installation("PraiseZhu/panoptes"), 164262283)
         self.assertEqual(G.installation("xindong/mivo-canvas-plugin"), 178486896)
-        with self.assertRaises(G.NoInstallation): G.installation("PraiseZhu/pr-qa-agent-deploy")
+        with self.assertRaises(G.NoInstallation): G.installation("someone/else")
 
     def test_jwt_is_rs256_and_verifies_with_the_key(self):
         now = 1_793_700_000
@@ -81,7 +81,7 @@ class T(unittest.TestCase):
         with mock.patch.object(G.urllib.request, "urlopen", self.urlopen), redirect_stderr(io.StringIO()) as err, redirect_stdout(io.StringIO()) as out:
             self.assertEqual(G.main(["check"]), 0)
         self.assertNotIn(FAKE, err.getvalue() + out.getvalue()); self.assertIn("installation 164262283", out.getvalue())
-        with redirect_stderr(io.StringIO()) as err: self.assertEqual(G.main(["check", "PraiseZhu/pr-qa-agent-deploy"]), 2)
+        with redirect_stderr(io.StringIO()) as err: self.assertEqual(G.main(["check", "someone/else"]), 2)
         self.assertIn("keep this caller on the PAT", err.getvalue())
 
     def test_missing_key_is_a_clear_error(self):

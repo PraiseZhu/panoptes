@@ -89,7 +89,8 @@ def gh_rl_clear(f=None):
 # 11-04 (pi-work/gh-app-1104 P1): GitHub App "Praise QA" for PraiseZhu/panoptes READS, behind the flag file $PI_STATE/gh-app-enabled
 # (read at call time). Flag absent, a repo without an App route, an identity-dependent call (@me, /user) or a token that cannot be
 # minted -> the default gh login (PAT), exactly as before. The App has its own quota, so its rate-limit marker is a separate file.
-GH_APP_REPOS = {"PraiseZhu/panoptes"}      # P3 (product repo) is not part of this; ghtoken knows its installation already
+GH_APP_REPOS = {"PraiseZhu/panoptes"}      # + every PraiseZhu/* repo (task B: installation 164262283 covers the owner), gh_app_own_repo()
+def gh_app_own_repo(repo): return bool(repo) and (repo in GH_APP_REPOS or (repo.count("/") == 1 and repo.split("/")[0] == "PraiseZhu"))
 def gh_app_flag(): return f"{PI_STATE}/gh-app-enabled"
 def gh_app_rl_file(): return f"{PI_STATE}/gh-ratelimit-praise-qa.json"
 def gh_target_repo(args):
@@ -110,13 +111,74 @@ def gh_target_repo(args):
 GH_APP_PRODUCT_REPOS = {"xindong/mivo-canvas-plugin"}
 def gh_app_product_flag(): return f"{PI_STATE}/gh-app-product-enabled"
 def gh_app_wanted(args):
-    """True when this call should use the App token (see above); writes are P2 (gh_app_writes_ok), panoptes only"""
+    """True when this call should use the App token (see above and task B below)"""
     repo = gh_target_repo(args)
     if not os.path.exists(gh_app_flag()): return False
     if any("@me" in x or re.match(r"/?user(?:$|/)", x) for x in args[1:]): return False   # identity-dependent (also inside --search): PAT
-    if repo in GH_APP_PRODUCT_REPOS: return os.path.exists(gh_app_product_flag()) and gh_is_read(args)
-    if repo not in GH_APP_REPOS: return False
-    return gh_is_read(args) or gh_app_writes_ok(args)
+    if repo in GH_APP_PRODUCT_REPOS:
+        if gh_is_read(args): return os.path.exists(gh_app_product_flag()) or gh_component_on()
+        return gh_app_product_writes_on()
+    if not gh_app_own_repo(repo): return False
+    return gh_is_read(args) or gh_app_writes_ok(args) or gh_component_on()
+# 11-04 task B: every remaining caller behind its own flag (each also needs gh-app-enabled); rm the flag -> that caller is back on the PAT.
+#   gh-app-product-writes-enabled  outbound/prfix product writes: gh pr create/comment/ready, issue writes, fix-branch clone + git push
+#   gh-app-merger-enabled / gh-app-mergewatch-enabled / gh-app-nightly-enabled / gh-app-ledgers-enabled  that job's gh calls (the job
+#   names itself with gh_component(); node/shell jobs get GH_TOKEN from `ghtoken.py env-for <component> <repo>`)
+GH_APP_COMPONENTS = ("merger", "mergewatch", "nightly", "ledgers")
+_COMPONENT = [os.environ.get("PI_GH_COMPONENT") or None]
+def gh_component(name):
+    assert name in GH_APP_COMPONENTS, name
+    _COMPONENT[0] = name
+def gh_component_flag(name): return f"{PI_STATE}/gh-app-{name}-enabled"
+def gh_component_on(name=None):
+    c = name or _COMPONENT[0]
+    return bool(c) and os.path.exists(gh_app_flag()) and os.path.exists(gh_component_flag(c))
+def gh_component_node_env(name, repo=REPO):
+    """node/shell jobs (ledgers -> build-ledger.mjs / track-followups.mjs, nightly -> argus): {PRAISE_QA_GH_TOKEN, PRAISE_QA_GH_REPOS}
+    while that job's flag is on and the token mints, else {} (= the PAT). Those scripts use the token ONLY for calls whose target repo
+    is PRAISE_QA_GH_REPOS; every other repo (handoff repos, pr-qa-agent-deploy) keeps the inherited login."""
+    if not gh_component_on(name): return {}
+    try:
+        import ghtoken
+        return {"PRAISE_QA_GH_TOKEN": ghtoken.token(repo), "PRAISE_QA_GH_REPOS": repo}
+    except Exception as e:
+        try: import ghtoken as _g; msg = _g.mask(e)
+        except Exception: msg = e.__class__.__name__
+        log(f"{name}: gh app token unavailable ({str(msg)[:160]}); node tools stay on the default gh login"); return {}
+def gh_app_product_writes_flag(): return f"{PI_STATE}/gh-app-product-writes-enabled"
+def gh_app_product_writes_on(): return os.path.exists(gh_app_flag()) and os.path.exists(gh_app_product_writes_flag())
+# Red lines (Praise, unchanged): only Praise merges product PRs, and no bot edits a product PR body. No code path does either, on ANY
+# identity: gh() refuses these before a token is chosen.
+class RedLine(RuntimeError): pass
+def gh_red_line(args):
+    """-> reason if args would merge a product PR or edit a product PR body/title, else None"""
+    if gh_target_repo(args) not in GH_APP_PRODUCT_REPOS: return None
+    a = list(args)
+    if a[:2] == ["pr", "merge"]: return "merging a product PR (only Praise merges)"
+    if a[:2] == ["pr", "edit"] and any(x.split("=", 1)[0] in ("--body", "-b", "--body-file", "-F", "--title", "-t") for x in a[2:]):
+        return "editing a product PR body"
+    if a[:1] == ["api"]:
+        path = next((x for x in a[1:] if re.match(r"/?repos/", x)), "")
+        meth = next((a[i + 1].upper() for i, x in enumerate(a) if x in ("-X", "--method") and i + 1 < len(a)), "")
+        if re.search(r"/pulls/\d+/merge$", path) and meth in ("PUT", ""): return "merging a product PR (only Praise merges)"
+        if re.search(r"/pulls/\d+$", path) and meth == "PATCH": return "editing a product PR body"
+    return None
+# Explicit identities (task B 4: no @me / `api user` anywhere). Our own PRs are authored by PraiseZhu (PAT, older) or by the App.
+PAT_LOGIN = "PraiseZhu"
+SELF_LOGINS = frozenset({PAT_LOGIN, "praise-qa[bot]", "app/praise-qa", "praise-qa"})   # REST login / gh --json author.login / slug
+SELF_AUTHORS = (PAT_LOGIN, "app/praise-qa")                                           # gh --author / search author: values
+def is_self(login):
+    if isinstance(login, dict): login = login.get("login")
+    return (login or "") in SELF_LOGINS
+def self_pr_list(repo, state, fields, search=None, limit=100, extra=(), run=None):
+    """our own PRs = union over SELF_AUTHORS (deduped by number): a dedupe never misses an old PraiseZhu PR nor a new App PR"""
+    seen = {}
+    for au in SELF_AUTHORS:
+        q = [f"{search} author:{au}"] if search else []
+        args = ["pr", "list", "-R", repo, "--state", state, "--limit", str(limit), "--json", fields] + list(extra)
+        args += (["--search", q[0]] if q else ["--author", au])
+        for p in (run or gh)(args) or []: seen.setdefault(p.get("number"), p)   # run: the caller's gh (tests stub module.gh)
+    return sorted(seen.values(), key=lambda p: -(p.get("number") or 0))
 # P2 (11-04): panoptes WRITES (PR create / merge / comment / branch delete, git push of infra branches) use the App too while BOTH
 # $PI_STATE/gh-app-enabled and $PI_STATE/gh-app-writes-enabled exist. rm gh-app-writes-enabled -> writes back on the PAT (reads stay).
 APP_LOGIN = "praise-qa[bot]"; APP_AUTHOR = "app/praise-qa"   # how the App shows up as a PR author (gh --author app/<slug>)
@@ -126,7 +188,7 @@ def gh_app_writes_on(): return os.path.exists(gh_app_flag()) and os.path.exists(
 def git_push_env(repo):
     """-> (git -c args, env) for a git push to repo: the App token through gh's credential helper while the write flags are on,
     else ([], None) = the box's default credentials (PAT) exactly as before"""
-    ident, env = gh_env(["repo", "clone", repo])   # "repo clone" is not a read: needs the writes flag
+    ident, env = gh_env(["repo", "clone", repo])   # "repo clone" is not a read: needs the (product-)writes flag
     if ident != "app": return [], None
     return ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"], env
 def gh_env(args):
@@ -149,6 +211,8 @@ def gh_skip(job):
     return bool(u)
 def gh(args, js=True, retries=1):
     cmd = f"gh {' '.join(args[:2])}"
+    why = gh_red_line(args)
+    if why: raise RedLine(f"{cmd}: refused, red line: {why}")
     ident, env = gh_env(args)
     rlf = gh_app_rl_file() if ident == "app" else None   # None = GH_RL_FILE (the PAT's)
     u = gh_rl_until(f=rlf)

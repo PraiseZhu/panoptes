@@ -47,7 +47,7 @@ class T(unittest.TestCase):
     def test_product_writes_and_me_searches_stay_on_pat(self):
         self.on()
         for a in (["pr", "create", "-R", PROD, "--draft", "--title", "t"], ["api", "-X", "POST", f"repos/{PROD}/issues/1/comments", "-f", "body=x"],
-                  ["pr", "list", "-R", PROD, "--search", '"fp" in:body author:@me'], ["issue", "list", "-R", "PraiseZhu/pr-qa-agent-deploy"]):
+                  ["pr", "list", "-R", PROD, "--search", '"fp" in:body author:@me'], ["issue", "list", "-R", "someone/else"]):
             self.assertIsNone(self.env_of(a), a)
 
     def test_prfix_reads_follow_the_flag(self):

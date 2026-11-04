@@ -151,7 +151,24 @@ def authors():
     return list(a.values()) if isinstance(a, dict) else a
 def author_by_name(name):
     return next((x for x in authors() if name in (x.get("name"), x.get("github_login"))), None)
+def _run_route(cmd):
+    """task B: gh/git calls of the product write paths take the App token while gh-app-product-writes-enabled (lib.gh_env /
+    git_push_env); every other repo and the flag absent -> the inherited default login (PAT), exactly as before"""
+    if cmd[:1] == ["gh"]:
+        why = gh_red_line(cmd[1:])
+        if why: raise RedLine(f"gh {' '.join(cmd[1:3])}: refused, red line: {why}")
+        return cmd, gh_env(cmd[1:])[1]
+    if cmd[:2] == ["git", "-C"] and len(cmd) > 3 and cmd[3] in ("push", "fetch"):
+        try: url = subprocess.run(["git", "-C", cmd[2], "remote", "get-url", "origin"], capture_output=True, text=True, timeout=30).stdout.strip()
+        except Exception: url = ""
+        m = re.search(r"github\.com[:/]([^/]+/[^/]+?)(?:\.git)?/?$", url)
+        if m:
+            gc, env = git_push_env(m.group(1))
+            if env: return cmd[:3] + gc + cmd[3:], env
+    return cmd, None
 def run(cmd, **kw):
+    cmd, env = _run_route(cmd)
+    if env is not None and "env" not in kw: kw["env"] = env
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=600, **kw)
     if r.returncode != 0: raise RuntimeError(f"{os.path.basename(cmd[0])} rc={r.returncode}: {(r.stderr or r.stdout).strip()[-300:]}")
     return r.stdout
@@ -169,7 +186,7 @@ def feishu_text(a):
     t += "\n\n" + feedback_block(n)
     au = ((r or {}).get("pr") or {}).get("author")
     au = au.get("login") if isinstance(au, dict) else au
-    if au in fix_authors(): t += "\n\n" + bot_followup_block(n, (r or {}).get("pr"))
+    if au in fix_authors() or is_self(au): t += "\n\n" + bot_followup_block(n, (r or {}).get("pr"))
     tmp = tempfile.NamedTemporaryFile("w", delete=False, suffix=".txt"); tmp.write(t); tmp.close(); return tmp.name
 
 P2_RULINGS = "/workspace/fleet-standards/p2-rulings.md"
@@ -392,12 +409,12 @@ def h_ready(a):
 def h_fixpr(a):
     patch, must = a.get("patch"), a.get("body_must_contain", "")
     def state():
-        hits = gh(["pr", "list", "-R", REPO, "--state", "all", "--search", f"\"{must}\" in:body author:@me", "--json", "number,body"]) if must else []
+        hits = self_pr_list(REPO, "all", "number,body", search=f"\"{must}\" in:body", run=gh) if must else []   # task B: PraiseZhu + App PRs
         sup = a.get("supersedes")   # 取代 #N: prfix checked N is our closed, unmerged fix PR with this fp; only N is not a duplicate
         if any(must in (h.get("body") or "") and h.get("number") != sup for h in hits): return "done"
         fp = a.get("fingerprint")
         if fp and fp != must and b_on():   # 11-03 B: round N of a finding whose earlier fix PR is still open -> do not open a second one
-            op = gh(["pr", "list", "-R", REPO, "--state", "open", "--search", f"\"{fp}\" in:body author:@me", "--json", "number,body"])
+            op = self_pr_list(REPO, "open", "number,body", search=f"\"{fp}\" in:body", run=gh)
             n = next((h["number"] for h in op if fp in (h.get("body") or "") and h["number"] != sup), None)
             if n: return f"superseded:open fix PR #{n} already carries {fp}"
         return "pending"
@@ -469,7 +486,7 @@ def h_push_fix(a, now=None):
     def state():
         p = view()
         if p["state"] != "OPEN": return f"stale:{p['state'].lower()}"
-        if (p.get("author") or {}).get("login") != "PraiseZhu" or p.get("headRefName") != br or not br.startswith("qa-fix/") \
+        if not is_self(p.get("author")) or p.get("headRefName") != br or not br.startswith("qa-fix/") \
                 or "<!-- pi-line fixpr:" not in (p.get("body") or ""): return "stale:not our bot fix PR"
         if p["headRefOid"] == head:
             if not p.get("isDraft"): return "stale:no longer a draft"
@@ -532,7 +549,8 @@ def fixpr_real_number(created):
     return int(m.group(1)) if m else None
 
 def _fx_git(d, *args):
-    r = subprocess.run(["git", "-C", d, *args], capture_output=True, text=True, timeout=600)
+    cmd, env = _run_route(["git", "-C", d, *args])
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=600, env=env)
     if r.returncode != 0: raise RuntimeError(f"git {args[0]} rc={r.returncode}: {(r.stderr or r.stdout).strip()[-300:]}")
     return r.stdout
 
@@ -594,6 +612,7 @@ def h_merge(a):
     n, sha = a["pr"], a["key"].split(":")[-1]
     def cur(): return gh(["pr", "view", str(n), "-R", REPO, "--json", merger.FIELDS])
     def state():
+        if REPO in GH_APP_PRODUCT_REPOS: return "stale:red line: only Praise merges product PRs"   # task B 5, never sent (gh() refuses too)
         p = cur()
         if p["state"] == "MERGED": return "done"
         if p["state"] != "OPEN": return f"stale:{p['state']}"
@@ -677,7 +696,7 @@ def h_rerun_failed(a):
         p = gh(["pr", "view", str(n), "-R", REPO, "--json", "headRefOid,state,isDraft,author"])
         if p["state"] != "OPEN": return "stale:closed"
         if head and p["headRefOid"] != head: return "stale:head moved"
-        if (p.get("author") or {}).get("login") != "PraiseZhu": return "stale:not our PR"
+        if not is_self(p.get("author")): return "stale:not our PR"
         return "pending" if failing() else "done"
     def validate():
         if not allow: raise RuntimeError("no rerunnable gate names")
@@ -697,7 +716,7 @@ def h_update_branch(a):
     def state():
         p = view()
         if p["state"] != "OPEN": return "stale:closed"
-        if (p.get("author") or {}).get("login") != "PraiseZhu" or not p.get("isDraft"): return "stale:not our draft"
+        if not is_self(p.get("author")) or not p.get("isDraft"): return "stale:not our draft"
         return "done" if head and p["headRefOid"] != head else "pending"
     def validate(): p = view(); return f"#{n} head {p['headRefOid'][:9]} mergeState {p.get('mergeStateStatus')}"
     def do():

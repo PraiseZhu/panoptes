@@ -26,8 +26,9 @@ def main():
     secret_env(); rows = []
     for k, (who, scope, p) in NEED.items():
         s = bool(os.environ.get(k)); rows.append((k, "set" if s else "MISSING", (probe(p) if s and p else "-"), who, scope))
-    r = subprocess.run(["gh", "api", "user", "-q", ".login"], capture_output=True, text=True)
-    rows.append(("gh (hosts.yml)", "set" if r.returncode == 0 else "MISSING", f"ok login={r.stdout.strip()}" if r.returncode == 0 else r.stderr[:80], "gh writes as PraiseZhu", "repo"))
+    # task B: explicit identity, no `api user`: the default login (PAT, PAT_LOGIN) must still be able to push to the product repo
+    r = subprocess.run(["gh", "api", f"repos/{REPO}", "-q", ".permissions.push"], capture_output=True, text=True)
+    rows.append(("gh (hosts.yml)", "set" if r.returncode == 0 else "MISSING", f"ok {PAT_LOGIN} push={r.stdout.strip()}" if r.returncode == 0 else r.stderr[:80], f"gh writes as {PAT_LOGIN} (PAT fallback)", "repo"))
     md = "| credential | state | read-only probe | used by | minimal scope |\n|---|---|---|---|---|\n" + "\n".join("| " + " | ".join(x) + " |" for x in rows)
     print(md); write_atomic(f"{BASE}/out/creds/{today()}.md", f"# credential inventory {now_cst().isoformat(timespec='seconds')}\nSource: env, ~/.pi-fallback-secret/env, ~/.config/mivo-qa/secrets.env\n\n{md}\n")
 if __name__ == "__main__": main()

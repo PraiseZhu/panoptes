@@ -45,8 +45,7 @@ def note_index():
 
 def main():
     d = today(); L = [f"# Praise PR 复盘 {d}（Pi line{' dry-run' if DRY else ''}，mode={mode()}）"]; acts = []
-    prs = gh(["pr", "list", "-R", REPO, "--author", AUTHOR, "--state", "all", "--limit", "2000",
-              "--json", "number,title,state,isDraft,body,headRefName,headRefOid,mergedAt"])
+    prs = self_pr_list(REPO, "all", "number,title,state,isDraft,body,headRefName,headRefOid,mergedAt", limit=2000, run=gh)
     fixmap = {}
     for p in prs:
         for n in set(re.findall(r"QA[:：]\s*#(\d+)", p.get("body") or "")): fixmap.setdefault(int(n), []).append(p)
