@@ -74,6 +74,12 @@ def progress_sig(p):
                 for c in p.get("statusCheckRollup") or [])
     return json.dumps([p.get("headRefOid") or "", cs, len(p.get("comments") or []), len(p.get("reviews") or [])], ensure_ascii=False)
 
+def last_activity(p, now):
+    """11-04：新 PR / 有进展 -> 从 PR 自己的最后活动时间（updatedAt）起算，而不是脚本第一次看到它的时间（#1710/#1725 没被催）；没有 / 解析失败 / 在未来 -> now"""
+    try: t = parse_ts(p["updatedAt"])
+    except Exception: return now.isoformat()
+    return t.isoformat() if t <= now else now.isoformat()
+
 def stalls(prs, state, now):
     """返回 (本轮要催的停滞列表 [(pr, 小时数, since_iso)], 新 state)。新 PR / 指纹变了 -> 从 now 重新计时、清 nudged；
     同一段停滞已催过（nudged）-> 不再返回"""
@@ -82,7 +88,7 @@ def stalls(prs, state, now):
         k, sig = str(p["number"]), progress_sig(p)
         old = state.get(k) or {}
         same = old.get("sig") == sig and old.get("since")
-        since = old["since"] if same else now.isoformat()
+        since = old["since"] if same else last_activity(p, now)
         new[k] = {"sig": sig, "since": since, "nudged": bool(same and old.get("nudged"))}
         h = (now - parse_ts(since)).total_seconds() / 3600
         if h > STALL_H and not new[k]["nudged"]:
@@ -115,7 +121,28 @@ def segment_alerts(prs, state, now):
         if seg: new[k] = seg
     return out, new
 
-FIELDS = "number,title,isDraft,createdAt,body,headRefName,headRefOid,comments,reviews,statusCheckRollup,mergeStateStatus"
+FIELDS = "number,title,isDraft,createdAt,updatedAt,body,headRefName,headRefOid,comments,reviews,statusCheckRollup,mergeStateStatus"
+
+def next_retry(now, e):
+    """下一轮 cron（北京 09–22 点 :05）；限流时不早于 lib.gh 记录的重置时间（#198 的 gh-ratelimit.json，没有则只看 cron）"""
+    t = now.replace(minute=5, second=0, microsecond=0)
+    if t <= now: t += dt.timedelta(hours=1)
+    try: u = gh_rl_until()
+    except Exception: u = 0
+    if u: t = max(t, dt.datetime.fromtimestamp(u, CST))
+    while not 9 <= t.hour <= 22: t = (t + dt.timedelta(hours=1)).replace(minute=5)
+    return t, u
+
+def fail_section(d, hh, e, dry):
+    msg = str(e); t, u = next_retry(now_cst(), e)
+    rl = type(e).__name__ == "GhRateLimited" or bool(u) or bool(re.search(r"rate limit|HTTP 429|abuse", msg, re.I))
+    why = ("GitHub 限流" + (f"（至 {dt.datetime.fromtimestamp(u, CST).strftime('%H:%M')} CST）" if u else "")) if rl else "gh 失败（非限流）"
+    txt = (f"## 白天催办 {hh}（Pi 线；gh pr list 失败，本轮未催）\n- 原因：{why}：{msg[:200]}\n"
+           f"- 下次重试：{t.strftime('%m-%d %H:%M')} CST\n\n")
+    if dry: print(txt); return
+    for pth in [f"{BASE}/out/pm/{d}.md"] + ([f"/workspace/fleet-standards/pm-daily/{d}.md"] if mode() == "pi" else []):
+        old = open(pth).read() if os.path.exists(pth) else ""
+        write_atomic(pth, old + ("\n" if old and not old.endswith("\n\n") else "") + txt)
 
 def main():
     dry = "--dry-run" in sys.argv
@@ -123,8 +150,9 @@ def main():
     try:
         prs = gh(["pr", "list", "-R", REPO, "--author", "PraiseZhu", "--state", "open", "--limit", "100",
                   "--json", FIELDS])
-    except Exception as e:   # gh 挂了：不崩、不催、不动进展文件（下轮再看）
-        log("pmnudge: gh pr list 失败，本轮跳过：", str(e)[:200]); return
+    except Exception as e:   # gh 挂了：不崩、不催、不动进展文件；11-04：仍写一节说明时间、原因、下次重试，每小时都有记录
+        log("pmnudge: gh pr list 失败，本轮跳过：", str(e)[:200])
+        fail_section(d, hh, e, dry); return
     b = b_on()
     if b:
         try: prs += [p for p in gh(["pr", "list", "-R", REPO, "--author", KIRO, "--state", "open", "--limit", "100", "--json", FIELDS])
