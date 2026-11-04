@@ -166,11 +166,28 @@ def _run_route(cmd):
             gc, env = git_push_env(m.group(1))
             if env: return cmd[:3] + gc + cmd[3:], env
     return cmd, None
+_CRED_URL_RE = re.compile(r"(https?://)[^/@\s:]*(?::[^/@\s]*)?@")
+def _redact(s):
+    """tokens never reach the log: gh*_ / github_pat_ (ghtoken.mask) and credentials embedded in remote URLs."""
+    import ghtoken
+    return _CRED_URL_RE.sub(r"\1***@", ghtoken.mask(s))
+def clip_err(s, n):
+    """str(s)[:n] for the ledger / outbound log, except git push's 'remote:' lines (e.g. GH013 rule violations) are kept verbatim
+    after the cap so the rejection reason survives (11-04 outbound-2026-11-04.log:9777 cut it at '-> qa-'). Always redacted."""
+    s = _redact(s); head = s[:n]
+    rem = [l for l in s.splitlines() if l.lstrip().startswith("remote:")]
+    extra = [l for l in rem if l not in head]
+    return head + ("\n" + "\n".join(extra) if extra else "")
+def _err_out(r):
+    """failing subprocess output: last 300 chars plus every 'remote:' line verbatim."""
+    t = (r.stderr or r.stdout).strip(); tail = t[-300:]
+    extra = [l for l in t.splitlines() if l.lstrip().startswith("remote:") and l not in tail]
+    return _redact(("\n".join(extra) + "\n" if extra else "") + tail)
 def run(cmd, **kw):
     cmd, env = _run_route(cmd)
     if env is not None and "env" not in kw: kw["env"] = env
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=600, **kw)
-    if r.returncode != 0: raise RuntimeError(f"{os.path.basename(cmd[0])} rc={r.returncode}: {(r.stderr or r.stdout).strip()[-300:]}")
+    if r.returncode != 0: raise RuntimeError(f"{os.path.basename(cmd[0])} rc={r.returncode}: {_err_out(r)}")
     return r.stdout
 def body_of(a):
     f = a.get("body_file")
@@ -551,7 +568,7 @@ def fixpr_real_number(created):
 def _fx_git(d, *args):
     cmd, env = _run_route(["git", "-C", d, *args])
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=600, env=env)
-    if r.returncode != 0: raise RuntimeError(f"git {args[0]} rc={r.returncode}: {(r.stderr or r.stdout).strip()[-300:]}")
+    if r.returncode != 0: raise RuntimeError(f"git {args[0]} rc={r.returncode}: {_err_out(r)}")
     return r.stdout
 
 def pi_open_trailer(key):
@@ -1064,13 +1081,13 @@ def main():
                 else: dropk(k)
                 rows.append((job, k, t, who, "rate-limited", str(e)[:160]))
             except GiveUp as e:   # the producer re-plans (prfix: a fix PR whose patch no longer applies is fixed again on main)
-                setk(k, {**prev, "status": "gave_up", "last_error": str(e)[:200], "at": now_cst().isoformat(timespec="seconds")})
+                setk(k, {**prev, "status": "gave_up", "last_error": clip_err(e, 200), "at": now_cst().isoformat(timespec="seconds")})
                 # no DM (Praise 10-24): prfix re-fixes it on main by itself and only a second give-up reaches him
-                rows.append((job, k, t, who, "GAVE_UP", str(e)[:160]))
+                rows.append((job, k, t, who, "GAVE_UP", clip_err(e, 160)))
             except Exception as e:
-                setk(k, {**prev, "status": "failed", "last_error": str(e)[:200], "at": now_cst().isoformat(timespec="seconds"),
+                setk(k, {**prev, "status": "failed", "last_error": clip_err(e, 200), "at": now_cst().isoformat(timespec="seconds"),
                          "fails": prev.get("fails", 0) + 1 if prev.get("status") == "failed" else 1})
-                rows.append((job, k, t, who, "FAILED", str(e)[:160])); fails += 1
+                rows.append((job, k, t, who, "FAILED", clip_err(e, 160))); fails += 1
     # ---- relays + notices -> Praise's Slack DM (urgent ones alone, the rest as one digest) ----
     def dm(key, text, keys):
         if (all(praise_dm_blocked(kk) for kk in keys) if keys else praise_dm_blocked(key)):   # muted: file only
@@ -1087,7 +1104,7 @@ def main():
         except Exception as e:
             nonlocal_fail.append(1)
             for kk in keys:
-                pv = ledger.get(kk, {}); setk(kk, {**pv, "status": "failed", "last_error": str(e)[:200], "at": now_cst().isoformat(timespec="seconds"),
+                pv = ledger.get(kk, {}); setk(kk, {**pv, "status": "failed", "last_error": clip_err(e, 200), "at": now_cst().isoformat(timespec="seconds"),
                                                   "fails": pv.get("fails", 0) + 1 if pv.get("status") in ("failed", "sending") else 1})
             rows.append(("relay", key, "slack.dm", "Praise", "FAILED", str(e)[:120]))
     nonlocal_fail = []
