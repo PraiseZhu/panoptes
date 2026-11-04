@@ -104,11 +104,18 @@ def gh_target_repo(args):
             m = re.match(r"/?repos/([^/\s]+/[^/?\s]+)", x)
             if m: return m.group(1)
     return None
+# P3 (11-04, PM 17:00): product-repo READS too, while $PI_STATE/gh-app-product-enabled also exists. Product WRITES stay on the PAT:
+# outbound/prfix dedupe their fix PRs with author:@me and gate pushes on author == PraiseZhu, so an App-authored product PR would be
+# invisible to them (duplicate PRs). Those gates move first, then writes.
+GH_APP_PRODUCT_REPOS = {"xindong/mivo-canvas-plugin"}
+def gh_app_product_flag(): return f"{PI_STATE}/gh-app-product-enabled"
 def gh_app_wanted(args):
-    """True when this call should use the App token (see above); writes are P2 (gh_app_writes_ok)"""
+    """True when this call should use the App token (see above); writes are P2 (gh_app_writes_ok), panoptes only"""
     repo = gh_target_repo(args)
-    if repo not in GH_APP_REPOS or not os.path.exists(gh_app_flag()): return False
-    if any(x == "@me" or re.match(r"/?user(?:$|/)", x) for x in args[1:]): return False   # identity-dependent: stays the PAT's
+    if not os.path.exists(gh_app_flag()): return False
+    if any("@me" in x or re.match(r"/?user(?:$|/)", x) for x in args[1:]): return False   # identity-dependent (also inside --search): PAT
+    if repo in GH_APP_PRODUCT_REPOS: return os.path.exists(gh_app_product_flag()) and gh_is_read(args)
+    if repo not in GH_APP_REPOS: return False
     return gh_is_read(args) or gh_app_writes_ok(args)
 # P2 (11-04): panoptes WRITES (PR create / merge / comment / branch delete, git push of infra branches) use the App too while BOTH
 # $PI_STATE/gh-app-enabled and $PI_STATE/gh-app-writes-enabled exist. rm gh-app-writes-enabled -> writes back on the PAT (reads stay).
