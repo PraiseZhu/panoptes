@@ -1,9 +1,10 @@
 // GitHub 访问：个人仓走 GitHub App（Argus QA PraiseZhu，最小权限：读代码 / 读 PR / 写 issue），
 // App 没装到的仓（如 xindong 组织的 Mivo）仍走 Mini 上已登录的 gh
-import { execFile } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { readFileSync, existsSync } from 'node:fs'
 import { createSign } from 'node:crypto'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { loadSecrets } from './config.mjs'
 import { APP_DIR } from './paths.mjs'
 
@@ -15,7 +16,25 @@ const API = process.env.ARGUS_GH_API ?? 'https://api.github.com'
 // while $PI_STATE/gh-app-nightly-enabled is on. Only gh calls / git fetches targeting those repos use it; everything else (the issue
 // repo, Argus's own App repos) keeps the inherited login. Flag off -> both vars unset -> exactly as before.
 export const PRAISE_QA_APP_SLUG = 'praise-qa'   // = pi/bin/lib.py APP_SLUG (the Praise QA App); bot login = `${slug}[bot]`
+// 11-04 P0 follow-up (PR-1729 401 at minute ~80): the tokens above are minted once by run-nightly.sh and ghtoken.py only promises
+// > 10 min of life, while a run can last 85+ min. Re-ask ghtoken.py (cached while > 10 min is left, else it mints) at most every
+// REFRESH_MS, so a handed-out token always has >= 5 min left. Only while the App env is on; a failed refresh keeps the old token.
+const GHTOKEN = process.env.PANOPTES_GHTOKEN ?? fileURLToPath(new URL('../../pi/bin/ghtoken.py', import.meta.url))
+const REFRESH_MS = Number(process.env.PRAISE_QA_REFRESH_MS ?? 5 * 60_000)
+let lastRefresh = Date.now()
+export function refreshPraiseQaTokens(now = Date.now()) {
+  if (!process.env.PRAISE_QA_GH_TOKEN || now - lastRefresh < REFRESH_MS) return
+  lastRefresh = now
+  const mint = (repo) => {
+    try { const t = execFileSync('python3', [GHTOKEN, 'token', repo], { encoding: 'utf8', timeout: 60_000, stdio: ['ignore', 'pipe', 'ignore'] }); return t.startsWith('ghs_') ? t : null } catch { return null }
+  }
+  const repo = (process.env.PRAISE_QA_GH_REPOS || '').split(',')[0].trim()
+  const t = repo && mint(repo)
+  if (t) { process.env.PRAISE_QA_GH_TOKEN = t; if (process.env.GH_TOKEN?.startsWith('ghs_')) process.env.GH_TOKEN = t }
+  if (process.env.PRAISE_QA_GH_OWN_TOKEN) { const o = mint('PraiseZhu/pr-qa-agent-deploy'); if (o) process.env.PRAISE_QA_GH_OWN_TOKEN = o }
+}
 export function praiseQaTokenFor(repo) {
+  refreshPraiseQaTokens()
   const tok = process.env.PRAISE_QA_GH_TOKEN
   const repos = (process.env.PRAISE_QA_GH_REPOS || '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean)
   if (tok && repo && repos.includes(String(repo).toLowerCase())) return tok
