@@ -1199,17 +1199,34 @@ const LINUX_CHROMIUM = existsSync('/usr/local/bin/chromium') ? '/usr/local/bin/c
 
 export function envSnapshot() {
   const ver = (cmd, args) => { try { return execFileSync(cmd, args, { encoding: 'utf8', timeout: 15_000 }).trim().split('\n')[0] } catch { return null } }
-  let free = null
-  try { const s = statfsSync(CACHE_DIR); free = Math.round((s.bavail * s.bsize) / 1024 ** 3) } catch { /* ignore */ }
+  let free = null, freeInodes = null, totalInodes = null
+  try {
+    const s = statfsSync(CACHE_DIR)
+    free = Math.round((s.bavail * s.bsize) / 1024 ** 3)
+    // inode 也用满时 mkdir 同样 ENOSPC：字节数看不出来（11-05 PR #1729：53 GB 空闲、2,097,152 个 inode 只剩 20,671）
+    freeInodes = Number.isFinite(s.ffree) ? s.ffree : null
+    totalInodes = Number.isFinite(s.files) ? s.files : null
+  } catch { /* ignore */ }
   return {
     host: hostname(), platform: process.platform, node: process.version,
     sandbox: sandboxMode({}), bwrap: ver('bwrap', ['--version']), chromium: ver(LINUX_CHROMIUM, ['--version']), chromium_path: LINUX_CHROMIUM,
     playwright: (() => { try { return JSON.parse(readFileSync(join(CODE_DIR, 'node_modules/playwright/package.json'), 'utf8')).version } catch { return null } })(),
-    python: ver(process.env.ARGUS_PYTHON ?? 'python3', ['--version']), disk_free_gb: free,
+    python: ver(process.env.ARGUS_PYTHON ?? 'python3', ['--version']), disk_free_gb: free, disk_free_inodes: freeInodes, disk_inodes_total: totalInodes,
     umask: currentUmask(), umask_inherited: process.env.PANOPTES_INHERITED_UMASK || INHERITED_UMASK,
     // 沙箱浏览器是否固定 prefers-reduced-motion（runner.stepEnv 的 CHROMIUM_FLAGS；回滚开关 qa-misattrib-off）
     browser_reduced_motion: !qaMisattribOff(),
   }
+}
+
+// 空闲 inode 不足 1% → env_problem：字节再多也 mkdir 不出来（ENOSPC），箱子要清理
+// 旧报告 / statfs 读不到时没有数字，不猜、不报警
+export function checkDiskInodes(health) {
+  const free = health.environment?.disk_free_inodes
+  const total = health.environment?.disk_inodes_total
+  if (!Number.isFinite(free) || !Number.isFinite(total) || total <= 0) return
+  const pct = (free / total) * 100
+  if (pct >= 1) return
+  health.env_problems.push({ message: `low inodes: ${free.toLocaleString('en-US')} free of ${total.toLocaleString('en-US')} (${pct.toFixed(1)}% free): mkdir fails with ENOSPC even while disk_free_gb still shows free space` })
 }
 
 // 实际 umask 不是 0022 → env_problem（测试夹具权限会变，权限相关断言可能假失败）
@@ -1743,6 +1760,7 @@ export async function runNightly(opts = {}) {
   if (env.sandbox !== 'bwrap') health.env_problems.push({ message: `sandbox mode is '${env.sandbox}' (expected bwrap)` })
   if (!env.chromium) health.env_problems.push({ message: `${LINUX_CHROMIUM} missing: browser E2E will be unavailable` })
   if (env.disk_free_gb != null && env.disk_free_gb < 12) health.env_problems.push({ message: `low disk: ${env.disk_free_gb} GB free` })
+  checkDiskInodes(health)
   checkUmask(health)
   recordBootstrap(health, readBootstrapStatus())
   recordSeverityPin(health)
