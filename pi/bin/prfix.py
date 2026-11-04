@@ -72,7 +72,8 @@ def _QA_LOCK(): return globals()["QA_LOCK"] if "QA_LOCK" in globals() else (_E("
 # 11-04 (#201 follow-up): PRFIX_RULINGS overrides the P2 rulings file, read at call time like the paths above; an assigned module attribute (tests) wins
 def _RULINGS(): return globals()["RULINGS"] if "RULINGS" in globals() else (_E("PRFIX_RULINGS") or "/workspace/fleet-standards/p2-rulings.md")
 LEDGER_DIR = f"{QA}/ledger/daily"
-GIT_ID = ["-c", "user.name=Praise", "-c", f"user.email={NOREPLY_EMAIL}"]   # = repo-local config of /workspace/mivo-canvas-plugin
+import git_identity  # noqa: E402
+GIT_ID = list(git_identity.GIT_ID)   # = repo-local config of /workspace/mivo-canvas-plugin
 DEFAULT_GATES = {923: "Praise 闸：#923 修复 PR 不得创建"}               # used only while conf/gates.json does not exist
 MAX_ROUNDS = 2
 # Praise 10-24 ("让 deepseek 能充分利用模型能力自主把修复 PR 推进到正式"): every check the harness runs feeds its failure back to the
@@ -249,6 +250,7 @@ def tail(s, n=60): return "\n".join((s or "").rstrip().splitlines()[-n:])
 def git(*a, cwd=None, t=600):
     if cwd is None and not os.path.exists(_GIT()) and os.path.abspath(_GIT()) == W.clone_dir("mivo"):
         W.ensure_clone("mivo")      # 10-24: the bot clone, made on first use (a test pointing GIT elsewhere never gets here)
+    if git_identity.GIT_COMMIT_VERBS & set(a[:5]): return run(["git", *a], cwd=cwd or _GIT(), t=t, env=git_identity.env())   # 11-05: Praise / noreply
     return run(["git", *a], cwd=cwd or _GIT(), t=t, env=lib.git_read_env(REPO) if a and a[0] in lib.GIT_NET_READS else None)   # task B
 def fp8(fp): return (fp or "")[4:12]
 def iso(t): return t.astimezone(CST).isoformat(timespec="seconds") if t else None

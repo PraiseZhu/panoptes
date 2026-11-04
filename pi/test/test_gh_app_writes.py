@@ -104,7 +104,7 @@ class Janitor(Base):
             try: J.Run.remote(self_)
             except Exception: pass
         searches = [a[a.index("--search") + 1] for a in calls if "--search" in a]   # task B: explicit identities, no @me
-        self.assertEqual([q.split("author:")[1] for q in searches], ["PraiseZhu", lib.APP_AUTHOR])
+        self.assertEqual([q.split("author:")[1] for q in searches], ["PraiseZhu", lib.app_author()])
 
 
 if __name__ == "__main__": unittest.main()

@@ -81,7 +81,8 @@ LOGDIR = _E("INFRA_LOGS") or f"{QA}/argus-root/logs"
 PANOPTES_REPO = "PraiseZhu/panoptes"
 ISSUE_REPO = "PraiseZhu/pr-qa-agent-deploy"
 JOB = "infrafix"
-GIT_ID = ["-c", f"user.name={_E('INFRA_GIT_NAME') or 'Praise'}", "-c", f"user.email={_E('INFRA_GIT_EMAIL') or NOREPLY_EMAIL}"]
+import git_identity  # noqa: E402
+GIT_ID = ["-c", f"user.name={_E('INFRA_GIT_NAME') or git_identity.NAME}", "-c", f"user.email={_E('INFRA_GIT_EMAIL') or NOREPLY_EMAIL}"]
 WINDOW_D = 7
 MIN_MEM_GB = 3
 BUSY = 75
@@ -136,6 +137,7 @@ def _write(p, data, mode="w"):
 def _rjson(p): return json.loads(_read(p))
 def tail(s, n=60): return "\n".join((s or "").rstrip().splitlines()[-n:])
 def git(*a, cwd=None, t=600):   # task B: network reads of the panoptes clone via the App while flagged
+    if not _E("INFRA_GIT_NAME") and git_identity.GIT_COMMIT_VERBS & set(a[:5]): return run(["git", *a], cwd=cwd or PANOPTES, t=t, env=git_identity.env())   # 11-05
     return run(["git", *a], cwd=cwd or PANOPTES, t=t, env=lib.git_read_env(PANOPTES_REPO) if a and a[0] in lib.GIT_NET_READS else None)
 def sig8(sig): return (sig or "")[5:13]
 def iso(t): return t.astimezone(CST).isoformat(timespec="seconds") if t else None

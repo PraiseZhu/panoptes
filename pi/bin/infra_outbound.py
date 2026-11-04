@@ -22,12 +22,13 @@ Env for tests: INFRA_GATES (gates file)."""
 import json, os, re, shutil, subprocess, tempfile, datetime as dt
 import praise_notice as PN
 import workroot as W
+import git_identity
 from git_identity import NOREPLY_EMAIL
 
 PANOPTES_REPO = "PraiseZhu/panoptes"
 ISSUE_REPO = "PraiseZhu/pr-qa-agent-deploy"
 INFRA_MERGE_DAY_CAP = 3
-GIT_NAME, GIT_EMAIL = "Praise", NOREPLY_EMAIL      # committer for `git am` (= panoptes repo-local config / history)
+GIT_NAME, GIT_EMAIL = git_identity.NAME, NOREPLY_EMAIL   # committer for `git am`; 11-05: the patch author must be the same (check_authors)
 CST = dt.timezone(dt.timedelta(hours=8))
 OK = ("SUCCESS", "SKIPPED", "NEUTRAL")
 
@@ -37,6 +38,11 @@ def automerge_allowed():
     try:
         with open(gates_file()) as f: return json.load(f).get("infra_automerge") is not False
     except Exception: return False
+
+def check_authors(log_out):
+    """11-05: refuse to push a commit whose author or committer is not Praise / noreply (git am keeps the patch's author)"""
+    bad = sorted({x for l in log_out.splitlines() if l.strip() for x in l.split("|") if x != git_identity.ident()})
+    if bad: raise RuntimeError(f"commit identity is not {git_identity.ident()}: {', '.join(bad)[:200]}; not pushing")
 
 def _git(d, *a, env=None):
     r = subprocess.run(["git", "-C", d, *a], capture_output=True, text=True, timeout=600, env=env)
@@ -85,7 +91,7 @@ def h_pr(a, gh):
             r = subprocess.run(["gh", "repo", "clone", repo, d, "--", "--depth", "50", "-q"], capture_output=True, text=True, timeout=600, env=genv)
             if r.returncode: raise RuntimeError(f"clone rc={r.returncode}: {r.stderr[-200:]}")
             br = a["branch"]
-            env = dict(os.environ, GIT_COMMITTER_NAME=GIT_NAME, GIT_COMMITTER_EMAIL=GIT_EMAIL)
+            env = git_identity.env()
             remote = _git(d, "ls-remote", "--heads", "origin", f"refs/heads/{br}").strip()
             if remote:   # an interrupted earlier run pushed it already: reuse only if it is ours
                 _git(d, "fetch", "-q", "--depth", "5", "origin", f"refs/heads/{br}:refs/remotes/origin/{br}")
@@ -98,6 +104,7 @@ def h_pr(a, gh):
                 except RuntimeError:
                     subprocess.run(["git", "-C", d, "am", "--abort"], capture_output=True)
                     raise RuntimeError("patch no longer applies on origin/main (git am --3way failed); infrafix must redo this ticket")
+                check_authors(_git(d, "log", "--format=%an <%ae>|%cn <%ce>", "origin/main..HEAD"))   # 11-05: Praise / noreply only
                 _git(d, *gitc, "push", "-q", "-u", "origin", f"HEAD:refs/heads/{br}", env=genv)    # new branch, plain push, never --force
                 note = "pushed"
             with open(a["body_file"]) as f: body = f.read()

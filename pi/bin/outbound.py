@@ -18,6 +18,7 @@ import praise_notice as PN
 from finding_policy import fix_authors, author_findings, no_fix_rulings
 import ready_guard as RG
 import workroot as W
+import git_identity
 from git_identity import NOREPLY_EMAIL
 QA_SLACK = f"{QA}/report/slack"
 SLACK_CHANNEL = "C0CAH3W61N2"           # Mivo QA channel; the only channel send-slack-report.mjs allows
@@ -44,7 +45,7 @@ FAIL_GIVE_UP = 5                      # failures (with backoff) before an action
 GATES = f"{PI_CODE}/conf/gates.json"     # {"no_fix_pr": {"923": "reason"}} -- shared with prfix.py
 GROK_SENT = f"{QA}/report/sent"          # Grok 日报 line per-day send records: slack-sent.json, run-notes.txt, created.tsv
 DISABLED_TYPES = f"{BASE}/outbound-disabled-types"   # one action type per line (e.g. feishu.dm) -> never sent
-GIT_NAME, GIT_EMAIL = "PraiseZhu", NOREPLY_EMAIL   # matches PraiseZhu commits in mivo-canvas-plugin
+GIT_NAME, GIT_EMAIL = git_identity.NAME, NOREPLY_EMAIL   # 11-05: author + committer Praise / noreply (also forced per commit, _run_route)
 MERGER_MARK = "<!-- mivo-merger -->"
 MERGE_DAY_CAP, MERGE_ROUND_CAP = 2, 1                  # policy maxMergesPerDay (canary) / maxMergesPerRound
 # 11-02 audit: while praise-dm-mute is on, these went to "skipped" and nobody got them. They go to the queue that jasper.py
@@ -158,6 +159,8 @@ def _run_route(cmd):
         why = gh_red_line(cmd[1:])
         if why: raise RedLine(f"gh {' '.join(cmd[1:3])}: refused, red line: {why}")
         return cmd, gh_env(cmd[1:])[1]
+    if cmd[:2] == ["git", "-C"] and len(cmd) > 3 and cmd[3] in git_identity.GIT_COMMIT_VERBS:
+        return cmd, git_identity.env()   # 11-05: every commit (App or PAT push) authored + committed as Praise / noreply
     if cmd[:2] == ["git", "-C"] and len(cmd) > 3 and cmd[3] in ("push", "fetch"):
         try: url = subprocess.run(["git", "-C", cmd[2], "remote", "get-url", "origin"], capture_output=True, text=True, timeout=30).stdout.strip()
         except Exception: url = ""

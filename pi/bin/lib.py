@@ -501,15 +501,20 @@ def gh_reads_stdin(args):
     return p["input"] == "-" or any(v == "@-" for _, v in p["fields"])
 # Explicit identities (task B 4: no @me / `api user` anywhere). Our own PRs are authored by PraiseZhu (PAT, older) or by the App.
 PAT_LOGIN = "PraiseZhu"
-SELF_LOGINS = frozenset({PAT_LOGIN, "praise-qa[bot]", "app/praise-qa", "praise-qa"})   # REST login / gh --json author.login / slug
-SELF_AUTHORS = (PAT_LOGIN, "app/praise-qa")                                           # gh --author / search author: values
+# 11-05 (PM): the App slug lives in ONE constant; every bot form is derived from it at call time (patch APP_SLUG alone -> all follow)
+APP_SLUG = "praise-qa"
+def app_login(): return f"{APP_SLUG}[bot]"        # REST login (merged_by, comment user)
+def app_author(): return f"app/{APP_SLUG}"        # gh --author / search author: / gh --json author.login
+def self_logins(): return frozenset({PAT_LOGIN, app_login(), app_author(), APP_SLUG})   # REST login / gh --json author.login / slug
+def self_authors(): return (PAT_LOGIN, app_author())                                    # gh --author / search author: values
+def self_bot(): return {"login": app_login(), "type": "Bot", "html_url": f"https://github.com/apps/{APP_SLUG}"}
 def is_self(login):
     if isinstance(login, dict): login = login.get("login")
-    return (login or "") in SELF_LOGINS
+    return (login or "") in self_logins()
 def self_pr_list(repo, state, fields, search=None, limit=100, extra=(), run=None):
-    """our own PRs = union over SELF_AUTHORS (deduped by number): a dedupe never misses an old PraiseZhu PR nor a new App PR"""
+    """our own PRs = union over self_authors() (deduped by number): a dedupe never misses an old PraiseZhu PR nor a new App PR"""
     seen = {}
-    for au in SELF_AUTHORS:
+    for au in self_authors():
         q = [f"{search} author:{au}"] if search else []
         args = ["pr", "list", "-R", repo, "--state", state, "--limit", str(limit), "--json", fields] + list(extra)
         args += (["--search", q[0]] if q else ["--author", au])
@@ -517,7 +522,6 @@ def self_pr_list(repo, state, fields, search=None, limit=100, extra=(), run=None
     return sorted(seen.values(), key=lambda p: -(p.get("number") or 0))
 # P2 (11-04): panoptes WRITES (PR create / merge / comment / branch delete, git push of infra branches) use the App too while BOTH
 # $PI_STATE/gh-app-enabled and $PI_STATE/gh-app-writes-enabled exist. rm gh-app-writes-enabled -> writes back on the PAT (reads stay).
-APP_LOGIN = "praise-qa[bot]"; APP_AUTHOR = "app/praise-qa"   # how the App shows up as a PR author (gh --author app/<slug>)
 def gh_app_writes_flag(): return f"{PI_STATE}/gh-app-writes-enabled"
 def gh_app_writes_ok(args): return os.path.exists(gh_app_writes_flag())
 def gh_app_writes_on(): return os.path.exists(gh_app_flag()) and os.path.exists(gh_app_writes_flag())
@@ -554,9 +558,8 @@ def git_push_env(repo):
     return ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"], env
 # G5 (11-05, acceptance 1105 §1: "@me / api user / gh search still PAT"): while gh-app-enabled exists these go through the App with the
 # bot identity hard-coded, never resolved by GitHub: `@me` -> app/praise-qa in author positions (--author, author:) and praise-qa[bot]
-# elsewhere (assignee, reviewer, mentions, involves...); bare `gh api user` is answered locally with SELF_BOT (an installation token
+# elsewhere (assignee, reviewer, mentions, involves...); bare `gh api user` is answered locally with self_bot() (an installation token
 # cannot call /user, and the PAT would answer PraiseZhu); `gh search` uses the panoptes installation (or the --repo it filters on).
-SELF_BOT = {"login": "praise-qa[bot]", "type": "Bot", "html_url": "https://github.com/apps/praise-qa"}
 _AUTHOR_ME = re.compile(r"(?i)(\bauthor:)@me\b"); _ANY_ME = re.compile(r"(?<![\w@])@me\b")
 def self_identity_args(args):
     """args with every @me replaced by the hard-coded bot identity (flag off -> unchanged, the PAT answers as before)"""
@@ -565,21 +568,21 @@ def self_identity_args(args):
     out = []
     for i, x in enumerate(a):
         prev = a[i - 1] if i else ""
-        if x == "@me" and prev in ("--author", "-A"): out.append(APP_AUTHOR); continue
-        if x.startswith("--author=@me"): out.append("--author=" + APP_AUTHOR); continue
-        x = _AUTHOR_ME.sub(lambda m: m.group(1) + APP_AUTHOR, x)
-        out.append(_ANY_ME.sub(APP_LOGIN, x))
+        if x == "@me" and prev in ("--author", "-A"): out.append(app_author()); continue
+        if x.startswith("--author=@me"): out.append("--author=" + app_author()); continue
+        x = _AUTHOR_ME.sub(lambda m: m.group(1) + app_author(), x)
+        out.append(_ANY_ME.sub(app_login(), x))
     return out
 def self_identity_answer(args):
-    """bare `gh api user` (GET, optional --jq/-q/-i) while gh-app-enabled exists -> the stdout gh would print for SELF_BOT, else None"""
+    """bare `gh api user` (GET, optional --jq/-q/-i) while gh-app-enabled exists -> the stdout gh would print for self_bot(), else None"""
     if not os.path.exists(gh_app_flag()) or args[:1] != ["api"]: return None
     try: p = gh_api_parse(args)
     except GhUnparseable: return None
     if api_path(p["path"]).strip("/").lower() != "user" or api_is_write(p): return None
     jq = next((args[i + 1] for i, x in enumerate(args[:-1]) if x in ("--jq", "-q")), None) or next((x.split("=", 1)[1] for x in args if x.startswith("--jq=")), None)
-    if jq in (".login", ".login // empty"): return SELF_BOT["login"] + "\n"
-    if jq in (".type",): return SELF_BOT["type"] + "\n"
-    return json.dumps(SELF_BOT) + "\n"
+    if jq in (".login", ".login // empty"): return self_bot()["login"] + "\n"
+    if jq in (".type",): return self_bot()["type"] + "\n"
+    return json.dumps(self_bot()) + "\n"
 def search_repo(args):
     """installation for `gh search`: the repo it filters on (--repo X, when the App has one), else panoptes"""
     a = list(args)
@@ -588,8 +591,26 @@ def search_repo(args):
         if r and (gh_app_own_repo(r) or r in GH_APP_PRODUCT_REPOS): return r
     return REPO_APP_DEFAULT
 REPO_APP_DEFAULT = "PraiseZhu/panoptes"
+# G2 (11-05, Jasper ruling): product-repo CI reruns are the ONE PAT exception (the App gets no Actions write). Exactly two shapes, target
+# repo resolved to the product repo (-R / --repo / URL, or repos/<product>/ in the REST path; unknown target -> no exception):
+#   gh run rerun [<id>] [--failed] [--job <id>] ...                         (noun "run", verb "rerun")
+#   gh api POST repos/<product>/actions/runs/<N>/rerun | .../runs/<N>/rerun-failed-jobs | .../jobs/<N>/rerun   (ACTIONS_RERUN, method POST)
+# run cancel / run delete / actions/runs/N/cancel, a GET on a rerun path, any other repo -> not this exception (App or PAT as before).
+def pat_rerun(args, repo=None):
+    a = list(args)
+    if gh_repo_selector_dup(a): return False
+    if a[:1] == ["api"]:
+        try: p = gh_api_parse(a)
+        except GhUnparseable: return False
+        path = api_path(p["path"]).lower()
+        if not api_is_write(p) or (p["method"] or "POST").upper() != "POST" or not ACTIONS_RERUN.fullmatch(path): return False
+        return _rerun_repo(api_path_repo(path))
+    if a[:2] != ["run", "rerun"]: return False
+    return _rerun_repo(repo or gh_target_repo(a))
+def _rerun_repo(r): return bool(r) and r.lower() in {x.lower() for x in GH_APP_PRODUCT_REPOS}
 def gh_env(args, repo=None):
     """-> (identity "app"|"pat", env for subprocess or None = inherit). Minting failures fall back to the PAT with one masked line."""
+    if pat_rerun(args, repo): return "pat", pat_env()   # G2: product CI rerun -> the PAT explicitly (an inherited ghs_ token is dropped)
     if not gh_app_wanted(args, repo): return "pat", None
     try:
         import ghtoken
