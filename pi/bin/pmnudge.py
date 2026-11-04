@@ -18,7 +18,8 @@
  成功一轮即清除），并在 gaps-open.json（pi 模式 = fleet-standards，否则 PI_STATE/out/pm；PI_GAPS_FILE 覆盖）按现有格式记一条，当天同 id 只更新。
 用法：pmnudge.py [--dry-run]（--dry-run 只打印，不写任何文件）
 """
-import sys, fcntl
+import sys
+import jsonrec
 from lib import *
 from finding_policy import ruling_keys
 RULINGS = "/workspace/fleet-standards/p2-rulings.md"
@@ -180,10 +181,7 @@ def record_gap(d, hh, errs, path=None):
     """gaps-open.json (fleet-standards/ORG.md 规则 5 的格式)：一天一条 id=pmnudge-gh-fail-<日>，同一天再失败只更新 item/evidence。"""
     path = path or gaps_file(); gid = f"pmnudge-gh-fail-{d}"
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    lk = open(path + ".lock", "a"); fcntl.flock(lk, fcntl.LOCK_EX)
-    try:
-        try: gs = json.load(open(path))
-        except FileNotFoundError: gs = []
+    def fn(gs):   # 11-05: jsonrec.update (same lock as stdcheck and every other gaps-open.json writer), was a private flock
         if not isinstance(gs, list): raise RuntimeError(f"{path} 不是列表，不写")
         g = next((x for x in gs if x.get("id") == gid), None)
         rounds = sorted(set((g or {}).get("failed_rounds", []) + [hh]))
@@ -197,9 +195,25 @@ def record_gap(d, hh, errs, path=None):
                "status": "open", "failed_rounds": rounds}
         if g: g.update(new)
         else: gs.append(new)
-        write_atomic(path, json.dumps(gs, ensure_ascii=False, indent=1))
-    finally: lk.close()
+        return True
+    jsonrec.update(path, fn, default=[])
     return gid
+
+def close_gaps(d, hh, path=None):
+    """11-05: gh is back -> close every open pmnudge-gh-fail-<day> entry (closed / closed_evidence, as the file's other entries).
+    No file -> nothing (never creates one). Returns the closed ids."""
+    path = path or gaps_file()
+    if not os.path.exists(path): return []
+    closed = []
+    def fn(gs):
+        if not isinstance(gs, list): return None
+        for g in gs:
+            if isinstance(g, dict) and str(g.get("id", "")).startswith("pmnudge-gh-fail-") and g.get("status") == "open":
+                g.update(status="closed", closed=now_cst().strftime("%Y-%m-%dT%H:%M+08:00"),
+                         closed_evidence=f"pmnudge {d} {hh}: gh pr list 成功，本轮催办为 gh 实查"); closed.append(g["id"])
+        return True if closed else None
+    jsonrec.update(path, fn)
+    return closed
 
 def raise_alert(d, hh, errs):
     """state file read by watchdog.pmnudge_gh_check -> one pmnudge:gh item (same open key while it lasts); success clears it."""
@@ -225,6 +239,10 @@ def main():
             except Exception as ge: log("pmnudge: gaps-open.json 写入失败：", str(ge)[:200])
         return
     if not dry and os.path.exists(ALERT): os.remove(ALERT); log("pmnudge: gh 恢复，告警清除")
+    if not dry:
+        try:
+            for gid in close_gaps(d, hh): log("pmnudge: gh 恢复，gap 关闭", gid)
+        except Exception as ge: log("pmnudge: gaps-open.json 关闭失败：", str(ge)[:200])
     b = b_on()
     if b:
         try: prs += [p for p in gh(["pr", "list", "-R", REPO, "--author", KIRO, "--state", "open", "--limit", "100", "--json", FIELDS])
