@@ -103,9 +103,45 @@ def catchup_running():
         os.close(fd)
 
 
+PRODUCT = 'xindong/mivo-canvas-plugin'
+
+
+def app_on():
+    """task B: $PI_STATE/gh-app-enabled + gh-app-mergewatch-enabled -> reads (PR list, ls-remote) with the Praise QA App; rm either -> PAT"""
+    return os.path.exists(os.path.join(BASE, 'gh-app-enabled')) and os.path.exists(os.path.join(BASE, 'gh-app-mergewatch-enabled'))
+
+
+def app_token():
+    """installation token for the product repo, or None (mint failure -> the caller falls back to the PAT; nothing is printed)"""
+    if not app_on():
+        return None
+    try:
+        import ghtoken
+        return ghtoken.token(PRODUCT)
+    except Exception as e:
+        try:
+            import ghtoken as _g
+            msg = _g.mask(e)
+        except Exception:
+            msg = e.__class__.__name__
+        log(f"gh app token unavailable ({str(msg)[:160]}); using GITHUB_TOKEN")
+        return None
+
+
+def git_env():
+    """env for git ls-remote: the App token through gh's credential helper while app_on(), else default credentials"""
+    env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0'}
+    t = app_token()
+    if t:
+        env.pop('GITHUB_TOKEN', None)
+        env.update(GH_TOKEN=t, GIT_CONFIG_COUNT='2', GIT_CONFIG_KEY_0='credential.helper', GIT_CONFIG_VALUE_0='',
+                   GIT_CONFIG_KEY_1='credential.helper', GIT_CONFIG_VALUE_1='!gh auth git-credential')
+    return env
+
+
 def gh_token():
-    """原凭证：GITHUB_TOKEN（环境变量，或 ~/.config/mivo-qa/secrets.env）；只用来读 PR 列表。不打印。"""
-    t = os.environ.get('GITHUB_TOKEN')
+    """App token while app_on(); else 原凭证：GITHUB_TOKEN（环境变量，或 ~/.config/mivo-qa/secrets.env）；只用来读 PR 列表。不打印。"""
+    t = app_token() or os.environ.get('GITHUB_TOKEN')
     if t:
         return t
     try:
@@ -263,7 +299,7 @@ def main():
         st.pop('auth', None)   # 10-26: praiseautomation App removed (belongs to another account); default git credentials only
         refs = ['refs/heads/main'] if basegate.main_only() else list(WATCH_REFS)
         out = subprocess.run(['git', 'ls-remote', REPO_URL, *refs], capture_output=True, text=True,
-                             timeout=25, env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'})
+                             timeout=25, env=git_env())
         heads = parse_ls_remote(out.stdout) if out.returncode == 0 else {}
         sha = heads.get('refs/heads/main', '')
     except subprocess.TimeoutExpired:

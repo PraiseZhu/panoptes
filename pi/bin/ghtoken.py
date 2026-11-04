@@ -5,7 +5,8 @@ The installation is chosen by target repo (INSTALLATIONS). At call time a JWT (R
 via `openssl dgst -sha256 -sign` (no Python crypto dependency; the key is only ever opened by openssl), exchanged for an installation
 token (POST /app/installations/<id>/access_tokens), and cached per installation in CACHE_DIR/inst-<id>.json (dir 0700, file 0600,
 tmp+rename under flock) until MARGIN_S before it expires. A token is never logged: everything this module prints or raises is passed
-through mask(). Repos without an installation (e.g. PraiseZhu/pr-qa-agent-deploy) raise NoInstallation: their callers stay on the PAT.
+through mask(). 11-04 task B: installation 164262283 covers every PraiseZhu/* repo (pr-qa-agent-deploy included, PM); other repos
+without an installation raise NoInstallation: their callers stay on the PAT.
 
 usage: ghtoken.py check [REPO]   -> one line: installation, expiry (never the token)
        ghtoken.py token [REPO]   -> the token on stdout, for GH_TOKEN=$(...) in scripts; nothing else is printed
@@ -14,6 +15,7 @@ import base64, calendar, fcntl, json, os, re, subprocess, sys, tempfile, time, u
 
 APP_ID_DEFAULT = "5055491"
 INSTALLATIONS = {"PraiseZhu/panoptes": 164262283, "xindong/mivo-canvas-plugin": 178486896}
+OWNER_INSTALLATIONS = {"PraiseZhu": 164262283}   # every repo of this owner (all-repositories installation)
 DEFAULT_REPO = "PraiseZhu/panoptes"
 MARGIN_S = 600          # re-mint when less than 10 min is left (tokens live 1 h)
 TOKEN_RE = re.compile(r"\b(gh[pousr]|github_pat)_[A-Za-z0-9_]+")
@@ -31,7 +33,7 @@ def _api(): return (os.environ.get("PRAISE_QA_API") or "https://api.github.com")
 
 
 def installation(repo):
-    try: return INSTALLATIONS[repo]
+    try: return INSTALLATIONS[repo] if repo in INSTALLATIONS else OWNER_INSTALLATIONS[str(repo).split("/")[0]] if str(repo).count("/") == 1 else INSTALLATIONS[repo]
     except KeyError: raise NoInstallation(f"Praise QA is not installed for {repo!r}: keep this caller on the PAT") from None
 
 

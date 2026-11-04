@@ -140,8 +140,7 @@ def main():
                 vs = [v for v in all_versions(n) if v["t"]]
                 p01[n] = (lvl, "（日报原文级别，报告现已改级）", min(v["t"] for v in vs) if vs else None)
     try:
-        fix = gh(["pr", "list", "-R", REPO, "--author", "PraiseZhu", "--state", "all", "--limit", "300",
-                  "--search", "QA in:body", "--json", "number,createdAt,body,isDraft,state"])
+        fix = self_pr_list(REPO, "all", "number,createdAt,body,isDraft,state", search="QA in:body", limit=300, run=gh)
     except Exception as e: fix = []; unv.append(f"G2 修复 PR 列表: {str(e)[:80]}")
     def claimers(n): return [x for x in fix if re.search(rf"QA[:：]?\s*#{n}\b", x.get("body") or "")]
     g2a = 0; rows = []; notes_any = {}

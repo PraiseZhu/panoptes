@@ -14,5 +14,5 @@ G = M.G; P = M.P
 ok = {"tokenLogin": P["tokenLogin"], "tokenScopes": list(P["tokenScopes"]), "incomplete": []}
 wide = {**ok, "tokenScopes": sorted(P["tokenScopes"] + ["admin:org", "workflow"])}
 assert not G.same_set(wide["tokenScopes"], P["tokenScopes"]) and G.same_set(ok["tokenScopes"], P["tokenScopes"])   # 规则不变：宽 scope 不过
-src = open(f"{B}/merger.py").read(); assert "def main():\n    use_merger_token()" in src
+src = open(f"{B}/merger.py").read(); assert 'if not gh_component_on("merger"): use_merger_token()' in src   # task B: the merger token unless gh-app-merger-enabled
 print("ok test_merger_identity")
