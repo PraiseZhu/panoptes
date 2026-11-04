@@ -53,8 +53,11 @@ class T(unittest.TestCase):
         self.flag_on()
         for args in (["pr", "create", "-R", PAN, "--title", "t"], ["api", "-X", "POST", f"repos/{PAN}/issues/1/comments", "-f", "body=x"],
                      ["pr", "list", "-R", "xindong/mivo-canvas-plugin"], ["pr", "list", "-R", "someone/else"],
-                     ["pr", "list", "-R", PAN, "--author", "@me"], ["api", "user"]):
+                     ):
             self.run_gh(args); self.assertIsNone(self.runs[-1], args)
+        # G5 (11-05): @me -> the bot through the App; bare `api user` is answered locally (praise-qa[bot]), nothing sent
+        self.run_gh(["pr", "list", "-R", PAN, "--author", "@me"]); self.assertEqual(self.runs[-1]["GH_TOKEN"], FAKE)
+        n = len(self.runs); self.run_gh(["api", "user"]); self.assertEqual(len(self.runs), n)
 
     def test_mint_failure_falls_back_to_pat_without_leaking(self):
         self.flag_on()

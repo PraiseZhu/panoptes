@@ -161,7 +161,10 @@ def gh_app_wanted(args, repo=None):
     one (`api rate_limit` checks the quota of the identity that will serve the repo)"""
     repo = repo or gh_target_repo(args)
     if not os.path.exists(gh_app_flag()): return False
-    if any("@me" in x or re.match(r"/?user(?:$|/)", x) for x in args[1:]): return False   # identity-dependent (also inside --search): PAT
+    # G5 (11-05): `@me` is rewritten (self_identity_args) and bare `api user` answered locally (self_identity_answer) before this is
+    # asked; whatever identity-dependent call is still left here (/user/<sub>, an @me a caller passed to gh_env directly) stays on the PAT
+    if any("@me" in x or re.match(r"/?user(?:$|/)", x) for x in args[1:]): return False
+    if args[:1] == ["search"]: return True   # G5: gh search (no repo of its own) -> the App, panoptes installation (search_repo)
     if repo in GH_APP_PRODUCT_REPOS:
         if gh_is_read(args): return os.path.exists(gh_app_product_flag()) or gh_component_on()
         return gh_app_product_writes_on()
@@ -549,12 +552,48 @@ def git_push_env(repo):
     ident, env = gh_env(["repo", "clone", repo])   # "repo clone" is not a read: needs the (product-)writes flag
     if ident != "app": return [], None
     return ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"], env
+# G5 (11-05, acceptance 1105 §1: "@me / api user / gh search still PAT"): while gh-app-enabled exists these go through the App with the
+# bot identity hard-coded, never resolved by GitHub: `@me` -> app/praise-qa in author positions (--author, author:) and praise-qa[bot]
+# elsewhere (assignee, reviewer, mentions, involves...); bare `gh api user` is answered locally with SELF_BOT (an installation token
+# cannot call /user, and the PAT would answer PraiseZhu); `gh search` uses the panoptes installation (or the --repo it filters on).
+SELF_BOT = {"login": "praise-qa[bot]", "type": "Bot", "html_url": "https://github.com/apps/praise-qa"}
+_AUTHOR_ME = re.compile(r"(?i)(\bauthor:)@me\b"); _ANY_ME = re.compile(r"(?<![\w@])@me\b")
+def self_identity_args(args):
+    """args with every @me replaced by the hard-coded bot identity (flag off -> unchanged, the PAT answers as before)"""
+    a = list(args)
+    if not os.path.exists(gh_app_flag()) or not any("@me" in x for x in a): return a
+    out = []
+    for i, x in enumerate(a):
+        prev = a[i - 1] if i else ""
+        if x == "@me" and prev in ("--author", "-A"): out.append(APP_AUTHOR); continue
+        if x.startswith("--author=@me"): out.append("--author=" + APP_AUTHOR); continue
+        x = _AUTHOR_ME.sub(lambda m: m.group(1) + APP_AUTHOR, x)
+        out.append(_ANY_ME.sub(APP_LOGIN, x))
+    return out
+def self_identity_answer(args):
+    """bare `gh api user` (GET, optional --jq/-q/-i) while gh-app-enabled exists -> the stdout gh would print for SELF_BOT, else None"""
+    if not os.path.exists(gh_app_flag()) or args[:1] != ["api"]: return None
+    try: p = gh_api_parse(args)
+    except GhUnparseable: return None
+    if api_path(p["path"]).strip("/").lower() != "user" or api_is_write(p): return None
+    jq = next((args[i + 1] for i, x in enumerate(args[:-1]) if x in ("--jq", "-q")), None) or next((x.split("=", 1)[1] for x in args if x.startswith("--jq=")), None)
+    if jq in (".login", ".login // empty"): return SELF_BOT["login"] + "\n"
+    if jq in (".type",): return SELF_BOT["type"] + "\n"
+    return json.dumps(SELF_BOT) + "\n"
+def search_repo(args):
+    """installation for `gh search`: the repo it filters on (--repo X, when the App has one), else panoptes"""
+    a = list(args)
+    for i, x in enumerate(a):
+        r = a[i + 1] if x in ("-R", "--repo") and i + 1 < len(a) else x.split("=", 1)[1] if x.startswith("--repo=") else None
+        if r and (gh_app_own_repo(r) or r in GH_APP_PRODUCT_REPOS): return r
+    return REPO_APP_DEFAULT
+REPO_APP_DEFAULT = "PraiseZhu/panoptes"
 def gh_env(args, repo=None):
     """-> (identity "app"|"pat", env for subprocess or None = inherit). Minting failures fall back to the PAT with one masked line."""
     if not gh_app_wanted(args, repo): return "pat", None
     try:
         import ghtoken
-        tok = ghtoken.token(repo or gh_target_repo(args))
+        tok = ghtoken.token(search_repo(args) if args[:1] == ["search"] and not repo else repo or gh_target_repo(args))
     except Exception as e:
         try: import ghtoken as _g; msg = _g.mask(e)
         except Exception: msg = e.__class__.__name__
@@ -569,7 +608,10 @@ def gh_skip(job):
     return bool(u)
 def gh(args, js=True, retries=1, repo=None):
     """repo: target for calls that name none (api rate_limit / graphql); picks the identity (and its rate-limit file) of that repo"""
+    args = self_identity_args(args)   # G5: @me -> the bot, before any guard or identity choice
     cmd = f"gh {' '.join(args[:2])}"
+    me = self_identity_answer(args)
+    if me is not None: return json.loads(me) if js else me   # G5: bare `api user` -> praise-qa[bot], nothing sent
     ub = update_branch_exception(args, repo, self_script())
     why = None if ub == "allow" else (ub or gh_red_line(args, repo))
     if why: raise RedLine(f"{cmd}: refused, red line: {why}")

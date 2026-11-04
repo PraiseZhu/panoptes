@@ -67,7 +67,9 @@ class Not_Allowlisted(unittest.TestCase):
         al = W.allowlist_log()
         if os.path.exists(al): os.remove(al)
         for c in CALLERS:
-            for a in (["pr", "list", "-R", PROD], ["auth", "status"], ["api", "user", "-q", ".login"]):
+            rc, call, _ = self.wrap(["api", "user", "-q", ".login"], c)   # G5 (11-05): answered by the wrapper as praise-qa[bot], nothing exec'd
+            self.assertEqual((rc, call), (0, None))
+            for a in (["pr", "list", "-R", PROD], ["auth", "status"]):
                 rc, call, err = self.wrap(a, c)
                 self.assertIsNotNone(call, (a, c)); self.assertEqual(call[2].get("GH_TOKEN"), FAKE_APP, (a, c))
                 self.assertNotIn("GITHUB_TOKEN", call[2]); self.assertNotIn(FAKE_PAT, json.dumps(call[2])); self.assertNotIn("allowlisted", err)
@@ -118,10 +120,10 @@ class Script60(unittest.TestCase):
 
     def test_default_path_is_the_wrapper_still_passes_as_non_allowlisted_read(self):
         """wrapper installed at /usr/local/bin/gh, PRAISE_QA_REAL_GH unset: 60-gh-auth goes through the wrapper, not allowlisted,
-        gets the App token for both calls (auth status allowed, api user a read) and still PASSes"""
+        gets the App token for auth status, `api user` is answered by the wrapper itself (G5, 11-05: praise-qa[bot]), still PASSes"""
         r, log = self.run60(f"{self.wd}/gh", {})
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr); self.assertIn("PASS gh auth ok (praise-qa-bot)", r.stdout)
-        self.assertEqual(log, ["app auth status", "app api user -q .login"])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr); self.assertIn("PASS gh auth ok (praise-qa[bot])", r.stdout)
+        self.assertEqual(log, ["app auth status"])
         self.assertFalse(os.path.exists(os.path.join(self.state, "out", "gh-wrapper", "allowlist.jsonl")))
         self.assertNotIn(FAKE_APP, r.stdout + r.stderr); self.assertNotIn(FAKE_PAT, r.stdout + r.stderr)
 

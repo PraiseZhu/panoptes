@@ -44,11 +44,13 @@ class T(unittest.TestCase):
             self.on(); os.remove(drop)
             self.assertIsNone(self.env_of(["pr", "list", "-R", PROD]), drop)
 
-    def test_product_writes_and_me_searches_stay_on_pat(self):
+    def test_product_writes_stay_on_pat_me_searches_use_the_bot(self):
         self.on()
         for a in (["pr", "create", "-R", PROD, "--draft", "--title", "t"], ["api", "-X", "POST", f"repos/{PROD}/issues/1/comments", "-f", "body=x"],
-                  ["pr", "list", "-R", PROD, "--search", '"fp" in:body author:@me'], ["issue", "list", "-R", "someone/else"]):
+                  ["issue", "list", "-R", "someone/else"]):
             self.assertIsNone(self.env_of(a), a)
+        # G5 (11-05): author:@me is rewritten to the bot (author:app/praise-qa) and read through the App
+        self.assertEqual((self.env_of(["pr", "list", "-R", PROD, "--search", '"fp" in:body author:@me']) or {}).get("GH_TOKEN"), FAKE)
 
     def test_prfix_reads_follow_the_flag(self):
         import prfix as P
