@@ -638,17 +638,36 @@ def pat_rerun(args, repo=None):
     if a[:2] != ["run", "rerun"]: return False
     return _rerun_repo(repo or gh_target_repo(a))
 def _rerun_repo(r): return bool(r) and r.lower() in {x.lower() for x in GH_APP_PRODUCT_REPOS}
+# 11-05 PAT attribution (logging only): one JSONL line per PAT use in $PI_STATE/out/logs/gh-pat.jsonl
+#   {"ts", "reason", "source", "caller", "ppid", "argv"}; argv is masked (no token ever), a failed write is one stderr warning.
+_TOKEN_RE = re.compile(r"\b(gh[opsur]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,})")
+def pat_log_file(): return f"{PI_STATE}/out/logs/gh-pat.jsonl"
+def log_pat(reason, argv, source=None):
+    try:
+        rec = {"ts": dt.datetime.now(CST).isoformat(timespec="seconds"), "reason": reason, "source": source or os.path.basename(self_script() or "?"),
+               "caller": self_script(), "ppid": os.getppid(), "argv": [_TOKEN_RE.sub("***", str(x)) for x in argv]}
+        os.makedirs(os.path.dirname(pat_log_file()), exist_ok=True)
+        with open(pat_log_file(), "a") as f: f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception as e: print(f"pat log: write failed ({e.__class__.__name__}); call not affected", file=sys.stderr)
+def pat_reason(args, repo=None):
+    """why gh_app_wanted said no: "switch off" | "@me" | "/user" | "non-App repo" """
+    if not os.path.exists(gh_app_flag()): return "switch off"
+    if any("@me" in x for x in args[1:]): return "@me"
+    if any(re.match(r"/?user(?:$|/)", x) for x in args[1:]): return "/user"
+    if product_write_identity(args, repo or gh_target_repo(args)) == "pat": return "switch off"
+    return "non-App repo"
 def gh_env(args, repo=None):
     """-> (identity "app"|"pat", env for subprocess or None = inherit). Minting failures fall back to the PAT with one masked line."""
-    if pat_rerun(args, repo): return "pat", pat_env()   # G2: product CI rerun -> the PAT explicitly (an inherited ghs_ token is dropped)
-    if not gh_app_wanted(args, repo): return "pat", None
+    if pat_rerun(args, repo): log_pat("product CI rerun", args); return "pat", pat_env()   # G2: product CI rerun -> the PAT explicitly
+    if not gh_app_wanted(args, repo): log_pat(pat_reason(args, repo), args); return "pat", None
     try:
         import ghtoken
         tok = ghtoken.token(search_repo(args) if args[:1] == ["search"] and not repo else repo or gh_target_repo(args))
     except Exception as e:
         try: import ghtoken as _g; msg = _g.mask(e)
         except Exception: msg = e.__class__.__name__
-        log(f"gh app token unavailable ({str(msg)[:160]}); using the default gh login for this call"); return "pat", None
+        log(f"gh app token unavailable ({str(msg)[:160]}); using the default gh login for this call")
+        log_pat("App token mint failed", args); return "pat", None
     env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN")}
     env["GH_TOKEN"] = tok
     return "app", env

@@ -28,6 +28,7 @@ def main():
         s = bool(os.environ.get(k)); rows.append((k, "set" if s else "MISSING", (probe(p) if s and p else "-"), who, scope))
     # task B: explicit identity, no `api user`: the default login (PAT, PAT_LOGIN) must still be able to push to the product repo
     # 11-04 (#214): this row checks the PAT FALLBACK, so it bypasses the box gh wrapper: real gh by absolute path + the PAT explicitly
+    log_pat("direct real gh", [real_gh(), "api", f"repos/{REPO}", "-q", ".permissions.push"][1:], source="credcheck")   # 11-05 PAT attribution
     r = subprocess.run([real_gh(), "api", f"repos/{REPO}", "-q", ".permissions.push"], capture_output=True, text=True, env=pat_env())
     rows.append(("gh (hosts.yml)", "set" if r.returncode == 0 else "MISSING", f"ok {PAT_LOGIN} push={r.stdout.strip()}" if r.returncode == 0 else r.stderr[:80], f"gh writes as {PAT_LOGIN} (PAT fallback)", "repo"))
     md = "| credential | state | read-only probe | used by | minimal scope |\n|---|---|---|---|---|\n" + "\n".join("| " + " | ".join(x) + " |" for x in rows)

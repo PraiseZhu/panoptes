@@ -30,6 +30,7 @@ def checks():
     fails += [f"missing: {k}" for k, v in spot.items() if not v and not any(k.split()[0] in m for m in miss)]
     # 11-04 (#214): `gh auth status` validates the login through /user; under the box gh wrapper (installation token) that fails, so this
     # check of the box's own gh login (the PAT fallback) calls the real gh with the PAT explicitly
+    log_pat("direct real gh", [real_gh(), "auth", "status"][1:], source="opsenv")   # 11-05 PAT attribution
     r = subprocess.run([real_gh(), "auth", "status"], capture_output=True, text=True, timeout=120, env=pat_env())
     o = next((l.strip() for l in (r.stdout + r.stderr).splitlines() if "Logged in" in l), ""); L.append(f"- gh: {'ok' if 'Logged in' in o else 'NOT OK'}")
     if 'Logged in' not in o: fails.append("gh auth not logged in")

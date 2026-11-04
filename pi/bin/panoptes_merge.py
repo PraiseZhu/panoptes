@@ -23,6 +23,25 @@ EXIT_REFUSED, EXIT_USAGE = 3, 64
 class ApiError(RuntimeError): pass
 
 
+# 11-05: one audit line per merge attempt in $PI_STATE/out/logs/panoptes-merge.jsonl; a failed write warns on stderr, never changes the exit
+def audit_file(): return f"{lib.PI_STATE}/out/logs/panoptes-merge.jsonl"
+def caller():
+    if os.environ.get("PANOPTES_MERGE_CALLER"): return os.environ["PANOPTES_MERGE_CALLER"]
+    try: user = __import__("pwd").getpwuid(os.getuid()).pw_name
+    except Exception: user = str(os.getuid())
+    try: parent = open(f"/proc/{os.getppid()}/cmdline", "rb").read().replace(b"\0", b" ").decode(errors="replace").strip()[:200]
+    except OSError: parent = ""
+    return f"{user} ppid={os.getppid()} {parent}".strip()
+def audit(pr, sha, merge_commit, merged_by, result, error):
+    try:
+        rec = {"ts": __import__("datetime").datetime.now(lib.CST).isoformat(timespec="seconds"), "pr": pr, "head_sha": sha,
+               "merge_commit": merge_commit, "merged_by": merged_by, "caller": caller(), "result": result,
+               "error": None if error is None else ghtoken.mask(error)[:300]}
+        os.makedirs(os.path.dirname(audit_file()), exist_ok=True)
+        with open(audit_file(), "a") as f: f.write(json.dumps(rec) + "\n")
+    except Exception as e: print(f"panoptes_merge: warning: audit log write failed ({e.__class__.__name__})", file=sys.stderr)
+
+
 def api(method, path, token, body=None, opener=urllib.request.urlopen):
     req = urllib.request.Request(f"{ghtoken._api()}/{path.lstrip('/')}", method=method,
                                  data=None if body is None else json.dumps(body).encode(),
@@ -69,12 +88,15 @@ def main(argv=None, opener=urllib.request.urlopen, token=None):
         if not res.get("merged"): raise ApiError(f"merge not done: {ghtoken.mask(res.get('message'))[:200]}")
         pr = api("GET", f"repos/{repo}/pulls/{n}", tok, None, opener)
     except (ApiError, ghtoken.NoInstallation, ghtoken.MintError) as e:
-        print(f"panoptes_merge: {repo}#{n}: {ghtoken.mask(e)}", file=sys.stderr); return 1
+        print(f"panoptes_merge: {repo}#{n}: {ghtoken.mask(e)}", file=sys.stderr)
+        audit(f"{repo}#{n}", sha, None, None, "failure", str(e)); return 1
     by = (pr.get("merged_by") or {}).get("login")
     print(f"{repo}#{n} merged={pr.get('merged')} sha={sha} merge_commit={res.get('sha')} merged_by={by}")
     bot = lib.app_login()   # 11-05: derived from lib.APP_SLUG
     if not pr.get("merged") or by != bot:
-        print(f"panoptes_merge: {repo}#{n}: merged_by is {by!r}, expected {bot}", file=sys.stderr); return 1
+        print(f"panoptes_merge: {repo}#{n}: merged_by is {by!r}, expected {bot}", file=sys.stderr)
+        audit(f"{repo}#{n}", sha, res.get("sha"), by, "failure", f"merged={pr.get('merged')} merged_by={by!r}, expected {bot}"); return 1
+    audit(f"{repo}#{n}", sha, res.get("sha"), by, "success", None)
     return 0
 
 
