@@ -30,8 +30,9 @@ CALLER_ALLOWLIST = (
     ("vigil-mivo-handoff", "mivo/bin/mivo-handoff.mjs"),
     ("lifeline-tick", "scripts/loops/lifeline/tick.mjs"),
     ("lifeline-report", "scripts/loops/lifeline/report.mjs"),
-    ("lifeline-org-market-open-company-pr", "scripts/ops/org-market-open-company-pr.mjs"),
+    # mivo-merger's app/scripts/ops/... must precede lifeline's scripts/ops/... (a shorter suffix of it): first match wins.
     ("mivo-merger-org-market-open-company-pr", "app/scripts/ops/org-market-open-company-pr.mjs"),
+    ("lifeline-org-market-open-company-pr", "scripts/ops/org-market-open-company-pr.mjs"),
     ("grokbot-box-60-gh-auth", "verify.d/60-gh-auth.sh"),
     ("review-pr-target-branch-reminder", "review-pr/scripts/target-branch-reminder"),
     ("review-pr-request-changes-reviewed-pr", "review-pr/scripts/request-changes-reviewed-pr"),

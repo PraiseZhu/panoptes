@@ -149,8 +149,17 @@ class Wrapper(Base):
                        ["/usr/bin/python3", "/Users/j/review-pr/scripts/merge-reviewed-pr.py"], ["node", "/srv/app/scripts/ops/org-market-open-company-pr.mjs"]):
             _, c, err = self.wrap(["pr", "list", "-R", PROD], env={"GITHUB_TOKEN": "ghp_pat", "GH_TOKEN": "ghs_old"}, caller=caller)
             self.assertEqual(c[0], "/real/gh", caller); self.assertEqual(c[2].get("GH_TOKEN"), "ghp_pat", caller); self.assertIn("allowlisted caller", err)
-        self.assertEqual(json.loads(open(W.allowlist_log()).read().splitlines()[-1])["caller"], "lifeline-org-market-open-company-pr")
+        self.assertEqual(json.loads(open(W.allowlist_log()).read().splitlines()[-1])["caller"], "mivo-merger-org-market-open-company-pr")
         self.assertEqual(len({n for n, _ in W.CALLER_ALLOWLIST}), len(W.CALLER_ALLOWLIST))
+
+    def test_org_market_open_company_pr_is_attributed_to_the_right_repo(self):
+        import gh_wrapper as W
+        for path, name in (("/srv/mivo-merger/app/scripts/ops/org-market-open-company-pr.mjs", "mivo-merger-org-market-open-company-pr"),
+                           ("app/scripts/ops/org-market-open-company-pr.mjs", "mivo-merger-org-market-open-company-pr"),
+                           ("/home/x/mivo-canvas-plugin/scripts/ops/org-market-open-company-pr.mjs", "lifeline-org-market-open-company-pr"),
+                           ("scripts/ops/org-market-open-company-pr.mjs", "lifeline-org-market-open-company-pr"),
+                           ("/x/myapp/scripts/ops/org-market-open-company-pr.mjs", "lifeline-org-market-open-company-pr")):
+            self.assertEqual(W.allowlisted(["node", path]), name, path)
 
     def test_non_listed_caller_gets_the_app(self):
         self.on("gh-app-wrapper-enabled")
