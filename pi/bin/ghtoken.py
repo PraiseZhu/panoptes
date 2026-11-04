@@ -31,7 +31,10 @@ _MASKS = [
     (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/@\s]+@"), r"\1***@"),                           # scheme://user:tok@ / tok@, any case
     (re.compile(r"(?i)\b(authorization\s*:\s*(?:basic|bearer|token)\s+)\S+"), r"\1***"),         # Authorization headers
     (re.compile(r"(?i)\b(x-access-token\s*[:=]\s*)[^\s@]+"), r"\1***"),                         # x-access-token:<tok> outside a URL
-    (re.compile(r"(?i)\b((?:access_?|auth_?|api_?)?(?:token|key|secret|password|passwd|pat)\s*[=:]\s*[\"']?)[0-9a-f]{40}\b"), r"\1***"),
+    # labelled 40-hex: any word label ending in token/key/secret/password/pat (GITHUB_TOKEN, secret_key, apikey), bare or as a quoted
+    # JSON key ("token": "<hex>"). Unlabelled shas and non-secret labels ("sha":, head=, commit) stay readable.
+    (re.compile(r"(?i)(?<![A-Za-z0-9])([A-Za-z0-9_-]*?(?:token|key|secret|password|passwd|pat)[\"']?\s*[=:]\s*[\"']?)[0-9a-f]{40}\b"), r"\1***"),
+    (re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]{20,}"), r"\1***"),                             # bare Bearer <tok>, no header name
     (re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"), "sk-***"),                                             # sk- API keys
 ]
 def mask(s):
