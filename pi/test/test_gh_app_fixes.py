@@ -147,9 +147,11 @@ class Wrapper(Base):
         import gh_wrapper as W
         if os.path.exists(W.unresolved_log()): os.remove(W.unresolved_log())
         self.on("gh-app-wrapper-enabled")
-        _, c, _ = self.wrap(["search", "prs", "secret-arg"]); self.assertEqual(c[2]["GH_TOKEN"], FAKE[PROD]); self.assertEqual(self.minted[-1], PROD)
+        _, c, _ = self.wrap(["issue", "list", "secret-arg"]); self.assertEqual(c[2]["GH_TOKEN"], FAKE[PROD]); self.assertEqual(self.minted[-1], PROD)
         line = json.loads(open(W.unresolved_log()).read().splitlines()[-1])
-        self.assertEqual((line["cmd"], line["repo"]), ("gh search prs", None)); self.assertNotIn("secret-arg", json.dumps(line)); self.assertNotIn("ghs_", json.dumps(line))
+        self.assertEqual((line["cmd"], line["repo"]), ("gh issue list", None))
+        # G5 (11-05): gh search names no repo but is no longer a guess: the panoptes installation (lib.search_repo)
+        _, c, _ = self.wrap(["search", "prs", "secret-arg"]); self.assertEqual(c[2]["GH_TOKEN"], FAKE[PAN]); self.assertEqual(self.minted[-1], PAN); self.assertNotIn("secret-arg", json.dumps(line)); self.assertNotIn("ghs_", json.dumps(line))
 
     def test_allowlisted_caller_gets_the_pat_and_the_real_gh(self):
         import gh_wrapper as W

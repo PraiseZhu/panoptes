@@ -282,20 +282,11 @@ set +a
 for v in GITHUB_TOKEN QA_LLM_BASE_URL QA_LLM_API_KEY; do
   [[ -n "${!v:-}" ]] || { echo "missing required variable $v in $SECRETS" >&2; exit 1; }
 done
-export GH_TOKEN="$GITHUB_TOKEN"
-# 11-04 task B: product-repo reads of this run via the Praise QA App while $PI_STATE/gh-app-enabled and gh-app-nightly-enabled exist
-# (argus/src/github.mjs uses PRAISE_QA_GH_TOKEN only for the repos in PRAISE_QA_GH_REPOS). rm either flag -> GH_TOKEN (PAT) as before.
-# A mint failure is one masked line on stderr and the run stays on the PAT; the token itself is never printed.
-unset PRAISE_QA_GH_TOKEN PRAISE_QA_GH_REPOS PRAISE_QA_GH_OWN_TOKEN || true
-_pi_state="${PI_STATE:-/workspace/mivo-qa/pi}"
-if [[ -f "$_pi_state/gh-app-enabled" && -f "$_pi_state/gh-app-nightly-enabled" ]]; then
-  if _pqa="$(python3 "$PANOPTES_DIR/pi/bin/ghtoken.py" token xindong/mivo-canvas-plugin)" && [[ -n "$_pqa" ]]; then
-    export PRAISE_QA_GH_TOKEN="$_pqa" PRAISE_QA_GH_REPOS="xindong/mivo-canvas-plugin"
-    # every PraiseZhu/* repo (the argus issue repo pr-qa-agent-deploy): installation 164262283
-    if _pqa="$(python3 "$PANOPTES_DIR/pi/bin/ghtoken.py" token PraiseZhu/pr-qa-agent-deploy)" && [[ -n "$_pqa" ]]; then export PRAISE_QA_GH_OWN_TOKEN="$_pqa"; fi
-  else echo "gh app token unavailable; nightly stays on GH_TOKEN" >&2; fi
-  unset _pqa
-fi
+# G4 (11-05): App tokens only while gh-app-enabled + gh-app-nightly-enabled exist (no PAT in this process's env or any child's);
+# either flag missing -> GH_TOKEN = GITHUB_TOKEN (PAT) as before. See scripts/gh-app-env.sh.
+# shellcheck disable=SC1091
+. "$PANOPTES_DIR/scripts/gh-app-env.sh"
+gh_app_env "$PANOPTES_DIR" "${PI_STATE:-/workspace/mivo-qa/pi}" || { [[ -n "$CATCH_UP" ]] && exit 3; exit 1; }
 # The secrets file cannot switch issue creation on; only the caller's env + flag can.
 unset ARGUS_ALLOW_ISSUES || true
 [[ -n "$ALLOW_ISSUES" ]] && export ARGUS_ALLOW_ISSUES=1

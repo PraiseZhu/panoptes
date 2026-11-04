@@ -326,6 +326,11 @@ def main(argv, env=None, execve=os.execve, run=subprocess.run, caller=None, stdi
     repo = target(argv, env, run)
     chain = caller_chain() if caller is None else caller
     name = allowlisted(chain)
+    if not name and wrapper_on():   # G5 (11-05): @me -> the bot identity, bare `api user` -> praise-qa[bot] locally (lib.self_identity_*)
+        argv = lib.self_identity_args(argv)
+        me = lib.self_identity_answer(argv)
+        if me is not None: sys.stdout.write(me); sys.stdout.flush(); return 0
+        if argv[:1] == ["search"]: repo = lib.search_repo(argv)   # G5: gh search -> the panoptes installation, never the cwd / product guess
     # #214 r2 B1: a body on stdin (--input -, field=@-) is read here, checked like any other body, then re-fed to the real gh
     body = None
     if lib.gh_reads_stdin(argv):
