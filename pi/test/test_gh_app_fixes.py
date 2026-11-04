@@ -657,4 +657,18 @@ class AcceptanceRound4(Base):
             self.assertIsNone(W.cli_refusal(a, None), a); self.assertIsNotNone(self.wrap(a, caller=["node", "/x/foo.mjs"])[1], a)
 
 
+    def test_config_set_and_auth_writes_only_for_allowlisted_callers(self):
+        import gh_wrapper as W
+        AL = ["node", "/x/review-pr/scripts/signoff-hold.mjs"]; OTHER = ["node", "/x/foo.mjs"]
+        writes = (["config", "set", "git_protocol", "https"], ["config", "set", "-h", "github.com", "editor", "vim"], ["auth", "login"],
+                  ["auth", "login", "--with-token"], ["auth", "setup-git"], ["auth", "switch", "-u", "x"], ["auth", "refresh", "-s", "repo"])
+        for a in writes:
+            self.assertIsNotNone(W.cli_refusal(a, None), a); self.assertIsNone(W.cli_refusal(a, "review-pr-signoff-hold"), a)
+            for c in ([], OTHER, ["python3", "/x/pi/bin/outbound.py"]):
+                rc, call, err = self.wrap(a, caller=c); self.assertEqual((rc, call), (4, None), (a, c)); self.assertIn("refused", err)
+            self.assertIsNotNone(self.wrap(a, caller=AL)[1], a)   # allowlisted: the real gh
+        for a in (["config", "get", "git_protocol"], ["config", "list"], ["config", "list", "-h", "github.com"], ["auth", "status"],
+                  ["auth", "status", "--hostname", "github.com"]):
+            self.assertIsNone(W.cli_refusal(a, None), a); self.assertIsNotNone(self.wrap(a, caller=OTHER)[1], a)
+
 if __name__ == "__main__": unittest.main()
