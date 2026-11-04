@@ -83,6 +83,22 @@ def split_verb(rest):
         if not x.startswith("--") and len(x) > 2 and x[:2] in PRE_VERB_VALUE: i += 1; continue   # -hgithub.com
         return None
     return "", []
+def credential_op(rest):
+    """args after `auth git-credential` -> the operation (get/store/erase/...): first non-flag word, "" when none"""
+    return next((x for x in rest if not x.startswith("-")), "")
+def git_credential_get(argv):
+    """True for `gh [flags] auth [flags] git-credential [flags] get`"""
+    a = list(argv)
+    if a[:1] != ["auth"]: return False
+    sv = split_verb(a[1:])
+    return bool(sv) and sv[0] == "git-credential" and credential_op(sv[1]) == "get"
+def credential_repo(text):
+    """git credential request -> OWNER/REPO for https://github.com/<path>, else None (needs credential.useHttpPath)"""
+    d = dict(l.split("=", 1) for l in (text or "").splitlines() if "=" in l)
+    if d.get("protocol") != "https" or d.get("host") != "github.com": return None
+    path = (d.get("path") or "").strip("/")
+    if path.endswith(".git"): path = path[:-4]
+    return "/".join(path.split("/")[:2]) if path.count("/") >= 1 else None
 def shows_token(args):
     return any(x in ("-t", "--show-token") or x.startswith("--show-token=") or (x.startswith("-") and not x.startswith("--") and "t" in x[1:]) for x in args)
 def cli_refusal(argv, allowlisted_name=None):
@@ -106,6 +122,9 @@ def cli_refusal(argv, allowlisted_name=None):
     if noun == "config":
         if verb not in CONFIG_READS: return f"gh config {verb or ''} (only config get/list for non-CALLER_ALLOWLIST callers)".replace("  ", " ")
         return None
+    if verb == "git-credential":   # 11-04 #222: git's credential.helper (`!gh auth git-credential`) runs as every caller
+        if credential_op(rest) == "get": return None
+        return f"gh auth git-credential {credential_op(rest) or ''} (changes stored git credentials; only get for non-CALLER_ALLOWLIST callers)".replace("  ", " ")
     if verb not in AUTH_READS:
         if verb == "token": return "gh auth token (prints the login token; only CALLER_ALLOWLIST callers)"
         return f"gh auth {verb or ''} (changes the box login / git credentials; only auth status for non-CALLER_ALLOWLIST callers)".replace("  ", " ")
@@ -296,6 +315,19 @@ def main(argv, env=None, execve=os.execve, run=subprocess.run, caller=None, stdi
     if why:
         print(f"gh-wrapper: refused, red line: {why} (repo {repo or 'unknown'}); nothing was sent", file=sys.stderr)
         return EXIT_RED_LINE
+    if not name and git_credential_get(argv):
+        # same design as git-credential-praise-qa: App token only for the request's repo when it has an installation (never the
+        # cwd repo, never the PRODUCT fallback); otherwise the real gh answers with the box login, stdin re-fed untouched
+        try: req = sys.stdin.read() if stdin is None else stdin
+        except Exception: req = ""
+        r = credential_repo(req)
+        tok = app_token(r, ["git", "credential"], no_install_is_none=True) if r and wrapper_on() else None
+        if tok:
+            sys.stdout.write(f"protocol=https\nhost=github.com\nusername=x-access-token\npassword={tok}\n"); sys.stdout.flush()
+            return 0
+        refeed_stdin(req)
+        gh = real_gh(env)
+        return execve(gh, [gh] + list(argv), env)
     if body is not None: refeed_stdin(body)
     if name:
         log_allowlisted(name, argv)
