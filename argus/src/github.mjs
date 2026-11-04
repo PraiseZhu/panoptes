@@ -187,7 +187,11 @@ export async function listMergedByAuthor(repo, authorId, sinceIso, { maxPages = 
 
 export const getPull = (repo, n) => apiGet(`repos/${repo}/pulls/${n}`)
 export const getCommit = (repo, sha) => apiGet(`repos/${repo}/commits/${sha}`)
-export const getBranchHead = async (repo, branch) => (await apiGet(`repos/${repo}/branches/${encodeURIComponent(branch)}`))?.commit?.sha ?? null
+// 主干 head 只是「顺手看一眼」的辅助读（判定用它复查最新主干）。读不到（安装令牌过期后的 401、网络、分支没了）返回 null ——
+// 调用方按「主干没复查」记待核实（nightly.mjs / control.mjs 的 latestIsSame 约定），不能因为这一读失败把已跑完的检查连同整轮一起丢掉
+export const getBranchHead = async (repo, branch) => {
+  try { return (await apiGet(`repos/${repo}/branches/${encodeURIComponent(branch)}`))?.commit?.sha ?? null } catch { return null }
+}
 
 export async function listPullFiles(repo, n, { maxPages = 30 } = {}) {
   const files = []
