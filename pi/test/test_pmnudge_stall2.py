@@ -26,12 +26,12 @@ def script():   # was module level (ran at pytest collection and leaked env / fr
     def fake_gh(args, js=True):
         if calls["fail"]: raise RuntimeError("gh down")
         return [dict(pr)] if args[:2] == ["pr", "list"] and "open" in args else []
-    M.gh = fake_gh
+    M.gh = fake_gh; M.SLEEP = lambda s: None   # 11-05: gh failures are retried with backoff; no real waiting
     run = lambda: (sys.argv.__setitem__(slice(1, None), []), M.main())
     md = lambda d: open(f"{S}/out/pm/{d}.md").read() if os.path.exists(f"{S}/out/pm/{d}.md") else ""
     acts = lambda d: [a for a in json.load(open(f"{S}/out/pm/{d}.nudges.actions.json"))] if os.path.exists(f"{S}/out/pm/{d}.nudges.actions.json") else []
     # gh 失败：不崩、不写进展 / actions；11-04 起只写一节失败说明（时间、原因、下次重试）
-    calls["fail"] = True; run(); assert sorted(os.listdir(f"{S}/out/pm")) == ["2026-10-28.md"], os.listdir(f"{S}/out/pm"); calls["fail"] = False
+    calls["fail"] = True; run(); assert sorted(x for x in os.listdir(f"{S}/out/pm") if x not in ("pmnudge-gh-alert.json", "gaps-open.json", "gaps-open.json.lock")) == ["2026-10-28.md"], os.listdir(f"{S}/out/pm"); calls["fail"] = False
     assert "本轮未催" in md("2026-10-28") and "下次重试：10-28 22:05" in md("2026-10-28"), md("2026-10-28")
     # 首跑：写 .md、actions、进展文件；不催
     run(); D = "2026-10-28"

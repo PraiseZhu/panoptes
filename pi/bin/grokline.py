@@ -11,6 +11,7 @@ When (may_open()): switch on, gate open, and either both Pi slots busy (or Pi bl
   over (emergency-killed > 3 times today, prfix sets grok_wanted).
 Claim: --claim --pct P takes the first todo in Pi's own priority order under tickets.json's flock: owner=grok, pid=null,
   host=cloud, status=running, usage_start; refused while Grok already holds GROK_CAP (2) owner=grok tickets. Pi never takes owner=grok. --progress KEY keeps it; 90 min without -> back to Pi.
+  --skip QA:FP (repeatable, also on gate --dry-run): that key is left out of this call's queue (held pending a ruling); bad key -> error.
   --finish KEY --pct P --pr N (draft fix PR opened: status pr_action_written, owner cleared, finished_by=grok, usage_end);
   --release KEY --pct P (gave up: back to the Pi queue).
 Records: out/praise-pr/grok-usage.json (per day: baseline, samples, opened, done, trips); one line per day in
@@ -21,7 +22,7 @@ pr-meta (11-03, product #1701): --wd is required = the product checkout with the
   (gh baseRefName, or --base), already prepended to pr_body_block. Use pr_body_block verbatim; never hand-write a
   mivo-platform-evidence block (a hand-written not-applicable on cindyplugin/ is what failed pr-format-gate on #1701).
   Any doubt (non-full SHA, evaluator unavailable, block still rejected) -> status error, no PR.
-Usage: grokline.py gate --dry-run (read-only) | pr-meta --key QA:FP --wd DIR [--base BRANCH] [--title T] (read-only) | --check | --record --pct P | --claim --pct P | --progress KEY | --finish KEY --pct P --pr N | --release KEY --pct P
+Usage: grokline.py gate --dry-run (read-only) | pr-meta --key QA:FP --wd DIR [--base BRANCH] [--title T] (read-only) | --check | --record --pct P | --claim --pct P [--skip QA:FP ...] | --progress KEY | --finish KEY --pct P --pr N | --release KEY --pct P
 Output: one JSON line on stdout."""
 import argparse, contextlib, fcntl, math, re, sys
 from lib import *
@@ -243,8 +244,17 @@ def check(now=None):
             "today": d, "pm_report_due": bool(d.get("pm_report_due"))}
 
 
-def claim(pct, now=None):
-    """-> result dict; the ticket is claimed only when may_open (usage checked with THIS pct first)."""
+def skip_keys(todo, wanted, skip):
+    """drop keys held back pending a ruling (--skip QA:FP, repeatable) from both lists, before may_open counts the backlog"""
+    s = set(skip or ())
+    return [k for k in todo if k not in s], [k for k in wanted if k not in s]
+
+
+SKIP_RE = re.compile(r"^\d+:mq1-[0-9a-f]{20}$")
+
+
+def claim(pct, now=None, skip=()):
+    """-> result dict; the ticket is claimed only when may_open (usage checked with THIS pct first). skip = keys never claimed this call."""
     now = now or now_cst()
     if not valid_pct(pct): return {"status": "no", "reason": f"用量读数无效（{pct}）：按 hold 处理", "gate": "hold"}
     try:
@@ -252,7 +262,7 @@ def claim(pct, now=None):
     except Exception as e:
         return {"status": "no", "reason": f"用量记录读不了（{type(e).__name__}）：按 stop 处理", "gate": "stop"}
     g, gwhy = day_gate(d)
-    todo, wanted = queue(now)
+    todo, wanted = skip_keys(*queue(now), skip)
     tks0 = prfix.load_tickets().get("tickets", {})
     ok, why = may_open(on(), g, pi_running(tks0), len(todo), len(wanted), grok_held(tks0), pi_mem_blocked())
     if not ok: return {"status": "no", "reason": why, "gate": g, "gate_reason": gwhy}
@@ -309,7 +319,7 @@ def jload_usage():
     with open(usage_path()) as f: return json.load(f)
 
 
-def gate_dry_run(now=None):
+def gate_dry_run(now=None, skip=()):
     """read-only: the gate decision and its inputs (no usage record, no tickets write). Any bad input -> hold, never a crash."""
     now = now or now_cst(); out = {"status": "dry-run", "now": now.isoformat(timespec="seconds")}
     try:
@@ -322,10 +332,10 @@ def gate_dry_run(now=None):
     except Exception as e:
         out.update(switch=None, gate="hold", gate_reason=f"用量记录读不了，按 hold：{str(e)[:120]}"); g = "hold"
     try:
-        tks = prfix.load_tickets().get("tickets", {}); todo, wanted = queue(now)
+        tks = prfix.load_tickets().get("tickets", {}); todo, wanted = skip_keys(*queue(now), skip)
         ok, why = may_open(bool(out["switch"]), g, pi_running(tks), len(todo), len(wanted), grok_held(tks), pi_mem_blocked())
         out.update(pi_running=pi_running(tks), qualifying_todo=todo, handed_over=wanted, authors=list(GROK_AUTHORS),
-                   grok=sorted(k for k, t in tks.items() if t.get("owner") == "grok"), may_open=ok, reason=why,
+                   skipped=sorted(set(skip or ())), grok=sorted(k for k, t in tks.items() if t.get("owner") == "grok"), may_open=ok, reason=why,
                    would_claim=(wanted + todo)[0] if ok and (wanted + todo) else None)
     except Exception as e:
         out.update(gate="hold", may_open=False, would_claim=None, reason=f"工单队列读不了，按 hold：{str(e)[:120]}")
@@ -402,12 +412,15 @@ def main(argv=None):
     ap.add_argument("--key"); ap.add_argument("--title"); ap.add_argument("--wd"); ap.add_argument("--base")
     ap.add_argument("--check", action="store_true"); ap.add_argument("--record", action="store_true")
     ap.add_argument("--claim", action="store_true"); ap.add_argument("--progress"); ap.add_argument("--finish"); ap.add_argument("--release")
+    ap.add_argument("--skip", action="append", default=[], help="QA:FP held back pending a ruling (repeatable; --claim and gate --dry-run)")
     ap.add_argument("--pct", type=float); ap.add_argument("--pr", type=int); ap.add_argument("--why", default="Grok 放弃")
     A = ap.parse_args(argv)
     real = sys.stdout; sys.stdout = sys.stderr       # helper logs never corrupt the JSON line
     try:
-        if A.cmd == "gate":
-            r = gate_dry_run() if A.dry_run else {"status": "error", "error": "gate 只有 --dry-run（只读）"}
+        bad_skip = [k for k in A.skip if not SKIP_RE.match(k)]
+        if bad_skip: r = {"status": "error", "error": f"--skip 要 QA:FP（如 1610:mq1-…20 位）：{bad_skip}"}
+        elif A.cmd == "gate":
+            r = gate_dry_run(skip=A.skip) if A.dry_run else {"status": "error", "error": "gate 只有 --dry-run（只读）"}
         elif A.cmd == "pr-meta":
             if not (A.key and A.wd): r = {"status": "error", "error": "pr-meta 要 --key QA:FP 和 --wd <产品仓修复后的 checkout>"}
             else:
@@ -420,7 +433,7 @@ def main(argv=None):
                 with usage_locked() as U: d = record(U, A.pct, now_cst())
                 r = {"status": "ok", "gate": day_gate(d), "today": d}
             except Exception as e: r = {"status": "error", "gate": "stop", "error": f"用量记录读不了（{type(e).__name__}）：按 stop 处理"}
-        elif A.claim: r = claim(A.pct)
+        elif A.claim: r = claim(A.pct, skip=A.skip)
         elif A.progress: r = progress(A.progress)
         elif A.finish: r = finish(A.finish, A.pct, A.pr) if A.pr else {"status": "error", "error": "--finish 要 --pr"}
         elif A.release: r = give_back(A.release, A.pct, A.why)
