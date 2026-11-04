@@ -1356,6 +1356,38 @@ export function writeReport(report, file) {
   return file
 }
 
+// ── 首跑开始时间（11-05，stdcheck qa_start 口径）──────────
+// 重跑会覆盖 PR-N.json（旧版进 history/），run.started_at 就成了重跑的开始时间；首跑若失败（exit 3）根本不写报告。
+// 所以每次运行一开始就在 history/PR-N.attempts.json 记一笔：first_started_at 只在第一次写入，之后只加 attempts。
+// 写 PR-N.json 时 run.first_started_at = 已有报告的 first_started_at / started_at、attempts 记录、本次 started_at 三者最早的那个；
+// 重跑绝不改掉它。run.attempt = 这是第几次运行（> 1 即首跑没成）。读报告的程序没有 first_started_at 时退回 started_at。
+export const attemptsPath = (file) => join(dirname(file), HISTORY_DIR, basename(file).replace(/\.json$/, '') + '.attempts.json')
+const readJson = (f) => { try { return JSON.parse(readFileSync(f, 'utf8')) } catch { return null } }
+const earliestIso = (...ts) => { const v = ts.filter((t) => t && Number.isFinite(Date.parse(t))); return v.length ? v.reduce((a, b) => (Date.parse(b) < Date.parse(a) ? b : a)) : null }
+export function recordAttemptStart(file, startedAt) {
+  const p = attemptsPath(file)
+  const prev = readJson(p)
+  const cur = readJson(file)
+  const doc = {
+    first_started_at: earliestIso(prev?.first_started_at, cur?.run?.first_started_at, cur?.run?.started_at, startedAt.toISOString()),
+    attempts: (prev?.attempts ?? (cur?.run ? (cur.run.attempt ?? 1) : 0)) + 1,
+    last_started_at: startedAt.toISOString(),
+  }
+  mkdirSync(dirname(p), { recursive: true })
+  const tmp = `${p}.tmp-${process.pid}`
+  writeFileSync(tmp, JSON.stringify(doc, null, 2) + '\n')
+  renameSync(tmp, p)
+  return doc
+}
+export function stampFirstStart(doc, file) {
+  if (!doc?.run || !/^PR-\d+\.json$/.test(basename(file))) return doc
+  const cur = readJson(file)
+  const att = readJson(attemptsPath(file))
+  doc.run.first_started_at = earliestIso(cur?.run?.first_started_at, cur?.run?.started_at, att?.first_started_at, doc.run.started_at)
+  doc.run.attempt = Math.max(att?.attempts ?? 1, cur?.run ? (cur.run.attempt ?? 1) + 1 : 1)
+  return doc
+}
+
 // ── 提 issue（默认关闭；本次部署不启用）─────────────────
 // 只有 --create-issues 且环境变量 ARGUS_ALLOW_ISSUES=1 同时满足才会执行。
 // 目标固定为私有仓 PraiseZhu/pr-qa-agent-deploy（绝不往被测仓 xindong/mivo-canvas-plugin 提），
@@ -1756,6 +1788,10 @@ export async function runNightly(opts = {}) {
   shanghaiDayWindow(day)
   const outFile = resolveOutPath(opts.out, day)
   if (opts.deadline) parseDeadline(opts.deadline, startedAt) // 参数错误在任何工作开始前报出
+  // 首跑开始时间：在任何可能失败的工作之前记下（首跑 exit 3 也留得住）；只记单 PR 文件
+  for (const f of new Set([...(opts.prs?.length && /^PR-\d+\.json$/.test(basename(outFile)) ? [outFile] : []), ...(opts.prs?.length && writeMergedEnabled(opts) ? opts.prs.map((n) => mergedReportPath(n, opts.mergedDir)) : [])])) {
+    try { recordAttemptStart(f, startedAt) } catch (err) { health.notes.push(`attempt record ${f}: ${redact(err.message).slice(0, 200)}`) }
+  }
   const reg = loadRegistry()
   const project = reg.projects.find((p) => p.repo === repo)
   if (!project?.profileData) throw new Error(`${repo} 没有在 registry 里配置 profile`)
@@ -1854,6 +1890,7 @@ export async function runNightly(opts = {}) {
   }
   report.merged_reports = writePerPrReports(report, { opts, outFile, kind: 'merged' })
   if (writeOpenEnabled(opts)) report.open_reports = writePerPrReports(report, { opts, outFile, kind: 'open' })
+  if (opts.prs?.length) stampFirstStart(report, outFile)
   const file = writeReport(report, outFile)
   return { file, report }
 }
@@ -1929,7 +1966,7 @@ export function writePerPrReports(report, { opts, outFile, kind }) {
     const doc = mergedReportFor(report, pr, { kind })
     // store-merged 从当前的 PR-N.json 自己重新存（例如修正 date / 去掉别的 PR）：原件先按版本机制改名，来源指向原件
     doc.run.source_report = self ? nextVersionPath(file) : outFile
-    try { writeReport(doc, file); written.push({ pr: pr.number, file }) } catch (err) { report.system_health.qa_tool_failures.push({ pr: pr.number, stage: `write-${kind}-report`, message: redact(err.message).slice(0, 300) }) }
+    try { if (kind === 'merged') stampFirstStart(doc, file); writeReport(doc, file); written.push({ pr: pr.number, file }) } catch (err) { report.system_health.qa_tool_failures.push({ pr: pr.number, stage: `write-${kind}-report`, message: redact(err.message).slice(0, 300) }) }
   }
   return written
 }
