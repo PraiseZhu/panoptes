@@ -44,12 +44,12 @@ class OutboundBase(unittest.TestCase):
     def test_pr_create_targets_base_ref(self):
         patch = os.path.join(tempfile.mkdtemp(), "x.patch")
         with open(patch, "w") as f: f.write("diff --git a/a b/a\n")
-        a = {"key": f"fixpr:1597:{FP}", "patch": patch, "title": "fix: t (QA #1597)", "body_must_contain": FP, "base_ref": S2}
+        a = {"key": f"fixpr:1597:{FP}", "patch": patch, "title": "fix: t (QA #1597)", "body_must_contain": FP, "base_ref": S2, "qa": 1597}
         cmds, ghs = [], []
         with mock.patch.object(O, "run", side_effect=lambda c, *k, **kw: cmds.append(list(c)) or ""), \
              mock.patch.object(O, "apply_fix_patch", return_value="main"), \
              mock.patch.object(O, "fixpr_gate_reason", return_value=None), \
-             mock.patch.object(O, "gh", side_effect=lambda c, *k, **kw: ghs.append(list(c)) or "https://github.com/x/y/pull/1\n"), \
+             mock.patch.object(O, "gh", side_effect=lambda c, *k, **kw: ghs.append(list(c)) or ({"baseRefName": S2} if c[:2] == ["pr", "view"] else "https://github.com/x/y/pull/1\n")), \
              mock.patch.object(O, "fixpr_docs_rename", return_value="ok"):
             O.h_fixpr(a)[3]()
         create = next(c for c in ghs if c[:2] == ["pr", "create"])

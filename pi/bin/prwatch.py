@@ -421,6 +421,7 @@ def dispatch_fix(st):
     try: pending = json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else None   # whole stdout is one JSON array
     except ValueError: pending = None
     if pending is None:
+        if r.returncode == 0 and "rate-limited" in (r.stderr or ""): qlog("prfix --pending-json skipped: GitHub rate-limited"); return   # 11-04: a skip
         qlog(f"prfix --pending-json failed rc={r.returncode}: {(r.stderr or r.stdout)[-160:]}"); return
     pending = [x for x in pending if not x.get("reason_if_skipped")]   # running tickets and entries for a human carry a reason
     st["fix_inputs"] = sig; st["fix_more"] = len(pending) > 1; st["fix_pending"] = len(pending)
