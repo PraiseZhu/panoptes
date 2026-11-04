@@ -280,8 +280,9 @@ def log_allowlisted(name, argv):
     try:
         os.makedirs(os.path.dirname(allowlist_log()), exist_ok=True)
         with open(allowlist_log(), "a") as f:
-            f.write(json.dumps({"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "caller": name, "cmd": "gh " + " ".join(x for x in argv[:2] if not x.startswith("-"))}) + "\n")
-    except OSError: pass
+            f.write(json.dumps({"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "caller": name, "cmd": "gh " + " ".join(x for x in argv[:2] if not x.startswith("-")),
+                                "argv": [lib._TOKEN_RE.sub("***", str(x)) for x in argv]}) + "\n")   # 11-05: full argv for attribution
+    except OSError as e: print(f"gh-wrapper: allowlist log write failed ({e.__class__.__name__})", file=sys.stderr)
 
 
 def wrapper_flag(): return f"{lib.PI_STATE}/gh-app-wrapper-enabled"
