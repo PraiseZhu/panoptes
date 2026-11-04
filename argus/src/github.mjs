@@ -14,6 +14,7 @@ const API = process.env.ARGUS_GH_API ?? 'https://api.github.com'
 // 11-04 task B (panoptes): run-nightly.sh hands over the Praise QA App token as PRAISE_QA_GH_TOKEN for the repos in PRAISE_QA_GH_REPOS
 // while $PI_STATE/gh-app-nightly-enabled is on. Only gh calls / git fetches targeting those repos use it; everything else (the issue
 // repo, Argus's own App repos) keeps the inherited login. Flag off -> both vars unset -> exactly as before.
+export const PRAISE_QA_APP_SLUG = 'praise-qa'   // = pi/bin/lib.py APP_SLUG (the Praise QA App); bot login = `${slug}[bot]`
 export function praiseQaTokenFor(repo) {
   const tok = process.env.PRAISE_QA_GH_TOKEN
   const repos = (process.env.PRAISE_QA_GH_REPOS || '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean)
@@ -320,7 +321,7 @@ export const reopenIssue = (repo, number) => apiSend('PATCH', `repos/${repo}/iss
 // 11-04: explicit identity, no GET /user (an installation token cannot call it, so it breaks under the box gh wrapper / Praise QA App).
 // The identity that serves `repo`: the Praise QA App, Argus's own App, or the gh login (named by the caller, e.g. registry owner).
 export async function currentIdentity(repo, ghLogin) {
-  if (praiseQaTokenFor(repo)) return { login: 'praise-qa[bot]', via: 'praise-qa-app' }
+  if (praiseQaTokenFor(repo)) return { login: `${PRAISE_QA_APP_SLUG}[bot]`, via: `${PRAISE_QA_APP_SLUG}-app` }
   const app = await appFor(repo).catch(() => null)
   if (app) return { login: app.botLogin, via: 'argus-app' }
   return { login: ghLogin, via: 'gh-login' }

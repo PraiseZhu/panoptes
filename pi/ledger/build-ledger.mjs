@@ -171,7 +171,8 @@ for (const v of Object.values(state)) for (const fp of v.fingerprints || []) {
 //    touch $PI_STATE/fix-authors-praise-only (default /workspace/mivo-qa/pi/) -> PraiseZhu only.
 //    (env MIVO_QA_LEDGER_OWNERS="login,login" overrides; empty string disables)
 const FIX_AUTHORS = ['PraiseZhu', 'kirozeng'];
-const SELF_BOTS = ['app/praise-qa', 'praise-qa[bot]', 'praise-qa'];   // = pi/bin/lib.py SELF_LOGINS (the Praise QA App)
+const APP_SLUG = 'praise-qa';   // = pi/bin/lib.py APP_SLUG; every bot form below is derived from it
+const SELF_BOTS = [`app/${APP_SLUG}`, `${APP_SLUG}[bot]`, APP_SLUG];   // = pi/bin/lib.py SELF_LOGINS (the Praise QA App)
 const praiseOnly = fs.existsSync(path.join(process.env.PI_STATE || path.join(QA, 'pi'), 'fix-authors-praise-only'));
 const OWNERS = (process.env.MIVO_QA_LEDGER_OWNERS ?? (praiseOnly ? FIX_AUTHORS.slice(0, 1) : FIX_AUTHORS).join(',')).split(',').map(s => s.trim()).filter(Boolean);
 const loginOf = p => (p?.author && typeof p.author === 'object' ? p.author.login : p?.author) || null;

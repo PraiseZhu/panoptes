@@ -8,15 +8,15 @@ usage: panoptes_merge.py <PR> <head_sha> [-R PraiseZhu/panoptes|PraiseZhu/vigil]
   2. an installation token from ghtoken.token(repo) (the existing helper: cache dir 0700 / file 0600). It stays in this process: never
      printed, never put in an env var or argv, never written anywhere else.
   3. PUT /repos/{repo}/pulls/N/merge {"merge_method": "squash", "sha": head_sha}: GitHub refuses (409) when the head moved.
-  4. GET /repos/{repo}/pulls/N: prints merged_by; exit 0 only when merged and merged_by == praise-qa[bot], else exit 1.
+  4. GET /repos/{repo}/pulls/N: prints merged_by; exit 0 only when merged and merged_by == lib.app_login() (praise-qa[bot]), else exit 1.
 Every error line is passed through ghtoken.mask()."""
 import json, os, re, sys, urllib.error, urllib.request
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import ghtoken  # noqa: E402
+import lib  # noqa: E402
 
 ALLOWED = ("PraiseZhu/panoptes", "PraiseZhu/vigil")
 DEFAULT_REPO = "PraiseZhu/panoptes"
-BOT = "praise-qa[bot]"
 EXIT_REFUSED, EXIT_USAGE = 3, 64
 
 
@@ -72,8 +72,9 @@ def main(argv=None, opener=urllib.request.urlopen, token=None):
         print(f"panoptes_merge: {repo}#{n}: {ghtoken.mask(e)}", file=sys.stderr); return 1
     by = (pr.get("merged_by") or {}).get("login")
     print(f"{repo}#{n} merged={pr.get('merged')} sha={sha} merge_commit={res.get('sha')} merged_by={by}")
-    if not pr.get("merged") or by != BOT:
-        print(f"panoptes_merge: {repo}#{n}: merged_by is {by!r}, expected {BOT}", file=sys.stderr); return 1
+    bot = lib.app_login()   # 11-05: derived from lib.APP_SLUG
+    if not pr.get("merged") or by != bot:
+        print(f"panoptes_merge: {repo}#{n}: merged_by is {by!r}, expected {bot}", file=sys.stderr); return 1
     return 0
 
 

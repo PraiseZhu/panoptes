@@ -72,7 +72,7 @@ def identity():
     lib.gh_red_line). PAT -> login PAT_LOGIN, scopes from the X-OAuth-Scopes header of a repo read (same header /user returned)."""
     args = ["api", "-i", f"repos/{REPO}"]
     ident, env = gh_env(args)
-    if ident == "app": return {"login": APP_LOGIN, "scopes": [], "via": "app"}
+    if ident == "app": return {"login": app_login(), "scopes": [], "via": "app"}
     r = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=60, env=env)
     if r.returncode: raise RuntimeError("identity read failed")
     head = r.stdout.split("\r\n\r\n" if "\r\n\r\n" in r.stdout else "\n\n", 1)[0]
