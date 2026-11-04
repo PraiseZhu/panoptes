@@ -9,6 +9,12 @@ sys.path.insert(0, BIN); sys.path.insert(0, HERE)
 import isolation  # noqa: E402
 isolation.sandbox_state()
 import lib  # noqa: E402
+# node-id resolution (acceptance 2b) never touches the network in tests: ids PAN_* -> own repo, PROD_* -> product, else unresolvable
+NODE_CALLS = []
+def fake_node_repos(ids):
+    NODE_CALLS.append(list(ids))
+    return [PAN if i.startswith("PAN_") else PROD if i.startswith("PROD_") else None for i in ids]
+lib.gql_node_repos = fake_node_repos
 
 PROD, PAN = "xindong/mivo-canvas-plugin", "PraiseZhu/panoptes"
 FAKE = {PROD: "ghs_" + "P" * 36, PAN: "ghs_" + "O" * 36}
@@ -85,7 +91,7 @@ class RedLines(unittest.TestCase):
 
     def test_graphql_reads_and_own_repo_allowed(self):
         self.assertIsNone(self.refused(["api", "graphql", "-f", "query=query{ repository(owner:\"xindong\",name:\"m\"){ id } }"]))
-        self.assertIsNone(self.refused(["api", "graphql", "-f", f"query={self.M}", "-F", "owner=PraiseZhu", "-F", "name=panoptes"]))
+        self.assertIsNone(self.refused(["api", "graphql", "-f", f"query={self.M}", "-F", "id=PAN_1"]))   # node id resolves to an own repo
 
     def test_issues_api_and_issue_edit(self):
         self.assertIn("editing", self.refused(["api", "-X", "PATCH", f"repos/{PROD}/issues/1700", "-f", "title=x"]))
@@ -234,12 +240,93 @@ class CredentialHelper(Base):
         self.on("gh-app-wrapper-enabled")
         self.assertEqual(self.get(q.format("xindong/mivo-canvas-plugin.git")), f"username=x-access-token\npassword={FAKE[PROD]}\n")
         self.assertIn(FAKE[PAN], self.get(q.format("PraiseZhu/grokbot-box.git")))
-        with redirect_stderr(io.StringIO()): self.assertIn(FAKE[PROD], self.get("protocol=https\nhost=github.com\n"))   # no path -> product, logged
+        self.assertEqual(self.get("protocol=https\nhost=github.com\n"), "")   # no path -> nothing (next helper)
         self.assertEqual(self.get("protocol=https\nhost=gitlab.com\npath=a/b\n"), "")
 
     def test_xindong_owner_maps_to_product_installation(self):
         import ghtoken
         self.assertEqual(ghtoken.installation("xindong/anything"), 178486896); self.assertEqual(ghtoken.installation("PraiseZhu/x"), 164262283)
+
+
+class AcceptanceRound1(Base):
+    """#214 acceptance round 1 (11-04): 2b graphql merge by node id, 5 credential helper on foreign repos, 4 allowlist script-only
+    matching + sh -c ancestors, 2c product writes"""
+    PANCWD = "https://github.com/PraiseZhu/panoptes.git"
+    def gql(self, q, *kv): return ["api", "graphql", "-f", f"query={q}"] + [y for x in kv for y in ("-F", x)]
+
+    def test_graphql_merge_by_product_node_id_refused_from_own_repo_context(self):
+        for m in ("mergePullRequest", "enablePullRequestAutoMerge", "enqueuePullRequest", "updatePullRequestBranch"):
+            q = "mutation($id:ID!){ %s(input:{pullRequestId:$id}){ clientMutationId } }" % m
+            for a, env, url in ((self.gql(q, "id=PROD_1"), {}, self.PANCWD), (self.gql(q, "id=PROD_1"), {"GH_REPO": PAN}, ""),
+                                (self.gql(q, "id=PROD_1", "owner=PraiseZhu", "name=panoptes"), {}, ""),
+                                (self.gql(q, "id=PROD_1"), {}, self.PANCWD)):
+                for caller in ([], ["node", "/x/review-pr/scripts/merge-reviewed-pr.mjs"]):
+                    rc, c, err = self.wrap(a, env=env, cwd_url=url, caller=caller)
+                    self.assertEqual((rc, c), (4, None), (m, env, caller)); self.assertIn("merging", err)
+        q = 'mutation { mergeBranch(input:{repositoryId:"PROD_R", base:"main", head:"x"}){ clientMutationId } }'
+        self.assertEqual(self.wrap(self.gql(q), cwd_url=self.PANCWD)[0], 4)
+
+    def test_graphql_merge_unresolvable_or_idless_refused_own_resolved_allowed(self):
+        q = "mutation($id:ID!){ mergePullRequest(input:{pullRequestId:$id}){ clientMutationId } }"
+        self.assertEqual(self.wrap(self.gql(q, "id=UNKNOWN"), cwd_url=self.PANCWD)[0], 4)
+        self.assertEqual(self.wrap(self.gql(q), cwd_url=self.PANCWD)[0], 4)                       # $id missing -> fail closed
+        self.assertEqual(self.wrap(self.gql("mutation($i:MergePullRequestInput!){ mergePullRequest(input:$i){ clientMutationId } }"), cwd_url=self.PANCWD)[0], 4)
+        rc, c, _ = self.wrap(self.gql(q, "id=PAN_1"), cwd_url=self.PANCWD); self.assertIsNotNone(c)
+        self.assertEqual(self.wrap(self.gql('mutation { mergePullRequest(input:{pullRequestId:"PAN_1"}) { a: clientMutationId } b: mergePullRequest(input:{pullRequestId:"PROD_2"}) { clientMutationId } }'))[0], 4)
+        NODE_CALLS.clear(); self.assertIsNone(lib.gh_red_line(self.gql("query{ viewer { login } }"))); self.assertEqual(NODE_CALLS, [])
+
+    def test_credential_helper_silent_for_repos_without_installation(self):
+        self.on("gh-app-wrapper-enabled"); q = "protocol=https\nhost=github.com\npath={}\n\n"
+        for p in ("aj0928/aj0928-handoff.git", "zhongxingtian-ai/handover-mivo.git", "someone/else"):
+            self.minted.clear(); self.assertEqual(self.get(q.format(p)), "", p); self.assertEqual(self.minted, [], p)
+        self.assertIn(FAKE[PAN], self.get(q.format("PraiseZhu/panoptes.git")))
+        self.assertIn(FAKE[PROD], self.get(q.format("xindong/mivo-canvas-plugin.git")))
+    get = CredentialHelper.get
+    wrap = Wrapper.wrap
+
+    def test_allowlist_matches_only_the_script_longest_suffix_first(self):
+        import gh_wrapper as W
+        self.assertEqual(W.allowlisted(["node", "/workspace/mivo-merger/app/scripts/ops/org-market-open-company-pr.mjs"]), "mivo-merger-org-market-open-company-pr")
+        for c in (["vim", "/tmp/evil/cindy/bin/cindy-watcher.mjs"], ["node", "x.mjs", "--note", "review-pr/scripts/signoff-hold"],
+                  ["node", "/tmp/a.mjs", "/x/cindy/bin/cindy-watcher.mjs"], ["sh", "-c", "gh pr list"], ["node", "-e", "x", "/x/cindy/bin/cindy-watcher.mjs"], []):
+            self.assertIsNone(W.allowlisted(c), c)
+        self.assertEqual(W.allowlisted(["node", "--no-warnings", "/x/cindy/bin/cindy-watcher.mjs", "--once"]), "vigil-cindy-watcher")
+        self.assertEqual(W.allowlisted(["/x/review-pr/scripts/signoff-hold", "1"]), "review-pr-signoff-hold")
+        d = tempfile.mkdtemp(); os.makedirs(f"{d}/real/cindy/bin"); open(f"{d}/real/cindy/bin/cindy-watcher.mjs", "w").close()
+        os.symlink(f"{d}/real/cindy/bin/cindy-watcher.mjs", f"{d}/innocent.mjs")
+        self.assertEqual(W.allowlisted(["node", f"{d}/innocent.mjs"]), "vigil-cindy-watcher")   # realpath of the script
+
+    def test_sh_c_parent_walks_up_at_most_three_levels(self):
+        import gh_wrapper as W
+        procs = {10: (["sh", "-c", "gh pr list"], 11), 11: (["bash", "-c", "sh -c x"], 12), 12: (["node", "/x/cindy/bin/cindy-watcher.mjs"], 1)}
+        with mock.patch.object(W, "parent_cmdline", lambda p=None: procs.get(p, ([], 0))[0]), mock.patch.object(W, "parent_pid", lambda p: procs.get(p, ([], 0))[1]):
+            self.assertEqual(W.allowlisted(W.caller_chain(10)), "vigil-cindy-watcher")
+            procs.update({12: (["sh", "-c", "a"], 13), 13: (["sh", "-c", "b"], 14), 14: (["node", "/x/cindy/bin/cindy-watcher.mjs"], 1)})
+            self.assertIsNone(W.allowlisted(W.caller_chain(10)))   # 4 shells deep: not walked
+            self.assertEqual(W.caller_chain(14), ["node", "/x/cindy/bin/cindy-watcher.mjs"])
+
+    def test_product_writes_refused_except_review_pr_comments_and_ci_rerun(self):
+        R = PROD; rp = ["node", "/x/review-pr/scripts/signoff-hold.mjs"]
+        always = (["issue", "create", "-R", R, "-t", "x"], ["pr", "close", "1", "-R", R], ["api", "-X", "POST", f"repos/{R}/issues", "-f", "title=x"],
+                  ["api", f"repos/{R}/issues", "-f", "title=x"], ["api", "-X", "DELETE", f"repos/{R}/git/refs/heads/x"],
+                  ["api", "--method", "DELETE", f"/repos/{R}/git/refs/heads/x"], ["api", "-X", "PATCH", f"repos/{R}/pulls/1", "-f", "state=closed"],
+                  self.gql('mutation { closePullRequest(input:{pullRequestId:"PROD_1"}){ clientMutationId } }'),
+                  self.gql('mutation { deleteRef(input:{refId:"PROD_ref"}){ clientMutationId } }'),
+                  self.gql('mutation { createIssue(input:{repositoryId:"PROD_R", title:"x"}){ clientMutationId } }'))
+        comments = (["issue", "comment", "1", "-R", R, "-b", "x"], ["pr", "comment", "1", "-R", R, "-b", "x"], ["pr", "review", "1", "-R", R, "--approve"],
+                    ["api", "-X", "POST", f"repos/{R}/issues/1/comments", "-f", "body=x"], ["api", "-X", "POST", f"repos/{R}/pulls/1/reviews", "-f", "event=APPROVE"],
+                    self.gql('mutation { addComment(input:{subjectId:"PROD_1", body:"x"}){ clientMutationId } }'),
+                    self.gql('mutation { addPullRequestReview(input:{pullRequestId:"PROD_1", event:APPROVE}){ clientMutationId } }'))
+        for a in always:
+            for caller in ([], rp): self.assertEqual(self.wrap(a, caller=caller)[0], 4, (a, caller))
+        for a in comments:
+            self.assertEqual(self.wrap(a)[0], 4, a); self.assertEqual(self.wrap(a, caller=["node", "/x/cindy/bin/cindy-watcher.mjs"])[0], 4, a)
+            self.assertIsNotNone(self.wrap(a, caller=rp)[1], a)
+        for a in (["run", "rerun", "123", "-R", R], ["run", "rerun", "123", "--failed", "-R", R], ["api", "-X", "POST", f"repos/{R}/actions/runs/1/rerun"],
+                  ["api", "-X", "POST", f"repos/{R}/actions/runs/1/rerun-failed-jobs"], ["api", "-X", "POST", f"repos/{R}/actions/jobs/1/rerun"],
+                  ["pr", "comment", "1", "-R", PAN, "-b", "x"], ["issue", "create", "-R", PAN, "-t", "x"], ["api", f"repos/{R}/issues/1/comments"],
+                  self.gql('mutation { addComment(input:{subjectId:"PAN_1", body:"x"}){ clientMutationId } }')):
+            self.assertIsNotNone(self.wrap(a)[1], a)
 
 
 if __name__ == "__main__": unittest.main()

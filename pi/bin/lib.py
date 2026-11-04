@@ -158,7 +158,47 @@ def gh_app_product_writes_on(): return os.path.exists(gh_app_flag()) and os.path
 # identity: gh() refuses these before a token is chosen.
 class RedLine(RuntimeError): pass
 RED_MERGE = "merging a product PR (only Praise merges)"; RED_EDIT = "editing a product PR body/title"
-GQL_MERGE_RE = re.compile(r"\b(mergePullRequest|enablePullRequestAutoMerge|enqueuePullRequest|mergeBranch)\s*\(")
+GQL_MERGE_RE = re.compile(r"\b(mergePullRequest|enablePullRequestAutoMerge|enqueuePullRequest|mergeBranch|updatePullRequestBranch)\s*\(")
+_ID_LIT = re.compile(r"\b\w*Ids?\s*:\s*(\[[^\]]*\]|\"[^\"]*\"|\$\w+)")
+_ID_KV = re.compile(r"[\"']?\w*Ids?[\"']?\s*[:=]\s*(\[[^\]]*\]|[\"'][^\"']*[\"'])")
+def gql_node_ids(doc, vs):
+    """node ids a mutation document carries: `xxxId: "..."` literals, `xxxId: $v` variables, and xxxId keys inside JSON/dict
+    variables (`input: $input`). -> list, or None when an id-ish argument cannot be read (fail closed)"""
+    ids, bad = [], False
+    def take(v):
+        got = re.findall(r"[\"']([^\"']+)[\"']", v) if v[:1] in "[\"'" else [v]
+        ids.extend(x for x in got if x)
+    for v in _ID_LIT.findall(doc):
+        if v.startswith("$"):
+            if v[1:] in vs and vs[v[1:]]: take(str(vs[v[1:]])) if str(vs[v[1:]])[:1] in "[\"'" else ids.append(str(vs[v[1:]]))
+            else: bad = True
+        else: take(v)
+    for k, v in vs.items():
+        if re.search(r"Ids?$", k) and v and not str(v)[:1] in "[{": ids.append(str(v))
+        for m in _ID_KV.findall(str(v)): take(m)
+    for m in re.findall(r"\binput\s*:\s*\$(\w+)", doc):
+        if m not in vs: bad = True
+    return None if bad else list(dict.fromkeys(ids))
+GQL_NODE_Q = ("query{nodes(ids:%s){__typename ... on Repository{nameWithOwner} ... on PullRequest{repository{nameWithOwner}}"
+              " ... on Issue{repository{nameWithOwner}} ... on Ref{repository{nameWithOwner}} ... on IssueComment{repository{nameWithOwner}}"
+              " ... on PullRequestReview{repository{nameWithOwner}} ... on PullRequestReviewComment{repository{nameWithOwner}}}}")
+def gql_node_repos(ids):
+    """[OWNER/REPO or None per id] by one `nodes(ids:)` query on the real gh (never the wrapper) with the inherited login; any error
+    -> all None. Tests patch this."""
+    try:
+        r = subprocess.run([real_gh(), "api", "graphql", "-f", "query=" + GQL_NODE_Q % json.dumps(list(ids))], capture_output=True, text=True, timeout=30)
+        ns = (json.loads(r.stdout or "{}").get("data") or {}).get("nodes") or []
+    except Exception: return [None] * len(ids)
+    out = [((n or {}).get("nameWithOwner") or ((n or {}).get("repository") or {}).get("nameWithOwner")) for n in ns]
+    return (out + [None] * len(ids))[:len(ids)]
+def is_product_repo(r): return r in GH_APP_PRODUCT_REPOS or (r or "").lower().startswith("xindong/")
+def gql_ids_product(doc, vs):
+    """False = every node id resolves to a non-product repo; True = some id is product; None = no id / unresolvable"""
+    ids = gql_node_ids(doc, vs)
+    if not ids: return None
+    repos = gql_node_repos(ids)
+    if any(is_product_repo(r) for r in repos): return True
+    return None if any(r is None for r in repos) else False
 GQL_EDIT_RE = re.compile(r"\bupdatePullRequest\s*\(")
 def gql_query_of(args, read=open):
     """the GraphQL document of `gh api graphql ...`: every -f/-F/--raw-field/--field query=... (also =@file) and --input FILE|- (JSON
@@ -198,13 +238,13 @@ def gh_red_line(args, repo=None, read=open):
         if "graphql" in [x.lstrip("/") for x in a[1:]]:
             doc, vs = gql_query_of(a, read)
             if not re.search(r"\bmutation\b", doc) and not (GQL_MERGE_RE.search(doc) or GQL_EDIT_RE.search(doc)): return None
-            # a mutation names its PR by node id: the repo is unknowable from the call, so (fail closed) only a call that names a
-            # non-product repo explicitly (-R/repo= of an own repo) may run it
-            owner = str(vs.get("owner") or vs.get("repoOwner") or ""); allowed = tgt is not None and not product and owner.lower() != "xindong"
-            if GQL_MERGE_RE.search(doc) and not allowed: return RED_MERGE + " (graphql)"
-            if GQL_EDIT_RE.search(doc) and re.search(r"\b(body|title)\s*:", doc) and not allowed: return RED_EDIT + " (graphql)"
-            if GQL_EDIT_RE.search(doc) and not allowed and any(k in vs for k in ("body", "title")): return RED_EDIT + " (graphql)"
-            return None
+            # 11-04 (#214 acceptance 2b): a mutation names its PR by node id, so cwd / GH_REPO / owner+name vars say nothing about
+            # the repo it hits. A merge-type or PR-edit mutation runs only when EVERY node id it carries resolves (a `node` query)
+            # to a non-product repo; no id, an unresolvable id, or a product id -> refused, on every identity incl. allowlisted.
+            merge, edit = GQL_MERGE_RE.search(doc), GQL_EDIT_RE.search(doc) and (re.search(r"\b(body|title)\s*:", doc) or any(k in vs for k in ("body", "title")))
+            if not (merge or edit): return None
+            if gql_ids_product(doc, vs) is False: return None
+            return (RED_MERGE if merge else RED_EDIT) + " (graphql, node id not resolved to a non-product repo)"
         if not (product or unknown): return None
         path = next((x for x in a[1:] if re.match(r"/?repos/", x)), "")
         meth = next((a[i + 1].upper() for i, x in enumerate(a) if x in ("-X", "--method") and i + 1 < len(a)), "")
@@ -214,6 +254,42 @@ def gh_red_line(args, repo=None, read=open):
         fields = [a[i + 1].split("=", 1)[0] for i, x in enumerate(a) if x in ("-f", "-F", "--raw-field", "--field") and i + 1 < len(a)]
         body_in = "--input" in a   # JSON body: contents unknown -> treat as an edit (fail closed)
         if re.search(r"/issues/\d+/?(\?.*)?$", path) and meth == "PATCH" and (body_in or {"title", "body"} & set(fields)): return RED_EDIT + " (issues API)"
+    return None
+# 11-04 (#214 acceptance 2c, PM ruling): product WRITES beyond merge/edit, refused by the box gh wrapper: issue create/comment, PR
+# comment/review/close, ref delete (gh subcommands, REST paths+methods, graphql mutations by node id). Exceptions: allowlisted
+# review-pr callers for comments/reviews (they must comment) and CI reruns (gh run rerun, actions/.../rerun*: never matched here).
+RED_WRITE = "writing to the product repo (issue/PR comment, review, close, issue create, ref delete)"
+GQL_COMMENT_RE = re.compile(r"\b(addComment|addPullRequestReview|submitPullRequestReview|addPullRequestReviewComment|addPullRequestReviewThread)\s*\(")
+GQL_WRITE_RE = re.compile(r"\b(createIssue|closePullRequest|closeIssue|deleteRef|updateRef|updateRefs)\s*\(")
+def gh_product_write(args, repo=None, caller=None, read=open):
+    """-> reason if args write to the product repo in the 2c set and caller (allowlist name) is not excused, else None"""
+    a = list(args); tgt = repo or gh_target_repo(a); product = is_product_repo(tgt)
+    review_pr = (caller or "").startswith("review-pr-")
+    if a[:1] in (["issue"], ["pr"]) and product:
+        if a[:2] in (["issue", "create"], ["pr", "close"]): return RED_WRITE
+        if a[:2] in (["issue", "comment"], ["pr", "comment"], ["pr", "review"]) and not review_pr: return RED_WRITE
+        if a[:2] in (["issue", "close"], ["issue", "delete"]): return RED_WRITE
+        return None
+    if a[:1] != ["api"]: return None
+    if "graphql" in [x.lstrip("/") for x in a[1:]]:
+        doc, vs = gql_query_of(a, read)
+        hard, soft = GQL_WRITE_RE.search(doc), GQL_COMMENT_RE.search(doc)
+        if not (hard or (soft and not review_pr)): return None
+        return None if gql_ids_product(doc, vs) is False else RED_WRITE + " (graphql)"
+    if not product: return None
+    path = next((x for x in a[1:] if re.match(r"/?repos/", x)), "").split("?")[0].rstrip("/")
+    meth = next((a[i + 1].upper() for i, x in enumerate(a) if x in ("-X", "--method") and i + 1 < len(a)), "")
+    meth = meth or next((x.split("=", 1)[1].upper() for x in a if x.startswith("--method=")), "")
+    fields = [a[i + 1].split("=", 1)[0] for i, x in enumerate(a) if x in ("-f", "-F", "--raw-field", "--field") and i + 1 < len(a)]
+    meth = meth or ("POST" if fields or "--input" in a else "GET")
+    if re.search(r"/actions/", path): return None   # CI reruns and other Actions calls
+    if meth == "DELETE" and re.search(r"/git/refs/", path): return RED_WRITE
+    if meth == "POST" and re.search(r"/repos/[^/]+/[^/]+/issues$", "/" + path.lstrip("/")): return RED_WRITE
+    if meth in ("PATCH", "POST") and re.search(r"/(issues|pulls)/\d+$", path) and ("--input" in a or "state" in fields): return RED_WRITE
+    if not review_pr:
+        if meth == "POST" and re.search(r"/(issues|pulls)/\d+/(comments|reviews)(/\d+/(events|comments|replies))?$", path): return RED_WRITE
+        if meth in ("POST", "PUT") and re.search(r"/pulls/\d+/reviews/\d+/events$", path): return RED_WRITE
+        if meth in ("POST",) and re.search(r"/pulls/comments/\d+/replies$", path): return RED_WRITE
     return None
 # Explicit identities (task B 4: no @me / `api user` anywhere). Our own PRs are authored by PraiseZhu (PAT, older) or by the App.
 PAT_LOGIN = "PraiseZhu"

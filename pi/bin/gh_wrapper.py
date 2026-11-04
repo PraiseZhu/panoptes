@@ -4,17 +4,19 @@
 Installed by 电脑运维 as `gh` ahead of the real gh on PATH (see the PR / docs). Every call:
   1. red lines first, on every identity and with the flag off too: product-repo PR merges and PR title/body edits are refused (gh pr
      merge / pr edit --title|--body, REST PUT .../merge / PATCH pulls/N, graphql mergePullRequest / enablePullRequestAutoMerge /
-     updatePullRequest) -> exit 4, nothing sent. Same function as lib.gh (lib.gh_red_line).
+     updatePullRequest) -> exit 4, nothing sent. Same function as lib.gh (lib.gh_red_line). graphql merge/edit mutations run only when
+     every node id resolves (a `nodes` query) to a non-product repo. Wrapper only (lib.gh_product_write): product issue create/comment,
+     PR comment/review/close, ref delete; allowlisted review-pr callers may comment/review; CI reruns pass.
   2. flag on ($PI_STATE/gh-app-enabled AND $PI_STATE/gh-app-wrapper-enabled): GH_TOKEN = a Praise QA installation token for the
      target repo (-R/--repo, GH_REPO, `api repos/O/R`, `repo clone O/R`, else the cwd's origin): xindong/* -> 178486896,
      PraiseZhu/* -> 164262283. Unresolvable -> 178486896, and one line {at, cmd, repo} in $PI_STATE/out/gh-wrapper/unresolved.jsonl
      (never a token, never the args). A caller that already holds an installation token (ghs_*, e.g. lib.gh) keeps it.
-  2a. caller allowlist (11-04, PM/Jasper): when the calling script (the parent process's cmdline) ends with a CALLER_ALLOWLIST path,
+  2a. caller allowlist (11-04, PM/Jasper): when the calling SCRIPT (script_of the parent's cmdline, realpath; a `sh -c` parent -> up to 3 ancestors) ends with a CALLER_ALLOWLIST path,
      the call keeps the PAT: the real gh with lib.pat_env(), one line {at, caller, cmd} in $PI_STATE/out/gh-wrapper/allowlist.jsonl.
      Red lines (1) still apply. Each entry is tracked as gh-allowlist:<name> in fleet-standards/gaps-open.json, to be removed.
   3. flag off, or a mint failure (one masked stderr line) -> the inherited login (PAT), exactly as without the wrapper.
 Then exec the real gh ($PRAISE_QA_REAL_GH, else the first `gh` on PATH that is not this wrapper)."""
-import json, os, subprocess, sys, time
+import json, os, re, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import lib  # noqa: E402
 
@@ -48,18 +50,58 @@ CALLER_ALLOWLIST = (
 SCRIPT_EXTS = ("", ".mjs", ".js", ".sh", ".py", ".ts")
 
 
+INTERPRETERS = re.compile(r"^(node|nodejs|deno|bun|tsx|ts-node|python[0-9.]*|bash|sh|dash|zsh|ksh|perl|ruby)$")
+SHELLS = ("bash", "sh", "dash", "zsh", "ksh")
+MAX_SHELL_HOPS = 3
+
+
 def parent_cmdline(pid=None):
     try: return [x for x in open(f"/proc/{pid or os.getppid()}/cmdline", "rb").read().decode(errors="replace").split("\0") if x]
     except OSError: return []
 
 
+def parent_pid(pid):
+    try: return int(open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[1])
+    except (OSError, ValueError, IndexError): return 0
+
+
+def is_shell_c(cmdline):
+    return bool(cmdline) and os.path.basename(cmdline[0]) in SHELLS and any(x == "-c" or (x.startswith("-") and not x.startswith("--") and "c" in x) for x in cmdline[1:2] + cmdline[1:3])
+
+
+def caller_chain(pid=None):
+    """the caller's cmdline: the parent, or, when the parent is `sh -c`/`bash -c ...`, the first non-`-c` ancestor at most
+    MAX_SHELL_HOPS levels up (a script that runs `sh -c "gh ..."`)"""
+    p = pid or os.getppid()
+    for _ in range(MAX_SHELL_HOPS + 1):
+        c = parent_cmdline(p)
+        if not is_shell_c(c): return c
+        p = parent_pid(p)
+        if p <= 1: return []
+    return []
+
+
+def script_of(cmdline):
+    """the first executable script of a cmdline: argv[1+] after an interpreter (skipping its -options), else argv[0]; realpath'd.
+    `sh -c ...` / `python -c` / `node -e` have no script -> None"""
+    if not cmdline: return None
+    if not INTERPRETERS.match(os.path.basename(cmdline[0])): return os.path.realpath(cmdline[0]) if "/" in cmdline[0] else cmdline[0]
+    for x in cmdline[1:]:
+        if x in ("-c", "-e", "--eval", "-p", "--print", "-m"): return None
+        if x.startswith("-"): continue
+        return os.path.realpath(x)
+    return None
+
+
 def allowlisted(cmdline):
-    """name of the CALLER_ALLOWLIST entry whose path suffix ends one of the caller's argv paths (extension optional for review-pr), else None"""
-    for arg in cmdline:
-        a = arg.replace("\\", "/")
-        for name, suf in CALLER_ALLOWLIST:
-            exts = SCRIPT_EXTS if "." not in os.path.basename(suf) else ("",)
-            if any(a == suf + e or a.endswith("/" + suf + e) for e in exts): return name
+    """name of the CALLER_ALLOWLIST entry whose path suffix ends the caller's SCRIPT (script_of: never other argv), longest suffix
+    first; extension optional for review-pr. None otherwise"""
+    s = script_of(cmdline)
+    if not s: return None
+    a = s.replace("\\", "/")
+    for name, suf in sorted(CALLER_ALLOWLIST, key=lambda e: -len(e[1])):
+        exts = SCRIPT_EXTS if "." not in os.path.basename(suf) else ("",)
+        if any(a == suf + e or a.endswith("/" + suf + e) for e in exts): return name
     return None
 
 
@@ -110,12 +152,14 @@ def log_unresolved(argv):
     except OSError: pass
 
 
-def app_token(repo, argv):
+def app_token(repo, argv, no_install_is_none=False):
     """installation token for repo (unresolvable/uninstalled -> the product installation, logged), or None (masked line) on failure"""
     import ghtoken
     r = repo
     try: ghtoken.installation(r) if r else None
-    except ghtoken.NoInstallation: r = None
+    except ghtoken.NoInstallation:
+        if no_install_is_none: return None   # credential helper: a repo with no installation -> silent, git asks the PAT helper
+        r = None
     if not r: log_unresolved(argv); r = PRODUCT
     try: return ghtoken.token(r)
     except Exception as e:
@@ -126,11 +170,11 @@ def app_token(repo, argv):
 def main(argv, env=None, execve=os.execve, run=subprocess.run, caller=None):
     env = dict(os.environ if env is None else env)
     repo = target(argv, env, run)
-    why = lib.gh_red_line(argv, repo)
+    name = allowlisted(caller_chain() if caller is None else caller)
+    why = lib.gh_red_line(argv, repo) or lib.gh_product_write(argv, repo, name)
     if why:
         print(f"gh-wrapper: refused, red line: {why} (repo {repo or 'unknown'}); nothing was sent", file=sys.stderr)
         return EXIT_RED_LINE
-    name = allowlisted(parent_cmdline() if caller is None else caller)
     if name:
         log_allowlisted(name, argv)
         penv = lib.pat_env(env); gh = lib.real_gh(penv)
