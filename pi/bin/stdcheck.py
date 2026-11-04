@@ -3,6 +3,8 @@
 Rollback: rm $PI_STATE/stdcheck-enabled (re-read every run; the cron line stays and does nothing).
 
 Checks (each one: a list of objects that breach, from files on disk plus two gh reads via lib.gh):
+  first_run_fail  metric only (no threshold / alert / gap): of the qa_start merges, how many had a failed first run that was rerun
+               (report run.attempt > 1, or mergewatch "try 2/3"); in the log, state.json and passrate-<day>.json "metrics"
   qa_start     a merge into main / integration/* / release/* has its QA run started within 10 min (reports/merged/PR-N.json
                prs[].merged_at vs run.started_at; mergewatch-<day>.log "launched priority run ... for PR #N" / "branch merge #N"
                for merges without a report yet -- same sources as pi-work/gaps-1105/LATENCY.md)
@@ -42,7 +44,7 @@ OWNER = {"qa_start": "Mivo QA 运维", "panoptes_prs": "Praise", "fix_prs": "Pra
 DEADLINE_H = {"qa_start": 4, "panoptes_prs": 24, "fix_prs": 4, "tasks": 4, "review_pr": 2}
 TZ_ABBR = {"CST": 8, "UTC": 0, "GMT": 0, "PST": -8, "PDT": -7, "JST": 9}
 MW_LINE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) (\w+) (.*)$")
-MW_LAUNCH = re.compile(r"launched priority run pid \d+ for PR #(\d+)")
+MW_LAUNCH = re.compile(r"launched priority run pid \d+ for PR #(\d+)(?:.*?try (\d+)/\d+)?")
 MW_SEEN = re.compile(r"branch merge #(\d+)(?: into (\S+))?")
 BASE_RX = re.compile(r"^(main|integration/.+|release/.+)$")   # merges that count for qa_start; unknown base = counted (main launches name none)
 
@@ -72,6 +74,7 @@ def mergewatch_events(now):
                 mm = rx.search(m[3])
                 if mm:
                     e = ev.setdefault(int(mm[1]), {}); e.setdefault(k, t); e.setdefault("seen", t)
+                    if k == "launched": e["launches"] = max(e.get("launches", 0) + 1, int(mm[2] or 1))
                     if k == "seen" and mm[2] and mm[2] != "None": e.setdefault("base", mm[2])
     return ev
 
@@ -80,11 +83,21 @@ def report_times(n):
     d = jload(f"{REPORTS}/PR-{n}.json", None)
     if not isinstance(d, dict): return None
     pr = next((p for p in d.get("prs", []) if p.get("number") == n), {}) or {}
-    start = (d.get("run") or {}).get("started_at") or pr.get("test_started_at")
-    return parse_ts(pr.get("merged_at")), parse_ts(start), pr.get("base_ref")
+    run = d.get("run") or {}
+    # 11-05: qa_start = the FIRST run's start (run.first_started_at, kept across reruns by nightly); old reports: started_at
+    start = run.get("first_started_at") or run.get("started_at") or pr.get("test_started_at")
+    return parse_ts(pr.get("merged_at")), parse_ts(start), pr.get("base_ref"), report_first_run_failed(run)
 
-def check_qa_start(now):
-    bad, ev = {}, mergewatch_events(now)
+def report_first_run_failed(run):
+    """True when the report's final run is not the first attempt (run.attempt > 1, or first_started_at earlier than started_at)"""
+    if (run.get("attempt") or 1) > 1: return True
+    f, s = parse_ts(run.get("first_started_at")), parse_ts(run.get("started_at"))
+    return bool(f and s and s - f > dt.timedelta(seconds=60))
+
+def qa_start_rows(now):
+    """[(n, merged_or_seen, first QA start or None, first_run_failed)] for the merges qa_start counts. Start = the earliest of the
+    report's first start and mergewatch's first launch (a first run that died before writing a report leaves only the launch)."""
+    rows, ev = [], mergewatch_events(now)
     nums = set(ev)
     for f in glob.glob(f"{REPORTS}/PR-*.json"):
         m = re.search(r"PR-(\d+)\.json$", f)
@@ -95,13 +108,24 @@ def check_qa_start(now):
         if base and not BASE_RX.match(base): continue   # 11-04 acceptance #2: only main / integration/* / release/*
         merged = rt[0] if rt and rt[0] else None
         if merged and now - merged > dt.timedelta(hours=LOOKBACK_H): continue
-        start = (rt[1] if rt else None) or e.get("launched")
+        start = min([t for t in ((rt[1] if rt else None), e.get("launched")) if t], default=None)
         ref = merged or e.get("seen")
         if not ref: continue
-        lim = dt.timedelta(minutes=QA_START_MAX_MIN)
+        rows.append((n, ref, start, bool((rt and rt[3]) or e.get("launches", 0) > 1)))
+    return rows
+
+def check_qa_start(now):
+    bad, lim = {}, dt.timedelta(minutes=QA_START_MAX_MIN)
+    for n, ref, start, _ in qa_start_rows(now):
         if start and start - ref > lim: bad[f"PR-{n}"] = f"merge {cst(ref)} -> QA start {cst(start)} ({int((start - ref).total_seconds() // 60)} min > {QA_START_MAX_MIN})"
         elif not start and now - ref > lim: bad[f"PR-{n}"] = f"merged/seen {cst(ref)}, no QA start after {int((now - ref).total_seconds() // 60)} min"
     return bad
+
+def first_run_fail(now):
+    """11-05 metric (count only, no threshold, no alert): share of the qa_start merges whose first QA run failed and was rerun"""
+    rows = [r for r in qa_start_rows(now) if r[2]]
+    failed = [f"PR-{n}" for n, _, _, f in rows if f]
+    return {"merges": len(rows), "failed": len(failed), "rate": round(len(failed) / len(rows), 3) if rows else None, "prs": failed}
 
 def check_panoptes_prs(now):
     prs = gh(["pr", "list", "-R", PANOPTES, "--state", "open", "--limit", "100", "--json", "number"])
@@ -261,7 +285,7 @@ def update_alerts(st, results, errors, now):
             log(f"stdcheck: ALERT {c} failed {streak[c]} runs in a row ({errors.get(c) or '; '.join((results[c] or {}).values())[:200]})")
         elif os.path.exists(f) and not DRY: os.unlink(f); log(f"stdcheck: alert {c} recovered")
 
-def record_passrate(results, now):
+def record_passrate(results, now, metrics=None):
     if DRY: return
     day = now.date().isoformat(); os.makedirs(OUT, exist_ok=True)
     def fn(doc):
@@ -272,6 +296,7 @@ def record_passrate(results, now):
             e["rate"] = round(e["pass"] / (e["pass"] + e["fail"] + e["error"]), 3)
         tot = [sum(e[k] for e in ck.values()) for k in ("pass", "fail", "error")]
         doc.update(runs=doc.get("runs", 0) + 1, updated=iso(now), overall=round(tot[0] / max(1, sum(tot)), 3))
+        if metrics: doc["metrics"] = metrics   # latest value of each metric (count only: no threshold, no alert, no gap)
         return True
     jsonrec.update(f"{OUT}/passrate-{day}.json", fn, default={})
 
@@ -295,10 +320,14 @@ def run(now=None):
         fn, kw = fns[c]; results[c], err = run_check(c, fn, now, **kw)
         if err: errors[c] = err
         log(f"stdcheck {c}: " + (f"ERROR {err}" if err else f"breach {json.dumps(results[c], ensure_ascii=False)[:300]}" if results[c] else "ok"))
+    try: frf = first_run_fail(now)
+    except Exception as e: frf = {"error": f"{type(e).__name__}: {str(e)[:200]}"}
+    log(f"stdcheck metric first_run_fail: {json.dumps(frf, ensure_ascii=False)}")
+    if DRY: print("DRY: metric first_run_fail", json.dumps(frf, ensure_ascii=False))
     escalate(sync_gaps(results, now), now)
     update_alerts(st, results, errors, now)
-    record_passrate(results, now)
-    st.update(last_run=iso(now), errors=errors, crash_streak=0)
+    record_passrate(results, now, {"first_run_fail": frf})
+    st.update(last_run=iso(now), errors=errors, crash_streak=0, metrics={"first_run_fail": frf})
     if os.path.exists(f"{OUT}/alerts/stdcheck.json") and not DRY: os.unlink(f"{OUT}/alerts/stdcheck.json"); log("stdcheck: crash alert recovered")
     save_json(f"{OUT}/state.json", st)
     return results
