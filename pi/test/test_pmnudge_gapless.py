@@ -5,6 +5,7 @@ import os, sys, json, time, tempfile, importlib.util, datetime as dt
 os.environ["PI_STATE"] = tempfile.mkdtemp(); os.environ["PI_FLEET_MODE"] = "grok"
 B = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin"); sys.path.insert(0, B)
 s = importlib.util.spec_from_file_location("pmnudge", f"{B}/pmnudge.py"); M = importlib.util.module_from_spec(s); s.loader.exec_module(M)
+M.SLEEP = lambda s: None   # 11-05: gh failures are retried with backoff; no real waiting in tests
 CST = dt.timezone(dt.timedelta(hours=8))
 
 def run_fail(err):

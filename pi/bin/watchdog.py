@@ -532,6 +532,15 @@ def gh_ratelimit_check(now, probs):
         "PR 的红 CI、冲突、新问题都没人看、不会自动修。", todo=PN.ask_session(f"PraiseZhu 的 GitHub 额度超限超过 {lib.GH_RL_ALERT_H} 小时（{s.get('error', '')[:120]}），查是谁在用这个账号的额度"))
 
 
+def pmnudge_gh_check(now, probs):
+    """11-05: pmnudge's gh pr list still failed after its retries (out/pm/pmnudge-gh-alert.json, removed on the next good round)."""
+    try: a = json.load(open(f"{BASE}/out/pm/pmnudge-gh-alert.json"))
+    except Exception: return
+    probs["pmnudge:gh"] = PN.item("action", "白天催办因 GitHub 调用失败没有催",
+        f"从 {str(a.get('since'))[:16]} 起，白天催办在重试 {max(a.get('attempts', 1) - 1, 0)} 次后仍读不到 PR 列表（{'、'.join(a.get('rounds', [])[-6:])}）：{a.get('error', '')[:120]}",
+        "这些轮次没有催任何 PR；已记入 gaps-open.json。", todo=PN.ask_session(f"pmnudge 的 gh pr list 一直失败（{a.get('error', '')[:120]}），查 GitHub 额度/凭证"))
+
+
 def prfix_check(now, probs, wst=None):
     T = jload(PRFIX_TICKETS, {}).get("tickets", {}); L = jload(LEDGER, {}); stale = outbound_stale_keys()
     def age_h(t):
@@ -661,7 +670,8 @@ def main():
     for fn in (lambda: job_checks(now, probs, since), lambda: mergewatch_check(now, probs), lambda: merge_sla_check(now, probs), lambda: merge_report_check(now, probs, st),
                lambda: backup_check(now, probs), lambda: backup_rules_check(now, probs), lambda: panoptes_check(now, probs, st),
                lambda: infra_check(now, probs), lambda: prfix_check(now, probs, st), lambda: vigil_check(now, probs, st),
-               lambda: outbound_health_check(now, probs), lambda: janitor_check(now, probs), lambda: gh_ratelimit_check(now, probs)):
+               lambda: outbound_health_check(now, probs), lambda: janitor_check(now, probs), lambda: gh_ratelimit_check(now, probs),
+               lambda: pmnudge_gh_check(now, probs)):
         try: fn()
         except Exception as e: probs[f"watchdog:{getattr(fn, '__name__', 'check')}"] = PN.item("action", "「看门狗」自己出错了",
             "专门盯各个自动化有没有停摆的看门狗，自己的一项检查出错了。", "那一项坏了也不会有人告诉你。",

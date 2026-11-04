@@ -13,9 +13,12 @@
  DIRTY/BEHIND 超过 2h、ready 且 BLOCKED 超过 24h、head 上没有 main CI（workflow「CI」）的 check 超过 30 分钟催，每段只催一次
  （PI_STATE/out/pm/pmnudge-segments.json）；kiro（kirozeng）正文含「QA: #N」的 open PR 同样催。
  回滚：touch PI_STATE/pmnudge-b-off（每轮重读）-> 恢复 11-03 前的行为。
+11-05（Jasper 审计：11-04 11:05–18:05 每轮都因 gh 限流失败）：gh pr list 失败后退避重试，最多 2 次（GH_BACKOFF_S；限流时等到
+ lib 记录的重置时间，单次不超过 GH_WAIT_MAX_S）。仍失败：写告警状态 out/pm/pmnudge-gh-alert.json（watchdog 的 pmnudge:gh 项报给 Praise，
+ 成功一轮即清除），并在 gaps-open.json（pi 模式 = fleet-standards，否则 PI_STATE/out/pm；PI_GAPS_FILE 覆盖）按现有格式记一条，当天同 id 只更新。
 用法：pmnudge.py [--dry-run]（--dry-run 只打印，不写任何文件）
 """
-import sys
+import sys, fcntl
 from lib import *
 from finding_policy import ruling_keys
 RULINGS = "/workspace/fleet-standards/p2-rulings.md"
@@ -149,14 +152,79 @@ def fail_section(d, hh, e, dry):
         if re.search(rf"^## 白天催办 {hh[:2]}:\d\d（Pi 线；gh pr list 失败，本轮未催）", old, re.M): continue   # 同一小时只写一节
         write_atomic(pth, old + ("\n" if old and not old.endswith("\n\n") else "") + txt)
 
+GH_RETRIES = 2                 # 11-05：首次 + 最多 2 次重试
+GH_BACKOFF_S = (60, 180)       # 第 1、2 次重试前等多久（指数退避）
+GH_WAIT_MAX_S = 900            # 限流时等到重置，但单次最多 15 分钟（两次合计 < 1 小时，不压下一轮 :05）
+SLEEP = time.sleep             # tests stub this
+ALERT = f"{BASE}/out/pm/pmnudge-gh-alert.json"
+def gaps_file():
+    return os.environ.get("PI_GAPS_FILE") or ("/workspace/fleet-standards/gaps-open.json" if mode() == "pi" else f"{BASE}/out/pm/gaps-open.json")
+
+def with_retry(fn, what="gh pr list"):
+    """fn() with up to GH_RETRIES retries (backoff GH_BACKOFF_S; a recorded rate-limit reset within GH_WAIT_MAX_S is waited out).
+    Returns (result, errors before success); re-raises the last error after the retries, with .attempts = list of errors."""
+    errs = []
+    for i in range(GH_RETRIES + 1):
+        try: return fn(), errs
+        except RedLine: raise
+        except Exception as e:
+            errs.append(e)
+            if i == GH_RETRIES: e.attempts = errs; raise
+            wait = GH_BACKOFF_S[min(i, len(GH_BACKOFF_S) - 1)]
+            try: u = gh_rl_until()
+            except Exception: u = 0
+            if u: wait = max(wait, min(int(u - time.time()) + 2, GH_WAIT_MAX_S))
+            log(f"pmnudge: {what} 失败（第 {i + 1} 次），{wait}s 后重试：", str(e)[:200]); SLEEP(wait)
+
+def record_gap(d, hh, errs, path=None):
+    """gaps-open.json (fleet-standards/ORG.md 规则 5 的格式)：一天一条 id=pmnudge-gh-fail-<日>，同一天再失败只更新 item/evidence。"""
+    path = path or gaps_file(); gid = f"pmnudge-gh-fail-{d}"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    lk = open(path + ".lock", "a"); fcntl.flock(lk, fcntl.LOCK_EX)
+    try:
+        try: gs = json.load(open(path))
+        except FileNotFoundError: gs = []
+        if not isinstance(gs, list): raise RuntimeError(f"{path} 不是列表，不写")
+        g = next((x for x in gs if x.get("id") == gid), None)
+        rounds = sorted(set((g or {}).get("failed_rounds", []) + [hh]))
+        last = str(errs[-1])[:200] if errs else ""
+        new = {"id": gid, "opened": (g or {}).get("opened") or now_cst().strftime("%Y-%m-%dT%H:%M+08:00"),
+               "bot": "Mivo 测试项目经理", "owner": "Mivo QA 运维",
+               "item": f"pmnudge 白天催办 {d} 共 {len(rounds)} 轮在 {GH_RETRIES} 次重试后仍因 gh 失败未催（{'、'.join(rounds)}）",
+               "evidence_needed": f"gh 恢复后一轮催办成功（{BASE}/out/pm/{d}.md「白天催办」节为 gh 实查）；最近错误：{last}",
+               "deadline": (g or {}).get("deadline") or (now_cst() + dt.timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M+08:00"),
+               "last_chased": (g or {}).get("last_chased"), "chase_count": (g or {}).get("chase_count", 0),
+               "status": "open", "failed_rounds": rounds}
+        if g: g.update(new)
+        else: gs.append(new)
+        write_atomic(path, json.dumps(gs, ensure_ascii=False, indent=1))
+    finally: lk.close()
+    return gid
+
+def raise_alert(d, hh, errs):
+    """state file read by watchdog.pmnudge_gh_check -> one pmnudge:gh item (same open key while it lasts); success clears it."""
+    try: a = json.load(open(ALERT))
+    except Exception: a = {}
+    a = {"since": a.get("since") or now_cst().isoformat(timespec="seconds"), "last": now_cst().isoformat(timespec="seconds"),
+         "rounds": sorted(set(a.get("rounds", []) + [f"{d} {hh}"])), "attempts": len(errs), "error": str(errs[-1])[:300] if errs else ""}
+    write_atomic(ALERT, json.dumps(a, ensure_ascii=False, indent=1))
+    log(f"ALERT pmnudge: gh 在 {len(errs)} 次尝试后仍失败 -> {ALERT}（watchdog pmnudge:gh）")
+
 def main():
     dry = "--dry-run" in sys.argv
     d = today(); hh = now_cst().strftime("%H:%M")
     try:
-        prs = self_pr_list(REPO, "open", FIELDS, run=gh)   # task B: PraiseZhu + App PRs
+        prs, errs = with_retry(lambda: self_pr_list(REPO, "open", FIELDS, run=gh))   # task B: PraiseZhu + App PRs
+        if errs: log(f"pmnudge: gh pr list 第 {len(errs) + 1} 次成功")
     except Exception as e:   # gh 挂了：不崩、不催、不动进展文件；11-04：仍写一节说明时间、原因、下次重试，每小时都有记录
-        log("pmnudge: gh pr list 失败，本轮跳过：", str(e)[:200])
-        fail_section(d, hh, e, dry); return
+        log("pmnudge: gh pr list 重试后仍失败，本轮跳过：", str(e)[:200])
+        fail_section(d, hh, e, dry)
+        if not dry:
+            errs = getattr(e, "attempts", [e]); raise_alert(d, hh, errs)
+            try: log("gaps:", record_gap(d, hh, errs))
+            except Exception as ge: log("pmnudge: gaps-open.json 写入失败：", str(ge)[:200])
+        return
+    if not dry and os.path.exists(ALERT): os.remove(ALERT); log("pmnudge: gh 恢复，告警清除")
     b = b_on()
     if b:
         try: prs += [p for p in gh(["pr", "list", "-R", REPO, "--author", KIRO, "--state", "open", "--limit", "100", "--json", FIELDS])

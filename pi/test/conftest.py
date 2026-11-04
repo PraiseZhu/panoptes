@@ -16,7 +16,8 @@ SANDBOX_ENV = {
     "BOXHEALTH_TMP_ROOT": f"{_T}/tmp", "BOXHEALTH_LOG_DIRS": f"{_T}/logs", "MEMGUARD_DIR": f"{_T}/memguard",
     "PI_OUTAGE_WITNESS": f"{_T}/work/locks/outage-seq-witness", "PI_ROLLBACK_MARK": f"{_T}/state/ROLLBACK-SUSPECTED",
     "PI_ARGUS_ROOT": f"{_T}/argus",   # prwatch.tests_running/queued: the qa-slot files (else the live merge-test slot)
-    "npm_config_cache": f"{_T}/home/.npm", "PI_LOCK_DIR": f"{_T}/tmp",   # mergewatch / outbound job flocks (else the real /tmp ones)
+    "npm_config_cache": f"{_T}/home/.npm", "PI_LOCK_DIR": f"{_T}/tmp",
+    "PI_GAPS_FILE": f"{_T}/state/gaps-open.json",   # pmnudge.record_gap (else fleet-standards/gaps-open.json when fleet-mode=pi)   # mergewatch / outbound job flocks (else the real /tmp ones)
 }
 for _d in ("state", "work", "home", "tmp", "logs", "memguard"): os.makedirs(f"{_T}/{_d}", exist_ok=True)
 os.makedirs(f"{_T}/mktemp", exist_ok=True)
