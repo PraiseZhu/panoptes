@@ -109,13 +109,13 @@ class RedLines(unittest.TestCase):
 
 
 class Wrapper(Base):
-    def wrap(self, argv, env=None, cwd_url=""):
+    def wrap(self, argv, env=None, cwd_url="", caller=()):
         import gh_wrapper as W
         calls = []
         fake_run = lambda cmd, **k: types.SimpleNamespace(returncode=0 if cwd_url else 1, stdout=cwd_url, stderr="")
         err = io.StringIO()
         with redirect_stderr(err):
-            rc = W.main(argv, env={"PATH": "", "PRAISE_QA_REAL_GH": "/real/gh", **(env or {})}, execve=lambda p, a, e: calls.append((p, a, e)), run=fake_run)
+            rc = W.main(argv, env={"PATH": "", "PRAISE_QA_REAL_GH": "/real/gh", **(env or {})}, execve=lambda p, a, e: calls.append((p, a, e)), run=fake_run, caller=list(caller))
         self.assertNotIn(FAKE[PROD], err.getvalue()); self.assertNotIn(FAKE[PAN], err.getvalue())
         return rc, (calls[-1] if calls else None), err.getvalue()
 
@@ -141,6 +141,26 @@ class Wrapper(Base):
         _, c, _ = self.wrap(["search", "prs", "secret-arg"]); self.assertEqual(c[2]["GH_TOKEN"], FAKE[PROD]); self.assertEqual(self.minted[-1], PROD)
         line = json.loads(open(W.unresolved_log()).read().splitlines()[-1])
         self.assertEqual((line["cmd"], line["repo"]), ("gh search prs", None)); self.assertNotIn("secret-arg", json.dumps(line)); self.assertNotIn("ghs_", json.dumps(line))
+
+    def test_allowlisted_caller_gets_the_pat_and_the_real_gh(self):
+        import gh_wrapper as W
+        self.on("gh-app-wrapper-enabled")
+        for caller in (["node", "/home/x/vigil/cindy/bin/cindy-watcher.mjs"], ["bash", "/opt/box/verify.d/60-gh-auth.sh"],
+                       ["/usr/bin/python3", "/Users/j/review-pr/scripts/merge-reviewed-pr.py"], ["node", "/srv/app/scripts/ops/org-market-open-company-pr.mjs"]):
+            _, c, err = self.wrap(["pr", "list", "-R", PROD], env={"GITHUB_TOKEN": "ghp_pat", "GH_TOKEN": "ghs_old"}, caller=caller)
+            self.assertEqual(c[0], "/real/gh", caller); self.assertEqual(c[2].get("GH_TOKEN"), "ghp_pat", caller); self.assertIn("allowlisted caller", err)
+        self.assertEqual(json.loads(open(W.allowlist_log()).read().splitlines()[-1])["caller"], "lifeline-org-market-open-company-pr")
+        self.assertEqual(len({n for n, _ in W.CALLER_ALLOWLIST}), len(W.CALLER_ALLOWLIST))
+
+    def test_non_listed_caller_gets_the_app(self):
+        self.on("gh-app-wrapper-enabled")
+        for caller in (["node", "/home/x/other/bin/cindy-watcher-old.mjs"], ["node", "/x/notcindy/bin/cindy-watcher.mjs.bak"], []):
+            _, c, err = self.wrap(["pr", "list", "-R", PROD], env={"GITHUB_TOKEN": "ghp_pat"}, caller=caller)
+            self.assertEqual(c[2]["GH_TOKEN"], FAKE[PROD], caller); self.assertNotIn("allowlisted", err)
+
+    def test_red_lines_still_block_allowlisted_callers(self):
+        for a in (["pr", "merge", "1", "-R", PROD], ["pr", "edit", "1", "--body", "x", "-R", PROD]):
+            rc, c, err = self.wrap(a, caller=["node", "/x/mivo/bin/mivo-handoff.mjs"]); self.assertEqual((rc, c), (4, None), a); self.assertIn("red line", err)
 
     def test_mint_failure_falls_back(self):
         self.on("gh-app-wrapper-enabled"); self.mint_fail = True
