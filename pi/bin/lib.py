@@ -502,7 +502,7 @@ def gh_reads_stdin(args):
 # Explicit identities (task B 4: no @me / `api user` anywhere). Our own PRs are authored by PraiseZhu (PAT, older) or by the App.
 PAT_LOGIN = "PraiseZhu"
 # 11-05 (PM): the App slug lives in ONE constant; every bot form is derived from it at call time (patch APP_SLUG alone -> all follow)
-APP_SLUG = "praise-qa"
+APP_SLUG = "praise-qa"   # also hard-coded in JS: argus/src/github.mjs and pi/ledger/build-ledger.mjs (change all three together)
 def app_login(): return f"{APP_SLUG}[bot]"        # REST login (merged_by, comment user)
 def app_author(): return f"app/{APP_SLUG}"        # gh --author / search author: / gh --json author.login
 def self_logins(): return frozenset({PAT_LOGIN, app_login(), app_author(), APP_SLUG})   # REST login / gh --json author.login / slug

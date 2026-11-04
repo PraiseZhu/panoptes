@@ -22,7 +22,7 @@ const ctlLog = (root) => existsSync(join(root, 'ctl.log')) ? readFileSync(join(r
 
 test('on-merge wait logs wait start and acquire with PR id and kind (control.log + stderr)', async () => {
   const root = setup(); const h = holder(root); await sleepMs(300)
-  const w = waiter(root, 'slot_acquire_onmerge 9 1718 20', { SLOT_ID: 'PR-1718', SLOT_KIND: 'merge', PANOPTES_ONMERGE_MAX_CONC: '0' })
+  const w = waiter(root, 'slot_acquire_onmerge 9 1718 20', { SLOT_ID: 'PR-1718', SLOT_KIND: 'merge', PANOPTES_ONMERGE_MAX_CONC: '0', PANOPTES_ONMERGE_MAX_CONC_HARD: '0' })
   try {
     assert.ok(await until(() => ctlLog(root).includes('slot wait start')), 'wait start logged')
     assert.match(ctlLog(root), /info\|run-nightly slot wait start\|"id":"PR-1718","kind":"merge"/)
@@ -45,7 +45,7 @@ test('catch-up (normal) wait also logs start and acquire', async () => {
 test('wait > 8 min raises one alert (warn line + slot-wait-alerts state file), not at 8 min; acquire closes it (simulated clock)', async () => {
   const root = setup(); const clock = join(root, 'clock'); const t0 = 1_800_000_000; writeFileSync(clock, String(t0))
   const h = holder(root); await sleepMs(300)
-  const w = waiter(root, 'slot_acquire_onmerge 9 1718 30', { SLOT_ID: 'PR-1718', SLOT_KIND: 'merge', PANOPTES_ONMERGE_MAX_CONC: '0', PANOPTES_TEST_CLOCK: clock })
+  const w = waiter(root, 'slot_acquire_onmerge 9 1718 30', { SLOT_ID: 'PR-1718', SLOT_KIND: 'merge', PANOPTES_ONMERGE_MAX_CONC: '0', PANOPTES_ONMERGE_MAX_CONC_HARD: '0', PANOPTES_TEST_CLOCK: clock })
   const alert = () => join(root, 'slot-wait-alerts', `${w.pid}.json`)
   try {
     assert.ok(await until(() => ctlLog(root).includes('slot wait start')))
@@ -66,7 +66,7 @@ test('a fresh merge overtakes a queued rerun for the next free slot (no cap chan
   const root = setup(); const h = holder(root)
   const conc = spawn('sleep', ['60']); writeFileSync(join(root, 'priority', `conc-${conc.pid}`), '')   // the one concurrent slot is taken
   await sleepMs(300)
-  const env = { PANOPTES_ONMERGE_MAX_CONC: '1' }
+  const env = { PANOPTES_ONMERGE_MAX_CONC: '1', PANOPTES_ONMERGE_MAX_CONC_HARD: '1' }
   const cu = waiter(root, 'slot_acquire_normal 9 30', { ...env, SLOT_ID: 'PR-1600', SLOT_KIND: 'catch-up' })
   const rr = waiter(root, 'slot_acquire_onmerge 9 1641 30', { ...env, SLOT_ID: 'PR-1641', SLOT_KIND: 'rerun' })   // queued first, polls fast
   await sleepMs(600)
@@ -85,7 +85,7 @@ test('a fresh merge overtakes a queued rerun for the next free slot (no cap chan
 test('starvation-safe: a rerun waiting >= PANOPTES_SLOT_STARVE_S counts as a fresh merge (oldest first)', async () => {
   const root = setup(); const clock = join(root, 'clock'); const t0 = 1_800_000_000; writeFileSync(clock, String(t0))
   const h = holder(root); await sleepMs(300)
-  const env = { PANOPTES_ONMERGE_MAX_CONC: '0', PANOPTES_TEST_CLOCK: clock, PANOPTES_SLOT_STARVE_S: '1800' }
+  const env = { PANOPTES_ONMERGE_MAX_CONC: '0', PANOPTES_ONMERGE_MAX_CONC_HARD: '0', PANOPTES_TEST_CLOCK: clock, PANOPTES_SLOT_STARVE_S: '1800' }
   const rr = waiter(root, 'slot_acquire_onmerge 9 1641 30', { ...env, SLOT_ID: 'PR-1641', SLOT_KIND: 'rerun' })
   await sleepMs(400); writeFileSync(clock, String(t0 + 1800))
   const mg = waiter(root, 'slot_acquire_onmerge 9 1718 30', { ...env, SLOT_ID: 'PR-1718', SLOT_KIND: 'merge' })

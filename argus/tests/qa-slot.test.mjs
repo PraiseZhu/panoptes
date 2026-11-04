@@ -2,7 +2,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -246,9 +246,40 @@ test('on-merge: slot busy + memory ok -> concurrent; memory low -> keeps waiting
       r = sh(root, `exec 9>$ARGUS_ROOT/nightly.lock; slot_acquire_onmerge 9 103 1 && echo $SLOT_MODE || echo refused`, { PANOPTES_MEMINFO: mi(9 * 1048576) })
       assert.equal(r.stdout.trim(), 'refused')
     } finally { same.kill() }
-    r = sh(root, `: >$ARGUS_ROOT/priority/conc-${h.pid}; exec 9>$ARGUS_ROOT/nightly.lock; slot_acquire_onmerge 9 104 1 && echo $SLOT_MODE || echo capped`, { PANOPTES_MEMINFO: mi(9 * 1048576), PANOPTES_ONMERGE_MAX_CONC: '1' })
-    assert.equal(r.stdout.trim(), 'capped')
+    r = sh(root, `: >$ARGUS_ROOT/priority/conc-${h.pid}; exec 9>$ARGUS_ROOT/nightly.lock; slot_acquire_onmerge 9 104 1 && echo $SLOT_MODE || echo capped`, { PANOPTES_MEMINFO: mi(9 * 1048576), PANOPTES_ONMERGE_MAX_CONC: '1', PANOPTES_ONMERGE_MAX_CONC_HARD: '1' })
+    assert.equal(r.stdout.trim(), 'capped')   // 11-05: the hard cap is the ceiling now (MAX_CONC is the always-allowed floor)
   } finally { h.kill() }
+})
+
+// 11-05 qa_start:PR-1718 (ROOTCAUSE.md plan A, 电脑运维-reviewed spec): concurrency cap by memory (slot_conc_room).
+// Memory simulated with PI_TEST_MEM_AVAIL_MB, time with PANOPTES_TEST_CLOCK; defaults headroom 3072, hard cap 3, min gap 600 s.
+test('on-merge: memory-scaled concurrency cap (headroom, 10-min gap, balloon 0, hard cap 3; below 2 as before)', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'argus-slot-')); mkdirSync(join(root, 'priority'))
+  const vm = (mb) => { const f = join(root, `vm-${mb}`); writeFileSync(f, `balloon_inflate ${mb * 256 + 1000}\nballoon_deflate 1000\n`); return f }
+  const mi = join(root, 'mi'); writeFileSync(mi, 'MemTotal: 16000000 kB\nMemAvailable: 1 kB\nSwapTotal: 8388604 kB\nSwapFree: 5242880 kB\n')
+  const clock = join(root, 'clock'); const NOW = 1_800_000_000; writeFileSync(clock, String(NOW))
+  const mark = join(root, 'priority', 'last-parallel-start')
+  const h = holder(root); await sleepMs(300)
+  const live = []
+  const setConc = (n) => {
+    while (live.length) { const p = live.pop(); p.kill(); rmSync(join(root, 'priority', `conc-${p.pid}`), { force: true }) }
+    for (let i = 0; i < n; i++) { const p = spawn('sleep', ['60']); live.push(p); writeFileSync(join(root, 'priority', `conc-${p.pid}`), '') }
+  }
+  const tryOnce = (pr, mem, { balloon = 0, lastStart = 0 } = {}) => {
+    writeFileSync(mark, String(lastStart))
+    return sh(root, `exec 9>$ARGUS_ROOT/nightly.lock; slot_acquire_onmerge 9 ${pr} 1 && echo $SLOT_MODE || echo waiting; rm -f $ARGUS_ROOT/priority/conc-$$`,
+      { PANOPTES_TEST: '1', PI_TEST_MEM_AVAIL_MB: String(mem), PANOPTES_TEST_CLOCK: clock, PANOPTES_MEMINFO: mi, PANOPTES_VMSTAT: vm(balloon) }).stdout.trim()
+  }
+  try {
+    setConc(2); assert.equal(tryOnce(201, 10000), 'concurrent')                          // 10000 >= 6144 + 3072, no recent start, balloon 0
+    assert.equal(readFileSync(mark, 'utf8').trim(), String(NOW))                           // admission time recorded in the slot dir
+    setConc(2); assert.equal(tryOnce(202, 9000), 'waiting')                               // 9000 < 9216 -> keeps waiting
+    setConc(2); assert.equal(tryOnce(203, 10000, { lastStart: NOW - 300 }), 'waiting')    // memory ok, last start 5 min ago -> refused
+    setConc(2); assert.equal(tryOnce(204, 10000, { lastStart: NOW - 600 }), 'concurrent') // exactly 10 min ago -> admitted
+    setConc(2); assert.equal(tryOnce(205, 10000, { balloon: 1024 }), 'waiting')            // balloon non-zero -> refused (old rule allowed <= 2048)
+    setConc(3); assert.equal(tryOnce(206, 16000), 'waiting')                              // hard cap 3
+    setConc(1); assert.equal(tryOnce(207, 6500, { lastStart: NOW, balloon: 1024 }), 'concurrent')   // below 2: unchanged (no gap / balloon-0 rule)
+  } finally { setConc(0); h.kill() }
 })
 
 test('on-merge: free slot -> lock mode (unchanged)', () => {
