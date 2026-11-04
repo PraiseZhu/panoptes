@@ -110,7 +110,18 @@ def gh_app_wanted(args):
     if repo not in GH_APP_REPOS or not os.path.exists(gh_app_flag()): return False
     if any(x == "@me" or re.match(r"/?user(?:$|/)", x) for x in args[1:]): return False   # identity-dependent: stays the PAT's
     return gh_is_read(args) or gh_app_writes_ok(args)
-def gh_app_writes_ok(args): return False   # P1: every write stays on the PAT
+# P2 (11-04): panoptes WRITES (PR create / merge / comment / branch delete, git push of infra branches) use the App too while BOTH
+# $PI_STATE/gh-app-enabled and $PI_STATE/gh-app-writes-enabled exist. rm gh-app-writes-enabled -> writes back on the PAT (reads stay).
+APP_LOGIN = "praise-qa[bot]"; APP_AUTHOR = "app/praise-qa"   # how the App shows up as a PR author (gh --author app/<slug>)
+def gh_app_writes_flag(): return f"{PI_STATE}/gh-app-writes-enabled"
+def gh_app_writes_ok(args): return os.path.exists(gh_app_writes_flag())
+def gh_app_writes_on(): return os.path.exists(gh_app_flag()) and os.path.exists(gh_app_writes_flag())
+def git_push_env(repo):
+    """-> (git -c args, env) for a git push to repo: the App token through gh's credential helper while the write flags are on,
+    else ([], None) = the box's default credentials (PAT) exactly as before"""
+    ident, env = gh_env(["repo", "clone", repo])   # "repo clone" is not a read: needs the writes flag
+    if ident != "app": return [], None
+    return ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"], env
 def gh_env(args):
     """-> (identity "app"|"pat", env for subprocess or None = inherit). Minting failures fall back to the PAT with one masked line."""
     if not gh_app_wanted(args): return "pat", None
