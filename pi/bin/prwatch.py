@@ -296,10 +296,23 @@ def sample_peaks(st, t):
         if v >= (700 if kind == "fix" else 1000): pk[kind] = (pk.get(kind, []) + [v])[-20:]
 
 
-def headroom_mb(t, mem=None, st=None):
-    """MemAvailable minus what is still to come: every running fix up to its learned peak (a wrapper not yet started counts in
-    full), and a merge test up to its learned peak -- the running one's remaining growth or, once a fix is running, a whole one
-    that may start any minute (cron :07, every merge)."""
+# 11-04 (accept-206 round 2): 3a reworked. qa-slot.sh can run up to 1 + PANOPTES_ONMERGE_MAX_CONC merge tests at once (the slot holder
+# plus memory-admitted concurrent on-merge runs; PANOPTES_ONMERGE_CONCURRENT=0 -> only the holder), and admits a concurrent one at
+# >= 6 GB MemAvailable without knowing what prwatch admitted. So a whole next-test peak stays reserved while another test CAN still
+# start; only once every test slot is taken is nothing more reserved (nothing else can start). Read the same env as run-nightly.sh.
+# Rollback: touch {BASE}/prwatch-reserve-1104-off -> headroom_mb_1103 below, the 11-03 code verbatim (union of runs, same decisions).
+RESERVE_1104_OFF = f"{BASE}/prwatch-reserve-1104-off"
+
+
+def max_tests():
+    """merge tests qa-slot.sh may run at once: the slot holder + concurrent on-merge runs (scripts/qa-slot.sh slot_acquire_onmerge)"""
+    if os.environ.get("PANOPTES_ONMERGE_CONCURRENT", "1") != "1": return 1
+    try: return 1 + max(0, int(os.environ.get("PANOPTES_ONMERGE_MAX_CONC") or 2))
+    except ValueError: return 3
+
+
+def headroom_mb_1103(t, mem=None, st=None):
+    """main's headroom_mb (11-03 rule + #208 per-run test peaks), verbatim (rollback target of RESERVE_1104_OFF; test_headroom_1104 checks identical decisions)"""
     run_pk, pan_pk = learned(st, "fix", RUN_PEAK_MB), learned(st, "panoptes", PANOPTES_PEAK_MB)
     pys, waiting = prfix_runs(t)
     grow = sum(max(0, run_pk - sum(t[q][1] for q in tree(t, p))) for p in pys) + run_pk * len(waiting)
@@ -312,6 +325,25 @@ def headroom_mb(t, mem=None, st=None):
     if flag_on(TEST_RESERVE_OFF):                    # always room for the next merge test, whatever runs now --
         # but with nothing running the first fix is not stacked on a whole test peak (11-03: 9030 + 8687 MB > a 16 GB box)
         grow += pan_pk if (pan or pys or waiting or disp) else min(pan_pk, TEST_RESERVE_CAP_MB)
+    elif not pan and (pys or waiting or disp): grow += pan_pk
+    return (mem_mb() if mem is None else mem) - grow
+
+
+def headroom_mb(t, mem=None, st=None):
+    """MemAvailable minus what is still to come: every running fix up to its learned peak (a wrapper not yet started counts in
+    full), every running merge test up to its own learned peak (11-04 b), and a whole next merge test while one can still start."""
+    if not flag_on(RESERVE_1104_OFF): return headroom_mb_1103(t, mem, st)
+    run_pk, pan_pk = learned(st, "fix", RUN_PEAK_MB), learned(st, "panoptes", PANOPTES_PEAK_MB)
+    pys, waiting = prfix_runs(t)
+    grow = sum(max(0, run_pk - sum(t[q][1] for q in tree(t, p))) for p in pys) + run_pk * len(waiting)
+    disp = dispatch_runs(t)   # fleet Pi tasks share the same RAM: count them up to their peak too
+    grow += sum(max(0, TASK_PEAK_MB - sum(t[q][1] for q in tree(t, p))) for p in disp)
+    runs = panoptes_runs(t)
+    grow += sum(max(0, pan_pk - sum(t[q][1] for q in ps)) for ps in runs.values())
+    pan = bool(runs)
+    if flag_on(TEST_RESERVE_OFF):
+        if not pan: grow += pan_pk if (pys or waiting or disp) else min(pan_pk, TEST_RESERVE_CAP_MB)
+        elif len(runs) < max_tests(): grow += pan_pk   # another merge test may still start beside the running one(s)
     elif not pan and (pys or waiting or disp): grow += pan_pk
     return (mem_mb() if mem is None else mem) - grow
 
