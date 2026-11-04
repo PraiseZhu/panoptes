@@ -345,6 +345,10 @@ fi
 source "$PANOPTES_DIR/scripts/qa-slot.sh"
 exec 9>"$ARGUS_ROOT/nightly.lock"
 ONMERGE_PRS=(); prev=""; for a in "$@"; do [[ "$prev" == --pr ]] && ONMERGE_PRS+=("$a"); [[ "$a" == --pr=* ]] && ONMERGE_PRS+=("${a#--pr=}"); prev="$a"; done
+# 11-05 slot wait logs / priority order (scripts/qa-slot.sh): who is waiting. mergewatch sets PANOPTES_SLOT_KIND=rerun on a requeue.
+SLOT_ID="$( (( ${#ONMERGE_PRS[@]} == 1 )) && echo "PR-${ONMERGE_PRS[0]}" || echo "${TRIGGER}-$$")"
+if [[ -n "$PRIORITY" ]]; then SLOT_KIND="${PANOPTES_SLOT_KIND:-merge}"; else SLOT_KIND="$TRIGGER"; fi
+export SLOT_ID SLOT_KIND
 if [[ -n "$PRIORITY" && ${#ONMERGE_PRS[@]} -eq 1 && "${PANOPTES_ONMERGE_CONCURRENT:-1}" == 1 ]]; then
   echo "[panoptes] on-merge run #${ONMERGE_PRS[0]}: per-PR lock, slot or memory-admitted concurrent run…" >&2
   slot_acquire_onmerge 9 "${ONMERGE_PRS[0]}" "${WAIT_LOCK:-14400}" || { echo "gave up waiting for the QA slot" >&2; exit 75; }
