@@ -27,10 +27,7 @@ EXIT_RED_LINE = 4
 
 # (name, calling-script path suffix): one entry per caller; suffix match so copies/checkouts match too. Tracked as gh-allowlist:<name>.
 CALLER_ALLOWLIST = (
-    ("vigil-cindy-watcher", "cindy/bin/cindy-watcher.mjs"),
-    ("vigil-cindy-repair", "cindy/bin/cindy-repair.mjs"),
-    ("vigil-mivo-watcher", "mivo/bin/mivo-watcher.mjs"),
-    ("vigil-mivo-handoff", "mivo/bin/mivo-handoff.mjs"),
+    # 11-04: vigil-cindy-watcher/-repair and vigil-mivo-watcher/-handoff removed (vigil#274 merged; vigil runs only on the Mac mini, not via this wrapper).
     ("lifeline-tick", "scripts/loops/lifeline/tick.mjs"),
     ("lifeline-report", "scripts/loops/lifeline/report.mjs"),
     # mivo-merger's app/scripts/ops/... must precede lifeline's scripts/ops/... (a shorter suffix of it): first match wins.
