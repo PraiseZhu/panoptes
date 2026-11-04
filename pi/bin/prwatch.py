@@ -352,11 +352,13 @@ def admit_block(t, st):
     """-> (why a new fix / revise may not start, or None; headroom MB)"""
     room, need = headroom_mb(t, st=st), ADMIT_FREE_MB + learned(st, "fix", RUN_PEAK_MB)
     if room < need: return f"headroom {room} MB < {need} MB", room
-    if flag_on(TEST_RESERVE_OFF):
+    if flag_on(TEST_RESERVE_OFF):   # flag_on(off_file) = the off file is ABSENT: the cap / queue rule is the default (11-05: not inverted)
         pys, waiting = prfix_runs(t)
         if len(pys) + len(waiting) >= MAX_FIXES: return f"{len(pys) + len(waiting)} fixes running (max {MAX_FIXES})", room
         q = tests_queued()
         if q: return f"{q} merge test(s) queued", room
+    why = fixpr_cap_reason(gh)   # 11-05 #1762: the same open-fix-PR count as outbound / stdcheck (fail closed)
+    if why: return why, room
     return None, room
 
 
@@ -492,9 +494,11 @@ REVISE_FLAG = f"{BASE}/takeover/prfix-revise"
 UB_PER_DAY = 6          # update-branch per PR per day (10-24: the old cap of 2 per PR for life ran out on #1257; main keeps moving)
 MAX_REVISIONS = 2       # = prfix.MAX_REVISIONS
 MAX_MERGES = 3          # = prfix.MAX_MERGES
-PILINE = "<!-- pi-line fixpr:"
+PILINE = FIX_PR_MARK
+# is_fix_pr (from lib): the one counting rule (stdcheck / outbound / admit_block)
 def is_bot_fixpr(p):
-    """a draft fix PR the Pi line (or the Grok line via grokline.pr_meta) opened: pi-line marker + qa-fix/* branch"""
+    """a draft fix PR the Pi line (or the Grok line via grokline.pr_meta) opened: pi-line marker + qa-fix/* branch. Driving rule only
+    (ready / rerun / revise); counting toward the cap is the wider shared lib.is_fix_pr"""
     return PILINE in (p.get("body") or "") and (p.get("headRefName") or "").startswith("qa-fix/")
 
 
@@ -701,6 +705,16 @@ def check_drafts(st):
         if any(not nm.startswith(AGGREGATE) for nm in red): red = [nm for nm in red if not nm.startswith(AGGREGATE)]
         behind = (p.get("mergeStateStatus") or "").upper() == "BEHIND"
         cnt = ub.get(str(n)) if (ub.get(str(n)) or {}).get("day") == day else {"day": day, "n": 0}
+        if all(nm.startswith("pr-ci-freshness") for nm in red) and not any((c.get("name") or c.get("context") or "").startswith(AGGREGATE) for c in cs):
+            # 11-05 #1762: freshness is red because CI (verify) never ran on this head -- a rerun cannot fix that (it waits for a
+            # pull_request event). No rerun; one reminder per head.
+            if seen != "nocirun":
+                act("prwatch", {"key": f"nocirun:{tag}", "type": "slack.dm", "to": "Praise", "text": PN.text(PN.item("action", f"修复 PR #{n} 的 CI 没有在当前提交上跑",
+                    f"修 PR bot 为 #{qa} 开的修复 PR #{n}（草稿）当前提交上没有 CI（verify）运行，所以 pr-ci-freshness 一直是红的，重跑它没用。",
+                    "这个修复 PR 卡住了，转不了正式。", todo=["推一个空提交，或者关掉再打开这个 PR，触发新的 pull_request 事件"],
+                    link=f"https://github.com/{REPO}/pull/{n}"))})
+                done[tag] = "nocirun"; qlog(f"#{n} pr-ci-freshness red and no CI run on head {head[:12]} -> one reminder, no rerun")
+            continue
         if all(nm.startswith(RACE_PRONE) for nm in red):
             # gates that judge the whole check set (10-23 #1250, #1257): when the PR is behind main they want evidence on the current
             # base/head merge -> update-branch at once (the repo's own pr-gate-rerun already re-ran them; prwatch's reruns fixed 0 of 4);

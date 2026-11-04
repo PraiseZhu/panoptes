@@ -48,7 +48,7 @@ class OutboundBase(unittest.TestCase):
         cmds, ghs = [], []
         with mock.patch.object(O, "run", side_effect=lambda c, *k, **kw: cmds.append(list(c)) or ""), \
              mock.patch.object(O, "apply_fix_patch", return_value="main"), \
-             mock.patch.object(O, "fixpr_gate_reason", return_value=None), \
+             mock.patch.object(O, "fixpr_gate_reason", return_value=None), mock.patch.object(O, "fixpr_cap_reason", return_value=None), \
              mock.patch.object(O, "gh", side_effect=lambda c, *k, **kw: ghs.append(list(c)) or ({"baseRefName": S2} if c[:2] == ["pr", "view"] else "https://github.com/x/y/pull/1\n")), \
              mock.patch.object(O, "fixpr_docs_rename", return_value="ok"):
             O.h_fixpr(a)[3]()
