@@ -358,6 +358,10 @@ elif [[ -n "$WAIT_LOCK" ]]; then
 else
   slot_acquire_normal 9 "" || { echo "another run is active (use --wait-lock to queue)" >&2; exit 75; }
 fi
+# 11-04 P0 (PR-1789 catch-up 401): the App token from the gh_app_env call above was resolved before the slot wait (up to
+# --wait-lock 4h); installation tokens live 1 h, so a run that queued longer started node with an expired GH_TOKEN. Re-resolve it
+# now that the slot is held (ghtoken.py hands out the cached token while > 10 min is left, else mints). Same no-PAT-fallback rule.
+gh_app_env "$PANOPTES_DIR" "${PI_STATE:-/workspace/mivo-qa/pi}" || { echo "gh app token refresh after the slot wait failed" >&2; exit 1; }
 
 # Per-run temp dir: everything this run (and its node / git / test children) puts under TMPDIR lands in
 # /tmp/argus-run-XXXXXX and is removed on exit (sandboxed runs bind their own dirs explicitly, unaffected).
