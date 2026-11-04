@@ -432,6 +432,11 @@ esac
 [[ -n "${PANOPTES_GATE_DRYRUN:-}" && -z "${PANOPTES_TEST:-}" ]] && { echo "[panoptes] WARNING PANOPTES_GATE_DRYRUN=$PANOPTES_GATE_DRYRUN set outside tests (PANOPTES_TEST unset): ignored, running normally" | tee -a "$LOG" >&2; ctl "run-nightly gate dryrun ignored" "\"level\":\"warn\""; unset PANOPTES_GATE_DRYRUN; }
 # tests only (PANOPTES_TEST=1): stop right after the gate decision (normal / degraded print it; skip already exited 76)
 [[ "${PANOPTES_GATE_DRYRUN:-}" == 1 ]] && { echo "[panoptes] gate: mode=$GATE_MODE wait=${GATE_WAIT_S}s shards=${ARGUS_UNIT_SHARDS:-auto} max_parallel=${ARGUS_MAX_PARALLEL:-auto}"; exit 0; }
+# 11-05 (inf1-54da4439, PR-1789 gh 401 in stage discovery): the App token above is minted before the slot wait (--wait-lock up to
+# 4 h) and before the memory-gate wait, but an installation token lives 1 h. A run that waited 3926 s therefore started the GitHub
+# work (Discovery / getPull) with an expired token: gh: Bad credentials (HTTP 401), nothing tested in that round. Mint again after
+# both waits -- same App-only call as above (PATs stay out of the environment, G4) -- so node starts from a valid token.
+gh_app_env "$PANOPTES_DIR" "${PI_STATE:-/workspace/mivo-qa/pi}" || { echo "gh app token refresh after the slot wait failed: not starting the run on an expired token (rm \$PI_STATE/gh-app-nightly-enabled to roll back)" >&2; exit 1; }
 echo "[panoptes] code: $PANOPTES_DIR ($(git -C "$PANOPTES_DIR" rev-parse --short HEAD 2>/dev/null || echo '?'))  data: $QA_HOME  log: $LOG" >&2
 # Lower priority so the box stays responsive
 nice -n 10 node --disable-warning=ExperimentalWarning src/cli.mjs nightly "$@" 2> >(tee -a "$LOG" >&2) | tee -a "$LOG"
