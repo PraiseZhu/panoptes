@@ -29,11 +29,12 @@ class T(unittest.TestCase):
     def test_opening_commit_is_pi_owned(self):
         patch = os.path.join(tempfile.mkdtemp(), "x.patch"); 
         with open(patch, "w") as f: f.write("diff --git a/a b/a\n")
-        a = {"key": KEY, "patch": patch, "title": "fix(ci): 连续失败判定只查询最近 100 次运行 (QA #1518)", "body_must_contain": "QA: #1518"}
+        a = {"key": KEY, "patch": patch, "title": "fix(ci): 连续失败判定只查询最近 100 次运行 (QA #1518)", "body_must_contain": "QA: #1518", "qa": 1518, "base_ref": "main"}
         cmds = []
         with mock.patch.object(O, "run", side_effect=lambda c, *k, **kw: cmds.append(list(c)) or ""), \
              mock.patch.object(O, "apply_fix_patch", return_value="main"), \
              mock.patch.object(O, "fixpr_gate_reason", return_value=None), \
+             mock.patch.object(O, "fixpr_check_source_base", return_value=None), \
              mock.patch.object(O, "gh", return_value="https://github.com/xindong/mivo-canvas-plugin/pull/1563\n"), \
              mock.patch.object(O, "fixpr_docs_rename", return_value="ok"):
             O.h_fixpr(a)[3]()

@@ -317,7 +317,7 @@ class TestOutboundPush(GitTmp):
         wf(f"{seed}/src/other.js", "x\n"); sh(*g, "add", "-A"); sh(*g, "commit", "-q", "-m", "unrelated")
         p2 = f"{self.tmp}/fix2.patch"; wf(f"{seed}/src/other.js", "y\n"); wf(p2, sh(*g, "diff")); sh(*g, "checkout", "-q", "--", ".")
         sh(*g, "push", "-q", self.origin, "main"); sh("git", "-C", d, "pull", "-q", "origin", "main")
-        self.assertEqual(self.OB.apply_fix_patch(d, p2, base, "qa-fix/x"), "main")
+        self.assertEqual(self.OB.apply_fix_patch(d, p2, base, "qa-fix/x"), "base")
 
     def test_push_fix_state(self):
         OB = self.OB; calls = {}

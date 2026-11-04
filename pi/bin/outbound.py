@@ -406,22 +406,26 @@ def h_fixpr(a):
         if why: raise RuntimeError(f"gated: {why}")
         if not (patch and os.path.exists(patch)): raise RuntimeError("patch missing")
         v = gh(["repo", "view", REPO, "--json", "viewerPermission,defaultBranchRef"])
-        return f"patch {os.path.getsize(patch)}B, perm={v['viewerPermission']}, base={v['defaultBranchRef']['name']}, docs={a.get('docs_dir_predicted') or '-'}"
+        return f"patch {os.path.getsize(patch)}B, perm={v['viewerPermission']}, base={fixpr_base_ref(a)} (default {v['defaultBranchRef']['name']}), docs={a.get('docs_dir_predicted') or '-'}"
     def do():
         why = fixpr_gate_reason(a)                                                  # (1) gate, re-read right before pushing
         if why: raise RuntimeError(f"refused: gated ({why})")
+        bref = fixpr_base_ref(a)
+        fixpr_check_source_base(a, bref)
         d = W.mkdtemp("pi-fixpr-")   # PI_WORK/tmp: janitor removes what a killed run leaves
         try:
-            bref = a.get("base_ref")   # 11-04: the source PR's base (prfix checked it); legacy actions without it: default branch
-            run(["gh", "repo", "clone", REPO, d, "--", "--depth", "50", "-q", *(["--branch", bref] if bref else [])])
+            try: run(["gh", "repo", "clone", REPO, d, "--", "--depth", "50", "-q", "--branch", bref])
+            except Exception as e:
+                if re.search(r"Remote branch .* not found|couldn't find remote ref", str(e), re.I): raise GiveUp(f"base gone: {bref!r} no longer exists on {REPO}")
+                raise
             br = "qa-fix/" + a["key"].replace(":", "-")[:60]
             run(["git", "-C", d, "config", "user.name", GIT_NAME]); run(["git", "-C", d, "config", "user.email", GIT_EMAIL])  # repo-local
-            run(["git", "-C", d, "checkout", "-b", br]); apply_fix_patch(d, patch, a.get("base"), br)
+            run(["git", "-C", d, "checkout", "-b", br]); apply_fix_patch(d, patch, a.get("base"), br, bref)
             md = patch[:-6] + ".md" if patch.endswith(".patch") else None
             title = a.get("title") or f"fix: QA follow-up ({must})"
             run(["git", "-C", d, "commit", "-m", title, "-m", pi_open_trailer(a["key"])]); run(["git", "-C", d, "push", "-u", "origin", br])
             body = (open(md).read() if md and os.path.exists(md) else "") + f"\n\n{must}\n<!-- pi-line {a['key']} -->"
-            created = gh(["pr", "create", "-R", REPO, "--draft", *(["--base", bref] if bref else []), "--head", br, "--title", title, "--body", body], js=False).strip()
+            created = gh(["pr", "create", "-R", REPO, "--draft", "--base", bref, "--head", br, "--title", title, "--body", body], js=False).strip()
             real = fixpr_real_number(created)                                       # (2) docs/pr/<pred> -> docs/pr/<real>
             try: note = fixpr_docs_rename(d, br, a, real) if real else "docs rename skipped: no PR number in gh output"
             except Exception as e:   # the PR exists now: never fail the action, queue a retry instead
@@ -434,16 +438,29 @@ def h_fixpr(a):
     return f"gh draft fix PR ({must})", state, validate, do
 class GiveUp(RuntimeError):
     """an action that can never succeed as written: mark it gave_up at once (no 5 retries); its producer re-plans."""
-def apply_fix_patch(d, patch, base=None, br=None):
-    """prfix verified the patch on its base; main may have moved since (10-24: a plain `git apply` onto the new main failed 5x ->
-    gave_up, ticket stuck). Try main, then a 3-way apply. If neither works, give up at once: a PR branched from the old base would
-    conflict with main (DIRTY, GitHub runs no checks), so prfix fixes the ticket again on the current main instead."""
-    if subprocess.run(["git", "-C", d, "apply", "--index", patch], capture_output=True).returncode == 0: return "main"
+def apply_fix_patch(d, patch, base=None, br=None, bref="main"):
+    """prfix verified the patch on its base commit; the target branch bref (the source PR's base) may have moved since (10-24: a plain
+    `git apply` onto the moved branch failed 5x -> gave_up, ticket stuck). Try a plain apply, then a 3-way apply. If neither works,
+    give up at once: a PR branched from the old base would conflict with bref (DIRTY, GitHub runs no checks), so prfix fixes the
+    ticket again on the current bref instead."""
+    if subprocess.run(["git", "-C", d, "apply", "--index", patch], capture_output=True).returncode == 0: return "base"
     r = subprocess.run(["git", "-C", d, "apply", "--3way", "--index", patch], capture_output=True, text=True)
     if r.returncode == 0 and not subprocess.run(["git", "-C", d, "diff", "--name-only", "--diff-filter=U"], capture_output=True, text=True).stdout.strip():
-        return "main-3way"
+        return "base-3way"
     subprocess.run(["git", "-C", d, "reset", "-q", "--hard", "HEAD"], capture_output=True)
-    raise GiveUp(f"patch no longer applies on main (verified base {str(base or '?')[:9]}): {(r.stderr or '').strip()[-160:]}")
+    raise GiveUp(f"patch no longer applies on {bref} (verified base {str(base or '?')[:9]}): {(r.stderr or '').strip()[-160:]}")
+def fixpr_base_ref(a):
+    """11-04 #200 follow-up (3): the action must carry the source PR's base; a legacy action without one is re-planned by prfix, never
+    sent to the default branch (#1682/#1710 went to main though their source was on integration/canvas-s2)."""
+    b = a.get("base_ref")
+    if not b or not re.fullmatch(r"[A-Za-z0-9._/-]+", str(b)): raise GiveUp(f"legacy action without base_ref ({b!r}): refused, prfix re-plans it")
+    return b
+def fixpr_check_source_base(a, bref):
+    """11-04 #200 follow-up (2): re-read the source PR's current base right before pushing; it may have been retargeted since prfix."""
+    n = a.get("qa")
+    if not n: raise GiveUp("action has no source PR (qa): cannot re-check its base")
+    cur = (gh(["pr", "view", str(n), "-R", REPO, "--json", "baseRefName"]) or {}).get("baseRefName")
+    if cur != bref: raise GiveUp(f"refused: source PR #{n} base is now {cur!r}, action targets {bref!r}")
 def h_push_fix(a, now=None):
     """gh.pr.push-fix {pr, branch, head, patch, title, message}: prfix --revise fixed red CI on our own draft fix PR (10-24). Plain
     push (never force) onto the PR's qa-fix/* branch, only while the PR is still our open draft and its head is the one that was fixed."""
