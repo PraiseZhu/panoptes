@@ -90,6 +90,14 @@ class Checks(Base):
         self.assertEqual(list(S.check_fix_prs(NOW)), ["concurrent"])
         self.prs[S.REPO] = self.prs[S.REPO][:2] + [fx(4)]; self.assertEqual(S.check_fix_prs(NOW), {})
 
+    def test_fix_prs_drafts_count_any_author_product_repo(self):
+        """Jasper: open Pi-line fix PRs in xindong/mivo-canvas-plugin, drafts included; breach only when > 2"""
+        self.prs[S.REPO] = [{"number": n, "headRefName": f"qa-fix/{n}", "body": "", "isDraft": True} for n in range(3)]
+        self.assertEqual(list(S.check_fix_prs(NOW)), ["concurrent"])           # 3 drafts = breach
+        c = self.gh_calls[-1]; self.assertEqual(c[c.index("-R") + 1], "xindong/mivo-canvas-plugin")
+        self.assertNotIn("--draft", c); self.assertNotIn("--author", c); self.assertEqual(c[c.index("--state") + 1], "open")
+        self.prs[S.REPO] = self.prs[S.REPO][:2]; self.assertEqual(S.check_fix_prs(NOW), {})   # exactly 2 = pass
+
     def test_tasks_breach_missing_failed_and_retry_once(self):
         self.runs["pmnudge"] = []
         s = S.last_slot(*S.TASKS["ledger"], NOW); self.runs["ledger"] = [(s, s, 1, None)]

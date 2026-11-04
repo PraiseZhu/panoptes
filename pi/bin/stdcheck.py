@@ -7,7 +7,7 @@ Checks (each one: a list of objects that breach, from files on disk plus two gh 
                prs[].merged_at vs run.started_at; mergewatch-<day>.log "launched priority run ... for PR #N" / "branch merge #N"
                for merges without a report yet -- same sources as pi-work/gaps-1105/LATENCY.md)
   panoptes_prs open PraiseZhu/panoptes PRs <= 3 (lib.gh: Praise QA App identity while gh-app-enabled, PAT otherwise)
-  fix_prs      open Pi-line fix PRs on the product repo (prwatch.PILINE marker or qa-fix/* / fix/qa-* head) <= 2
+  fix_prs      OPEN Pi-line fix PRs in xindong/mivo-canvas-plugin, drafts included (Jasper), (prwatch.PILINE marker or qa-fix/* / fix/qa-* head) <= 2
   tasks        pmnudge (Beijing 09-22 :05), daily (07:35, retry 08:35) and ledger (23:40) ran clean: run.sh records
                (watchdog.runs / ok_run), plus daily's outbound ledger key mivo-daily-report:<day> done and out/ledger/<day>.json
   vigil        Mac mini dispatcher heartbeat ($PI_VIGIL_HEARTBEAT, default $PI_STATE/out/vigil/heartbeat.json: "at" field or mtime)
@@ -107,7 +107,8 @@ def is_fix_pr(p):
     return PILINE in (p.get("body") or "") or (p.get("headRefName") or "").startswith(("qa-fix/", "fix/qa-"))
 
 def check_fix_prs(now):
-    prs = [p for p in self_pr_list(REPO, "open", "number,headRefName,body", limit=100, run=lambda a: gh(a)) if is_fix_pr(p)]
+    """Jasper ruling (11-04): OPEN Pi-line fix PRs in xindong/mivo-canvas-plugin, drafts included, any author; breach = count > 2"""
+    prs = [p for p in gh(["pr", "list", "-R", REPO, "--state", "open", "--limit", "200", "--json", "number,headRefName,body,isDraft"]) if is_fix_pr(p)]
     return {"concurrent": f"{len(prs)} Pi-line fix PRs open > {MAX_FIX_PRS}: " + " ".join(f"#{p['number']}" for p in prs)} if len(prs) > MAX_FIX_PRS else {}
 
 def last_slot(slots, judge_min, now):
