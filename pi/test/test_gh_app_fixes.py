@@ -669,4 +669,156 @@ class AcceptanceRound4(Base):
             self.assertIsNone(W.cli_refusal(a, None), a); self.assertIsNotNone(self.wrap(a, caller=["node", "/x/foo.mjs"])[1], a)
 
 
+    def test_config_set_and_auth_writes_only_for_allowlisted_callers(self):
+        import gh_wrapper as W
+        AL = ["node", "/x/review-pr/scripts/signoff-hold.mjs"]; OTHER = ["node", "/x/foo.mjs"]
+        writes = (["config", "set", "git_protocol", "https"], ["config", "set", "-h", "github.com", "editor", "vim"], ["auth", "login"],
+                  ["auth", "login", "--with-token"], ["auth", "setup-git"], ["auth", "switch", "-u", "x"], ["auth", "refresh", "-s", "repo"])
+        for a in writes:
+            self.assertIsNotNone(W.cli_refusal(a, None), a); self.assertIsNone(W.cli_refusal(a, "review-pr-signoff-hold"), a)
+            for c in ([], OTHER, ["python3", "/x/pi/bin/outbound.py"]):
+                rc, call, err = self.wrap(a, caller=c); self.assertEqual((rc, call), (4, None), (a, c)); self.assertIn("refused", err)
+            self.assertIsNotNone(self.wrap(a, caller=AL)[1], a)   # allowlisted: the real gh
+        for a in (["config", "get", "git_protocol"], ["config", "list"], ["config", "list", "-h", "github.com"], ["auth", "status"],
+                  ["auth", "status", "--hostname", "github.com"]):
+            self.assertIsNone(W.cli_refusal(a, None), a); self.assertIsNotNone(self.wrap(a, caller=OTHER)[1], a)
+
+    def test_flags_before_verb_cannot_bypass_auth_config_alias_extension(self):
+        # #222 acceptance: gh skips flags (and values) before the verb; the verb is not simply argv[1]
+        import gh_wrapper as W
+        AL = ["node", "/x/review-pr/scripts/signoff-hold.mjs"]; OTHER = ["node", "/x/foo.mjs"]
+        refused = (["auth", "-h", "github.com", "login", "--with-token"], ["auth", "--hostname", "github.com", "login", "--with-token"],
+                   ["auth", "-h", "github.com", "setup-git"], ["auth", "--hostname=github.com", "setup-git"], ["auth", "-hgithub.com", "switch"],
+                   ["config", "--host", "github.com", "set", "editor", "x"], ["config", "-h", "github.com", "set", "editor", "x"],
+                   ["auth", "-h", "github.com", "status", "--show-token"], ["auth", "-h", "github.com", "status", "-at"], ["auth", "-h", "github.com", "token"],
+                   ["auth", "--bogus", "status"], ["auth", "-x", "github.com", "status"], ["auth", "-h"], ["auth", "--", "status"], ["config", "--weird", "get", "x"],
+                   ["auth", "logout"], ["auth", "git-credential", "store"], ["auth", "-h", "github.com", "git-credential", "erase"], ["auth"], ["config", "clear-cache"], ["config"],
+                   ["alias", "-h", "x", "set", "m", "pr merge"], ["alias", "--bogus", "import", "f.yml"],
+                   ["extension", "-R", "o/r", "install", "evil/gh-x"], ["ext", "--help", "install", "evil/gh-x"], ["extension", "--bogus", "list"],
+                   ["--help", "auth", "login"], ["-R", "o/r", "config", "set", "x", "y"])
+        for a in refused:
+            self.assertIsNotNone(W.cli_refusal(a, None), a)
+            for c in ([], OTHER, ["python3", "/x/pi/bin/outbound.py"]):
+                rc, call, err = self.wrap(a, caller=c); self.assertEqual((rc, call), (4, None), (a, c)); self.assertIn("refused", err)
+        for a in refused[:10]: self.assertIsNone(W.cli_refusal(a, "review-pr-signoff-hold"), a); self.assertIsNotNone(self.wrap(a, caller=AL)[1], a)
+        for a in (["alias", "-h", "x", "set", "m", "x"], ["ext", "--help", "install", "x"]): self.assertIsNotNone(W.cli_refusal(a, "review-pr-signoff-hold"), a)
+        for a in (["auth", "-h", "github.com", "status"], ["auth", "--hostname", "github.com", "status", "-a"], ["config", "--host", "github.com", "get", "editor"],
+                  ["config", "-h", "github.com", "list"], ["alias", "--help", "list"], ["extension", "-R", "o/r", "list"], ["auth", "--help", "status"]):
+            self.assertIsNone(W.cli_refusal(a, None), a); self.assertIsNotNone(self.wrap(a, caller=OTHER)[1], a)
+
+
+class WrapperGitCredential(Base):
+    """#222: `credential.helper=!gh auth git-credential` runs through the wrapper for every caller: get answers, store/erase refused"""
+    Q = "protocol=https\nhost=github.com\npath={}\n"
+    OTHER = ["git", "credential", "fill"]
+
+    def cred(self, argv, req, caller=None):
+        import gh_wrapper as W
+        calls, fed, out, err = [], [], io.StringIO(), io.StringIO()
+        with mock.patch.object(W, "refeed_stdin", fed.append), redirect_stdout(out), redirect_stderr(err):
+            rc = W.main(argv, env={"PATH": "", "PRAISE_QA_REAL_GH": "/real/gh"}, execve=lambda p, a, e: calls.append((p, a, e)),
+                        run=lambda cmd, **k: types.SimpleNamespace(returncode=0, stdout=f"https://github.com/{PROD}.git", stderr=""),
+                        caller=list(caller or self.OTHER), stdin=req)
+        return rc, (calls[-1] if calls else None), fed, out.getvalue(), err.getvalue()
+
+    def test_get_allowed_with_flags_before_verb_store_erase_refused(self):
+        import gh_wrapper as W
+        for a in (["auth", "git-credential", "get"], ["auth", "-h", "github.com", "git-credential", "get"], ["auth", "--hostname=github.com", "git-credential", "get"]):
+            self.assertIsNone(W.cli_refusal(a, None), a)
+        for a in (["auth", "git-credential", "store"], ["auth", "git-credential", "erase"], ["auth", "-h", "github.com", "git-credential", "erase"], ["auth", "git-credential"]):
+            self.assertIsNotNone(W.cli_refusal(a, None), a)
+            rc, call, fed, out, err = self.cred(a, self.Q.format(PAN + ".git")); self.assertEqual((rc, call), (4, None), a); self.assertIn("refused", err)
+            self.assertIsNone(W.cli_refusal(a, "review-pr-signoff-hold"), a)
+
+    def test_get_flag_off_passes_stdin_to_real_gh_without_app_token(self):
+        req = self.Q.format(PAN + ".git")
+        rc, call, fed, out, _ = self.cred(["auth", "git-credential", "get"], req)
+        self.assertEqual(call[1], ["/real/gh", "auth", "git-credential", "get"]); self.assertEqual(fed, [req]); self.assertEqual(out, "")
+        self.assertNotIn("GH_TOKEN", call[2]); self.assertEqual(self.minted, [])
+
+    def test_get_flag_on_app_token_for_request_repo_not_cwd(self):
+        self.on("gh-app-wrapper-enabled")
+        rc, call, fed, out, _ = self.cred(["auth", "git-credential", "get"], self.Q.format(PAN + ".git"))   # cwd is PROD
+        self.assertEqual((rc, call), (0, None)); self.assertIn(f"password={FAKE[PAN]}\n", out); self.assertEqual(self.minted, [PAN])
+        # repo with no installation / non-github host / no path: never the PRODUCT fallback, the real gh (box login) answers
+        for req in (self.Q.format("aj0928/x.git"), "protocol=https\nhost=github.com\n", "protocol=https\nhost=example.com\npath=a/b\n"):
+            self.minted.clear(); rc, call, fed, out, _ = self.cred(["auth", "git-credential", "get"], req)
+            self.assertEqual(call[1][1:], ["auth", "git-credential", "get"], req); self.assertEqual(fed, [req]); self.assertEqual(out, "")
+            self.assertNotIn("GH_TOKEN", call[2]); self.assertNotIn(PROD, self.minted)
+
+
+class WrapperGitCredentialE2E(unittest.TestCase):
+    """real git -> credential.helper=!<wrapper> auth git-credential -> mock real gh, against a local https smart-http remote"""
+    def setUp(self):
+        import shutil, ssl, threading, http.server, base64
+        if not shutil.which("openssl") or not os.path.exists(os.path.join(subprocess.check_output(["git", "--exec-path"], text=True).strip(), "git-http-backend")):
+            self.skipTest("needs openssl + git-http-backend")
+        self.d = d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, True)
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=127.0.0.1", "-days", "1",
+                        "-keyout", f"{d}/k.pem", "-out", f"{d}/c.pem"], check=True, capture_output=True)
+        subprocess.run(["git", "init", "-q", "--bare", f"{d}/srv/r.git"], check=True)
+        subprocess.run(["git", "-C", f"{d}/srv/r.git", "config", "http.receivepack", "true"], check=True)
+        backend = os.path.join(subprocess.check_output(["git", "--exec-path"], text=True).strip(), "git-http-backend")
+        want = "Basic " + base64.b64encode(b"mockuser:MOCKPW").decode()
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a): pass
+            def go(self):
+                if self.headers.get("Authorization") != want:
+                    self.send_response(401); self.send_header("WWW-Authenticate", 'Basic realm="t"'); self.send_header("Content-Length", "0"); self.end_headers(); return
+                path, _, qs = self.path.partition("?")
+                n = int(self.headers.get("Content-Length") or 0); body = self.rfile.read(n) if n else b""
+                env = {"PATH": os.environ.get("PATH", ""), "GIT_PROJECT_ROOT": f"{d}/srv", "GIT_HTTP_EXPORT_ALL": "1", "PATH_INFO": path,
+                       "QUERY_STRING": qs, "REQUEST_METHOD": self.command, "CONTENT_TYPE": self.headers.get("Content-Type", ""),
+                       "CONTENT_LENGTH": str(n), "REMOTE_USER": "mockuser", "REMOTE_ADDR": "127.0.0.1", "GIT_PROTOCOL": self.headers.get("Git-Protocol", "")}
+                r = subprocess.run([backend], input=body, env=env, capture_output=True)
+                head, _, out = r.stdout.partition(b"\r\n\r\n")
+                if not out and b"\n\n" in r.stdout: head, _, out = r.stdout.partition(b"\n\n")
+                status = 200; hdrs = []
+                for line in head.decode().splitlines():
+                    k, _, v = line.partition(":")
+                    if k.lower() == "status": status = int(v.split()[0])
+                    elif k: hdrs.append((k, v.strip()))
+                self.send_response(status)
+                for k, v in hdrs: self.send_header(k, v)
+                self.send_header("Content-Length", str(len(out))); self.end_headers(); self.wfile.write(out)
+            do_GET = do_POST = go
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); ctx.load_cert_chain(f"{d}/c.pem", f"{d}/k.pem")
+        self.srv.socket = ctx.wrap_socket(self.srv.socket, server_side=True)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start(); self.addCleanup(self.srv.shutdown)
+        self.url = f"https://127.0.0.1:{self.srv.server_address[1]}/r.git"
+        self.log = f"{d}/gh.log"
+        with open(f"{d}/realgh", "w") as f:   # mock real gh: answers get with a fixed credential, logs argv + stdin
+            f.write(f"#!/bin/sh\nin=$(cat)\nprintf '%s|%s\\n' \"$*\" \"$(echo \"$in\" | tr '\\n' ' ')\" >> {self.log}\n"
+                    "[ \"$3\" = get ] && printf 'username=mockuser\\npassword=MOCKPW\\n'\nexit 0\n")
+        with open(f"{d}/gh", "w") as f:   # what /usr/local/bin/gh would be once installed: the wrapper
+            f.write(f"#!/bin/sh\nexec python3 {os.path.join(BIN, 'gh_wrapper.py')} \"$@\"\n")
+        os.chmod(f"{d}/realgh", 0o755); os.chmod(f"{d}/gh", 0o755)
+        self.env = {"PATH": os.environ.get("PATH", ""), "HOME": d, "PRAISE_QA_REAL_GH": f"{d}/realgh", "PI_STATE": f"{d}/state",
+                    "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_TERMINAL_PROMPT": "0", "PYTHONDONTWRITEBYTECODE": "1"}
+        self.cfg = ["-c", f"credential.helper=!{d}/gh auth git-credential", "-c", "http.sslVerify=false", "-c", "credential.useHttpPath=true"]
+
+    def git(self, *a, cwd=None, stdin=None):
+        return subprocess.run(["git", *self.cfg, *a], cwd=cwd or self.d, env=self.env, input=stdin, capture_output=True, text=True, timeout=60)
+
+    def test_fill_and_push_dry_run_succeed_store_erase_refused(self):
+        r = self.git("credential", "fill", stdin=f"url={self.url}\n\n")
+        self.assertEqual(r.returncode, 0, r.stderr); self.assertIn("password=MOCKPW", r.stdout)
+        w = f"{self.d}/w"; subprocess.run(["git", "init", "-q", w], check=True, env=self.env)
+        for c in (["commit", "-q", "--allow-empty", "-m", "x"],):
+            subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *c], cwd=w, check=True, env=self.env)
+        r = self.git("push", "--dry-run", self.url, "HEAD:refs/heads/main", cwd=w)
+        self.assertEqual(r.returncode, 0, r.stderr); self.assertIn("git-credential store", r.stderr)   # git's store after auth: refused, push unaffected
+        r = self.git("push", self.url, "HEAD:refs/heads/main", cwd=w)   # a real push: git then calls `store`, which the wrapper refuses
+        self.assertEqual(r.returncode, 0, r.stderr)
+        log = open(self.log).read()
+        self.assertIn("auth git-credential get|", log); self.assertIn("host=127.0.0.1", log)   # stdin reached the real gh
+        self.assertNotIn("store", log); self.assertNotIn("erase", log)
+        for op in ("store", "erase"):
+            r = subprocess.run([f"{self.d}/gh", "auth", "git-credential", op], input="protocol=https\nhost=127.0.0.1\nusername=u\npassword=p\n\n",
+                               env=self.env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 4, op); self.assertIn("refused", r.stderr)
+        self.assertNotIn("store", open(self.log).read())
+
+
 if __name__ == "__main__": unittest.main()
