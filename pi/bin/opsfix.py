@@ -13,7 +13,7 @@
       prs_by_severity/findings_by_severity, and when no unrejected code-review P0/P1 remains: code_review.status/gate
       → passed with gate.calibrated_from and verdict.status passed.
   opsfix.py retest [--day YYYY-MM-DD | --since ISO] [--pr N ...] [--execute] [--max-model 8] [--keep] [--wait-lock S] [--no-handoff]
-      Fix-PR original-case retest; logic + write-back format in opsfix_retest.py. Default dry-run (plan only).
+  Fix-PR original-case retest; logic + write-back format in opsfix_retest.py. Default dry-run (plan only).
       Scope (10-23): fix PRs (body "QA: #N") merged after the last successful run — watermark + done/retry sets in
       out/ops/retest-state.json (seeded from manual-runs.jsonl on first use); --day = that data day only (watermark kept);
       --since overrides the watermark. Fix PRs whose targets stay blocked are retried (max 3 runs; model-cap blocks free).
@@ -22,7 +22,12 @@
       reports/merged/PR-<fix>.json prs[0].retest[] and the latest ledger/daily/*.json (both .bak-<YYYYMMDD>-retest first;
       one row + several fix PRs: fail wins, else the latest `at`; results without a ledger row are logged and counted),
       then handoff issue close/reopen as outbound actions out/opsfix/<today>.actions.json (gh.issue.close /
-      gh.issue.reopen; --no-handoff skips). Evidence in out/ops/retest/<today>/."""
+      gh.issue.reopen; --no-handoff skips). Evidence in out/ops/retest/<today>/.
+      Ledger = newest *complete* YYYY-MM-DD.json (hand-made / partial files are skipped and logged; none trustworthy -> rc 1,
+      nothing written). Results without a row (incl. rows removed by a 不修/已修 ruling) -> ledger/retest-unmatched.jsonl.
+  opsfix.py retest-replay --pr N ... [--yes] [--ledger F | --daily DIR] [--reports DIR] [--rulings F] [--unmatched-log F]
+      Re-apply retest results already in reports/merged/PR-<fix>.json to the newest complete ledger (11-04 0-row write-back).
+      Dry-run by default; --yes writes (.bak-<ts>-replay first); idempotent; unmatched -> ledger/retest-unmatched.jsonl."""
 import argparse, shutil
 from lib import *
 RUNS = f"{RPT}/manual-runs.jsonl"
@@ -118,8 +123,14 @@ r.add_argument("--execute", action="store_true"); r.add_argument("--max-model", 
 r.add_argument("--since", help="ISO time; overrides the watermark in out/ops/retest-state.json")
 r.add_argument("--wait-lock", type=int, default=1200, help="seconds to wait for the panoptes QA lock before rc 75")
 r.add_argument("--no-handoff", action="store_true", help="do not record handoff issue close/reopen actions")
+rr = s.add_parser("retest-replay", help="re-apply recorded retest results (reports/merged/PR-<fix>.json) to the right ledger; dry-run unless --yes")
+rr.add_argument("--pr", type=int, nargs="+", required=True); rr.add_argument("--yes", action="store_true")
+rr.add_argument("--ledger", help="explicit ledger file (default: newest complete ledger/daily/YYYY-MM-DD.json)")
+rr.add_argument("--daily"); rr.add_argument("--reports"); rr.add_argument("--rulings"); rr.add_argument("--unmatched-log")
 if __name__ == "__main__":
     a = ap.parse_args()
     if a.cmd == "retest":
         import opsfix_retest; sys.exit(opsfix_retest.run(a))
+    if a.cmd == "retest-replay":
+        import opsfix_retest; sys.exit(opsfix_retest.replay(a))
     backfill(a) if a.cmd == "backfill" else calibrate(a)
