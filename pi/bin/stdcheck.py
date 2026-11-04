@@ -10,15 +10,17 @@ Checks (each one: a list of objects that breach, from files on disk plus two gh 
   fix_prs      OPEN Pi-line fix PRs in xindong/mivo-canvas-plugin, drafts included (Jasper), (prwatch.PILINE marker or qa-fix/* / fix/qa-* head) <= 2
   tasks        pmnudge (Beijing 09-22 :05), daily (07:35, retry 08:35) and ledger (23:40) ran clean: run.sh records
                (watchdog.runs / ok_run), plus daily's outbound ledger key mivo-daily-report:<day> done and out/ledger/<day>.json
-  vigil        Mac mini dispatcher heartbeat ($PI_VIGIL_HEARTBEAT, default $PI_STATE/out/vigil/heartbeat.json: "at" field or mtime)
-               not older than 15 min
+  review_pr    the Mac mini review-pr dispatcher is moving (Jasper ruling, 11-04): product repo via lib.gh (App identity, REST, at most
+               REVIEW_MAX_PRS ready PRs). Ready open PRs waiting on review-pr (a review-pr / "review-pr (integration)" check run or status
+               queued / pending / missing) while no review-pr check or status on any of them started or completed in the last 60 min
+               -> stalled; a review-pr check in_progress > 60 min -> stalled; nothing waiting -> ok. Gap owner Jasper. No file is read.
 
 Breach -> gaps-open.json (fleet-standards list, $PI_GAPS_FILE overrides; jsonrec lock) entry id stdcheck:<check>:<object>, with owner
 and deadline, upserted (re-breach keeps opened/deadline, bumps last_seen); a check that ran clean closes its stdcheck entries that no
 longer breach. An entry still open past its deadline -> one escalation record (out/stdcheck/escalations.json) for Jasper's 09:00 brief.
 A check that errors is retried (ATTEMPTS, RETRY_SLEEP_S); a failed task run is re-run once via run.sh. A check failing (error or breach)
 2 runs in a row -> out/stdcheck/alerts/<check>.json (removed on recovery) + brief. Crash of this script -> alerts/stdcheck.json, rc 1.
-Daily pass rate: out/stdcheck/passrate-<Beijing day>.json. Jasper reads brief_facts(). --dry-run: print, write nothing, re-run nothing.
+Daily pass rate: out/stdcheck/passrate-<Beijing day>.json. Jasper's 09:00 brief reads brief_facts(). --dry-run: print, write nothing, re-run nothing.
 """
 import sys, time
 from lib import *
@@ -29,20 +31,20 @@ OUT = f"{BASE}/out/stdcheck"
 FLAG = f"{BASE}/stdcheck-enabled"
 GAPS = os.environ.get("PI_GAPS_FILE") or "/workspace/fleet-standards/gaps-open.json"
 REPORTS = os.environ.get("PI_REPORTS_MERGED") or RPT
-VIGIL_HB = os.environ.get("PI_VIGIL_HEARTBEAT") or f"{BASE}/out/vigil/heartbeat.json"
 RUN_SH = f"{PI_CODE}/bin/run.sh"
 PANOPTES = "PraiseZhu/panoptes"
-QA_START_MAX_MIN = 10; LOOKBACK_H = 24; MAX_PANOPTES_PRS = 3; MAX_FIX_PRS = 2; VIGIL_MAX_MIN = 15
+QA_START_MAX_MIN = 10; LOOKBACK_H = 24; MAX_PANOPTES_PRS = 3; MAX_FIX_PRS = 2; REVIEW_STALL_MIN = 60; REVIEW_MAX_PRS = 15
 ATTEMPTS = 3; RETRY_SLEEP_S = 20; ALERT_STREAK = 2
 TASKS = {  # job: (Beijing slots, judge this many minutes after the slot)
     "pmnudge": ([(h, 5) for h in range(9, 23)], 20), "daily": ([(7, 35)], 85), "ledger": ([(23, 40)], 20)}
-CHECKS = ("qa_start", "panoptes_prs", "fix_prs", "tasks", "vigil")
-OWNER = {"qa_start": "Mivo QA 运维", "panoptes_prs": "Praise", "fix_prs": "Praise PR", "tasks": "Pi 线运维", "vigil": "Mac mini 盯梢"}
-DEADLINE_H = {"qa_start": 4, "panoptes_prs": 24, "fix_prs": 4, "tasks": 4, "vigil": 2}
+CHECKS = ("qa_start", "panoptes_prs", "fix_prs", "tasks", "review_pr")
+OWNER = {"qa_start": "Mivo QA 运维", "panoptes_prs": "Praise", "fix_prs": "Praise PR", "tasks": "Pi 线运维", "review_pr": "Jasper"}
+DEADLINE_H = {"qa_start": 4, "panoptes_prs": 24, "fix_prs": 4, "tasks": 4, "review_pr": 2}
 TZ_ABBR = {"CST": 8, "UTC": 0, "GMT": 0, "PST": -8, "PDT": -7, "JST": 9}
 MW_LINE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) (\w+) (.*)$")
 MW_LAUNCH = re.compile(r"launched priority run pid \d+ for PR #(\d+)")
-MW_SEEN = re.compile(r"branch merge #(\d+)")
+MW_SEEN = re.compile(r"branch merge #(\d+)(?: into (\S+))?")
+BASE_RX = re.compile(r"^(main|integration/.+|release/.+)$")   # merges that count for qa_start; unknown base = counted (main launches name none)
 
 
 def jload(f, d):
@@ -70,15 +72,16 @@ def mergewatch_events(now):
                 mm = rx.search(m[3])
                 if mm:
                     e = ev.setdefault(int(mm[1]), {}); e.setdefault(k, t); e.setdefault("seen", t)
+                    if k == "seen" and mm[2] and mm[2] != "None": e.setdefault("base", mm[2])
     return ev
 
 def report_times(n):
-    """(merged_at, qa_started_at) of reports/merged/PR-N.json, or None when there is no report"""
+    """(merged_at, qa_started_at, base_ref) of reports/merged/PR-N.json, or None when there is no report"""
     d = jload(f"{REPORTS}/PR-{n}.json", None)
     if not isinstance(d, dict): return None
     pr = next((p for p in d.get("prs", []) if p.get("number") == n), {}) or {}
     start = (d.get("run") or {}).get("started_at") or pr.get("test_started_at")
-    return parse_ts(pr.get("merged_at")), parse_ts(start)
+    return parse_ts(pr.get("merged_at")), parse_ts(start), pr.get("base_ref")
 
 def check_qa_start(now):
     bad, ev = {}, mergewatch_events(now)
@@ -88,6 +91,8 @@ def check_qa_start(now):
         if m and now.timestamp() - os.path.getmtime(f) < (LOOKBACK_H + 2) * 3600: nums.add(int(m[1]))
     for n in sorted(nums):
         rt, e = report_times(n), ev.get(n, {})
+        base = (rt[2] if rt else None) or e.get("base")
+        if base and not BASE_RX.match(base): continue   # 11-04 acceptance #2: only main / integration/* / release/*
         merged = rt[0] if rt and rt[0] else None
         if merged and now - merged > dt.timedelta(hours=LOOKBACK_H): continue
         start = (rt[1] if rt else None) or e.get("launched")
@@ -142,13 +147,38 @@ def check_tasks(now, retry=None):
             bad[obj] = f"out/ledger/{slot.date().isoformat()}.json missing after a clean run"
     return bad
 
-def check_vigil(now):
-    try: st = os.stat(VIGIL_HB)
-    except FileNotFoundError: return {"heartbeat": f"{VIGIL_HB} missing"}
-    t = parse_ts((jload(VIGIL_HB, {}) or {}).get("at")) if VIGIL_HB.endswith(".json") else None
-    t = t or dt.datetime.fromtimestamp(st.st_mtime, CST)
-    age = (now - t).total_seconds() / 60
-    return {"heartbeat": f"last beat {cst(t)} ({int(age)} min > {VIGIL_MAX_MIN})"} if age > VIGIL_MAX_MIN else {}
+REVIEW_RX = re.compile(r"^review-pr(?: \(integration\))?$")
+WAITING = ("queued", "pending", "requested", "waiting")
+def review_state(sha):
+    """review-pr entries of one head: [(kind, state, started, finished)] from REST check-runs + combined status (2 calls)"""
+    out = []
+    for c in (gh(["api", f"repos/{REPO}/commits/{sha}/check-runs?per_page=100"]) or {}).get("check_runs", []):
+        if REVIEW_RX.match(c.get("name") or ""):
+            out.append(("check", c.get("status"), parse_ts(c.get("started_at")), parse_ts(c.get("completed_at"))))
+    for x in (gh(["api", f"repos/{REPO}/commits/{sha}/status?per_page=100"]) or {}).get("statuses", []):
+        if REVIEW_RX.match(x.get("context") or ""):
+            st = x.get("state"); t = parse_ts(x.get("updated_at") or x.get("created_at"))
+            out.append(("status", st, None, None if st == "pending" else t))   # a pending status is a queue entry, not activity
+    return out
+
+def check_review_pr(now):
+    """Jasper (11-04): is the Mac mini review-pr dispatcher moving? REST only, at most REVIEW_MAX_PRS ready PRs (1 + 2 per PR calls)"""
+    prs = gh(["api", f"repos/{REPO}/pulls?state=open&sort=updated&direction=desc&per_page=50"]) or []
+    ready = [p for p in prs if not p.get("draft")][:REVIEW_MAX_PRS]
+    bad, waiting, last = {}, [], None
+    lim = dt.timedelta(minutes=REVIEW_STALL_MIN)
+    for p in ready:
+        n, es = p["number"], review_state(p["head"]["sha"])
+        if not es or any(st in WAITING for _, st, _, _ in es): waiting.append(n)
+        for kind, st, started, finished in es:
+            for t in (started, finished):
+                if t and (last is None or t > last): last = t
+            if kind == "check" and st == "in_progress" and started and now - started > lim:
+                bad[f"running:PR-{n}"] = f"review-pr on #{n} in_progress since {cst(started)} ({int((now - started).total_seconds() // 60)} min > {REVIEW_STALL_MIN})"
+    if waiting and (last is None or now - last > lim):
+        bad["queue"] = (f"{len(waiting)} ready PRs waiting on review-pr ({' '.join(f'#{n}' for n in waiting)}), last review-pr activity "
+                        f"{cst(last) if last else 'none seen'} (> {REVIEW_STALL_MIN} min)")
+    return bad
 
 
 # ---------------- retries, gaps, alerts, escalations, pass rate ----------------
@@ -205,7 +235,7 @@ def sync_gaps(results, now):
     return overdue
 
 def brief_day(now):
-    """the Jasper brief (09:05) that will carry a record made now"""
+    """the 09:00 Jasper brief that will carry a record made now"""
     d = now.date()
     return (d if now.hour < 9 else d + dt.timedelta(days=1)).isoformat()
 
@@ -261,7 +291,7 @@ def run(now=None):
     now = now or now_cst()
     st = jload(f"{OUT}/state.json", {})
     fns = {"qa_start": (check_qa_start, {}), "panoptes_prs": (check_panoptes_prs, {}), "fix_prs": (check_fix_prs, {}),
-           "tasks": (check_tasks, {"retry": retry_task(st, now)}), "vigil": (check_vigil, {})}
+           "tasks": (check_tasks, {"retry": retry_task(st, now)}), "review_pr": (check_review_pr, {})}
     results, errors = {}, {}
     for c in CHECKS:
         fn, kw = fns[c]; results[c], err = run_check(c, fn, now, **kw)
