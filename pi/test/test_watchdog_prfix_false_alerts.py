@@ -50,7 +50,7 @@ class T(unittest.TestCase):
         os.makedirs(f"{self.tmp}/pp"); json.dump({"tickets": t}, open(f"{self.tmp}/pp/tickets.json", "w"))
         saved = (prfix.OUT, prfix.RULINGS); prfix.OUT, prfix.RULINGS = f"{self.tmp}/pp", rul
         try:
-            for _ in range(2): self.assertEqual(prfix.main(["--close-ruled", "--yes"]), 0)   # idempotent
+            for _ in range(2): self.assertEqual(prfix.main(["--close-ruled", k, "--yes"]), 0)   # idempotent
         finally: prfix.OUT, prfix.RULINGS = saved
         got = json.load(open(f"{self.tmp}/pp/tickets.json"))["tickets"]
         self.assertEqual((got[k]["status"], got[k]["ruling"], got[k]["ruling_source"]), ("ruled_out", "不修", "p2-rulings.md:4"))
@@ -62,3 +62,42 @@ class T(unittest.TestCase):
         self.assertEqual(self.keys(t, {"revise:8:abc": {"status": "failed"}}, report="| praise-pr | revise:8:abc | gh.pr.push-fix | x | failed |  |\n"), ["prfix:nopr:9", "prfix:nopush:rev:8"])
 
 if __name__ == "__main__": unittest.main()
+
+class CloseRuled(unittest.TestCase):
+    """Round-1 acceptance of #201: --close-ruled closes one named key, can be undone, and refuses PR-only rulings on multi-ticket PRs."""
+    ROWS = ("| 日期 | 报告 PR | 指纹 | 问题 | 裁决 |\n|---|---|---|---|---|\n"
+            "| 2026-11-04 | #1433 | mq1-9be27e51512fbd075277-pr1433 | e2e | 不修 | 误报 |\n"
+            "| 2026-11-04 | #1456 | mq1-7a5374add598af27a3cd-pr1456 | x | 不修 | 误报 |\n"
+            "| 2026-11-01 | #1500 | 只写 PR 的老裁决 | 不修 | 误报 |\n")
+    K = "1433:mq1-9be27e51512fbd075277"
+    def setUp(self):
+        import prfix; self.p = prfix
+        self.tmp = tempfile.mkdtemp(prefix="prfix-ruled-"); os.makedirs(f"{self.tmp}/pp")
+        open(f"{self.tmp}/r.md", "w").write(self.ROWS)
+        self.T = {self.K: {"qa": 1433, "fp": "mq1-9be27e51512fbd075277", "status": "pr_action_written", "pid": 42, "next_retry_at": "x"},
+                  "1456:mq1-7a5374add598af27a3cd": {"qa": 1456, "fp": "mq1-7a5374add598af27a3cd", "status": "queued"},
+                  "1500:mq1-aaaa": {"qa": 1500, "fp": "mq1-aaaa", "status": "queued"}, "1500:mq1-bbbb": {"qa": 1500, "fp": "mq1-bbbb", "status": "queued"}}
+        json.dump({"tickets": self.T}, open(f"{self.tmp}/pp/tickets.json", "w"))
+        self.saved = (prfix.OUT, prfix.RULINGS); prfix.OUT, prfix.RULINGS = f"{self.tmp}/pp", f"{self.tmp}/r.md"
+    def tearDown(self): self.p.OUT, self.p.RULINGS = self.saved; shutil.rmtree(self.tmp, ignore_errors=True)
+    def got(self): return json.load(open(f"{self.tmp}/pp/tickets.json"))["tickets"]
+    def run_(self, *a):
+        try: return self.p.main(list(a))
+        except SystemExit as e: return e.code
+
+    def test_yes_without_key_refuses(self):
+        self.assertNotEqual(self.run_("--close-ruled", "--yes"), 0)
+        self.assertEqual(self.got(), self.T)
+    def test_yes_with_key_closes_only_that_key(self):
+        self.assertEqual(self.run_("--close-ruled", self.K, "--yes"), 0)
+        g = self.got(); self.assertEqual(g[self.K]["status"], "ruled_out")
+        self.assertEqual(g["1456:mq1-7a5374add598af27a3cd"]["status"], "queued")
+    def test_reopen_restores_previous_status_and_fields(self):
+        self.assertEqual(self.run_("--close-ruled", self.K, "--yes"), 0)
+        self.assertEqual(self.run_("--reopen-ruled", self.K, "--yes"), 0)
+        self.assertEqual(self.got()[self.K], self.T[self.K] | {"updated_at": self.got()[self.K]["updated_at"]})
+    def test_pr_only_ruling_with_several_tickets_hard_stops(self):
+        amb = {x[0]: x[3] for x in self.p.ruled_tickets({"tickets": self.T}, self.ROWS, "r.md")}
+        self.assertEqual((amb["1500:mq1-aaaa"], amb["1500:mq1-bbbb"], amb[self.K]), (True, True, False))
+        self.assertNotEqual(self.run_("--close-ruled", "1500:mq1-aaaa", "--yes"), 0)
+        self.assertEqual(self.got(), self.T)
