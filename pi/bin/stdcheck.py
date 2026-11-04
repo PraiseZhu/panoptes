@@ -33,7 +33,7 @@ GAPS = os.environ.get("PI_GAPS_FILE") or "/workspace/fleet-standards/gaps-open.j
 REPORTS = os.environ.get("PI_REPORTS_MERGED") or RPT
 RUN_SH = f"{PI_CODE}/bin/run.sh"
 PANOPTES = "PraiseZhu/panoptes"
-QA_START_MAX_MIN = 10; LOOKBACK_H = 24; MAX_PANOPTES_PRS = 3; MAX_FIX_PRS = 2; REVIEW_STALL_MIN = 60; REVIEW_MAX_PRS = 15
+QA_START_MAX_MIN = 10; LOOKBACK_H = 24; MAX_PANOPTES_PRS = 3; REVIEW_STALL_MIN = 60; REVIEW_MAX_PRS = 15
 ATTEMPTS = 3; RETRY_SLEEP_S = 20; ALERT_STREAK = 2
 TASKS = {  # job: (Beijing slots, judge this many minutes after the slot)
     "pmnudge": ([(h, 5) for h in range(9, 23)], 20), "daily": ([(7, 35)], 85), "ledger": ([(23, 40)], 20)}
@@ -107,13 +107,11 @@ def check_panoptes_prs(now):
     prs = gh(["pr", "list", "-R", PANOPTES, "--state", "open", "--limit", "100", "--json", "number"])
     return {"open-prs": f"{len(prs)} open panoptes PRs > {MAX_PANOPTES_PRS}: " + " ".join(f"#{p['number']}" for p in prs)} if len(prs) > MAX_PANOPTES_PRS else {}
 
-PILINE = "<!-- pi-line fixpr:"   # = prwatch.PILINE
-def is_fix_pr(p):
-    return PILINE in (p.get("body") or "") or (p.get("headRefName") or "").startswith(("qa-fix/", "fix/qa-"))
+PILINE = FIX_PR_MARK   # 11-05: is_fix_pr / MAX_FIX_PRS come from lib (shared with prwatch and outbound)
 
 def check_fix_prs(now):
     """Jasper ruling (11-04): OPEN Pi-line fix PRs in xindong/mivo-canvas-plugin, drafts included, any author; breach = count > 2"""
-    prs = [p for p in gh(["pr", "list", "-R", REPO, "--state", "open", "--limit", "200", "--json", "number,headRefName,body,isDraft"]) if is_fix_pr(p)]
+    prs = open_fix_prs(gh)
     return {"concurrent": f"{len(prs)} Pi-line fix PRs open > {MAX_FIX_PRS}: " + " ".join(f"#{p['number']}" for p in prs)} if len(prs) > MAX_FIX_PRS else {}
 
 def last_slot(slots, judge_min, now):

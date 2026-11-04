@@ -22,7 +22,7 @@ lib.ub_lookup = _no_lookup
 PROD, PAN = "xindong/mivo-canvas-plugin", "PraiseZhu/panoptes"
 FAKE = {PROD: "ghs_" + "P" * 36, PAN: "ghs_" + "O" * 36}
 def F(n): return f"{lib.PI_STATE}/{n}"
-FLAGS = ("gh-app-enabled", "gh-app-merger-enabled", "gh-app-wrapper-enabled", "gh-ratelimit.json", "gh-ratelimit-praise-qa.json")
+FLAGS = ("gh-app-enabled", "gh-app-merger-enabled", "gh-app-wrapper-enabled", "gh-app-product-writes-enabled", "gh-ratelimit.json", "gh-ratelimit-praise-qa.json")
 
 
 class Base(unittest.TestCase):
@@ -255,6 +255,8 @@ class CredentialHelper(Base):
         q = "protocol=https\nhost=github.com\npath={}\n"
         self.assertEqual(self.get(q.format("xindong/mivo-canvas-plugin.git")), "", "flag off -> next helper (PAT)")
         self.on("gh-app-wrapper-enabled")
+        self.assertEqual(self.get(q.format("xindong/mivo-canvas-plugin.git")), "", "11-05: product-writes off -> PAT (next helper)")
+        self.on("gh-app-product-writes-enabled")
         self.assertEqual(self.get(q.format("xindong/mivo-canvas-plugin.git")), f"username=x-access-token\npassword={FAKE[PROD]}\n")
         self.assertIn(FAKE[PAN], self.get(q.format("PraiseZhu/grokbot-box.git")))
         self.assertEqual(self.get("protocol=https\nhost=github.com\n"), "")   # no path -> nothing (next helper)
@@ -297,6 +299,7 @@ class AcceptanceRound1(Base):
         for p in ("aj0928/aj0928-handoff.git", "zhongxingtian-ai/handover-mivo.git", "someone/else"):
             self.minted.clear(); self.assertEqual(self.get(q.format(p)), "", p); self.assertEqual(self.minted, [], p)
         self.assertIn(FAKE[PAN], self.get(q.format("PraiseZhu/panoptes.git")))
+        self.on("gh-app-product-writes-enabled")
         self.assertIn(FAKE[PROD], self.get(q.format("xindong/mivo-canvas-plugin.git")))
     get = CredentialHelper.get
     wrap = Wrapper.wrap

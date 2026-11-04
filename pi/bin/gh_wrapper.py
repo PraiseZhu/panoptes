@@ -352,11 +352,13 @@ def main(argv, env=None, execve=os.execve, run=subprocess.run, caller=None, stdi
         try: req = sys.stdin.read() if stdin is None else stdin
         except Exception: req = ""
         r = credential_repo(req)
-        tok = app_token(r, ["git", "credential"], no_install_is_none=True) if r and wrapper_on() else None
+        pw = lib.product_write_identity(["git", "push"], r) if r else None   # 11-05: xindong/* credentials follow the product-writes flag
+        tok = app_token(r, ["git", "credential"], no_install_is_none=True) if r and wrapper_on() and pw != "pat" else None
         if tok:
             sys.stdout.write(f"protocol=https\nhost=github.com\nusername=x-access-token\npassword={tok}\n"); sys.stdout.flush()
             return 0
         refeed_stdin(req)
+        if pw == "pat": env = lib.pat_env(env)   # never an inherited installation token for a xindong/* credential while the flag is off
         gh = real_gh(env)
         return execve(gh, [gh] + list(argv), env)
     if body is not None: refeed_stdin(body)
@@ -364,7 +366,8 @@ def main(argv, env=None, execve=os.execve, run=subprocess.run, caller=None, stdi
         log_allowlisted(name, argv)
         penv = lib.pat_env(env); gh = lib.real_gh(penv)
         return execve(gh, [gh] + list(argv), penv)
-    if lib.pat_rerun(argv, repo):   # G2 (Jasper): product CI rerun -> the PAT (the App has no Actions write); nothing else
+    pw = lib.product_write_identity(argv, repo)   # 11-05: the same decision as lib.gh_env for xindong/* writes (G2 rerun included)
+    if pw == "pat":
         penv = lib.pat_env(env); gh = lib.real_gh(penv)
         return execve(gh, [gh] + list(argv), penv)
     if wrapper_on() and not (env.get("GH_TOKEN") or "").startswith("ghs_"):

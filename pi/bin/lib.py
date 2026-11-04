@@ -165,9 +165,9 @@ def gh_app_wanted(args, repo=None):
     # asked; whatever identity-dependent call is still left here (/user/<sub>, an @me a caller passed to gh_env directly) stays on the PAT
     if any("@me" in x or re.match(r"/?user(?:$|/)", x) for x in args[1:]): return False
     if args[:1] == ["search"]: return True   # G5: gh search (no repo of its own) -> the App, panoptes installation (search_repo)
-    if repo in GH_APP_PRODUCT_REPOS:
-        if gh_is_read(args): return os.path.exists(gh_app_product_flag()) or gh_component_on()
-        return gh_app_product_writes_on()
+    if repo in GH_APP_PRODUCT_REPOS and gh_is_read(args): return os.path.exists(gh_app_product_flag()) or gh_component_on()
+    pw = product_write_identity(args, repo)
+    if pw: return pw == "app"
     if not gh_app_own_repo(repo): return False
     return gh_is_read(args) or gh_app_writes_ok(args) or gh_component_on()
 # 11-04 task B: every remaining caller behind its own flag (each also needs gh-app-enabled); rm the flag -> that caller is back on the PAT.
@@ -520,6 +520,23 @@ def self_pr_list(repo, state, fields, search=None, limit=100, extra=(), run=None
         args += (["--search", q[0]] if q else ["--author", au])
         for p in (run or gh)(args) or []: seen.setdefault(p.get("number"), p)   # run: the caller's gh (tests stub module.gh)
     return sorted(seen.values(), key=lambda p: -(p.get("number") or 0))
+# 11-05 (pr-1762 REPORT items 1/2/4): ONE definition of a Pi-line fix PR, shared by stdcheck (fix_prs), prwatch (admit_block) and
+# outbound (h_fixpr): Jasper's 11-04 rule -- pi-line marker in the body OR a qa-fix/* / fix/qa-* head; drafts included, any author.
+FIX_PR_MARK = "<!-- pi-line fixpr:"; FIX_PR_HEADS = ("qa-fix/", "fix/qa-"); MAX_FIX_PRS = 2
+def is_fix_pr(p):
+    return FIX_PR_MARK in (p.get("body") or "") or (p.get("headRefName") or "").startswith(FIX_PR_HEADS)
+def open_fix_prs(run=None, repo=None):
+    """OPEN fix PRs of the product repo (is_fix_pr), drafts and any author included. Raises when the list cannot be read."""
+    prs = (run or gh)(["pr", "list", "-R", repo or REPO, "--state", "open", "--limit", "200", "--json", "number,headRefName,body,isDraft"])
+    if not isinstance(prs, list): raise RuntimeError("open PR list unreadable")
+    return [p for p in prs if is_fix_pr(p)]
+def fixpr_cap_reason(run=None, exclude=None):
+    """-> why no new fix PR may open now, or None. >= MAX_FIX_PRS open fix PRs -> refused; the count cannot be read -> refused too
+    (fail closed). exclude: a PR number that does not count (the closed one a superseding fix replaces)."""
+    try: prs = [p for p in open_fix_prs(run) if p.get("number") != exclude]
+    except Exception as e: return f"open fix PR count unreadable ({str(e)[:120]}): fail closed"
+    if len(prs) >= MAX_FIX_PRS: return f"{len(prs)} open fix PRs >= {MAX_FIX_PRS}: " + " ".join(f"#{p.get('number')}" for p in prs[:10])
+    return None
 # P2 (11-04): panoptes WRITES (PR create / merge / comment / branch delete, git push of infra branches) use the App too while BOTH
 # $PI_STATE/gh-app-enabled and $PI_STATE/gh-app-writes-enabled exist. rm gh-app-writes-enabled -> writes back on the PAT (reads stay).
 def gh_app_writes_flag(): return f"{PI_STATE}/gh-app-writes-enabled"
@@ -596,6 +613,19 @@ REPO_APP_DEFAULT = "PraiseZhu/panoptes"
 #   gh run rerun [<id>] [--failed] [--job <id>] ...                         (noun "run", verb "rerun")
 #   gh api POST repos/<product>/actions/runs/<N>/rerun | .../runs/<N>/rerun-failed-jobs | .../jobs/<N>/rerun   (ACTIONS_RERUN, method POST)
 # run cancel / run delete / actions/runs/N/cancel, a GET on a rerun path, any other repo -> not this exception (App or PAT as before).
+# 11-05 (pr-1762 WHY-APP item 1): THE decision for writes to xindong/* (product repos), used by lib.gh_env, gh_wrapper.main and the
+# git credential paths (gh_wrapper credential get, git-credential-praise-qa) alike:
+#   G2 CI rerun (pat_rerun)                                   -> "pat" (always; the App has no Actions write)
+#   any other write (pr create/ready/comment, issue create/close, REST writes, ["git", "push"] credentials)
+#       gh-app-enabled AND gh-app-product-writes-enabled exist -> "app", else -> "pat"
+#   not a write, or not a xindong/* target                    -> None (the caller's other rules decide)
+def product_write_identity(args, repo=None):
+    a = list(args)
+    tgt = repo or (gh_target_repo(a) if a[:1] != ["git"] else None)
+    if not is_product_repo(tgt): return None
+    if pat_rerun(a, tgt): return "pat"
+    if a[:1] != ["git"] and gh_is_read(a): return None
+    return "app" if gh_app_product_writes_on() else "pat"
 def pat_rerun(args, repo=None):
     a = list(args)
     if gh_repo_selector_dup(a): return False
