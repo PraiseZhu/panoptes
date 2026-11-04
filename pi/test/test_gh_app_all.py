@@ -9,6 +9,7 @@ HERE = os.path.dirname(os.path.abspath(__file__)); BIN = os.path.join(os.path.di
 sys.path.insert(0, BIN); sys.path.insert(0, HERE)
 import isolation  # noqa: E402
 isolation.sandbox_state()
+sys.modules.setdefault("merger", types.SimpleNamespace(FIELDS="number", blockers=lambda p: []))   # CI has no /workspace/mivo-merger
 import lib  # noqa: E402
 
 FAKE = "ghs_" + "Q" * 36
