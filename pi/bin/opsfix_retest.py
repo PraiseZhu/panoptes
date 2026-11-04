@@ -57,9 +57,80 @@ def pick_targets(fix_body, orig_pr, orig_report, fix_title=""):
         if hit: return hit
     return fs
 
-def ledger_path():
-    fs = sorted(glob.glob(f"{QA}/ledger/daily/*.json")); fs = [f for f in fs if re.search(r"/\d{4}-\d{2}-\d{2}\.json$", f)]
-    return fs[-1] if fs else None
+LEDGER_KIND = "mivo-qa-feishu-ledger"
+LEDGER_DROP_MAX = 0.10      # same bar as ledger.py DROP_MAX: a newest ledger >10% smaller than the one before is suspect
+UNMATCHED_LOG = f"{QA}/ledger/retest-unmatched.jsonl"   # outside ledger/daily: daily readers never glob it
+RULINGS = os.environ.get("MIVO_QA_P2_RULINGS") or "/workspace/fleet-standards/p2-rulings.md"
+
+class LedgerError(RuntimeError):
+    """No daily ledger can be trusted for write-back. Never fall back to a guess: callers log it and write nothing."""
+
+def ledger_problems(path, doc):
+    """Why `doc` is not a complete build-ledger output (empty list = ok). 11-04: a PM hand-made 2-row 2026-11-04.json
+    (manual_note, '非完整日台账') was the newest file, so three passing retests were written back to it as 0 rows."""
+    m = re.search(r"(\d{4}-\d{2}-\d{2})\.json$", path); errs = []
+    if not isinstance(doc, dict): return ["不是 JSON 对象"]
+    if doc.get("kind") != LEDGER_KIND: errs.append(f"kind={doc.get('kind')!r}，不是 {LEDGER_KIND}")
+    if not m or doc.get("date") != m.group(1): errs.append(f"date={doc.get('date')!r} 与文件名不符")
+    if not doc.get("generated_at"): errs.append("没有 generated_at")
+    if doc.get("manual_note"): errs.append(f"手工文件（manual_note：{str(doc['manual_note'])[:60]}）")
+    rows = doc.get("rows")
+    if not isinstance(rows, list): errs.append("rows 不是列表")
+    elif (doc.get("summary") or {}).get("total") != len(rows): errs.append(f"summary.total={(doc.get('summary') or {}).get('total')} ≠ rows {len(rows)}")
+    return errs
+
+def ledger_path(daily=None, rejected=None):
+    """Newest *complete* daily ledger (canonical YYYY-MM-DD.json, see ledger_problems). Files that fail the check are
+    skipped and appended to `rejected` as (path, [why]) so the caller can log them loudly. Raises LedgerError when dated
+    files exist but none passes, or when the newest good one has >LEDGER_DROP_MAX fewer rows than the good one before it.
+    Returns None only when there is no dated file at all."""
+    daily = daily or f"{QA}/ledger/daily"
+    fs = sorted(f for f in glob.glob(f"{daily}/*.json") if re.search(r"/\d{4}-\d{2}-\d{2}\.json$", f))
+    if not fs: return None
+    rejected = [] if rejected is None else rejected; ok = []
+    for f in reversed(fs):
+        try: d = json.load(open(f)); why = ledger_problems(f, d)
+        except Exception as e: why = [f"读不了：{str(e)[:120]}"]
+        if why: rejected.append((f, why)); continue
+        ok.append((f, len(d["rows"])))
+        if len(ok) == 2: break
+    if not ok: raise LedgerError(f"{daily} 下没有完整台账：" + "；".join(f"{os.path.basename(f)}: {', '.join(w)}" for f, w in rejected))
+    if len(ok) == 2 and ok[0][1] < (1 - LEDGER_DROP_MAX) * ok[1][1]:
+        raise LedgerError(f"{os.path.basename(ok[0][0])} 只有 {ok[0][1]} 行，比 {os.path.basename(ok[1][0])} 的 {ok[1][1]} 行少 >{LEDGER_DROP_MAX:.0%}，疑似不完整，拒绝回写")
+    return ok[0][0]
+
+def classify_unmatched(items, rulings_text):
+    """Give every unmatched write-back result an explicit kind: ruled_out (row dropped by a 不修/已修/结案… ruling for that
+    PR or PR:fingerprint, e.g. #1440 ← #1409), no_report (no fingerprint) or no_row. Mutates and returns items."""
+    from finding_policy import ruling_rows, bare_fp, _nofix
+    rs = list(ruling_rows(rulings_text or ""))
+    for u in items:
+        if not u.get("fingerprint"): u.setdefault("kind", "no_report"); continue
+        hit = [r for n, fp, r in rs if n == u["original_pr"] and (fp is None or bare_fp(fp) == u["fingerprint"]) and _nofix(r)]
+        if hit:
+            u.update(kind="ruled_out", ruling=hit[-1], why=f"台账行已被裁决移除（p2-rulings #{u['original_pr']}：{hit[-1]}）；复测结果记入 retest-unmatched.jsonl")
+        else: u.setdefault("kind", "no_row")
+    return items
+
+def record_unmatched(items, ledger=None, path=None, stamp=None):
+    """Append unmatched results to ledger/retest-unmatched.jsonl (the defined destination; daily ledgers are rebuilt and
+    retest_writeback is overwritten every run). Idempotent: one line per (fix_pr, original_pr, fingerprint, result, at)."""
+    path = path or UNMATCHED_LOG
+    have = set()
+    if os.path.exists(path):
+        for ln in open(path):
+            try: x = json.loads(ln); have.add((x["fix_pr"], x["original_pr"], x.get("fingerprint"), x["result"], x.get("at")))
+            except Exception: continue
+    new = []
+    for u in items:
+        k = (u["fix_pr"], u["original_pr"], u.get("fingerprint"), u["result"], u.get("at"))
+        if k in have: continue
+        have.add(k); new.append(dict(u, ledger=ledger, recorded_at=(stamp or now_cst()).isoformat(timespec="seconds"), by=BY))
+    if new:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a") as f:
+            for x in new: f.write(json.dumps(x, ensure_ascii=False) + "\n")
+    return new
 
 def targets_for(p):
     tg = []
@@ -349,7 +420,7 @@ def apply_ledger(led, results, unmatched=None):
         if not row:
             if unmatched is not None:
                 unmatched.append({"fix_pr": r["fix_pr"], "original_pr": r["original_pr"], "fingerprint": r.get("fingerprint"), "result": r["result"],
-                                  "why": "原 PR 无合并报告（没有 fingerprint）" if not r.get("fingerprint") else "台账无此行（未通知/不在台账范围）"})
+                                  "at": r.get("at"), "evidence": r.get("evidence"), "why": "原 PR 无合并报告（没有 fingerprint）" if not r.get("fingerprint") else "台账无此行（未通知/不在台账范围）"})
             continue
         fps = row.setdefault("fix_prs", []) or []
         if not any(x.get("pr") == r["fix_pr"] for x in fps):
@@ -471,7 +542,7 @@ def run(a):
     os.makedirs(odir, exist_ok=True); lk = open(QA_LOCK, "a")
     if not take_lock(lk, wait):
         lk.close(); return note_skip(state, f"QA lock {QA_LOCK} still held after {wait}s (panoptes running)", stamp)
-    results = []; model_calls = 0; unmatched = []; lp = None; touched = []; acts = []
+    results = []; model_calls = 0; unmatched = []; lp = None; ledger_err = None; touched = []; acts = []
     try:
         for p, tg in P:
             n = p["number"]
@@ -505,21 +576,33 @@ def run(a):
             bak = f"{f}.bak-{stamp:%Y%m%d}-retest"
             if not os.path.exists(bak): shutil.copy2(f, bak)
             d = apply_report(json.load(open(f)), n, ents); write_atomic(f, json.dumps(d, ensure_ascii=False, indent=2))
-        lp = ledger_path()
+        rej = []
+        try: lp = ledger_path(rejected=rej)
+        except LedgerError as e: lp = None; ledger_err = str(e)
+        else: ledger_err = None
+        for f, why in rej: log(f"WARN ledger {f} skipped for write-back: {'; '.join(why)}")
+        if ledger_err:
+            log(f"ERROR {ledger_err} -> {len(results)} result(s) NOT written to any ledger; recorded in {UNMATCHED_LOG}; replay later: opsfix.py retest-replay --pr N")
+            unmatched = [{"fix_pr": r["fix_pr"], "original_pr": r["original_pr"], "fingerprint": r.get("fingerprint"), "result": r["result"],
+                          "at": r.get("at"), "evidence": r.get("evidence"), "kind": "ledger_rejected", "why": f"台账不可信，未回写：{ledger_err}"}
+                         for r in results if r["result"] in ("pass", "fail", "blocked")]
+            record_unmatched(unmatched, None, stamp=stamp)
         if lp:
             bak = f"{lp}.bak-{stamp:%Y%m%d}-retest"
             if not os.path.exists(bak): shutil.copy2(lp, bak)
             led = json.load(open(lp)); touched = apply_ledger(led, results, unmatched)
+            classify_unmatched(unmatched, open(RULINGS).read() if os.path.exists(RULINGS) else "")
             led["retest_writeback"] = {"at": stamp.isoformat(timespec="seconds"), "by": BY, "rows": touched,
                                        "unmatched": len(unmatched), "unmatched_items": unmatched}
             write_atomic(lp, json.dumps(led, ensure_ascii=False, indent=2))
+            record_unmatched(unmatched, lp, stamp=stamp)
             for u in unmatched: log(f"UNMATCHED #{u['fix_pr']} ← #{u['original_pr']} {u['fingerprint']} {u['result']}: {u['why']} — not written to the ledger")
             log(f"ledger write-back: {len(touched)} row(s), {len(unmatched)} result(s) without a ledger row")
             if not getattr(a, "no_handoff", False):
                 acts = handoff_actions(led, gh_issue_state)
                 record_actions("opsfix", stamp.date().isoformat(), acts)
                 log(f"handoff close/reopen actions: {len(acts)} -> out/opsfix/{stamp:%Y-%m-%d}.actions.json")
-        else: log(f"WARN no ledger file under {QA}/ledger/daily -> {len(results)} result(s) not written back")
+        elif not ledger_err: log(f"WARN no ledger file under {QA}/ledger/daily -> {len(results)} result(s) not written back")
         open(f"{RPT}/manual-runs.jsonl", "a").write(json.dumps({"kind": "fix-retest", "day": a.day or f"since {state['watermark']}",
             **({"watermark_to": stamp.isoformat(timespec="seconds")} if advance else {}),
             "fix_prs": sorted({r['fix_pr'] for r in results}), "results": {k: sum(r["result"] == k for r in results) for k in ("pass", "fail", "blocked")},
@@ -546,5 +629,65 @@ def run(a):
         L += ["", f"## 没写进台账的结果（{len(unmatched)} 条）"] + [f"- #{u['fix_pr']} ← #{u['original_pr']} {u['fingerprint'] or '-'} {u['result']}：{u['why']}" for u in unmatched]
     if acts:
         L += ["", "## 交接 issue 动作（outbound 执行）"] + [f"- {x['type']} {x['url'] or x['repo'] + '#' + str(x['issue'])}（{x['row'].split('#')[-1]}）" for x in acts]
+    if ledger_err: L += ["", f"## ⚠️ 台账回写失败：{ledger_err}", f"结果已记入 {UNMATCHED_LOG}；修好台账后用 opsfix.py retest-replay --pr N 补写。"]
     write_atomic(f"{odir}.md", "\n".join(L) + "\n"); write_atomic(f"{odir}.json", json.dumps(results, ensure_ascii=False, indent=1))
-    print("\n".join(L)); return 0
+    print("\n".join(L)); return 1 if ledger_err else 0
+
+# ---------- retest-replay: re-apply recorded results to the right ledger (11-04: 0-row write-back of #1563/#1682/#1706) ----------
+def replay_results(fix_prs, rpt=None):
+    """Write-back results rebuilt from reports/merged/PR-<fix>.json prs[].retest[] (run() wrote them there before the ledger).
+    Only this tool's pass/fail entries. Returns (results, [(fix_pr, why)] for reports that could not be read)."""
+    rpt = rpt or RPT; out, missing = [], []
+    for n in fix_prs:
+        try:
+            d = json.load(open(f"{rpt}/PR-{n}.json")); pr = next(p for p in d["prs"] if p.get("number") == n)
+        except Exception as e: missing.append((n, f"{type(e).__name__}: {str(e)[:120]}")); continue
+        es = [e for e in pr.get("retest") or [] if e.get("by") == BY and e.get("result") in ("pass", "fail") and e.get("fingerprint")]
+        if not es: missing.append((n, "报告里没有 opsfix retest 的 pass/fail 记录"))
+        out += [dict(fix_pr=n, original_pr=e["original_pr"], fingerprint=e["fingerprint"], result=e["result"], reason=e.get("reason"),
+                     evidence=e.get("evidence"), at=e.get("at"), source=e.get("method")) for e in es]
+    return out, missing
+
+def _row_view(r):
+    return {k: r.get(k) for k in ("key", "status", "retest", "retest_pr", "fix_pr", "fix_round")} | {"retests": [(x.get("pr"), x.get("result")) for x in r.get("retests") or []]}
+
+def replay(a):
+    """opsfix.py retest-replay --pr N ... [--yes]: dry-run by default; --yes writes (backup first). Idempotent: a second
+    run finds nothing to change and writes nothing. Exit 1 when no trustworthy ledger (LedgerError) or a report is missing."""
+    import copy
+    stamp = now_cst()
+    rej = []
+    try:
+        if a.ledger:
+            why = ledger_problems(a.ledger, json.load(open(a.ledger)))
+            if why: raise LedgerError(f"{a.ledger}: {'; '.join(why)}")
+            lp = a.ledger
+        else: lp = ledger_path(daily=a.daily, rejected=rej)
+    except LedgerError as e: print(f"ERROR {e} -> nothing written"); return 1
+    for f, why in rej: print(f"skip {f}: {'; '.join(why)}")
+    if not lp: print("ERROR no ledger file -> nothing written"); return 1
+    results, missing = replay_results(a.pr, a.reports)
+    for n, why in missing: print(f"WARN #{n}: {why}")
+    raw = open(lp).read(); led = json.loads(raw); before = copy.deepcopy(led)
+    um = []; touched = apply_ledger(led, results, um)
+    rul = a.rulings or RULINGS
+    classify_unmatched(um, open(rul).read() if os.path.exists(rul) else "")
+    rp = led.setdefault("retest_replay", {})
+    for n in a.pr:
+        rs = [r for r in results if r["fix_pr"] == n]
+        if rs: rp[str(n)] = {"results_at": max(r["at"] or "" for r in rs), "rows": sorted(k for k in set(touched) if any(t.get("pr") == n for row in led["rows"] if row["key"] == k for t in row.get("retests") or [])), "by": BY}
+    changed = led != before
+    print(f"retest-replay {'WRITE' if a.yes else 'DRY-RUN'} ledger={lp} fix_prs={a.pr} results={len(results)} rows={len(set(touched))} unmatched={len(um)} changed={changed}")
+    bk = {r["key"]: r for r in before["rows"]}
+    for k in dict.fromkeys(touched):
+        row = next(r for r in led["rows"] if r["key"] == k)
+        print(f"  {k}\n    before {json.dumps(_row_view(bk[k]), ensure_ascii=False)}\n    after  {json.dumps(_row_view(row), ensure_ascii=False)}")
+    for u in um: print(f"  UNMATCHED #{u['fix_pr']} ← #{u['original_pr']} {u.get('fingerprint')} {u['result']} [{u.get('kind')}]: {u['why']}")
+    if not a.yes: print("DRY: nothing written (add --yes)"); return 1 if missing else 0
+    if changed:
+        bak = f"{lp}.bak-{stamp:%Y%m%d-%H%M%S}-replay"; shutil.copy2(lp, bak); print("backup", bak)
+        write_atomic(lp, json.dumps(led, ensure_ascii=False, indent=2))
+    else: print("no change: already applied, ledger not rewritten")
+    new = record_unmatched(um, lp, path=a.unmatched_log, stamp=stamp)
+    print(f"unmatched log: +{len(new)} line(s)")
+    return 1 if missing else 0
