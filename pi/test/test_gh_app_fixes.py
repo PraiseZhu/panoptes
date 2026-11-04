@@ -154,7 +154,7 @@ class Wrapper(Base):
     def test_allowlisted_caller_gets_the_pat_and_the_real_gh(self):
         import gh_wrapper as W
         self.on("gh-app-wrapper-enabled")
-        for caller in (["node", "/home/x/lifeline/scripts/loops/lifeline/tick.mjs"], ["bash", "/opt/box/verify.d/60-gh-auth.sh"],
+        for caller in (["node", "/home/x/lifeline/scripts/loops/lifeline/tick.mjs"],
                        ["/usr/bin/python3", "/Users/j/review-pr/scripts/merge-reviewed-pr.py"], ["node", "/srv/app/scripts/ops/org-market-open-company-pr.mjs"]):
             _, c, err = self.wrap(["pr", "list", "-R", PROD], env={"GITHUB_TOKEN": "ghp_pat", "GH_TOKEN": "ghs_old"}, caller=caller)
             self.assertEqual(c[0], "/real/gh", caller); self.assertEqual(c[2].get("GH_TOKEN"), "ghp_pat", caller); self.assertIn("allowlisted caller", err)
@@ -166,7 +166,7 @@ class Wrapper(Base):
         import gh_wrapper as W
         names = {n for n, _ in W.CALLER_ALLOWLIST}
         for n in ("vigil-cindy-watcher", "vigil-cindy-repair", "vigil-mivo-watcher", "vigil-mivo-handoff"): self.assertNotIn(n, names)
-        self.assertIn("grokbot-box-60-gh-auth", names)
+        self.assertNotIn("grokbot-box-60-gh-auth", names)
         self.on("gh-app-wrapper-enabled")
         for p in ("/home/x/vigil/watchers/cindy/bin/cindy-watcher.mjs", "/x/cindy/bin/cindy-repair.mjs", "/x/mivo/bin/mivo-watcher.mjs", "/x/mivo/bin/mivo-handoff.mjs"):
             self.assertIsNone(W.allowlisted(["node", p]), p)

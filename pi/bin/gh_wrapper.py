@@ -27,13 +27,13 @@ EXIT_RED_LINE = 4
 
 # (name, calling-script path suffix): one entry per caller; suffix match so copies/checkouts match too. Tracked as gh-allowlist:<name>.
 CALLER_ALLOWLIST = (
+    # 11-04: grokbot-box-60-gh-auth removed (grokbot-box ebcda7536: verify.d/60-gh-auth.sh calls the real gh directly, explicit identity).
     # 11-04: vigil-cindy-watcher/-repair and vigil-mivo-watcher/-handoff removed (vigil#274 merged; vigil runs only on the Mac mini, not via this wrapper).
     ("lifeline-tick", "scripts/loops/lifeline/tick.mjs"),
     ("lifeline-report", "scripts/loops/lifeline/report.mjs"),
     # mivo-merger's app/scripts/ops/... must precede lifeline's scripts/ops/... (a shorter suffix of it): first match wins.
     ("mivo-merger-org-market-open-company-pr", "app/scripts/ops/org-market-open-company-pr.mjs"),
     ("lifeline-org-market-open-company-pr", "scripts/ops/org-market-open-company-pr.mjs"),
-    ("grokbot-box-60-gh-auth", "verify.d/60-gh-auth.sh"),
     ("review-pr-target-branch-reminder", "review-pr/scripts/target-branch-reminder"),
     ("review-pr-request-changes-reviewed-pr", "review-pr/scripts/request-changes-reviewed-pr"),
     ("review-pr-merge-reviewed-pr", "review-pr/scripts/merge-reviewed-pr"),
