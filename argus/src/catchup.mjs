@@ -128,10 +128,15 @@ export function backlogCap(env = process.env) {
 
 export function catchUp({ repo, skipBaseBranches = registrySkip(), mainOnly: mo = mainOnly(), now = new Date(), reportsDir = REPORTS_DIR, mergedDir = join(reportsDir, 'merged'), list = (r, d) => listMergedPrs(r, d), runOne, maxAttempts = MAX_ATTEMPTS, active = () => activeRunPrs(), docsOnly = () => false, maxBacklog = backlogCap() }) {
   const days = catchUpDays(now)
-  const merged = list(repo, days)
+  const listed = list(repo, days)
   const sFile = statePath(reportsDir)
   const state = loadState(sFile)
   state.prs ??= {}
+  // 11-04 (#203 follow-up): backlog gaps deferred by the per-round cap are kept in state.backlog, so one whose merge day leaves the
+  // 2-day window at midnight is still caught up later instead of silently dropped. Dropped again once filled / run / given up.
+  const seen = new Set(listed.map((p) => p.number))
+  const merged = [...Object.values(state.backlog ?? {}).filter((p) => p && !seen.has(p.number)), ...listed]
+  const hadBacklog = Object.keys(state.backlog ?? {}).length > 0
   const testBase = (ref) => shouldTestBase(ref, skipBaseBranches, { mainOnly: mo })
   const gaps = []
   const running = active()
@@ -165,9 +170,16 @@ export function catchUp({ repo, skipBaseBranches = registrySkip(), mainOnly: mo 
   const deferred = []
   { let n = 0
     const kept = []
-    for (const g of gaps) { if (!g.docs_only && g.day !== today && ++n > maxBacklog) deferred.push(g.number); else kept.push(g) }
+    state.backlog = {}
+    for (const g of gaps) {
+      if (!g.docs_only && g.day !== today && ++n > maxBacklog) {
+        deferred.push(g.number)
+        state.backlog[String(g.number)] = { number: g.number, merged_at: g.merged_at, merge_sha: g.merge_sha, day: g.day, base_ref: g.base_ref ?? null, deferred_at: toShanghaiIso(now) }
+      } else kept.push(g)
+    }
     gaps.splice(0, gaps.length, ...kept) }
-  if (!gaps.length) { if (existsSync(sFile)) saveState(sFile, state); return { status: 'nothing-to-do', days, gaps: [], deferred_backlog: deferred, in_progress: inProgress, skipped } }
+  if (!Object.keys(state.backlog).length) delete state.backlog
+  if (!gaps.length) { if (existsSync(sFile) || state.backlog || hadBacklog) saveState(sFile, state); return { status: 'nothing-to-do', days, gaps: [], deferred_backlog: deferred, in_progress: inProgress, skipped } }
 
   const result = { schema: 'mivo-qa-catch-up/v1', repo, days, started_at: toShanghaiIso(now), gaps: gaps.map((g) => ({ number: g.number, day: g.day, merge_sha: g.merge_sha, reason: g.gap.reason, docs_only: g.docs_only, base_ref: g.base_ref ?? null })), deferred_backlog: deferred, in_progress: inProgress, skipped, runs: [],
     system_health: { status: 'ok', gave_up: [], qa_tool_failures: [] } }

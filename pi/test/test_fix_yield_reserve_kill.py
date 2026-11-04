@@ -57,9 +57,9 @@ class Reserve(T):
         h = [735, 900, 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000, 2100, 2200, 2300, 2400, 2500, 2550, 2604, 5765]
         self.assertEqual(prwatch.learned({"peaks": {"fix": h}}, "fix", 2560), int(2550 * 1.3))
 
-    def test_running_test_keeps_its_growth_and_the_next_one_reserved(self):
+    def test_running_test_keeps_its_growth_and_is_the_reserved_one(self):   # 11-04 headroom-1104 (a): no second whole peak on top
         t = {50: (1, 1400, PAN)}
-        self.assertEqual(prwatch.headroom_mb(t, mem=9700), 9700 - (prwatch.PANOPTES_PEAK_MB - 1400) - prwatch.PANOPTES_PEAK_MB)
+        self.assertEqual(prwatch.headroom_mb(t, mem=9700), 9700 - (prwatch.PANOPTES_PEAK_MB - 1400))
 
     def test_box_baseline_admits_exactly_one_fix(self):   # 11-03: first fix reserves min(7662, 3072): 7413 - 3072 = 4341 = 1536 + 2805
         self.procs({}, 7413); self.assertIsNone(prwatch.admit_block({}, ST)[0])
