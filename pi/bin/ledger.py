@@ -94,7 +94,7 @@ def real(d, force):
         f = f"{DAILY}/{d}.{ext}"
         if os.path.exists(f): baks[ext] = f"{f}.bak-{stamp}-prerebuild"; shutil.copy2(f, baks[ext]); log("backup", baks[ext])
     prev = prev_official(d); prev_total = (jl(prev) or {}).get("summary", {}).get("total") if prev else None
-    r = subprocess.run(["node", TOOL, d], capture_output=True, text=True, timeout=900, env={**os.environ, "QA_HOME": QA_HOME})
+    r = subprocess.run(["node", TOOL, d], capture_output=True, text=True, timeout=900, env={**os.environ, "QA_HOME": QA_HOME, **gh_component_node_env("ledgers")})
     log("build-ledger (real) rc", r.returncode, r.stdout.strip()[-300:], r.stderr[-300:])
     errs, warns = check(jl(tgt), d, prev_total, force) if r.returncode == 0 else ([f"build-ledger rc={r.returncode}: {r.stderr.strip()[-200:]}"], [])
     if errs:
@@ -117,7 +117,7 @@ def real(d, force):
 
 def dry(d, render_only):
     if not render_only:
-        r = subprocess.run(["node", TOOL, "--dry-run", d], capture_output=True, text=True, timeout=900, env={**os.environ, "QA_HOME": QA_HOME})
+        r = subprocess.run(["node", TOOL, "--dry-run", d], capture_output=True, text=True, timeout=900, env={**os.environ, "QA_HOME": QA_HOME, **gh_component_node_env("ledgers")})
         log("build-ledger --dry-run rc", r.returncode, r.stderr[-300:])
         copy_out(f"{QA_HOME}/scratch/ledger-dry", d)
         if r.returncode: sys.exit(1)

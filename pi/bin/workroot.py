@@ -8,7 +8,7 @@ away lives under PI_WORK (/workspace/pi-work; PI_WORK_ROOT overrides it, tests o
   .trash/            reaped worktrees: a rename takes them away at once, rm -rf runs in the background
   locks/             <repo>.repo.lock (clone metadata: fetch, worktree add / prune, branch -D), janitor.lock
 Not backed up (grokbot-box sync excludes it). Tickets, evidence and logs stay in PI_STATE/out."""
-import contextlib, fcntl, json, os, shutil, subprocess, time
+import contextlib, fcntl, re, json, os, shutil, subprocess, time
 from lib import PI_CODE, PI_WORK, now_cst
 
 def root():
@@ -36,8 +36,10 @@ def under(p, root=None):
     """p's real path is inside root (default ROOT) -- symlinks resolved, so a link pointing out never counts as inside."""
     r = os.path.realpath(root or globals()["root"]()); return os.path.realpath(p).startswith(r + os.sep)
 
-def _git(args, cwd=None, t=900):
-    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=t, stdin=subprocess.DEVNULL)
+def _git(args, cwd=None, t=900, repo=None):
+    import lib   # task B: clone / fetch of the bot clones via the App while that repo's read route is on
+    env = lib.git_read_env(repo) if repo and args and args[0] in lib.GIT_NET_READS else None
+    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=t, stdin=subprocess.DEVNULL, env=env)
     return r.returncode, (r.stdout + r.stderr)
 
 # ---------------------------------------------------------------- locks
@@ -128,7 +130,7 @@ def ensure_clone(repo):
         if os.path.exists(os.path.join(d, ".git")): return d
         src = REPOS[repo]; tmp = f"{d}.tmp-{os.getpid()}"
         shutil.rmtree(tmp, ignore_errors=True); os.makedirs(os.path.dirname(d), exist_ok=True)
-        rc, o = _git(["clone", "-q", "--no-checkout", *([f"--filter={src['filter']}"] if src["filter"] else []), src["url"], tmp], t=1800)
+        rc, o = _git(["clone", "-q", "--no-checkout", *([f"--filter={src['filter']}"] if src["filter"] else []), src["url"], tmp], t=1800, repo=(re.search(r"github\.com/([^/]+/[^/.]+)", src["url"]) or [None, None])[1])
         if rc: shutil.rmtree(tmp, ignore_errors=True); raise RuntimeError(f"clone {repo} rc={rc}: {o.strip()[-300:]}")
         with open(os.path.join(tmp, ".git", "info", "exclude"), "a") as f: f.write(f"\n/{MARK}\n/{MARK}.tmp-*\n")
         os.rename(tmp, d)

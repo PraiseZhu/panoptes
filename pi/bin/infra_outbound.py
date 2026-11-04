@@ -80,7 +80,9 @@ def h_pr(a, gh):
         validate()
         d = W.mkdtemp("pi-infrapr-")   # PI_WORK/tmp: janitor removes what a killed run leaves
         try:
-            r = subprocess.run(["gh", "repo", "clone", repo, d, "--", "--depth", "50", "-q"], capture_output=True, text=True, timeout=600)
+            import lib   # 11-04 P2: App token for clone + push while gh-app-enabled + gh-app-writes-enabled exist, else the PAT as before
+            gitc, genv = lib.git_push_env(repo)
+            r = subprocess.run(["gh", "repo", "clone", repo, d, "--", "--depth", "50", "-q"], capture_output=True, text=True, timeout=600, env=genv)
             if r.returncode: raise RuntimeError(f"clone rc={r.returncode}: {r.stderr[-200:]}")
             br = a["branch"]
             env = dict(os.environ, GIT_COMMITTER_NAME=GIT_NAME, GIT_COMMITTER_EMAIL=GIT_EMAIL)
@@ -96,7 +98,7 @@ def h_pr(a, gh):
                 except RuntimeError:
                     subprocess.run(["git", "-C", d, "am", "--abort"], capture_output=True)
                     raise RuntimeError("patch no longer applies on origin/main (git am --3way failed); infrafix must redo this ticket")
-                _git(d, "push", "-q", "-u", "origin", f"HEAD:refs/heads/{br}")    # new branch, plain push, never --force
+                _git(d, *gitc, "push", "-q", "-u", "origin", f"HEAD:refs/heads/{br}", env=genv)    # new branch, plain push, never --force
                 note = "pushed"
             with open(a["body_file"]) as f: body = f.read()
             if marker not in body: body += f"\n\n{marker}"

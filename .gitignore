@@ -49,3 +49,4 @@ pi/outbound-disabled-types*
 pi/ops-repair-enabled
 pi/**/*.bak*
 pi/**/__pycache__/
+inst-*.json

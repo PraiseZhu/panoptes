@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """备份管家 / 电脑运维 / Cindy 管家: verify their cron-or-script duties keep running without Grok Bot (check-only)."""
 from lib import *
-def sh(c):
-    r = subprocess.run(c, shell=True, capture_output=True, text=True, timeout=60); return (r.stdout + r.stderr).strip()
+def sh(c, env=None):
+    r = subprocess.run(c, shell=True, capture_output=True, text=True, timeout=60, env=env); return (r.stdout + r.stderr).strip()
 def age_min(p):
     try: return round((time.time() - os.path.getmtime(p)) / 60)
     except Exception: return None
@@ -10,7 +10,7 @@ import time
 def main():
     d = today(); L = [f"## {now_cst().strftime('%H:%M')}"]
     a = age_min("/workspace/grokbot-box-check/sync.log"); L.append(f"- 备份: sync 日志 {a} 分钟前更新（cron :17 每小时；>70 算异常）{'⚠' if a is None or a > 70 else '✓'}")
-    loc = sh("git -C /workspace/grokbot-box rev-parse HEAD"); rem = sh("git -C /workspace/grokbot-box ls-remote origin HEAD | cut -f1")
+    loc = sh("git -C /workspace/grokbot-box rev-parse HEAD"); rem = sh("git -C /workspace/grokbot-box ls-remote origin HEAD | cut -f1", env=git_read_env("PraiseZhu/grokbot-box"))   # task B: App read while gh-app-enabled
     L.append(f"- 备份: 本地 {loc[:8]} vs 远端 {rem[:8]} {'✓' if loc == rem else '⚠ 未推送/不一致'}")
     lc = sh("git -C /workspace/grokbot-box log -1 --format=%cI"); L.append(f"- 备份: 最近提交 {cst(lc) if lc else '?'}")
     m = age_min("/workspace/box-ops/mem.log"); L.append(f"- 电脑运维: mem.log {m} 分钟前更新（每分钟 cron）{'✓' if m is not None and m <= 2 else '⚠'}")

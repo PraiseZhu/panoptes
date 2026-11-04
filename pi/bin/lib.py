@@ -46,19 +46,20 @@ GH_RL_FILE = f"{PI_STATE}/gh-ratelimit.json"
 GH_RL_ALERT_H = 2
 GH_RL_MAX_S = 2 * 3600   # a recorded reset is never further away than this (a bogus Retry-After / reset must not wedge every job)
 class GhRateLimited(RuntimeError): pass
-def gh_rl_state():
+def gh_rl_state(f=None):
     """the state dict; a missing file is {}, a corrupt one (not a dict / non-numeric until or since) is ignored with one log line"""
-    try: d = json.load(open(GH_RL_FILE))
+    GH_RL_FILE_ = f or GH_RL_FILE
+    try: d = json.load(open(GH_RL_FILE_))
     except FileNotFoundError: return {}
-    except (OSError, ValueError) as e: log(f"{GH_RL_FILE} unreadable ({e.__class__.__name__}), ignored"); return {}
+    except (OSError, ValueError) as e: log(f"{GH_RL_FILE_} unreadable ({e.__class__.__name__}), ignored"); return {}
     num = lambda v: v is None or (isinstance(v, (int, float)) and not isinstance(v, bool))
-    if not isinstance(d, dict) or not num(d.get("until")) or not num(d.get("since")): log(f"{GH_RL_FILE} malformed, ignored"); return {}
+    if not isinstance(d, dict) or not num(d.get("until")) or not num(d.get("since")): log(f"{GH_RL_FILE_} malformed, ignored"); return {}
     return d
-def gh_rl_until(now=None):
+def gh_rl_until(now=None, f=None):
     """epoch the GitHub calls may resume, or 0 when not rate-limited. Writes cap until at now+GH_RL_MAX_S, so a stored until further
     out is bogus: ignored (one log line), never clamped on read -- a read clamp would roll forward to now+2h forever"""
-    now = now or _epoch(); u = gh_rl_state().get("until") or 0
-    if u > now + GH_RL_MAX_S + 60: log(f"{GH_RL_FILE} until is > {GH_RL_MAX_S}s away, ignored"); return 0
+    now = now or _epoch(); u = gh_rl_state(f).get("until") or 0
+    if u > now + GH_RL_MAX_S + 60: log(f"{f or GH_RL_FILE} until is > {GH_RL_MAX_S}s away, ignored"); return 0
     return u if u > now else 0
 def _gh_rl_reset(err):
     """epoch from Retry-After / X-RateLimit-Reset in err, else from `gh api rate_limit` (free, not counted), else a short default"""
@@ -75,15 +76,144 @@ def _gh_rl_reset(err):
         if ts and max(ts) > now: return float(max(ts))
     except Exception: pass
     return now + 900
-def gh_rl_record(err):
+def gh_rl_record(err, f=None):
     """err is a GitHub rate limit -> record the reset in GH_RL_FILE (keeping 'since' of an ongoing streak) and return True"""
     if not GH_RL_RE.search(err or ""): return False
-    old = gh_rl_state(); until = min(_gh_rl_reset(err), _epoch() + GH_RL_MAX_S)
-    write_atomic(GH_RL_FILE, json.dumps({"since": old.get("since") or _epoch(), "until": until, "error": err[:200]}))
+    old = gh_rl_state(f); until = min(_gh_rl_reset(err), _epoch() + GH_RL_MAX_S)
+    write_atomic(f or GH_RL_FILE, json.dumps({"since": old.get("since") or _epoch(), "until": until, "error": err[:200]}))
     return True
-def gh_rl_clear():
-    try: os.remove(GH_RL_FILE)
+def gh_rl_clear(f=None):
+    try: os.remove(f or GH_RL_FILE)
     except FileNotFoundError: pass
+
+# 11-04 (pi-work/gh-app-1104 P1): GitHub App "Praise QA" for PraiseZhu/panoptes READS, behind the flag file $PI_STATE/gh-app-enabled
+# (read at call time). Flag absent, a repo without an App route, an identity-dependent call (@me, /user) or a token that cannot be
+# minted -> the default gh login (PAT), exactly as before. The App has its own quota, so its rate-limit marker is a separate file.
+GH_APP_REPOS = {"PraiseZhu/panoptes"}      # + every PraiseZhu/* repo (task B: installation 164262283 covers the owner), gh_app_own_repo()
+def gh_app_own_repo(repo): return bool(repo) and (repo in GH_APP_REPOS or (repo.count("/") == 1 and repo.split("/")[0] == "PraiseZhu"))
+def gh_app_flag(): return f"{PI_STATE}/gh-app-enabled"
+def gh_app_rl_file(): return f"{PI_STATE}/gh-ratelimit-praise-qa.json"
+def gh_target_repo(args):
+    """OWNER/REPO a gh call targets: -R/--repo X, `repo view|clone X`, or `api [/]repos/OWNER/REPO/...`; None if unknown"""
+    a = list(args)
+    for i, x in enumerate(a):
+        if x in ("-R", "--repo") and i + 1 < len(a): return a[i + 1]
+        if x.startswith("--repo="): return x.split("=", 1)[1]
+    if a[:1] == ["repo"] and len(a) > 2 and a[1] in ("view", "clone") and "/" in a[2]: return a[2]
+    if a[:1] == ["api"]:
+        for x in a[1:]:
+            m = re.match(r"/?repos/([^/\s]+/[^/?\s]+)", x)
+            if m: return m.group(1)
+    return None
+# P3 (11-04, PM 17:00): product-repo READS too, while $PI_STATE/gh-app-product-enabled also exists. Product WRITES stay on the PAT:
+# outbound/prfix dedupe their fix PRs with author:@me and gate pushes on author == PraiseZhu, so an App-authored product PR would be
+# invisible to them (duplicate PRs). Those gates move first, then writes.
+GH_APP_PRODUCT_REPOS = {"xindong/mivo-canvas-plugin"}
+def gh_app_product_flag(): return f"{PI_STATE}/gh-app-product-enabled"
+def gh_app_wanted(args):
+    """True when this call should use the App token (see above and task B below)"""
+    repo = gh_target_repo(args)
+    if not os.path.exists(gh_app_flag()): return False
+    if any("@me" in x or re.match(r"/?user(?:$|/)", x) for x in args[1:]): return False   # identity-dependent (also inside --search): PAT
+    if repo in GH_APP_PRODUCT_REPOS:
+        if gh_is_read(args): return os.path.exists(gh_app_product_flag()) or gh_component_on()
+        return gh_app_product_writes_on()
+    if not gh_app_own_repo(repo): return False
+    return gh_is_read(args) or gh_app_writes_ok(args) or gh_component_on()
+# 11-04 task B: every remaining caller behind its own flag (each also needs gh-app-enabled); rm the flag -> that caller is back on the PAT.
+#   gh-app-product-writes-enabled  outbound/prfix product writes: gh pr create/comment/ready, issue writes, fix-branch clone + git push
+#   gh-app-merger-enabled / gh-app-mergewatch-enabled / gh-app-nightly-enabled / gh-app-ledgers-enabled  that job's gh calls (the job
+#   names itself with gh_component(); node/shell jobs get GH_TOKEN from `ghtoken.py env-for <component> <repo>`)
+GH_APP_COMPONENTS = ("merger", "mergewatch", "nightly", "ledgers")
+_COMPONENT = [os.environ.get("PI_GH_COMPONENT") or None]
+def gh_component(name):
+    assert name in GH_APP_COMPONENTS, name
+    _COMPONENT[0] = name
+def gh_component_flag(name): return f"{PI_STATE}/gh-app-{name}-enabled"
+def gh_component_on(name=None):
+    c = name or _COMPONENT[0]
+    return bool(c) and os.path.exists(gh_app_flag()) and os.path.exists(gh_component_flag(c))
+def gh_component_node_env(name, repo=REPO):
+    """node/shell jobs (ledgers -> build-ledger.mjs / track-followups.mjs, nightly -> argus): {PRAISE_QA_GH_TOKEN, PRAISE_QA_GH_REPOS}
+    while that job's flag is on and the token mints, else {} (= the PAT). Those scripts use the token ONLY for calls whose target repo
+    is PRAISE_QA_GH_REPOS; every other repo (handoff repos, pr-qa-agent-deploy) keeps the inherited login."""
+    if not gh_component_on(name): return {}
+    try:
+        import ghtoken
+        # + PRAISE_QA_GH_OWN_TOKEN for every PraiseZhu/* repo (installation 164262283: handoff / deploy issue repos)
+        return {"PRAISE_QA_GH_TOKEN": ghtoken.token(repo), "PRAISE_QA_GH_REPOS": repo, "PRAISE_QA_GH_OWN_TOKEN": ghtoken.token("PraiseZhu/panoptes")}
+    except Exception as e:
+        try: import ghtoken as _g; msg = _g.mask(e)
+        except Exception: msg = e.__class__.__name__
+        log(f"{name}: gh app token unavailable ({str(msg)[:160]}); node tools stay on the default gh login"); return {}
+def gh_app_product_writes_flag(): return f"{PI_STATE}/gh-app-product-writes-enabled"
+def gh_app_product_writes_on(): return os.path.exists(gh_app_flag()) and os.path.exists(gh_app_product_writes_flag())
+# Red lines (Praise, unchanged): only Praise merges product PRs, and no bot edits a product PR body. No code path does either, on ANY
+# identity: gh() refuses these before a token is chosen.
+class RedLine(RuntimeError): pass
+def gh_red_line(args):
+    """-> reason if args would merge a product PR or edit a product PR body/title, else None"""
+    if gh_target_repo(args) not in GH_APP_PRODUCT_REPOS: return None
+    a = list(args)
+    if a[:2] == ["pr", "merge"]: return "merging a product PR (only Praise merges)"
+    if a[:2] == ["pr", "edit"] and any(x.split("=", 1)[0] in ("--body", "-b", "--body-file", "-F", "--title", "-t") for x in a[2:]):
+        return "editing a product PR body"
+    if a[:1] == ["api"]:
+        path = next((x for x in a[1:] if re.match(r"/?repos/", x)), "")
+        meth = next((a[i + 1].upper() for i, x in enumerate(a) if x in ("-X", "--method") and i + 1 < len(a)), "")
+        if re.search(r"/pulls/\d+/merge$", path) and meth in ("PUT", ""): return "merging a product PR (only Praise merges)"
+        if re.search(r"/pulls/\d+$", path) and meth == "PATCH": return "editing a product PR body"
+    return None
+# Explicit identities (task B 4: no @me / `api user` anywhere). Our own PRs are authored by PraiseZhu (PAT, older) or by the App.
+PAT_LOGIN = "PraiseZhu"
+SELF_LOGINS = frozenset({PAT_LOGIN, "praise-qa[bot]", "app/praise-qa", "praise-qa"})   # REST login / gh --json author.login / slug
+SELF_AUTHORS = (PAT_LOGIN, "app/praise-qa")                                           # gh --author / search author: values
+def is_self(login):
+    if isinstance(login, dict): login = login.get("login")
+    return (login or "") in SELF_LOGINS
+def self_pr_list(repo, state, fields, search=None, limit=100, extra=(), run=None):
+    """our own PRs = union over SELF_AUTHORS (deduped by number): a dedupe never misses an old PraiseZhu PR nor a new App PR"""
+    seen = {}
+    for au in SELF_AUTHORS:
+        q = [f"{search} author:{au}"] if search else []
+        args = ["pr", "list", "-R", repo, "--state", state, "--limit", str(limit), "--json", fields] + list(extra)
+        args += (["--search", q[0]] if q else ["--author", au])
+        for p in (run or gh)(args) or []: seen.setdefault(p.get("number"), p)   # run: the caller's gh (tests stub module.gh)
+    return sorted(seen.values(), key=lambda p: -(p.get("number") or 0))
+# P2 (11-04): panoptes WRITES (PR create / merge / comment / branch delete, git push of infra branches) use the App too while BOTH
+# $PI_STATE/gh-app-enabled and $PI_STATE/gh-app-writes-enabled exist. rm gh-app-writes-enabled -> writes back on the PAT (reads stay).
+APP_LOGIN = "praise-qa[bot]"; APP_AUTHOR = "app/praise-qa"   # how the App shows up as a PR author (gh --author app/<slug>)
+def gh_app_writes_flag(): return f"{PI_STATE}/gh-app-writes-enabled"
+def gh_app_writes_ok(args): return os.path.exists(gh_app_writes_flag())
+def gh_app_writes_on(): return os.path.exists(gh_app_flag()) and os.path.exists(gh_app_writes_flag())
+GIT_NET_READS = ("fetch", "ls-remote", "clone")
+def git_read_env(repo):
+    """task B: env for a git network READ (fetch / ls-remote / clone) of repo: the App token through gh's credential helper (GIT_CONFIG_*
+    env, so no .git/config is edited) while that repo's App read route is on (lib.gh_app_wanted of a read), else None = default creds"""
+    ident, env = gh_env(["api", f"repos/{repo}"])
+    if ident != "app": return None
+    env.update(GIT_TERMINAL_PROMPT="0", GIT_CONFIG_COUNT="2", GIT_CONFIG_KEY_0="credential.helper", GIT_CONFIG_VALUE_0="",
+               GIT_CONFIG_KEY_1="credential.helper", GIT_CONFIG_VALUE_1="!gh auth git-credential")
+    return env
+def git_push_env(repo):
+    """-> (git -c args, env) for a git push to repo: the App token through gh's credential helper while the write flags are on,
+    else ([], None) = the box's default credentials (PAT) exactly as before"""
+    ident, env = gh_env(["repo", "clone", repo])   # "repo clone" is not a read: needs the (product-)writes flag
+    if ident != "app": return [], None
+    return ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"], env
+def gh_env(args):
+    """-> (identity "app"|"pat", env for subprocess or None = inherit). Minting failures fall back to the PAT with one masked line."""
+    if not gh_app_wanted(args): return "pat", None
+    try:
+        import ghtoken
+        tok = ghtoken.token(gh_target_repo(args))
+    except Exception as e:
+        try: import ghtoken as _g; msg = _g.mask(e)
+        except Exception: msg = e.__class__.__name__
+        log(f"gh app token unavailable ({str(msg)[:160]}); using the default gh login for this call"); return "pat", None
+    env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN")}
+    env["GH_TOKEN"] = tok
+    return "app", env
 def gh_skip(job):
     """True (and one log line) when GitHub is rate-limited: the caller skips its GitHub steps this run"""
     u = gh_rl_until()
@@ -91,18 +221,25 @@ def gh_skip(job):
     return bool(u)
 def gh(args, js=True, retries=1):
     cmd = f"gh {' '.join(args[:2])}"
-    u = gh_rl_until()
+    why = gh_red_line(args)
+    if why: raise RedLine(f"{cmd}: refused, red line: {why}")
+    ident, env = gh_env(args)
+    rlf = gh_app_rl_file() if ident == "app" else None   # None = GH_RL_FILE (the PAT's)
+    u = gh_rl_until(f=rlf)
     if u: raise GhRateLimited(f"{cmd}: GitHub rate-limited until {dt.datetime.fromtimestamp(u, CST).strftime('%H:%M:%S')} CST (not sent)")
     for left in range(retries if gh_is_read(args) else 0, -1, -1):
-        try: r = subprocess.run(["gh"] + args, capture_output=True, text=True, timeout=120)
+        try: r = subprocess.run(["gh"] + args, capture_output=True, text=True, timeout=120, env=env)
         except subprocess.TimeoutExpired:
             if left: print(f"{cmd}: timeout after 120s, retrying once", file=sys.stderr, flush=True); continue
             raise RuntimeError(f"{cmd}: timeout after 120s [{' '.join(args)[:120]}]")
         if r.returncode == 0:
-            if os.path.exists(GH_RL_FILE): gh_rl_clear()
+            if os.path.exists(rlf or GH_RL_FILE): gh_rl_clear(rlf)
             return json.loads(r.stdout) if js else r.stdout
         err = (r.stderr or "").strip()
-        if gh_rl_record(err): raise GhRateLimited(f"{cmd}: {err[:300]} [{' '.join(args)[:120]}]")
+        if ident == "app" and re.search(r"HTTP 401|Bad credentials", err):
+            try: import ghtoken; ghtoken.invalidate(gh_target_repo(args))
+            except Exception: pass
+        if gh_rl_record(err, rlf): raise GhRateLimited(f"{cmd}: {err[:300]} [{' '.join(args)[:120]}]")
         if left and GH_TRANSIENT_RE.search(err): print(f"{cmd}: {err[:200]} -- retrying once", file=sys.stderr, flush=True); time.sleep(2); continue
         raise RuntimeError(f"{cmd}: {err[:300]} [{' '.join(args)[:120]}]")
 

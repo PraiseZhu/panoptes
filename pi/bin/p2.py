@@ -47,7 +47,7 @@ def src_tree(sha):
     os.makedirs(d + ".tmp", exist_ok=True)
     a = subprocess.run(f"git -C {GIT} archive {sha} | tar -x -C {d}.tmp", shell=True, capture_output=True, text=True)
     if a.returncode != 0:
-        subprocess.run(["git", "-C", GIT, "fetch", "--quiet", "origin", sha], capture_output=True)  # read-only fetch of object
+        subprocess.run(["git", "-C", GIT, "fetch", "--quiet", "origin", sha], capture_output=True, env=git_read_env(REPO))   # task B: App while flagged  # read-only fetch of object
         a = subprocess.run(f"git -C {GIT} archive {sha} | tar -x -C {d}.tmp", shell=True, capture_output=True, text=True)
         if a.returncode != 0: shutil.rmtree(d + ".tmp", True); raise RuntimeError(a.stderr[:200])
     subprocess.run(["chmod", "-R", "a-w", d + ".tmp"]); os.rename(d + ".tmp", d)

@@ -65,3 +65,31 @@ PATH because GUI-launched cindy often has a minimal PATH.
 6. Leave `silentWhenIdle: true`. Skipped fires and successful ingests stay quiet; a hook failure (exit 3/4/5) or a failed run notifies you.
 
 Rollback: delete the entry (or pause it in cindy). Already-ingested defects and evidence stay in lifeline.
+
+## gh as the Praise QA App (praise-qa[bot]), 11-04
+
+`praise-qa-gh.sh` mints GitHub App installation tokens at run time (bash 3.2, openssl RS256 JWT, curl; no jq or python):
+
+- `xindong/mivo-canvas-plugin` uses installation 178486896.
+- `PraiseZhu/*` uses installation 164262283.
+- Any other repo uses the gh login.
+
+The key `/Users/praise/.config/praise-qa/app.pem` is opened only by openssl and is never printed. Tokens are cached in `~/.cache/praise-qa/inst-<id>` (directory 0700, file 0600) and re-minted when less than 10 minutes are left.
+
+`check-queue.sh` sources the script for its queue read. The schedule's agent steps call it instead of `gh` (`__MINI_QA_DIR__/praise-qa-gh.sh issue comment|edit`, `label create`).
+
+**Flag:** `~/.config/praise-qa/gh-app-enabled`. Removing it, a missing or unreadable key, or a mint failure all fall back to the mini's own gh login, with one masked line on stderr.
+
+**Deploy:**
+1. `install -m 0700 -d ~/.config/praise-qa`
+2. Copy the key to `~/.config/praise-qa/app.pem` and run `chmod 600` on it.
+3. `install -m 0755 check-queue.sh praise-qa-gh.sh <MINI_QA_DIR>/`
+4. Update the schedule prompt from `schedules.json` (replace `__MINI_QA_DIR__`).
+5. `touch ~/.config/praise-qa/gh-app-enabled`
+
+**Verify:**
+1. `<MINI_QA_DIR>/praise-qa-gh.sh api repos/PraiseZhu/pr-qa-agent-deploy -q .full_name` should print the repo name.
+2. Run the dry-run hook (step 3 of the install section above).
+3. After the next ingest, `gh issue view N -R PraiseZhu/pr-qa-agent-deploy --json comments -q '.comments[-1].author.login'` should show `praise-qa` (bot), and the label event should be by praise-qa[bot].
+
+**Rollback:** `rm ~/.config/praise-qa/gh-app-enabled`. The next call uses the gh login, with no restart needed.

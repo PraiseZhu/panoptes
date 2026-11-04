@@ -214,6 +214,9 @@ def judge_norepro(c, wd, claim, tag, base=None, step=None):
 def run(cmd, cwd=None, t=1800, env=None, inp=None):
     """Never a shell (dash has no PIPESTATUS). Returns (rc, stdout+stderr); timeout -> 124, missing binary -> 127."""
     kw = {"input": inp} if inp is not None else {"stdin": subprocess.DEVNULL}
+    if env is None and cmd[:1] == ["gh"]:   # task B: prfix gh reads route like lib.gh (App while flagged, else PAT)
+        if lib.gh_red_line(cmd[1:]): return 1, f"refused, red line: {lib.gh_red_line(cmd[1:])}"
+        env = lib.gh_env(cmd[1:])[1]
     try:
         r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=t, env=env, **kw)
         emerg_check()
@@ -246,7 +249,7 @@ def tail(s, n=60): return "\n".join((s or "").rstrip().splitlines()[-n:])
 def git(*a, cwd=None, t=600):
     if cwd is None and not os.path.exists(_GIT()) and os.path.abspath(_GIT()) == W.clone_dir("mivo"):
         W.ensure_clone("mivo")      # 10-24: the bot clone, made on first use (a test pointing GIT elsewhere never gets here)
-    return run(["git", *a], cwd=cwd or _GIT(), t=t)
+    return run(["git", *a], cwd=cwd or _GIT(), t=t, env=lib.git_read_env(REPO) if a and a[0] in lib.GIT_NET_READS else None)   # task B
 def fp8(fp): return (fp or "")[4:12]
 def iso(t): return t.astimezone(CST).isoformat(timespec="seconds") if t else None
 def ts(s):
@@ -477,9 +480,11 @@ def note_claims(path):
     try: return not PARKED_NOTE.search(open(path, errors="replace").read(4000))
     except OSError: return True
 def _gh_json(args, t):
-    if lib.gh_rl_until(): raise lib.GhRateLimited(f"gh {' '.join(args[:3])} …: GitHub rate-limited (not sent)")
-    r = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=t, stdin=subprocess.DEVNULL)
-    if r.returncode and lib.gh_rl_record(r.stderr): raise lib.GhRateLimited(f"gh {' '.join(args[:3])} …: {(r.stderr or '').strip()[:300]}")
+    _ident, _env = lib.gh_env(args)   # 11-04 P3: product reads via the App while the flags are on (writes / @me stay on the PAT)
+    rlf = lib.gh_app_rl_file() if _ident == "app" else None
+    if lib.gh_rl_until(f=rlf): raise lib.GhRateLimited(f"gh {' '.join(args[:3])} …: GitHub rate-limited (not sent)")
+    r = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=t, stdin=subprocess.DEVNULL, env=_env)
+    if r.returncode and lib.gh_rl_record(r.stderr, rlf): raise lib.GhRateLimited(f"gh {' '.join(args[:3])} …: {(r.stderr or '').strip()[:300]}")
     if r.returncode: raise RuntimeError(f"gh {' '.join(args[:3])} …: {(r.stderr or '').strip()[:300]}")
     return json.loads(r.stdout)
 def pr_list():
@@ -573,7 +578,7 @@ def collect(reps, ledger, fix2, nofix=frozenset()):
     """current report ∪ ledger open rows (fp absent from the current report) ∪ history-only (listed, never auto-picked).
     Only PRs authored by owners() (default fix_authors())."""
     out, cur_fps = {}, {}; own = owners()
-    mine = lambda a: own is None or (a or "") in own
+    mine = lambda a: own is None or (a or "") in own or ("PraiseZhu" in own and lib.is_self(a))   # task B: App-authored fix PRs are Praise's
     def add(n, x, source, author, row=None):
         fp = x.get("fingerprint")
         out[(n, fp)] = {"qa": n, "fp": fp, "sev": x.get("severity") or (row or {}).get("level"), "source": source, "author": author,
@@ -1901,7 +1906,7 @@ def pick_qa(A, ctx, vs, now):
         n, fp = v["c"]["qa"], v["c"]["fp"]
         p = next((p for p in ctx["prs"] if p.get("number") == A.supersedes), None)
         why = ("找不到这个 PR" if not p else f"是 {p.get('state')}，只能取代已关闭未合并的" if p.get("state") != "CLOSED"
-               else "不是 bot 开的修复 PR" if author_of(p) != AUTHOR_SELF
+               else "不是 bot 开的修复 PR" if not lib.is_self(author_of(p))
                else f"正文没有 QA #{n} 和指纹 {fp}" if fp not in (p.get("body") or "") or not qa_ref_re(n).search(p.get("body") or "") else None)
         if why: return None, {"status": "stopped", "qa": A.qa, "fp": fp, "error": f"--supersedes #{A.supersedes} {why}"}
         v = evaluate(v["c"], dict(ctx, prs=[q for q in ctx["prs"] if q is not p]), now); v["c"] = dict(v["c"], supersedes=A.supersedes)
@@ -2011,7 +2016,7 @@ def revise_target(p, commits=()):
     m = PILINE_MARK.search(p.get("body") or "")
     if p.get("state") != "OPEN": return None, None, "PR 不是 open"
     if not p.get("isDraft"): return None, None, "PR 已经转正式（之后由 Mac mini 盯梢跟进）"
-    if author_of(p) != AUTHOR_SELF: return None, None, "不是我们的 PR"
+    if not lib.is_self(author_of(p)): return None, None, "不是我们的 PR"
     if not (p.get("headRefName") or "").startswith("qa-fix/") or not m: return None, None, "不是 Pi 线开的修复 PR"
     why = ownership_block(p.get("number"), commits)
     if why: return None, None, why

@@ -8,6 +8,24 @@ import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, mkdtem
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
+
+// 11-04 task B: the Praise QA App token (PRAISE_QA_GH_TOKEN, set by the Python caller while its gh-app-<job>-enabled flag is on) is used
+// ONLY for gh calls whose target repo is in PRAISE_QA_GH_REPOS; every other call, and the flag off, inherit the default login (PAT).
+function ghTargetRepo(args) {
+  for (let i = 0; i < args.length; i++) {
+    if ((args[i] === '-R' || args[i] === '--repo') && args[i + 1]) return args[i + 1]
+    const m = /^\/?repos\/([^/\s]+\/[^/?\s]+)/.exec(args[i]); if (args[0] === 'api' && m) return m[1]
+  }
+  return null
+}
+function ghExec(args, opts = {}) { return execFileSync('gh', args, { ...opts, env: ghEnvFor(args) }) }
+function ghEnvFor(args) {
+  const tok = process.env.PRAISE_QA_GH_TOKEN, repos = (process.env.PRAISE_QA_GH_REPOS || '').split(',').filter(Boolean)
+  const r = ghTargetRepo(args), own = process.env.PRAISE_QA_GH_OWN_TOKEN
+  const t = tok && r && repos.includes(r) ? tok : own && r && /^PraiseZhu\/[^/]+$/.test(r) ? own : null   // own = every PraiseZhu/* repo
+  if (!t) return process.env
+  const e = { ...process.env, GH_TOKEN: t }; delete e.GITHUB_TOKEN; return e
+}
 import { matchesItem, isCoverage, shortTitle, prCountsAsFollowup, isAcceptanceReportFor, namesItem, ignoredPrs } from './followup-match.mjs'
 import { handoffRepos, loadResolutions, resolvedBy, parseReceiptDetail, fixPrResolutions } from './handoff-receipts.mjs'
 import { overdueCc, routeFor, loadRoutes } from './handoff-routes.mjs'
@@ -57,7 +75,7 @@ const today = bjDate()
 const summary = { dry_run: DRY, held: [], handoff_resolved: [], date: today, reminded: [], thanked: [], escalated: [], errors: [], drafts: [], items: [] }
 
 // GitHub 偶发 EOF：每次调用最多重试 3 次
-function ghx(args, opts) { for (let i = 0; ; i++) { try { return execFileSync('gh', args, opts) } catch (e) { if (i >= 3 || !/EOF|timeout|502|503|ECONNRESET/i.test(String(e.stderr || e.message))) throw e; execFileSync('sleep', [String(2 * (i + 1))]) } } }
+function ghx(args, opts) { for (let i = 0; ; i++) { try { return ghExec(args, opts) } catch (e) { if (i >= 3 || !/EOF|timeout|502|503|ECONNRESET/i.test(String(e.stderr || e.message))) throw e; execFileSync('sleep', [String(2 * (i + 1))]) } } }
 function gh(args) { return JSON.parse(ghx(args, { encoding: 'utf8', maxBuffer: 64 << 20 }) || 'null') }
 function ghPaged(path) {
   const out = ghx(['api', '--paginate', '--jq', '.[] | tojson', path], { encoding: 'utf8', maxBuffer: 64 << 20 })

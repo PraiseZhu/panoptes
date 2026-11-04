@@ -220,8 +220,8 @@ class Run:
         since = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 86400 * self.c["remote_days"]))
         for repo, R in sorted(REMOTE.items()):
             try:
-                prs = gh(["pr", "list", "-R", R["gh"], "--state", "closed", "--author", "@me", "--limit", "100", "--search", f"closed:>={since}",
-                          "--json", "number,headRefName,headRefOid,mergedAt,body"])
+                # task B: our closed PRs by explicit identity = PraiseZhu (PAT, older) + app/praise-qa (App), no @me
+                prs = self_pr_list(R["gh"], "closed", "number,headRefName,headRefOid,mergedAt,body", search=f"closed:>={since}", run=gh)
             except Exception as e: self.r["remote_kept"].append({"repo": repo, "why": f"gh 查不到 PR 列表，远端一律不删：{str(e)[:120]}"}); continue
             for p in prs or []:
                 br, head = p.get("headRefName") or "", p.get("headRefOid") or ""

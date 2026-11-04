@@ -105,7 +105,7 @@ def scan_reports(st):
         except ValueError: continue          # still being written: read it again next minute
         seen[k] = {"m": m, "h": h}
         for p in doc.get("prs", []):
-            if (p.get("author") or "") not in fix_authors(): continue   # Praise 11-02: PraiseZhu + kirozeng; others' PRs go to their handoff repos
+            if (p.get("author") or "") not in fix_authors() and not is_self(p.get("author")): continue   # Praise 11-02: PraiseZhu + kirozeng; others' PRs go to their handoff repos
             xs = [dict(x, severity=x.get("severity") or x.get("severity_if_confirmed")) for x in (p.get("findings") or []) + (p.get("pending_verification") or [])]
             xs = [x for x in xs if x.get("severity") in ("P0", "P1") and x.get("fingerprint") not in notified]
             if not xs: continue
@@ -318,8 +318,10 @@ def headroom_mb_1103(t, mem=None, st=None):
     grow = sum(max(0, run_pk - sum(t[q][1] for q in tree(t, p))) for p in pys) + run_pk * len(waiting)
     disp = dispatch_runs(t)   # fleet Pi tasks share the same RAM: count them up to their peak too
     grow += sum(max(0, TASK_PEAK_MB - sum(t[q][1] for q in tree(t, p))) for p in disp)
-    pan = panoptes_procs(t)
-    if pan: grow += max(0, pan_pk - sum(t[p][1] for p in pan))
+    runs = panoptes_runs(t)
+    # 11-04 (headroom-1104 b): each running test up to its own peak (priority + catch-up at once = two tests, not one)
+    grow += sum(max(0, pan_pk - sum(t[q][1] for q in ps)) for ps in runs.values())
+    pan = bool(runs)
     if flag_on(TEST_RESERVE_OFF):                    # always room for the next merge test, whatever runs now --
         # but with nothing running the first fix is not stacked on a whole test peak (11-03: 9030 + 8687 MB > a 16 GB box)
         grow += pan_pk if (pan or pys or waiting or disp) else min(pan_pk, TEST_RESERVE_CAP_MB)
@@ -650,8 +652,7 @@ def red_dm(st, n, qa, tag, red, how):
 def check_drafts(st):
     if time.time() - st.get("drafts_at", 0) < 110: return
     st["drafts_at"] = time.time()
-    prs = gh(["pr", "list", "-R", REPO, "--author", "PraiseZhu", "--draft", "--state", "open", "--limit", "50",
-              "--json", "number,headRefOid,headRefName,body,statusCheckRollup,mergeStateStatus"])
+    prs = self_pr_list(REPO, "open", "number,headRefOid,headRefName,body,statusCheckRollup,mergeStateStatus", limit=50, extra=["--draft"], run=gh)
     done = st.setdefault("draft_seen", {}); ub = st.setdefault("update_branch_day", {}); day = today()
     # 10-24 (plan S2): a bot draft that left this list was merged / closed / readied -> janitor right away (branches, worktrees)
     ours = sorted(p["number"] for p in prs if is_bot_fixpr(p))
