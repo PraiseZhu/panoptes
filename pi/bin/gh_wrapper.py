@@ -47,6 +47,27 @@ CALLER_ALLOWLIST = (
     ("review-pr-notify-author-resolve", "review-pr/scripts/notify-author-resolve"),
     ("review-pr-signoff-hold", "review-pr/scripts/signoff-hold"),
 )
+# 11-04 (#214, PM ruling): product-write exceptions per caller x operation, never a whole script. The caller is the calling SCRIPT
+# (script_of(caller_chain()), realpath, path suffix as for CALLER_ALLOWLIST). These callers are NOT PAT pass-through (not allowlisted):
+# only the listed `gh <noun> <verb>` skips lib.gh_product_write; pr close / review / merge / ref delete / REST / graphql stay refused.
+PRODUCT_WRITE_EXCEPTIONS = (
+    ("panoptes-outbound", "pi/bin/outbound.py", frozenset({("issue", "create"), ("pr", "comment"), ("issue", "close")})),
+    # infra_outbound's issue comment: matches only when infra_outbound.py is the process script (normally it is imported by
+    # outbound.py, whose ops above do not include issue comment); its target is pr-qa-agent-deploy, not a product repo, anyway.
+    ("panoptes-infra-outbound", "pi/bin/infra_outbound.py", frozenset({("issue", "comment")})),
+)
+
+
+def write_exceptions(cmdline):
+    """frozenset of (noun, verb) product writes excused for the caller's SCRIPT (exact path-suffix match), else empty"""
+    s = script_of(cmdline)
+    if not s: return frozenset()
+    a = s.replace("\\", "/")
+    for _, suf, ops in sorted(PRODUCT_WRITE_EXCEPTIONS, key=lambda e: -len(e[1])):
+        if a == suf or a.endswith("/" + suf): return ops
+    return frozenset()
+
+
 SCRIPT_EXTS = ("", ".mjs", ".js", ".sh", ".py", ".ts")
 
 
@@ -170,8 +191,9 @@ def app_token(repo, argv, no_install_is_none=False):
 def main(argv, env=None, execve=os.execve, run=subprocess.run, caller=None):
     env = dict(os.environ if env is None else env)
     repo = target(argv, env, run)
-    name = allowlisted(caller_chain() if caller is None else caller)
-    why = lib.gh_red_line(argv, repo) or lib.gh_product_write(argv, repo, name)
+    chain = caller_chain() if caller is None else caller
+    name = allowlisted(chain)
+    why = lib.gh_red_line(argv, repo) or lib.gh_product_write(argv, repo, name, excused=write_exceptions(chain))
     if why:
         print(f"gh-wrapper: refused, red line: {why} (repo {repo or 'unknown'}); nothing was sent", file=sys.stderr)
         return EXIT_RED_LINE

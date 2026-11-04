@@ -261,11 +261,15 @@ def gh_red_line(args, repo=None, read=open):
 RED_WRITE = "writing to the product repo (issue/PR comment, review, close, issue create, ref delete)"
 GQL_COMMENT_RE = re.compile(r"\b(addComment|addPullRequestReview|submitPullRequestReview|addPullRequestReviewComment|addPullRequestReviewThread)\s*\(")
 GQL_WRITE_RE = re.compile(r"\b(createIssue|closePullRequest|closeIssue|deleteRef|updateRef|updateRefs)\s*\(")
-def gh_product_write(args, repo=None, caller=None, read=open):
-    """-> reason if args write to the product repo in the 2c set and caller (allowlist name) is not excused, else None"""
+PRODUCT_WRITE_EXCUSABLE = frozenset({("issue", "create"), ("issue", "comment"), ("issue", "close"), ("pr", "comment")})   # never pr close/review
+def gh_product_write(args, repo=None, caller=None, read=open, excused=frozenset()):
+    """-> reason if args write to the product repo in the 2c set and caller (allowlist name) is not excused, else None.
+    excused: the caller x operation exceptions (gh_wrapper.PRODUCT_WRITE_EXCEPTIONS, PM ruling 11-04) -- gh subcommand pairs such as
+    ("issue", "create"); only that exact `gh <noun> <verb>` passes, never the REST/graphql form, never any other op."""
     a = list(args); tgt = repo or gh_target_repo(a); product = is_product_repo(tgt)
     review_pr = (caller or "").startswith("review-pr-")
     if a[:1] in (["issue"], ["pr"]) and product:
+        if tuple(a[:2]) in excused and tuple(a[:2]) in PRODUCT_WRITE_EXCUSABLE: return None
         if a[:2] in (["issue", "create"], ["pr", "close"]): return RED_WRITE
         if a[:2] in (["issue", "comment"], ["pr", "comment"], ["pr", "review"]) and not review_pr: return RED_WRITE
         if a[:2] in (["issue", "close"], ["issue", "delete"]): return RED_WRITE

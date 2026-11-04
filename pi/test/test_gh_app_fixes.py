@@ -329,4 +329,45 @@ class AcceptanceRound1(Base):
             self.assertIsNotNone(self.wrap(a)[1], a)
 
 
+class ProductWriteExceptions(Base):
+    """PM ruling 11-04: product-write exceptions per caller x operation (gh_wrapper.PRODUCT_WRITE_EXCEPTIONS), never a whole script"""
+    wrap = Wrapper.wrap
+    gql = AcceptanceRound1.gql
+    OUT = ["python3", "/x/panoptes/pi/bin/outbound.py", "--job", "daily"]
+    INFRA = ["python3", "/x/panoptes/pi/bin/infra_outbound.py"]
+
+    def test_listed_caller_x_op_allowed(self):
+        R = PROD
+        for caller, a in ((self.OUT, ["issue", "create", "-R", R, "--title", "x", "--body", "y"]),
+                          (self.OUT, ["pr", "comment", "1", "-R", R, "--body", "x"]),
+                          (self.OUT, ["issue", "close", "1", "-R", R, "--reason", "completed", "--comment", "x"]),
+                          (self.INFRA, ["issue", "comment", "1", "-R", R, "--body", "x"])):
+            rc, c, err = self.wrap(a, caller=caller); self.assertIsNotNone(c, (caller, a)); self.assertNotIn("refused", err)
+            self.assertNotIn("allowlisted", err)   # an exception is not PAT pass-through
+
+    def test_listed_callers_other_ops_refused(self):
+        R = PROD
+        others = (["pr", "close", "1", "-R", R], ["api", "-X", "DELETE", f"repos/{R}/git/refs/heads/x"], ["pr", "review", "1", "-R", R, "--approve"],
+                  ["pr", "merge", "1", "-R", R, "--squash"], ["api", "-X", "POST", f"repos/{R}/issues", "-f", "title=x"],
+                  ["api", "-X", "POST", f"repos/{R}/issues/1/comments", "-f", "body=x"], ["api", "-X", "PATCH", f"repos/{R}/issues/1", "-f", "state=closed"],
+                  ["pr", "edit", "1", "-R", R, "--body", "x"], ["issue", "delete", "1", "-R", R],
+                  self.gql('mutation { addComment(input:{subjectId:"PROD_1", body:"x"}){ clientMutationId } }'),
+                  self.gql('mutation { createIssue(input:{repositoryId:"PROD_R", title:"x"}){ clientMutationId } }'))
+        for caller in (self.OUT, self.INFRA):
+            for a in others: self.assertEqual(self.wrap(a, caller=caller)[:2], (4, None), (caller, a))
+        self.assertEqual(self.wrap(["issue", "comment", "1", "-R", R, "-b", "x"], caller=self.OUT)[:2], (4, None))   # not listed for outbound
+        for a in (["issue", "create", "-R", R, "-t", "x"], ["pr", "comment", "1", "-R", R, "-b", "x"], ["issue", "close", "1", "-R", R]):
+            self.assertEqual(self.wrap(a, caller=self.INFRA)[:2], (4, None), a)   # infra_outbound: issue comment only
+
+    def test_non_panoptes_callers_still_refused(self):
+        R = PROD
+        ops = (["issue", "create", "-R", R, "-t", "x"], ["pr", "comment", "1", "-R", R, "-b", "x"], ["issue", "close", "1", "-R", R],
+               ["issue", "comment", "1", "-R", R, "-b", "x"])
+        for caller in ([], ["python3", "/x/other/outbound.py"], ["python3", "/x/pi/bin/my_outbound.py"], ["python3", "/x/pi/bin/outbound.py.bak"],
+                       ["python3", "-c", "import outbound"], ["sh", "-c", "python3 /x/pi/bin/outbound.py"], ["node", "/x/cindy/bin/cindy-watcher.mjs"],
+                       ["python3", "/tmp/evil.py", "/x/panoptes/pi/bin/outbound.py"]):
+            for a in ops: self.assertEqual(self.wrap(a, caller=caller)[:2], (4, None), (caller, a))
+        self.assertEqual(self.wrap(["issue", "comment", "1", "-R", R, "-b", "x"], caller=["python3", "/x/panoptes/pi/bin/infra_outbound.py.old"])[:2], (4, None))
+
+
 if __name__ == "__main__": unittest.main()
