@@ -1387,6 +1387,21 @@ def pr_body(c, res, tests, src, pf, docs_ok, issue_url, plat):
     return "\n".join(L)
 
 # ---------------------------------------------------------------- one ticket
+def source_base(n):
+    """baseRefName of source PR #n (11-04: #1682/#1710 went to main while their source #1597 is on integration/canvas-s2)."""
+    try: b = (_gh_json(["pr", "view", str(n), "-R", REPO, "--json", "baseRefName"], 120) or {}).get("baseRefName")
+    except Exception as e: raise Transient(f"读源 PR #{n} 的 base 失败：{str(e)[:200]}")
+    if not b or not re.fullmatch(r"[A-Za-z0-9._/-]+", b): raise Transient(f"源 PR #{n} 的 base 读不出来：{b!r}")
+    return b
+
+def check_fix_base(n, fix_base):
+    """hard stop (Deterministic, no PR action) unless the fix PR's base == the source PR's baseRefName."""
+    src = source_base(n)
+    if fix_base != src:
+        log("base mismatch", f"QA{n}", f"fix base {fix_base!r} != source base {src!r}", "-> hard stop, no PR")
+        raise Deterministic(f"修复 PR 的 base {fix_base!r} 与源 PR #{n} 的 base {src!r} 不一致，硬停不开 PR")
+    return src
+
 def fix_one(c, A, d):
     """-> (outcome, res). outcome: status pr_action_written | dry_ok | norepro | failed (kind transient|deterministic)."""
     n, sev, fp = c["qa"], c["sev"], c["fp"]
@@ -1408,9 +1423,10 @@ def fix_one(c, A, d):
                         log("legacy worktree of this ticket ->", drop_worktree(w["path"]))
             if os.path.exists(wd) or (not A.dry_run and branch_exists(branch)):
                 log("leftover of this ticket ->", drop_worktree(wd, None if A.dry_run else branch))
-            rc, o = git("fetch", "-q", "origin", "main")
+            src_base = source_base(n); res["base_ref"] = src_base   # 11-04: the fix PR targets the source PR's base, not always main
+            rc, o = git("fetch", "-q", "origin", f"+refs/heads/{src_base}:refs/remotes/origin/{src_base}")
             if rc: raise Transient(f"git fetch 失败 rc={rc}：{tail(o, 2)}")
-            base = A.base or git("rev-parse", "origin/main")[1].strip()
+            base = A.base or git("rev-parse", f"origin/{src_base}")[1].strip()
             if not re.fullmatch(r"[0-9a-f]{40}", base):
                 rc, o = git("rev-parse", base); base = o.strip()
                 if rc or not re.fullmatch(r"[0-9a-f]{40}", base): raise Transient(f"base 解析失败：{tail(o, 2)}")
@@ -1679,9 +1695,10 @@ def fix_one(c, A, d):
             rnd = int(res.get("round") or 1)   # round 2+ needs its own key + dedupe string, or outbound sees round 1 as "done"
             att = int(c.get("attempt") or 1)   # 10-24: a later attempt after outbound gave up on this ticket's action needs a new key
             key = f"fixpr:{n}:{fp}" + (f":r{rnd}" if rnd > 1 else "") + (f":a{att}" if att > 1 else "")
+            check_fix_base(n, res["base_ref"])   # mandatory: re-read the source PR's base right before the action is written
             record_actions("praise-pr", d, [{"key": key, "type": "gh.pr.create(draft)", "patch": pfile, "title": title,
                 "body_must_contain": fp + (f" r{rnd}" if rnd > 1 else ""), "qa": n, "fingerprint": fp, "sev": sev, "ticket": f"{n}:{fp}", "round": res["round"], "supersedes": c.get("supersedes"),
-                "local_branch": branch, "base": base, "head": head, "pred_pr": pred, "docs_dir_predicted": f"docs/pr/{pred}",
+                "local_branch": branch, "base": base, "base_ref": res["base_ref"], "head": head, "pred_pr": pred, "docs_dir_predicted": f"docs/pr/{pred}",
                 "preflight": f"{pf['passed']}/{pf['total']} ok in {pf['seconds']}s",
                 "note": "outbound: after gh pr create, if the real number != pred_pr, git mv docs/pr/<pred> docs/pr/<real> (+ front matter pr:) "
                         "on the same branch, commit, plain push (no force)"}])

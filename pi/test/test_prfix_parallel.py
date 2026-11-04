@@ -159,14 +159,14 @@ class TestTierAndRegex(GitTmp):
         tiers = []
         def fake_pi(tier, *a, **k):
             tiers.append(tier); raise RuntimeError("stop after the first model call")
-        orig = prfix.pi, prfix.predict_pr, prfix.npm_ci
-        prfix.pi = fake_pi; prfix.predict_pr = lambda *a, **k: 4242; prfix.npm_ci = lambda wd: (0, "ok")
+        orig = prfix.pi, prfix.predict_pr, prfix.npm_ci, prfix.source_base
+        prfix.pi = fake_pi; prfix.predict_pr = lambda *a, **k: 4242; prfix.npm_ci = lambda wd: (0, "ok"); prfix.source_base = lambda n: "main"
         try:
             with contextlib.redirect_stdout(io.StringIO()):
                 out, res = prfix.fix_one({"qa": 1178, "fp": A, "sev": "P1", "title": "t", "source": "report", "author": "PraiseZhu",
                                           "finding": finding(A, file="src/foo.js", line=1), "row": None, "round": 1},
                                          argparse.Namespace(dry_run=False, base=None), "2026-10-24")
-        finally: prfix.pi, prfix.predict_pr, prfix.npm_ci = orig
+        finally: prfix.pi, prfix.predict_pr, prfix.npm_ci, prfix.source_base = orig
         self.assertEqual(tiers, ["deep"]); self.assertEqual(out["kind"], "transient")
         self.assertFalse(os.path.exists(f"{prfix.WT_ROOT}/pi-wt-1178-{A[4:12]}"))   # cleaned up under the clone lock
 
