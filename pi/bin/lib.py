@@ -36,15 +36,73 @@ GH_WRITE_FLAGS = {"-X", "--method", "-f", "-F", "--field", "--raw-field", "--inp
 def gh_is_read(args):
     if tuple(args[:2]) in GH_READS: return True
     return bool(args) and args[0] == "api" and not any(a.split("=", 1)[0] in GH_WRITE_FLAGS for a in args[1:])
+# 11-04 (pi-work/ratelimit-1104/FINDINGS.md): PraiseZhu's GraphQL quota ran out and every job kept sending doomed gh calls each
+# minute (a rate-limit error matched nothing above: no backoff). Now a primary or secondary rate limit records its reset time in
+# GH_RL_FILE; until then gh() raises GhRateLimited WITHOUT calling GitHub, jobs skip their GitHub steps (one log line, never an
+# error/streak) and watchdog reports one gh:ratelimit item once skipping has lasted > GH_RL_ALERT_H. The next success removes the file.
+from time import time as _epoch   # not lib.time.time: tests stub lib.time with a sleep-only object
+GH_RL_RE = re.compile(r"rate limit|HTTP 429|status(?: code)?:? 429|\b429 Too Many Requests|abuse detection|retry-after", re.I)
+GH_RL_FILE = f"{PI_STATE}/gh-ratelimit.json"
+GH_RL_ALERT_H = 2
+GH_RL_MAX_S = 2 * 3600   # a recorded reset is never further away than this (a bogus Retry-After / reset must not wedge every job)
+class GhRateLimited(RuntimeError): pass
+def gh_rl_state():
+    """the state dict; a missing file is {}, a corrupt one (not a dict / non-numeric until or since) is ignored with one log line"""
+    try: d = json.load(open(GH_RL_FILE))
+    except FileNotFoundError: return {}
+    except (OSError, ValueError) as e: log(f"{GH_RL_FILE} unreadable ({e.__class__.__name__}), ignored"); return {}
+    num = lambda v: v is None or (isinstance(v, (int, float)) and not isinstance(v, bool))
+    if not isinstance(d, dict) or not num(d.get("until")) or not num(d.get("since")): log(f"{GH_RL_FILE} malformed, ignored"); return {}
+    return d
+def gh_rl_until(now=None):
+    """epoch the GitHub calls may resume, or 0 when not rate-limited. Writes cap until at now+GH_RL_MAX_S, so a stored until further
+    out is bogus: ignored (one log line), never clamped on read -- a read clamp would roll forward to now+2h forever"""
+    now = now or _epoch(); u = gh_rl_state().get("until") or 0
+    if u > now + GH_RL_MAX_S + 60: log(f"{GH_RL_FILE} until is > {GH_RL_MAX_S}s away, ignored"); return 0
+    return u if u > now else 0
+def _gh_rl_reset(err):
+    """epoch from Retry-After / X-RateLimit-Reset in err, else from `gh api rate_limit` (free, not counted), else a short default"""
+    now = _epoch()
+    m = re.search(r"retry-after:?\s*(\d+)", err, re.I)
+    if m: return now + int(m.group(1))
+    m = re.search(r"x-ratelimit-reset:?\s*(\d{9,})", err, re.I)
+    if m: return float(m.group(1))
+    if re.search(r"secondary|abuse", err, re.I): return now + 60
+    try:
+        r = subprocess.run(["gh", "api", "rate_limit"], capture_output=True, text=True, timeout=30)
+        res = json.loads(r.stdout).get("resources") or {}
+        ts = [v.get("reset") or 0 for v in res.values() if isinstance(v, dict) and v.get("remaining") == 0]
+        if ts and max(ts) > now: return float(max(ts))
+    except Exception: pass
+    return now + 900
+def gh_rl_record(err):
+    """err is a GitHub rate limit -> record the reset in GH_RL_FILE (keeping 'since' of an ongoing streak) and return True"""
+    if not GH_RL_RE.search(err or ""): return False
+    old = gh_rl_state(); until = min(_gh_rl_reset(err), _epoch() + GH_RL_MAX_S)
+    write_atomic(GH_RL_FILE, json.dumps({"since": old.get("since") or _epoch(), "until": until, "error": err[:200]}))
+    return True
+def gh_rl_clear():
+    try: os.remove(GH_RL_FILE)
+    except FileNotFoundError: pass
+def gh_skip(job):
+    """True (and one log line) when GitHub is rate-limited: the caller skips its GitHub steps this run"""
+    u = gh_rl_until()
+    if u: log(f"{job}: GitHub rate-limited until {dt.datetime.fromtimestamp(u, CST).strftime('%H:%M:%S')} CST, skipping GitHub steps")
+    return bool(u)
 def gh(args, js=True, retries=1):
     cmd = f"gh {' '.join(args[:2])}"
+    u = gh_rl_until()
+    if u: raise GhRateLimited(f"{cmd}: GitHub rate-limited until {dt.datetime.fromtimestamp(u, CST).strftime('%H:%M:%S')} CST (not sent)")
     for left in range(retries if gh_is_read(args) else 0, -1, -1):
         try: r = subprocess.run(["gh"] + args, capture_output=True, text=True, timeout=120)
         except subprocess.TimeoutExpired:
             if left: print(f"{cmd}: timeout after 120s, retrying once", file=sys.stderr, flush=True); continue
             raise RuntimeError(f"{cmd}: timeout after 120s [{' '.join(args)[:120]}]")
-        if r.returncode == 0: return json.loads(r.stdout) if js else r.stdout
+        if r.returncode == 0:
+            if os.path.exists(GH_RL_FILE): gh_rl_clear()
+            return json.loads(r.stdout) if js else r.stdout
         err = (r.stderr or "").strip()
+        if gh_rl_record(err): raise GhRateLimited(f"{cmd}: {err[:300]} [{' '.join(args)[:120]}]")
         if left and GH_TRANSIENT_RE.search(err): print(f"{cmd}: {err[:200]} -- retrying once", file=sys.stderr, flush=True); time.sleep(2); continue
         raise RuntimeError(f"{cmd}: {err[:300]} [{' '.join(args)[:120]}]")
 

@@ -476,7 +476,9 @@ def note_claims(path):
     try: return not PARKED_NOTE.search(open(path, errors="replace").read(4000))
     except OSError: return True
 def _gh_json(args, t):
+    if lib.gh_rl_until(): raise lib.GhRateLimited(f"gh {' '.join(args[:3])} …: GitHub rate-limited (not sent)")
     r = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=t, stdin=subprocess.DEVNULL)
+    if r.returncode and lib.gh_rl_record(r.stderr): raise lib.GhRateLimited(f"gh {' '.join(args[:3])} …: {(r.stderr or '').strip()[:300]}")
     if r.returncode: raise RuntimeError(f"gh {' '.join(args[:3])} …: {(r.stderr or '').strip()[:300]}")
     return json.loads(r.stdout)
 def pr_list():
@@ -2314,6 +2316,7 @@ def main(argv=None):
     if A.fp and not A.qa: ap.error("--fp needs --qa")
     if A.supersedes and not A.qa: ap.error("--supersedes needs --qa")
     if A.cleanup_stale: return cleanup_stale(A.yes)
+    if not (A.list or A.pending_json) and lib.gh_skip("prfix"): return 0   # 11-04: rate-limited -> no doomed run, no error ticket
     if A.revise:
         try: return revise(A)
         except Exception as e: return finish({"status": "error", "pr": A.revise, "error": f"内部错误：{e!r}"[:300]}, 1, A)

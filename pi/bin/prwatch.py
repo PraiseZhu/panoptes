@@ -765,10 +765,20 @@ ERR_STREAK = 3   # = watchdog.PRWATCH_ERR_STREAK
 THROTTLE_KEY = {"drafts": "drafts_at", "resolved": "resolved_at", "cleanup": "cleanup_at", "digest": "digest_day"}   # 没变 = 这轮被节流跳过
 
 
+GH_STEPS = {"fix", "drafts", "resolved", "infra"}   # steps that call GitHub (gh / prfix|infrafix --pending-json)
+_rl_logged = []
+
+
 def run_step(st, name, fn):
+    """11-04: while lib.GH_RL_FILE says GitHub is rate-limited a GitHub step is skipped -- one log line per run, and a skip (or a
+    GhRateLimited raised mid-step) is neither an error nor a streak count nor a success (errors/error_counts/error_alerts untouched)"""
+    def skip():
+        if not _rl_logged: _rl_logged.append(1); qlog(f"GitHub rate-limited until {dt.datetime.fromtimestamp(gh_rl_until() or time.time(), CST).strftime('%H:%M:%S')} CST: skipping GitHub steps")
+    if name in GH_STEPS and gh_rl_until(): return skip()
     old = os.path.exists(ERR_ALERT_ONCE)
     tk = THROTTLE_KEY.get(name); before = st.get(tk) if tk else None
     try: fn(st)
+    except GhRateLimited: return skip()
     except Exception as e:
         st.setdefault("errors", {})[name] = f"{now_cst().strftime('%F %T')} {str(e)[:200]}"; qlog(f"{name} error: {str(e)[:200]}")
         if not old:
