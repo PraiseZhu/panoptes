@@ -52,7 +52,7 @@ import lib
 import praise_notice as PN
 import workroot as W
 from git_identity import NOREPLY_EMAIL
-from finding_policy import notifiable, own_pr_ticket, no_fix_rulings, fix_authors
+from finding_policy import notifiable, own_pr_ticket, no_fix_rulings, fix_authors, ruling_rows, bare_fp, _nofix
 os.environ["PATH"] = "/usr/local/bin:" + os.environ.get("PATH", "")
 
 _E = os.environ.get
@@ -957,6 +957,63 @@ def stale_scan(tickets=None):
             rows.append({"path": None, "branch": b, "act": "delete" if r is False else "keep",
                          "why": "孤立的 prfix 分支（无 worktree、未推送）" if r is False else "孤立分支，远端有同名或没核实"})
     return rows
+
+RULED = "ruled_out"   # terminal: an open ticket whose finding fleet-standards/p2-rulings.md rules no-fix (--close-ruled)
+
+def ruled_tickets(doc, text, src):
+    """[(key, reason, source, ambiguous)] for tickets (not running, not yet ruled_out) a no_fix_rulings row covers (PR+fp, or a
+    whole-PR row without a fingerprint). ambiguous: matched by PR number alone while that PR has more than one ticket."""
+    nofix = no_fix_rulings(text); line = {}
+    for i, ln in enumerate(text.splitlines(), 1):
+        for n, fp, r in ruling_rows(ln):
+            if _nofix(r): line.setdefault((n, bare_fp(fp) if fp else None), (i, r))
+    T = doc.get("tickets") or {}; per_pr = {}
+    for t in T.values():
+        if t.get("kind") != "revise": per_pr[t.get("qa")] = per_pr.get(t.get("qa"), 0) + 1
+    out = []
+    for k, t in T.items():
+        n, fp = t.get("qa"), t.get("fp") or (k.split(":", 1)[-1] if ":" in k else "")
+        if t.get("status") in (RULED, "running") or t.get("kind") == "revise" or not isinstance(n, int): continue
+        if (n, fp) in nofix: i, r = line.get((n, fp)) or (0, "?"); out.append((k, r, f"{src}:{i}", False))
+        elif n in nofix: i, r = line.get((n, None)) or line.get((n, fp)) or (0, "?"); out.append((k, r, f"{src}:{i}", per_pr.get(n, 0) > 1))
+    return out
+
+RULED_SAVE = ("pid", "next_retry_at")   # fields close_ruled clears; kept in prev_fields so --reopen-ruled restores them
+
+def close_ruled(key, yes):
+    """--close-ruled [KEY] [--yes]: move ONE ticket a no-fix P2 ruling covers to ruled_out (reason + ruling source; previous
+    status/fields kept for --reopen-ruled). Without --yes it only lists (all matches when KEY is omitted). Idempotent."""
+    text = _read(RULINGS) if os.path.exists(RULINGS) else ""
+    print(f"# prfix 按裁决结案 {now_cst():%Y-%m-%d %H:%M} 北京（{'写入' if yes else '只列出，加 --yes 才写'}）")
+    if yes and not key:
+        print("prfix: --close-ruled --yes 必须指定一个工单 key（--close-ruled KEY --yes）；没有写任何东西", file=sys.stderr); return 2
+    rows = [x for x in ruled_tickets(load_tickets(), text, os.path.basename(RULINGS)) if not key or x[0] == key]
+    for k, r, src, amb in rows: print(f"- {k}：-> {RULED}（{r}，{src}）" + ("  ✗ 裁决行没写 mq1 指纹，该 PR 有多个工单" if amb else ""))
+    if not rows: print("- 无")
+    if any(x[3] for x in rows):
+        print("prfix: 裁决行只写了 PR 号、没写 mq1 指纹，而该 PR 有多个工单，无法确定是哪一个；请在 p2-rulings.md 的裁决行写上 mq1 指纹。"
+              "没有结案任何工单", file=sys.stderr); return 2
+    if yes and rows:
+        with tickets_locked() as doc:
+            t = doc["tickets"].get(key)
+            if t and t.get("status") not in (RULED, "running"):
+                t.update(prev_status=t.get("status"), prev_fields={f: t.get(f) for f in RULED_SAVE}, status=RULED, ruling=rows[0][1],
+                         ruling_source=rows[0][2], pid=None, next_retry_at=None, updated_at=now_cst().isoformat(timespec="seconds"))
+    print("RESULT " + json.dumps({"status": "closed" if yes else "listed", "n": len(rows)}, ensure_ascii=False)); return 0
+
+def reopen_ruled(key, yes):
+    """--reopen-ruled KEY [--yes]: undo --close-ruled for KEY: restore prev_status and prev_fields, drop the ruling fields."""
+    t = (load_tickets().get("tickets") or {}).get(key)
+    if not t or t.get("status") != RULED or not t.get("prev_status"):
+        print(f"prfix: {key} 不是由 --close-ruled 结案的工单（没有 prev_status），不能重开", file=sys.stderr); return 2
+    print(f"- {key}：{RULED} -> {t['prev_status']}（{'写入' if yes else '只列出，加 --yes 才写'}）")
+    if yes:
+        with tickets_locked() as doc:
+            t = doc["tickets"][key]
+            if t.get("status") == RULED and t.get("prev_status"):
+                t.update(status=t.pop("prev_status"), **(t.pop("prev_fields", None) or {}), updated_at=now_cst().isoformat(timespec="seconds"))
+                for f in ("ruling", "ruling_source"): t.pop(f, None)
+    print("RESULT " + json.dumps({"status": "reopened" if yes else "listed", "key": key}, ensure_ascii=False)); return 0
 
 def cleanup_stale(yes):
     rows = stale_scan()
@@ -2326,6 +2383,8 @@ def main(argv=None):
     ap.add_argument("--supersedes", type=int, help="with --qa: replace closed, unmerged bot fix PR N carrying the same fingerprint (取代 #N)")
     ap.add_argument("--list", action="store_true"); ap.add_argument("--pending-json", action="store_true")
     ap.add_argument("--cleanup-stale", action="store_true"); ap.add_argument("--yes", action="store_true")
+    ap.add_argument("--close-ruled", nargs="?", const="*", metavar="KEY", help="ticket KEY a no-fix P2 ruling covers -> ruled_out (lists; --yes writes and needs KEY)")
+    ap.add_argument("--reopen-ruled", metavar="KEY", help="undo --close-ruled for KEY (lists; --yes writes)")
     ap.add_argument("--dry-run", action="store_true"); ap.add_argument("--base")
     ap.add_argument("--revise", type=int, help="our own draft fix PR N went red on GitHub CI: fix it (prwatch launches this)")
     ap.add_argument("--allow-sensitive", action="store_true", help="no-op since 10-25 (sensitive files no longer stop the bot); kept so old commands still run")
@@ -2333,6 +2392,8 @@ def main(argv=None):
     if A.fp and not A.qa: ap.error("--fp needs --qa")
     if A.supersedes and not A.qa: ap.error("--supersedes needs --qa")
     if A.cleanup_stale: return cleanup_stale(A.yes)
+    if A.close_ruled: return close_ruled(None if A.close_ruled == "*" else A.close_ruled, A.yes)
+    if A.reopen_ruled: return reopen_ruled(A.reopen_ruled, A.yes)
     if not (A.list or A.pending_json) and lib.gh_skip("prfix"): return 0   # 11-04: rate-limited -> no doomed run, no error ticket
     if A.revise:
         try: return revise(A)

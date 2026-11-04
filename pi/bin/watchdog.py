@@ -508,6 +508,14 @@ CRED_ERR = re.compile(r"not set|invalid_auth|not_authed|token_revoked|token_expi
 
 
 PRFIX_TICKETS = f"{BASE}/out/praise-pr/tickets.json"
+OUTBOUND_REPORT_DIR = f"{BASE}/out/outbound"   # outbound.py writes <date>.md each run; state() "stale:<why>" rows live only there
+
+
+def outbound_stale_keys():
+    """Keys whose result is "stale:<why>" in today's outbound run report (outbound.py never writes stale to the ledger)."""
+    try: rows = [r.split("|") for r in open(f"{OUTBOUND_REPORT_DIR}/{today()}.md").read().splitlines() if r.startswith("|")]
+    except OSError: return set()
+    return {r[2].strip() for r in rows if len(r) > 6 and r[5].strip().startswith("stale:")}
 PRWATCH_STATE = f"{BASE}/out/prwatch/state.json"
 PRWATCH_ERR_STREAK = 3   # prwatch.run_step 记的 error_counts[name]（连续失败次数，成功一次清零）
 PRWATCH_ERR_ALERT_ONCE = f"{BASE}/prwatch-error-alert-once"   # touch = 旧行为：15 分钟内出错一次就报；rm = 连续 3 次才报
@@ -525,22 +533,23 @@ def gh_ratelimit_check(now, probs):
 
 
 def prfix_check(now, probs, wst=None):
-    T = jload(PRFIX_TICKETS, {}).get("tickets", {}); L = jload(LEDGER, {})
+    T = jload(PRFIX_TICKETS, {}).get("tickets", {}); L = jload(LEDGER, {}); stale = outbound_stale_keys()
     def age_h(t):
         try: return (now - dt.datetime.fromisoformat(t.get("updated_at"))).total_seconds() / 3600
         except Exception: return 0.0
     for k, t in T.items():
+        if t.get("pr") and not t.get("action_key") or t.get("status") == "ruled_out": continue   # done by grok / closed by ruling (prfix --close-ruled)
         n, st_ = t.get("qa") or k.split(":")[0], t.get("status")
         what = f"你的 PR #{n} 上的一个问题（{t.get('sev') or ''}，编号 {(t.get('fp') or k.split(':', 1)[-1])[4:12]}）"
         if st_ == "running" and age_h(t) > 3:   # 10-24: a run now feeds every failed check back to the model (up to 4 fix rounds + pre-push rounds)
             probs[f"prfix:stuck:{k}"] = PN.item("action", "「修 PR bot」卡住了", f"它在修{what}，已经跑了 {age_h(t):.1f} 小时，正常 1 小时内就有结果。",
                 "这个问题没人修；它占着的内存也让后面的单子排不上。",
                 todo=PN.ask_session(f"prfix 工单 {k} 卡在 running {age_h(t):.1f} 小时（pid {t.get('pid')}），看 out/logs/prfix-*.log，卡死了就结束它（会自动按瞬时失败重排）"))
-        elif st_ == "pr_action_written" and age_h(t) > 2 and (L.get(t.get("action_key")) or {}).get("status") != "done":
+        elif st_ == "pr_action_written" and not t.get("pr") and t.get("finished_by") != "grok" and age_h(t) > 2 and (L.get(t.get("action_key")) or {}).get("status") != "done":
             probs[f"prfix:nopr:{k}"] = PN.item("action", "「修 PR bot」修好的修复 PR 没开出来", f"{what}已经修好、测过，要开修复 PR，但 {age_h(t):.0f} 小时了 PR 还没出现。",
                 "修好的代码上不去，这个问题会一直算「在修」。",
                 todo=PN.ask_session(f"prfix 工单 {k} 的开 PR 动作 {t.get('action_key')} {age_h(t):.0f} 小时没执行成功，看 out/outbound/ledger.json 和 outbound 日志（补丁打不上就重排这一单）"))
-        elif st_ in ("push_action_written", "pushed") and 2 < age_h(t) < 24 and (L.get(t.get("action_key")) or {}).get("status") != "done":   # prfix --revise (10-24)
+        elif st_ in ("push_action_written", "pushed") and 2 < age_h(t) < 24 and t.get("action_key") not in stale and (st_ != "pushed" or t.get("action_key") in L) and (L.get(t.get("action_key")) or {}).get("status") != "done":   # prfix --revise (10-24)
             probs[f"prfix:nopush:{k}"] = PN.item("action", "「修 PR bot」修好的 CI 修正没推上去", f"修复 PR #{t.get('pr')} 的 CI 没过，bot 已经修好，但 {age_h(t):.0f} 小时了还没推到 PR 上。",
                 "这个修复 PR 会一直红着、转不了正式。",
                 todo=PN.ask_session(f"prfix --revise {t.get('pr')} 的推送动作 {t.get('action_key')} {age_h(t):.0f} 小时没执行成功，看 out/outbound/ledger.json 和 outbound 日志"))
