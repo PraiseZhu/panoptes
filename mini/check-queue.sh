@@ -35,6 +35,8 @@
 #                             (fallback default: $HOME/mivo-ops/evidence/mivo-qa)
 #   MIVO_QA_SOURCE            observation.source, default mivo-qa
 #   GH_BIN                    gh executable, default: gh on PATH
+#   PRAISE_QA_GH              praise-qa-gh.sh (default: next to this script); its flag file
+#                             ~/.config/praise-qa/gh-app-enabled switches gh to the Praise QA App
 #
 # Deliberately no `set -e`: bash would exit with the failing command's status,
 # and a stray status 2 would be misread by cindy as "queue empty, skip".
@@ -64,6 +66,14 @@ case "$QUEUE_REPO" in
   */*) ;; *) die "$EX_LOCAL" "MIVO_QA_QUEUE_REPO must be owner/name" ;;
 esac
 command -v "$GH" >/dev/null 2>&1 || die "$EX_GH" "gh not found (GH_BIN=${GH}); install/login gh on this machine"
+
+# 11-04: the queue read runs as the Praise QA App (praise-qa[bot]) while ~/.config/praise-qa/gh-app-enabled exists (praise-qa-gh.sh,
+# installed next to this script). Flag removed, helper missing or a mint failure -> the mini's own gh login, exactly as before.
+_PQA="${PRAISE_QA_GH:-$(cd "$(dirname "$0")" && pwd)/praise-qa-gh.sh}"
+if [ -f "$_PQA" ]; then
+  # shellcheck source=/dev/null
+  . "$_PQA" --lib && pqa_env_for "$QUEUE_REPO"
+fi
 
 sha256_file() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
