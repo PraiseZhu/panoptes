@@ -17,13 +17,13 @@ class T(unittest.TestCase):
         self.rd = tempfile.mkdtemp(); os.makedirs(f"{self.rd}/merged"); M.REPORTS = self.rd
         os.environ.pop("PANOPTES_MAIN_ONLY", None)
 
-    def tick(self, st, ls_out, pulls, env=None):
+    def tick(self, st, ls_out, pulls, env=None, dry=True):
         """one main() tick in DRY mode; returns (state after, log lines, ls-remote argv, fetch count)"""
         lines, argv, fetched, saved = [], [], [], {}
         def run(cmd, **k):
             argv.append(cmd); return types.SimpleNamespace(returncode=0, stdout=ls_out, stderr="")
         def fetch(tok): fetched.append(1); return pulls
-        with mock.patch.object(M, "DRY", True), mock.patch.object(M, "log", lines.append), mock.patch.object(M, "load", lambda: json.loads(json.dumps(st))), \
+        with mock.patch.object(M, "DRY", dry), mock.patch.object(M, "log", lines.append), mock.patch.object(M, "load", lambda: json.loads(json.dumps(st))), \
              mock.patch.object(M, "save", lambda x: saved.update(x)), mock.patch.object(M, "running_prs", lambda: set()), mock.patch.object(M, "heartbeat", lambda m: None), \
              mock.patch.object(M, "catchup_running", lambda: True), mock.patch.object(M, "fetch_pulls", fetch), mock.patch.object(M.subprocess, "run", run), \
              mock.patch.dict(os.environ, {"PI_FLEET_MODE": "pi", "GITHUB_TOKEN": "t", "PI_LOCK_DIR": tempfile.mkdtemp(), **(env or {})}):
@@ -65,6 +65,24 @@ class T(unittest.TestCase):
         self.assertTrue(saved.get("dirty"))
         self.assertTrue(any("ref moved integration/canvas-s2" in l for l in lines), lines)
         self.assertEqual(saved["main_sha"], MAIN)   # old field kept
+
+    def test_branch_merge_launch_logs_real_base_and_merge_sha(self):
+        """11-05 #1740: an integration/* merge was logged `main 6a427967`; label = base + merge sha, kept on the requeue (try 2)"""
+        old, new, msha = "b" * 40, "c" * 40, "87a87859" + "d" * 32
+        st = {"main_sha": MAIN, "ref_shas": {"refs/heads/main": MAIN, "refs/heads/integration/foo": old}, "merged_seen": "2026-11-02T08:00:00+00:00", "last_poll_ts": time.time()}
+        launched = []
+        def launch(cmd, sha, env=None, base="main"): launched.append((base, sha)); return types.SimpleNamespace(pid=7)
+        p = dict(pull(1740, "integration/foo"), merge_commit_sha=msha)
+        with mock.patch.object(M, "launch", launch):
+            saved, lines, _, _ = self.tick(st, f"{MAIN}\trefs/heads/main\n{new}\trefs/heads/integration/foo\n", [p], dry=False)
+            self.assertTrue(any("branch merge #1740 into integration/foo" in l for l in lines), lines)
+            self.assertIn("launched priority run pid 7 for PR #1740 (integration/foo 87a87859, try 1/3)", lines)
+            self.assertEqual(launched, [("integration/foo", msha)])
+            saved["inflight"]["1740"]["next_at"] = 0   # try 1 died: requeue
+            with mock.patch.object(M, "requeue", lambda inf, busy: [(1740, "d")]):
+                _, lines, _, _ = self.tick(saved, f"{MAIN}\trefs/heads/main\n{new}\trefs/heads/integration/foo\n", [], dry=False)
+            self.assertIn("launched priority run pid 7 for PR #1740 (integration/foo 87a87859, try 2/3)", lines)
+            self.assertNotIn(MAIN[:8], " ".join(l for l in lines if "launched" in l))
 
     def test_main_only_rollback(self):
         pulls = [pull(1379, "feat/video-in-canvas"), pull(1700, "main")]

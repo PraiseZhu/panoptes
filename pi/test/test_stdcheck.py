@@ -15,7 +15,7 @@ NOW = dt.datetime(2026, 11, 5, 12, 30, tzinfo=CST)
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="stdcheck-", dir=_T); t = self.tmp
-        self.prs = {"PraiseZhu/panoptes": [], S.REPO: []}; self.review = []; self.checks = {}; self.statuses = {}; self.gh_calls = []; self.runs = {j: [] for j in S.TASKS}; self.spawned = []
+        self.prs = {"PraiseZhu/panoptes": [], S.REPO: []}; self.review = []; self.checks = {}; self.statuses = {}; self.gh_calls = []; self.merged = []; self.runs = {j: [] for j in S.TASKS}; self.spawned = []
         ps = [mock.patch.object(S, "BASE", t), mock.patch.object(S, "OUT", f"{t}/out/stdcheck"), mock.patch.object(S, "FLAG", f"{t}/stdcheck-enabled"),
               mock.patch.object(S, "GAPS", f"{t}/gaps-open.json"), mock.patch.object(S, "REPORTS", f"{t}/reports"),
               mock.patch.object(S, "ACK_FILE", f"{t}/no-ack.json"),  # missing => today behavior; Allowlist tests override
@@ -39,6 +39,7 @@ class Base(unittest.TestCase):
             if "/check-runs" in path: return {"check_runs": self.checks.get(sha, [])}
             return {"statuses": self.statuses.get(sha, [])}
         repo = args[args.index("-R") + 1]
+        if "merged" in args: return list(self.merged)   # qa_start: gh pr list --state merged
         return list(self.prs[repo]) if "--author" not in args or args[args.index("--author") + 1] == "PraiseZhu" else []
 
     def task_runs(self, job): return self.runs[job], lambda r: r[2] in (0, 75)
@@ -86,6 +87,28 @@ class Checks(Base):
         t = (NOW - dt.timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M:%S CST")
         open(f"{self.tmp}/out/logs/mergewatch-2026-11-05.log", "w").write(f"{t} branch merge #1815 into feat/y\n{t} branch merge #1816 into release/2\n")
         self.assertEqual(sorted(S.check_qa_start(NOW)), ["PR-1810", "PR-1811", "PR-1812", "PR-1816"])
+
+    def test_qa_start_ref_is_gh_merged_at_not_mergewatch_seen(self):
+        T = NOW - dt.timedelta(minutes=60); t = lambda m: (T + dt.timedelta(minutes=m)).strftime("%Y-%m-%d %H:%M:%S CST")
+        open(f"{self.tmp}/out/logs/mergewatch-2026-11-05.log", "w").write(
+            f"{t(9)} branch merge #1920 into integration/x\n{t(11)} launched priority run pid 1 for PR #1920 (main abc, try 1/3)\n")
+        self.assertEqual(S.check_qa_start(NOW), {})   # without gh: seen T+9 -> launch T+11 = 2 min
+        self.merged = [{"number": 1920, "mergedAt": T.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "baseRefName": "integration/x"}]
+        self.assertIn("11 min", S.check_qa_start(NOW)["PR-1920"])
+        c = [a for a in self.gh_calls if "merged" in a][-1]
+        self.assertEqual(c[c.index("-R") + 1], S.REPO); self.assertTrue(c[c.index("--search") + 1].startswith("merged:>="))
+
+    def test_qa_start_merge_missed_by_mergewatch(self):
+        z = lambda m: (NOW - dt.timedelta(minutes=m)).astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.merged = [{"number": 1930, "mergedAt": z(30), "baseRefName": "release/9"}, {"number": 1931, "mergedAt": z(30), "baseRefName": "feat/x"},
+                       {"number": 1932, "mergedAt": z(5), "baseRefName": "main"}]
+        bad = S.check_qa_start(NOW)
+        self.assertEqual(list(bad), ["PR-1930"]); self.assertIn("no QA start", bad["PR-1930"])
+
+    def test_qa_start_gh_merged_failure_falls_back_to_mergewatch(self):
+        t = (NOW - dt.timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M:%S CST")
+        open(f"{self.tmp}/out/logs/mergewatch-2026-11-05.log", "w").write(f"{t} branch merge #1940 into main\n")
+        with mock.patch.dict(os.environ, {"_STD_GH_FAIL": "1"}): self.assertEqual(list(S.check_qa_start(NOW)), ["PR-1940"])
 
     def test_qa_start_pst_log_lines(self):
         t = (NOW - dt.timedelta(minutes=30)).astimezone(dt.timezone(dt.timedelta(hours=-8))).strftime("%Y-%m-%d %H:%M:%S PST")
