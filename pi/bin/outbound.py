@@ -70,7 +70,7 @@ def BRIEF_ROUTE_OFF(): return f"{BASE}/outbound-brief-route-off"
 CONFLICT_KEY = re.compile(r"^(dirty:|nudge:\d+:merge:|resolved:dirty:)")
 def CONFLICT_BRIEF_OFF(): return f"{BASE}/conflict-brief-off"
 def conflict_brief(k): return bool(CONFLICT_KEY.match(str(k))) and not os.path.exists(CONFLICT_BRIEF_OFF())
-TERMINAL = ("done", "skipped", "gave_up", "uncertain", "briefed", "superseded")  # ledger statuses never retried (uncertain = a send was interrupted:
+TERMINAL = ("done", "skipped", "gave_up", "uncertain", "briefed", "superseded", "closed_unmerged")  # ledger statuses never retried (uncertain = a send was interrupted:
                                                        # Slack/Feishu cannot be checked remotely, so never re-sent blindly)
 def backoff_left(e):
     """all jobs (10-23; was merger only): after n failures wait 10min*2^(n-1) (cap 6h) from last failure. Minutes left (0 = go)."""
@@ -1067,6 +1067,13 @@ def main():
                 if not o.dry_run: setk(k, {"status": "done", "at": now_cst().isoformat(timespec="seconds"), "by": "target-state"})
                 rows.append((job, k, t, who, "done(target)", ""))
                 continue
+            if prev.get("status") == "awaiting_merge":   # 11-05 inframerge:229: do() declined to merge; re-check the PR, never re-run do()
+                if st.startswith("stale:") and st != "stale:ci running" and st != "stale:ci none":   # closed / head moved, not merged
+                    if not o.dry_run: setk(k, {**prev, "status": "closed_unmerged", "reason": st, "at": now_cst().isoformat(timespec="seconds")})
+                    notices.append(PN.item("action", f"修复 PR 没合并就被关了（{k}）", f"「消息外发」记录这个修复 PR 在等人合并，但现在它的状态是 {st}，没有合进 main。",
+                        "这个故障的修复没有上线，问题仍然存在。", todo=PN.ask_session(f"outbound {k} 等合并期间 PR {st} 未合并：确认修复是否需要重新开 PR")))
+                    rows.append((job, k, t, who, "closed_unmerged", st)); continue
+                rows.append((job, k, t, who, "awaiting_merge", st)); continue
             if st.startswith("superseded:"):   # a real ledger status (11-03 B), not a stale row that is re-read every run
                 if not o.dry_run: setk(k, {"status": "superseded", "reason": st.split(":", 1)[1], "at": now_cst().isoformat(timespec="seconds")})
                 rows.append((job, k, t, who, "superseded", st.split(":", 1)[1])); continue
@@ -1080,7 +1087,11 @@ def main():
             try:
                 if is_merge: merged_run += 1   # count the attempt, success or not: at most 1 merge call per round
                 setk(k, {**prev, "status": "sending", "at": now_cst().isoformat(timespec="seconds")})   # on disk BEFORE the side effect
-                res = do(); setk(k, {"status": "done", "at": now_cst().isoformat(timespec="seconds"), "by": "resend" if resend else "pi-line", "result": res[-200:]})
+                res = do()
+                # gh.infra.merge whose merge conditions were not met: not done (11-05 inframerge:229 was recorded done while #229 was closed
+                # unmerged). awaiting_merge is non-terminal: state() is re-read each run -> merged = done, closed = closed_unmerged + alert.
+                st_new = "awaiting_merge" if t.startswith("gh.infra.merge") and str(res).startswith("not merged") else "done"
+                setk(k, {"status": st_new, "at": now_cst().isoformat(timespec="seconds"), "by": "resend" if resend else "pi-line", "result": res[-200:]})
                 rows.append((job, k, t, who, "SENT", res[-120:]))
             except GhRateLimited as e:   # 11-04: not a failure (no fails+1, never gave_up); the row goes back to what it was
                 if prev: setk(k, prev)
