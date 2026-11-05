@@ -186,7 +186,8 @@ export async function processJob({ db, reg, secrets, job }) {
     if (still.length > 0 && baseKnown) base = await execOrStop({ ...common, label: 'b', sha: baseSha, stepIds: still })
     const prelim = decideOutcome({ first, rerun, base, latest: null, baseKnown, latestIsSame: true })
     if (prelim.outcome === 'defect') {
-      const head = await getBranchHead(job.repo, job.base_ref)
+      let head = null
+      try { head = await getBranchHead(job.repo, job.base_ref) } catch (err) { if (!err?.branchHeadAuthFailed) throw err }
       latestHeadSha = head ?? null
       // 拿不到最新主干时不能当成「就是合并版本」，交给判定记待核实
       latestIsSame = Boolean(head) && head === job.merge_sha

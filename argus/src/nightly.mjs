@@ -425,7 +425,8 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     if (merged) {
       const prelim = decideOutcome({ first, rerun, base, latest: null, baseKnown: Boolean(baseSha), latestIsSame: true })
       if (prelim.outcome === 'defect') {
-        const head = await getBranchHead(repo, pr.base.ref)
+        let head = null
+        try { head = await getBranchHead(repo, pr.base.ref) } catch (err) { if (!err?.branchHeadAuthFailed) throw err }
         latestIsSame = Boolean(head) && head === sha
         // noLatestRecheck 的步骤（secret-scan）不在最新主干复查：泄露进了历史，后续提交修不掉
         const recheck = prelim.failedSteps.filter((id) => !profile.steps.find((x) => x.id === id)?.noLatestRecheck)
