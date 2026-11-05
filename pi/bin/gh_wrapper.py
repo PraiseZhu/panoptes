@@ -15,7 +15,8 @@ Installed by 电脑运维 as `gh` ahead of the real gh on PATH (see the PR / doc
   2a. caller allowlist (11-04, PM/Jasper): when the calling SCRIPT (script_of the parent's cmdline, realpath; a `sh -c` parent -> up to 3 ancestors) ends with a CALLER_ALLOWLIST path,
      the call keeps the PAT: the real gh with lib.pat_env(), one line {at, caller, cmd} in $PI_STATE/out/gh-wrapper/allowlist.jsonl.
      Red lines (1) still apply. Each entry is tracked as gh-allowlist:<name> in fleet-standards/gaps-open.json, to be removed.
-  3. flag off, or a mint failure (one masked stderr line) -> the inherited login (PAT), exactly as without the wrapper.
+  3. flag off -> the inherited login (PAT), exactly as without the wrapper. A mint failure (11-05 R2) -> one masked stderr line,
+     the alert $PI_STATE/out/stdcheck/alerts/gh_app_mint.json and exit 5: nothing sent, never the inherited (PraiseZhu) login.
 Then exec the real gh ($PRAISE_QA_REAL_GH, else the first `gh` on PATH that is not this wrapper).
 
 Install (电脑运维, at wrapper install time; see also pi/README.md "gh wrapper 安装"):
