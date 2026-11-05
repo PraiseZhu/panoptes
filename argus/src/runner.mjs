@@ -6,6 +6,7 @@ import { run, isStopping, overBudget } from './exec.mjs'
 import { RUNS_DIR, MIRRORS_DIR, NPM_CACHE_DIR, UV_CACHE_DIR, UV_PYTHON_DIR, CACHE_DIR, CODE_DIR } from './paths.mjs'
 import { log, toPlainZh, waitWithinBudget } from './util.mjs'
 import { machineLoad } from './memory.mjs'
+import { runPerfWithRetry, sideFile } from './perf-retry.mjs'
 import { gitTokenFor } from './github.mjs'
 import { fileURLToPath } from 'node:url'
 import { validateTestReport } from './config.mjs'
@@ -507,14 +508,19 @@ export async function runSteps(profile, src, runDir, { stepIds = null, execution
     for (const k of step.envUnset ?? []) delete stepEnvBase[k]
     const watch = watchDesktop(step.silentCheck)
     const sp = step.shard ? shardPlan(step) : null
+    let perfRun = null
     const res = sp && sp.shards > 1
       ? await runSharded({ step, plan: sp, cmd, covDir, reportFile: stepVarsForReport.TEST_REPORT ?? null, runDir, src, profile, ro: bin.ro, env: { ...stepEnvBase, ...stepVars }, logFile, tmpBase: stepTmp })
-      : await run(argv[0], argv.slice(1), { cwd: src, env: { ...stepEnvBase, ...stepVars }, timeoutMs: (step.timeoutMin ?? 20) * 60_000, logFile })
+      : step.perfRetry
+        ? (perfRun = await runPerfWithRetry({ ...step.perfRetry, reportFile: stepVarsForReport.TEST_REPORT ?? null,
+          runOnce: (tag) => run(argv[0], argv.slice(1), { cwd: src, env: { ...stepEnvBase, ...stepVars }, timeoutMs: (step.timeoutMin ?? 20) * 60_000, logFile: tag ? sideFile(logFile, tag) : logFile }) })).res
+        : await run(argv[0], argv.slice(1), { cwd: src, env: { ...stepEnvBase, ...stepVars }, timeoutMs: (step.timeoutMin ?? 20) * 60_000, logFile })
     if (sp && !res.shards) res.shards = { count: 1, reason: sp.reason }
     const disturbed = await watch.stop()
     if (disturbed) log('error', 'step disturbed desktop', { step: step.id })
     const result = { ...identity, id: step.id, nameZh: step.nameZh, kind: step.kind, cmdText: step.cmd.join(' '), ok: res.ok, exitCode: res.exitCode, signal: res.signal ?? null, endedAt: res.endedAt ?? null, timedOut: res.timedOut, durationMs: res.durationMs, tail: res.tail, failures: res.ok ? [] : res.failures, failureDetails: res.ok ? [] : res.failureDetails, failureParseStatus: res.failureParseStatus, ...(res.shards ? { shards: res.shards } : {}) }
     if (step.trialOnly) result.machine = machineLoad()
+    if (perfRun) result.perf = perfRun.perf   // 第一次读数 + 重跑读数 + verdict（pass / pass-after-retry / fail）
     toStepOutcome(step, result, runDir)
     Object.assign(result, readTestReport(step, result, src, runDir, stepVarsForReport, execution))
     if (disturbed) result.disturbedDesktop = true
