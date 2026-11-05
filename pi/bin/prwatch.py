@@ -458,15 +458,16 @@ def dispatch_fix(st):
     if not due: return
     why, room = admit_block(t, st)
     if why:                                                       # stay due; re-check next minute
-        kind = re.sub(r"\d+", "N", why)                          # log once per kind of wait, not every minute's numbers
+        kind = re.sub(r"-?\d+", "N", why)                        # log once per kind of wait, not every minute's numbers (11-05: -N == N)
         if st.get("fix_wait") != kind: qlog(f"fix dispatch waits: {why}, {len(pys)} fixing")
-        st["fix_wait"] = kind
+        st["fix_wait"] = kind; st["fix_wait_reason"] = why   # watchdog names the real cause (11-05: fix PR cap was called "memory")
+        if why.startswith("headroom"): st["fix_wait_mem"] = mem_mb()
         if st.get("fix_pending"): st.setdefault("fix_wait_since", time.time())   # work known to wait (watchdog: > 3 h -> tell him)
         return
     if st.get("fix_wait"):   # 11-04 (headroom-1104 c): log when a wait clears, not only when it starts
         since = st.get("fix_wait_since")
         qlog(f"fix dispatch wait cleared ({st['fix_wait']}){f' after {int((time.time() - since) / 60)} min' if since else ''}: headroom {room} MB")
-    st.pop("fix_wait", None)
+    for k in ("fix_wait", "fix_wait_reason", "fix_wait_mem"): st.pop(k, None)
     r = subprocess.run([sys.executable, f"{PI_CODE}/bin/prfix.py", "--pending-json"], capture_output=True, text=True, timeout=600, cwd=f"{PI_CODE}/bin")
     st["fix_checked_at"] = time.time()
     try: pending = json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else None   # whole stdout is one JSON array

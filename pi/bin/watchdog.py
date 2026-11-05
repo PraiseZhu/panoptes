@@ -623,9 +623,21 @@ def prfix_check(now, probs, wst=None):
             "你的 PR 上测出的问题可能没人接、不会自动修。", todo=PN.ask_session(f"prwatch 的 {name} 步骤连续出错：{e[20:140]}，看 out/logs/prwatch-*.log 修一下")))
     w = st.get("fix_wait_since")
     if w and time.time() - w > 3 * 3600:
-        probs["prfix:memwait"] = PN.item("fyi", "「修 PR bot」排队等内存", f"有 {st.get('fix_pending') or '几'} 个问题等着修，但机器内存不够再开一单，已经等了 {(time.time() - w) / 3600:.1f} 小时。",
+        why, hours = st.get("fix_wait_reason") or "", f"{(time.time() - w) / 3600:.1f}"
+        fresh = time.time() - st.get("fix_checked_at", 0) <= 900   # 11-05: the count is not refreshed while dispatch waits
+        n = (st.get("fix_pending") if fresh else None) or "几"
+        if "open fix PRs >=" in why:   # lib.fixpr_cap_reason: "5 open fix PRs >= 2: #1 #2"
+            prs = " ".join(re.findall(r"#\d+", why))
+            probs["prfix:fixprcap"] = PN.item("fyi", "「修 PR bot」等已开的 fix PR 合并", f"有 {n} 个问题等着修，但已开的 fix PR 达到上限（{why.split(':')[0]}），已经等了 {hours} 小时。",
+                "这些问题要等已开的 fix PR 合并或关闭后才修。", todo=f"合并或关闭这些 fix PR：{prs}")
+            return
+        m = re.match(r"headroom (-?\d+) MB < (\d+) MB", why)
+        if m and st.get("fix_wait_mem") is not None:
+            room, need, mem = int(m[1]), int(m[2]), st["fix_wait_mem"]
+            detail = f"预留后余量 {room} MB < 需要 {need} MB（MemAvailable {mem} MB，其中预留 {mem - room} MB）"
+        else: detail = why or "机器内存不够再开一单"
+        probs["prfix:memwait"] = PN.item("fyi", "「修 PR bot」排队等内存", f"有 {n} 个问题等着修，但{detail}，已经等了 {hours} 小时。",
             "这些问题要晚一点才修。", todo="不用做什么，内存一空出来就会开修；想快一点，可以关掉暂时不用的会话腾出内存")
-
 
 VIGIL_BAD = ("FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR")
 VIGIL_LEGACY = "vigil:stall"   # pre-11-03 single key for all stuck PRs; still in old state.json, dropped silently on the first run after upgrade
