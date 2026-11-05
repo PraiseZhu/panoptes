@@ -58,3 +58,40 @@ test('没配 perfRetry 的步骤行为不变：不预热、不重跑', async () 
   const [r] = await runSteps({ steps: [{ id: 'bench', kind: 'product', cache: false, cmd: [process.execPath, '-e', script, calls, '3'] }] }, src, runDir)
   assert.equal(r.ok, false); assert.equal(r.perf, undefined); assert.equal(readFileSync(calls, 'utf8').trim().split('\n').length, 1)
 })
+
+// 直接 mock runOnce：断言报告文件行为（ops verify-252/first-json）——bench.first.json 保留第一次读数，bench.json 可被重跑覆盖
+const { runPerfWithRetry } = await import('../src/perf-retry.mjs')
+
+test('bench.first.json 保留第一次读数；预热报告被删；只重跑一次', async () => {
+  const d = mkdtempSync(join(tmpdir(), 'argus-fj-'))
+  try {
+    const rf = join(d, 'bench.json')
+    const seq = [['warmup', 9.9, true], [null, 2.56, false], ['retry', 1.4, true]]
+    const tags = []
+    const { res, perf } = await runPerfWithRetry({
+      warmup: true, retries: 1, reportFile: rf,
+      runOnce: async (tag) => {
+        tags.push(tag)
+        const [, p, ok] = seq[tags.length - 1]
+        writeFileSync(rf, JSON.stringify({ tag, p95: p }))
+        return { ok, exitCode: ok ? 0 : 1, tail: `p95=${p}ms`, durationMs: 1 }
+      },
+    })
+    assert.deepEqual(tags, ['warmup', null, 'retry'])
+    assert.equal(JSON.parse(readFileSync(join(d, 'bench.first.json'), 'utf8')).p95, 2.56)
+    assert.equal(JSON.parse(readFileSync(rf, 'utf8')).tag, 'retry')
+    assert.equal(perf.first.reportFile, join(d, 'bench.first.json'))
+    assert.equal(perf.verdict, 'pass-after-retry')
+    assert.equal(res.ok, true)
+  } finally { rmSync(d, { recursive: true, force: true }) }
+})
+
+test('整步超时不重跑', async () => {
+  let n = 0
+  const { perf } = await runPerfWithRetry({
+    warmup: false,
+    runOnce: async () => { n++; return { ok: false, timedOut: true, tail: '' } },
+  })
+  assert.equal(n, 1)
+  assert.equal(perf.verdict, 'fail')
+})
