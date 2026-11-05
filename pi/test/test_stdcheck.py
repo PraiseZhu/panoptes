@@ -178,10 +178,29 @@ class Checks(Base):
         import builtins; real = builtins.open; opened = []
         def spy(f, *a, **k): opened.append(str(f)); return real(f, *a, **k)
         self.pr(40)
+        # may open ACK_FILE for external_deps labels; must not read a vigil heartbeat or stat one
         with mock.patch.object(builtins, "open", spy), mock.patch.object(S.os, "stat", side_effect=AssertionError("stat")):
             S.check_review_pr(NOW)
-        self.assertEqual(opened, []); self.assertFalse(hasattr(S, "VIGIL_HB"))
+        self.assertTrue(all("heartbeat" not in f.lower() and "vigil" not in f.lower() for f in opened))
+        self.assertFalse(hasattr(S, "VIGIL_HB"))
         self.assertNotIn("heartbeat", open(S.__file__).read().lower())
+
+    def test_review_pr_external_deps_annotates_but_still_breaches(self):
+        """Jasper B 1105: label 外部依赖（Mac mini） in breach text; do NOT drop from scoring."""
+        self.pr(1736); self.pr(1727)
+        self.checks["sha1736"] = [{"name": "review-pr", "status": "in_progress", "started_at": self.ago(90), "completed_at": None}]
+        self.checks["sha1727"] = [{"name": "review-pr (integration)", "status": "in_progress", "started_at": self.ago(30), "completed_at": None}]
+        ack = f"{self.tmp}/ext-ack.json"
+        json.dump({"acknowledged_breaches": [], "superseded": [], "external_deps": [
+            {"pr": 1736, "check": "review_pr", "label": "外部依赖（Mac mini）", "date": "2026-11-05"},
+        ]}, open(ack, "w"))
+        with mock.patch.object(S, "ACK_FILE", ack):
+            bad = S.check_review_pr(NOW)
+        self.assertEqual(list(bad), ["running:PR-1736"])
+        self.assertIn("外部依赖（Mac mini）", bad["running:PR-1736"])
+        self.assertIn("in_progress", bad["running:PR-1736"])
+        ext = S.check_review_pr.last_external
+        self.assertTrue(any(x["pr"] == 1736 for x in ext))
 
 
 
