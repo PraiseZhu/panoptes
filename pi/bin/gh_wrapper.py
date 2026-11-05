@@ -10,7 +10,8 @@ Installed by 电脑运维 as `gh` ahead of the real gh on PATH (see the PR / doc
      PRODUCT_WRITE_EXCEPTIONS and review-pr comments/reviews pass. A body on stdin is read, checked, and re-fed to the real gh.
   2. flag on ($PI_STATE/gh-app-enabled AND $PI_STATE/gh-app-wrapper-enabled): GH_TOKEN = a Praise QA installation token for the
      target repo (-R/--repo, GH_REPO, `api repos/O/R`, `repo clone O/R`, else the cwd's origin): xindong/* -> 178486896,
-     PraiseZhu/* -> 164262283. Unresolvable -> 178486896, and one line {at, cmd, repo} in $PI_STATE/out/gh-wrapper/unresolved.jsonl
+     PraiseZhu/* -> 164262283, aj0928/aj0928-handoff -> 178902423, zhongxingtian-ai/handover-mivo -> 178909971.
+     Unresolvable -> 178486896, and one line {at, cmd, repo} in $PI_STATE/out/gh-wrapper/unresolved.jsonl
      (never a token, never the args). A caller that already holds an installation token (ghs_*, e.g. lib.gh) keeps it.
   2a. caller allowlist (11-04, PM/Jasper): when the calling SCRIPT (script_of the parent's cmdline, realpath; a `sh -c` parent -> up to 3 ancestors) ends with a CALLER_ALLOWLIST path,
      the call keeps the PAT: the real gh with lib.pat_env(), one line {at, caller, cmd} in $PI_STATE/out/gh-wrapper/allowlist.jsonl.

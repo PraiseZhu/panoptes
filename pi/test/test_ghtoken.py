@@ -42,7 +42,10 @@ class T(unittest.TestCase):
     def test_installation_by_repo(self):
         self.assertEqual(G.installation("PraiseZhu/panoptes"), 164262283)
         self.assertEqual(G.installation("xindong/mivo-canvas-plugin"), 178486896)
+        self.assertEqual(G.installation("aj0928/aj0928-handoff"), 178902423)
+        self.assertEqual(G.installation("zhongxingtian-ai/handover-mivo"), 178909971)
         with self.assertRaises(G.NoInstallation): G.installation("someone/else")
+        with self.assertRaises(G.NoInstallation): G.installation("aj0928/other-repo")
 
     def test_jwt_is_rs256_and_verifies_with_the_key(self):
         now = 1_793_700_000
