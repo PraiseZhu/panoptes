@@ -28,7 +28,12 @@ class Cap(unittest.TestCase):
     def test_count_like_stdcheck_and_fail_closed(self):
         self.assertIn("2 open fix PRs", lib.fixpr_cap_reason(fake_gh(TWO)))
         self.assertIsNone(lib.fixpr_cap_reason(fake_gh(ONE)))
-        self.assertIsNone(lib.fixpr_cap_reason(fake_gh(TWO), exclude=2))   # a superseding PR replaces its own predecessor
+        self.assertIsNone(lib.fixpr_cap_reason(fake_gh(TWO), exclude=2))
+    def test_superseded_in_ack_file_not_counted(self):   # 11-05 gap (c): same exclusion as stdcheck fix_prs
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f: json.dump({"superseded": [{"pr": 2, "superseded_by": 9}]}, f)
+        with mock.patch.object(lib, "STDCHECK_ACK_FILE", f.name): self.assertIsNone(lib.fixpr_cap_reason(fake_gh(TWO)))
+        with mock.patch.object(lib, "STDCHECK_ACK_FILE", f.name + ".missing"): self.assertIn("2 open fix PRs", lib.fixpr_cap_reason(fake_gh(TWO)))
+        os.unlink(f.name)   # a superseding PR replaces its own predecessor
         self.assertIn("fail closed", lib.fixpr_cap_reason(fake_gh(fail=True)))
         self.assertIn("fail closed", lib.fixpr_cap_reason(fake_gh(None)))
 
