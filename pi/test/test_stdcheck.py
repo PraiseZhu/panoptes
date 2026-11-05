@@ -18,6 +18,7 @@ class Base(unittest.TestCase):
         self.prs = {"PraiseZhu/panoptes": [], S.REPO: []}; self.review = []; self.checks = {}; self.statuses = {}; self.gh_calls = []; self.runs = {j: [] for j in S.TASKS}; self.spawned = []
         ps = [mock.patch.object(S, "BASE", t), mock.patch.object(S, "OUT", f"{t}/out/stdcheck"), mock.patch.object(S, "FLAG", f"{t}/stdcheck-enabled"),
               mock.patch.object(S, "GAPS", f"{t}/gaps-open.json"), mock.patch.object(S, "REPORTS", f"{t}/reports"),
+              mock.patch.object(S, "ACK_FILE", f"{t}/no-ack.json"),  # missing => today behavior; Allowlist tests override
               mock.patch.object(S, "RETRY_SLEEP_S", 0),
               mock.patch.object(S, "DRY", False), mock.patch.object(S, "gh", self.gh), mock.patch.object(S, "task_runs", self.task_runs),
               mock.patch.object(S.subprocess, "Popen", self.popen), mock.patch.object(S, "write_atomic", self.write)]
@@ -166,6 +167,81 @@ class Checks(Base):
             S.check_review_pr(NOW)
         self.assertEqual(opened, []); self.assertFalse(hasattr(S, "VIGIL_HB"))
         self.assertNotIn("heartbeat", open(S.__file__).read().lower())
+
+
+
+class Allowlist(Base):
+    """acknowledged qa_start breaches + superseded fix_prs (mocks only; ack file under tmp)."""
+
+    def ack_file(self, doc):
+        p = f"{self.tmp}/stdcheck-acknowledged.json"
+        json.dump(doc, open(p, "w")); return p
+
+    def test_qa_start_allowlisted_does_not_fail_and_is_listed(self):
+        self.report(1718, NOW - dt.timedelta(hours=2), NOW - dt.timedelta(hours=2) + dt.timedelta(minutes=15))  # 15 min late, merge >1h ago
+        self.ack_file({"acknowledged_breaches": [{"pr": 1718, "handler": "Praise PR", "gap_id": "qa-start-1105-metric", "date": "2026-11-05"}], "superseded": []})
+        with mock.patch.object(S, "ACK_FILE", f"{self.tmp}/stdcheck-acknowledged.json"):
+            bad = S.check_qa_start(NOW)
+        self.assertEqual(bad, {})
+        ack = S.check_qa_start.last_acknowledged
+        self.assertEqual(len(ack), 1)
+        self.assertEqual(ack[0]["pr"], 1718)
+        self.assertEqual(ack[0]["gap_id"], "qa-start-1105-metric")
+        self.assertEqual(ack[0]["handler"], "Praise PR")
+        self.assertIn("15 min", ack[0]["detail"])
+
+    def test_qa_start_new_breach_still_fails(self):
+        """not listed, or listed but merged <1h before run -> still fails"""
+        # not listed
+        self.report(1800, NOW - dt.timedelta(hours=2), NOW - dt.timedelta(hours=2) + dt.timedelta(minutes=15))
+        self.ack_file({"acknowledged_breaches": [{"pr": 1718, "handler": "Praise PR", "gap_id": "x", "date": "2026-11-05"}], "superseded": []})
+        with mock.patch.object(S, "ACK_FILE", f"{self.tmp}/stdcheck-acknowledged.json"):
+            self.assertEqual(list(S.check_qa_start(NOW)), ["PR-1800"])
+        # listed but merge <1h ago -> ignore entry, still fail, and note it
+        self.report(1718, NOW - dt.timedelta(minutes=30), NOW - dt.timedelta(minutes=10))  # 20 min late, merge 30 min ago
+        with mock.patch.object(S, "ACK_FILE", f"{self.tmp}/stdcheck-acknowledged.json"):
+            bad = S.check_qa_start(NOW)
+        self.assertIn("PR-1718", bad)
+        self.assertIn("PR-1800", bad)
+        ign = S.check_qa_start.last_ignored
+        self.assertTrue(any(x["pr"] == 1718 and "ignored" in x for x in ign))
+
+    def test_qa_start_missing_or_invalid_ack_file_behaves_as_today(self):
+        self.report(1800, NOW - dt.timedelta(hours=2), NOW - dt.timedelta(hours=2) + dt.timedelta(minutes=15))
+        with mock.patch.object(S, "ACK_FILE", f"{self.tmp}/no-such-ack.json"):
+            self.assertEqual(list(S.check_qa_start(NOW)), ["PR-1800"])
+        open(f"{self.tmp}/bad.json", "w").write("{not json")
+        with mock.patch.object(S, "ACK_FILE", f"{self.tmp}/bad.json"):
+            self.assertEqual(list(S.check_qa_start(NOW)), ["PR-1800"])
+
+    def test_fix_prs_superseded_excluded_from_count(self):
+        fx = lambda n, **k: {"number": n, "headRefName": k.get("h", f"qa-fix/{n}"), "body": k.get("b", "")}
+        # 5 open fix PRs; superseding 1734 and 1621 leaves 3 -> still breach; superseding one more leaves 2 -> pass
+        self.prs[S.REPO] = [fx(1762), fx(1734), fx(1727), fx(1724), fx(1621)]
+        self.ack_file({"acknowledged_breaches": [], "superseded": [
+            {"pr": 1734, "superseded_by": 1710, "date": "2026-11-05"},
+            {"pr": 1621, "superseded_by": 1648, "date": "2026-11-05"},
+        ]})
+        with mock.patch.object(S, "ACK_FILE", f"{self.tmp}/stdcheck-acknowledged.json"):
+            bad = S.check_fix_prs(NOW)
+        self.assertEqual(list(bad), ["concurrent"])
+        self.assertIn("#1762", bad["concurrent"]); self.assertIn("#1727", bad["concurrent"]); self.assertIn("#1724", bad["concurrent"])
+        self.assertNotIn("#1734", bad["concurrent"]); self.assertNotIn("#1621", bad["concurrent"])
+        sup = S.check_fix_prs.last_superseded
+        self.assertEqual({x["pr"] for x in sup}, {1734, 1621})
+        self.assertEqual({(x["pr"], x["superseded_by"]) for x in sup}, {(1734, 1710), (1621, 1648)})
+        # drop one more active -> 2 active = pass, superseded still listed
+        self.prs[S.REPO] = [fx(1762), fx(1734), fx(1727), fx(1621)]
+        with mock.patch.object(S, "ACK_FILE", f"{self.tmp}/stdcheck-acknowledged.json"):
+            self.assertEqual(S.check_fix_prs(NOW), {})
+            self.assertEqual({x["pr"] for x in S.check_fix_prs.last_superseded}, {1734, 1621})
+
+    def test_fix_prs_missing_ack_file_unchanged(self):
+        self.prs[S.REPO] = [{"number": n, "headRefName": f"qa-fix/{n}", "body": ""} for n in range(3)]
+        with mock.patch.object(S, "ACK_FILE", f"{self.tmp}/missing.json"):
+            self.assertEqual(list(S.check_fix_prs(NOW)), ["concurrent"])
+
+
 
 
 def glob_one(p): return S.glob.glob(p)[0]
