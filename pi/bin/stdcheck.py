@@ -7,9 +7,12 @@ Checks (each one: a list of objects that breach, from files on disk plus two gh 
                (report run.attempt > 1, or mergewatch "try 2/3"); in the log, state.json and passrate-<day>.json "metrics"
   qa_start     a merge into main / integration/* / release/* has its QA run started within 10 min (reports/merged/PR-N.json
                prs[].merged_at vs run.started_at; mergewatch-<day>.log "launched priority run ... for PR #N" / "branch merge #N"
-               for merges without a report yet -- same sources as pi-work/gaps-1105/LATENCY.md)
+               for merges without a report yet -- same sources as pi-work/gaps-1105/LATENCY.md). Acknowledged breaches
+               (PI_STDCHECK_ACK_FILE, default /workspace/fleet-standards/stdcheck-acknowledged.json) are listed but do not fail
+               when that PR's merge is >1h before the run; newer merges ignore the entry and still fail.
   panoptes_prs open PraiseZhu/panoptes PRs <= 3 (lib.gh: Praise QA App identity while gh-app-enabled, PAT otherwise)
-  fix_prs      OPEN Pi-line fix PRs in xindong/mivo-canvas-plugin, drafts included (Jasper), (prwatch.PILINE marker or qa-fix/* / fix/qa-* head) <= 2
+  fix_prs      OPEN Pi-line fix PRs in xindong/mivo-canvas-plugin, drafts included (Jasper), (prwatch.PILINE marker or qa-fix/* / fix/qa-* head) <= 2.
+               Superseded PRs listed under the same ack file's "superseded" key are excluded from the count and shown as superseded.
   tasks        pmnudge (Beijing 09-22 :05), daily (07:35, retry 08:35) and ledger (23:40) ran clean: run.sh records
                (watchdog.runs / ok_run), plus daily's outbound ledger key mivo-daily-report:<day> done and out/ledger/<day>.json
   review_pr    the Mac mini review-pr dispatcher is moving (Jasper ruling, 11-04): product repo via lib.gh (App identity, REST, at most
@@ -32,6 +35,8 @@ DRY = "--dry-run" in sys.argv
 OUT = f"{BASE}/out/stdcheck"
 FLAG = f"{BASE}/stdcheck-enabled"
 GAPS = os.environ.get("PI_GAPS_FILE") or "/workspace/fleet-standards/gaps-open.json"
+ACK_FILE = os.environ.get("PI_STDCHECK_ACK_FILE") or "/workspace/fleet-standards/stdcheck-acknowledged.json"
+ACK_MIN_AGE = dt.timedelta(hours=1)  # allowlist entry only accepted when the PR's merge is older than this
 REPORTS = os.environ.get("PI_REPORTS_MERGED") or RPT
 RUN_SH = f"{PI_CODE}/bin/run.sh"
 PANOPTES = "PraiseZhu/panoptes"
@@ -114,11 +119,64 @@ def qa_start_rows(now):
         rows.append((n, ref, start, bool((rt and rt[3]) or e.get("launches", 0) > 1)))
     return rows
 
+
+def _pr_num(v):
+    """normalize pr field from allowlist (1718 / "1718" / "PR-1718" / "#1718") -> int or None"""
+    if isinstance(v, int): return v
+    if isinstance(v, str):
+        m = re.search(r"(\d+)", v)
+        return int(m[1]) if m else None
+    return None
+
+def load_ack(path=None):
+    """-> {"acknowledged_breaches": [...], "superseded": [...]} or empty dicts when missing/invalid (today's behavior)."""
+    p = path or ACK_FILE
+    empty = {"acknowledged_breaches": [], "superseded": []}
+    try:
+        d = json.load(open(p))
+    except Exception:
+        return empty
+    if not isinstance(d, dict): return empty
+    ack = d.get("acknowledged_breaches") if isinstance(d.get("acknowledged_breaches"), list) else []
+    sup = d.get("superseded") if isinstance(d.get("superseded"), list) else []
+    return {"acknowledged_breaches": [x for x in ack if isinstance(x, dict)], "superseded": [x for x in sup if isinstance(x, dict)]}
+
+def ack_entries_by_pr(ack_list):
+    """pr_number -> first matching entry"""
+    out = {}
+    for e in ack_list:
+        n = _pr_num(e.get("pr"))
+        if n is not None and n not in out: out[n] = e
+    return out
+
+def superseded_pr_set(sup_list):
+    return {n for e in sup_list if (n := _pr_num(e.get("pr"))) is not None}
+
 def check_qa_start(now):
     bad, lim = {}, dt.timedelta(minutes=QA_START_MAX_MIN)
+    ack_by = ack_entries_by_pr(load_ack()["acknowledged_breaches"])
+    acknowledged, ignored = [], []
     for n, ref, start, _ in qa_start_rows(now):
-        if start and start - ref > lim: bad[f"PR-{n}"] = f"merge {cst(ref)} -> QA start {cst(start)} ({int((start - ref).total_seconds() // 60)} min > {QA_START_MAX_MIN})"
-        elif not start and now - ref > lim: bad[f"PR-{n}"] = f"merged/seen {cst(ref)}, no QA start after {int((now - ref).total_seconds() // 60)} min"
+        if start and start - ref > lim: why = f"merge {cst(ref)} -> QA start {cst(start)} ({int((start - ref).total_seconds() // 60)} min > {QA_START_MAX_MIN})"
+        elif not start and now - ref > lim: why = f"merged/seen {cst(ref)}, no QA start after {int((now - ref).total_seconds() // 60)} min"
+        else: continue
+        entry = ack_by.get(n)
+        if entry is not None:
+            age_ok = ref and (now - ref > ACK_MIN_AGE)
+            note = {"pr": n, "handler": entry.get("handler"), "gap_id": entry.get("gap_id"), "date": entry.get("date"), "detail": why}
+            if age_ok:
+                acknowledged.append(note); continue
+            note["ignored"] = f"merge {cst(ref)} is <1h before run; allowlist entry ignored"
+            ignored.append(note)
+        bad[f"PR-{n}"] = why
+    if acknowledged:
+        log(f"stdcheck qa_start: acknowledged {json.dumps(acknowledged, ensure_ascii=False)}")
+        if DRY: print("ACKNOWLEDGED qa_start:", json.dumps(acknowledged, ensure_ascii=False))
+    if ignored:
+        log(f"stdcheck qa_start: ignored allowlist (merge <1h) {json.dumps(ignored, ensure_ascii=False)}")
+        if DRY: print("IGNORED allowlist qa_start:", json.dumps(ignored, ensure_ascii=False))
+    check_qa_start.last_acknowledged = acknowledged
+    check_qa_start.last_ignored = ignored
     return bad
 
 def first_run_fail(now):
@@ -134,9 +192,25 @@ def check_panoptes_prs(now):
 PILINE = FIX_PR_MARK   # 11-05: is_fix_pr / MAX_FIX_PRS come from lib (shared with prwatch and outbound)
 
 def check_fix_prs(now):
-    """Jasper ruling (11-04): OPEN Pi-line fix PRs in xindong/mivo-canvas-plugin, drafts included, any author; breach = count > 2"""
+    """Jasper ruling (11-04): OPEN Pi-line fix PRs in xindong/mivo-canvas-plugin, drafts included, any author; breach = count > 2.
+    Superseded list (same ACK_FILE) is excluded from the count and shown in output as superseded."""
     prs = open_fix_prs(gh)
-    return {"concurrent": f"{len(prs)} Pi-line fix PRs open > {MAX_FIX_PRS}: " + " ".join(f"#{p['number']}" for p in prs)} if len(prs) > MAX_FIX_PRS else {}
+    sup_list = load_ack()["superseded"]
+    sup_nums = superseded_pr_set(sup_list)
+    by_pr = {_pr_num(e.get("pr")): e for e in sup_list}
+    superseded, active = [], []
+    for p in prs:
+        n = p.get("number")
+        if n in sup_nums:
+            e = by_pr.get(n) or {}
+            superseded.append({"pr": n, "superseded_by": e.get("superseded_by"), "date": e.get("date")})
+        else:
+            active.append(p)
+    if superseded:
+        log(f"stdcheck fix_prs: superseded {json.dumps(superseded, ensure_ascii=False)}")
+        if DRY: print("SUPERSEDED fix_prs:", json.dumps(superseded, ensure_ascii=False))
+    check_fix_prs.last_superseded = superseded
+    return {"concurrent": f"{len(active)} Pi-line fix PRs open > {MAX_FIX_PRS}: " + " ".join(f"#{p['number']}" for p in active)} if len(active) > MAX_FIX_PRS else {}
 
 def last_slot(slots, judge_min, now):
     """latest slot whose judge time (slot + judge_min) has passed, as a CST datetime"""
