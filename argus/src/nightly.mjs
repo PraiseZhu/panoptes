@@ -1388,6 +1388,11 @@ export function stampFirstStart(doc, file) {
   const att = readJson(attemptsPath(file))
   doc.run.first_started_at = earliestIso(cur?.run?.first_started_at, cur?.run?.started_at, att?.first_started_at, doc.run.started_at)
   doc.run.attempt = Math.max(att?.attempts ?? 1, cur?.run ? (cur.run.attempt ?? 1) + 1 : 1)
+  // 手动补跑（--trigger manual）覆盖 PR-N.json 时，首次触发来源不能丢：first_trigger 只在第一次写入，trigger_history 每次追加。
+  // run.trigger 仍是本次运行的来源，不改。
+  const prevHistory = Array.isArray(cur?.run?.trigger_history) ? cur.run.trigger_history : (cur?.run?.trigger ? [cur.run.trigger] : [])
+  doc.run.first_trigger = cur?.run?.first_trigger ?? prevHistory[0] ?? doc.run.trigger ?? null
+  doc.run.trigger_history = [...prevHistory, doc.run.trigger ?? null]
   return doc
 }
 
