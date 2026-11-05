@@ -194,10 +194,34 @@ class Wrapper(Base):
         for a in (["pr", "merge", "1", "-R", PROD], ["pr", "edit", "1", "--body", "x", "-R", PROD]):
             rc, c, err = self.wrap(a, caller=["node", "/x/scripts/loops/lifeline/report.mjs"]); self.assertEqual((rc, c), (4, None), a); self.assertIn("red line", err)
 
-    def test_mint_failure_falls_back(self):
+    def test_mint_failure_refuses_and_alerts_no_pat(self):
+        """11-05 R2 gap 3: mint failure -> exit 5, nothing exec'd (no inherited PraiseZhu login), alert written; recovery clears it"""
         self.on("gh-app-wrapper-enabled"); self.mint_fail = True
-        _, c, err = self.wrap(["pr", "list", "-R", PROD], env={"GITHUB_TOKEN": "pat"})
-        self.assertNotIn("GH_TOKEN", c[2]); self.assertIn("inherited gh login", err)
+        al = lib.gh_app_mint_alert_file()
+        if os.path.exists(al): os.remove(al)
+        rc, c, err = self.wrap(["pr", "list", "-R", PROD], env={"GITHUB_TOKEN": "ghp_pat"})
+        self.assertEqual((rc, c), (5, None)); self.assertIn("not falling back", err)
+        doc = json.load(open(al)); self.assertEqual((doc["check"], doc["consecutive_failures"]), ("gh_app_mint", 1))
+        self.assertNotIn(FAKE[PROD], json.dumps(doc)); self.assertNotIn("ghp_pat", json.dumps(doc)); self.assertIn("gh_wrapper", doc["breaches"])
+        self.mint_fail = False
+        rc, c, _ = self.wrap(["pr", "list", "-R", PROD], env={"GITHUB_TOKEN": "ghp_pat"})
+        self.assertEqual(c[2]["GH_TOKEN"], FAKE[PROD]); self.assertFalse(os.path.exists(al))
+
+    def test_mint_failure_git_credential_gives_no_answer(self):
+        self.on("gh-app-wrapper-enabled", "gh-app-product-writes-enabled"); self.mint_fail = True
+        import gh_wrapper as W
+        out = io.StringIO()
+        with redirect_stderr(io.StringIO()), mock.patch("sys.stdout", out):
+            rc = W.main(["auth", "git-credential", "get"], env={"PATH": "", "PRAISE_QA_REAL_GH": "/real/gh", "GITHUB_TOKEN": "ghp_pat"},
+                        execve=lambda *a: self.fail("real gh (PAT) must not answer"), run=lambda *a, **k: types.SimpleNamespace(returncode=1, stdout="", stderr=""),
+                        caller=[], stdin="protocol=https\nhost=github.com\npath=xindong/mivo-canvas-plugin.git\n\n")
+        self.assertEqual(rc, 5); self.assertNotIn("password", out.getvalue())
+
+    def test_allowlisted_caller_still_on_the_pat_when_mint_would_fail(self):
+        """#234 CALLER_ALLOWLIST unchanged: never mints, still the PAT pass-through"""
+        self.on("gh-app-wrapper-enabled"); self.mint_fail = True
+        rc, c, _ = self.wrap(["pr", "list", "-R", PROD], env={"GITHUB_TOKEN": "ghp_pat"}, caller=["node", "/x/scripts/loops/lifeline/report.mjs"])
+        self.assertIsNotNone(c); self.assertEqual(c[2].get("GH_TOKEN"), "ghp_pat")
 
 
 class PatChecksBypassTheWrapper(unittest.TestCase):

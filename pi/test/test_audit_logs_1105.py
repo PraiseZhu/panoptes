@@ -86,7 +86,8 @@ class PatFallbackLog(unittest.TestCase):
         self.on()
         def boom(repo): raise RuntimeError("mint")
         sys.modules["ghtoken"].token = boom
-        self.assertEqual(self.reason(["pr", "list", "-R", "PraiseZhu/panoptes"]), "App token mint failed")
+        with redirect_stdout(io.StringIO()), self.assertRaises(lib.GhAppMintFailed): lib.gh_env(["pr", "list", "-R", "PraiseZhu/panoptes"])
+        self.assertEqual(lines(lib.pat_log_file()), [], "11-05 R2: a mint failure is not a PAT use any more")
     def test_app_not_logged(self):
         self.on()
         with redirect_stdout(io.StringIO()): self.assertEqual(lib.gh_env(["pr", "list", "-R", "PraiseZhu/panoptes"])[0], "app")

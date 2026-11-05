@@ -29,6 +29,7 @@ import lib  # noqa: E402
 
 PRODUCT = "xindong/mivo-canvas-plugin"
 EXIT_RED_LINE = 4
+EXIT_MINT_FAILED = 5   # 11-05 R2: App token mint failed, nothing sent (no PAT fallback)
 
 
 # (name, calling-script path suffix): one entry per caller; suffix match so copies/checkouts match too. Tracked as gh-allowlist:<name>.
@@ -329,10 +330,14 @@ def app_token(repo, argv, no_install_is_none=False):
         if no_install_is_none: return None   # credential helper: a repo with no installation -> silent, git asks the PAT helper
         r = None
     if not r: log_unresolved(argv); r = PRODUCT
-    try: return ghtoken.token(r)
-    except Exception as e:
-        print(f"gh-wrapper: praise-qa token unavailable ({str(ghtoken.mask(e))[:160]}); using the inherited gh login", file=sys.stderr)
-        return None
+    try: tok = ghtoken.token(r)
+    except Exception as e:   # 11-05 R2 gap 3: an error + alert, never the inherited (PraiseZhu) gh login
+        msg = lib._TOKEN_RE.sub("***", str(ghtoken.mask(e)))[:160]
+        print(f"gh-wrapper: praise-qa token unavailable ({msg}); refused, not falling back to the inherited gh login", file=sys.stderr)
+        lib.gh_app_mint_alert(msg, source="gh_wrapper", argv=argv)
+        raise lib.GhAppMintFailed(msg) from None
+    lib.gh_app_mint_alert(None)
+    return tok
 
 
 def refeed_stdin(data):
@@ -374,7 +379,8 @@ def main(argv, env=None, execve=os.execve, run=subprocess.run, caller=None, stdi
         except Exception: req = ""
         r = credential_repo(req)
         pw = lib.product_write_identity(["git", "push"], r) if r else None   # 11-05: xindong/* credentials follow the product-writes flag
-        tok = app_token(r, ["git", "credential"], no_install_is_none=True) if r and wrapper_on() and pw != "pat" else None
+        try: tok = app_token(r, ["git", "credential"], no_install_is_none=True) if r and wrapper_on() and pw != "pat" else None
+        except lib.GhAppMintFailed: return EXIT_MINT_FAILED   # no answer -> git fails; the PAT helper is never asked
         if tok:
             sys.stdout.write(f"protocol=https\nhost=github.com\nusername=x-access-token\npassword={tok}\n"); sys.stdout.flush()
             return 0
@@ -392,7 +398,8 @@ def main(argv, env=None, execve=os.execve, run=subprocess.run, caller=None, stdi
         penv = lib.pat_env(env); gh = lib.real_gh(penv)
         return execve(gh, [gh] + list(argv), penv)
     if wrapper_on() and not (env.get("GH_TOKEN") or "").startswith("ghs_"):
-        tok = app_token(repo, argv)
+        try: tok = app_token(repo, argv)
+        except lib.GhAppMintFailed: return EXIT_MINT_FAILED
         if tok:
             env["GH_TOKEN"] = tok
             for k in ("GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"): env.pop(k, None)

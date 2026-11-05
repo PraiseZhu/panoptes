@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """11-04 gh-app-1104 P1: lib.gh() sends PraiseZhu/panoptes READS through the Praise QA App token while $PI_STATE/gh-app-enabled exists;
-removing the flag falls back to the PAT (default gh login). Writes, other repos, @me / user calls and mint failures stay on the PAT.
+removing the flag falls back to the PAT (default gh login). Writes, other repos stay on the PAT; a mint failure raises (11-05 R2, no PAT).
 The App's rate-limit marker is its own file. ghtoken and gh are mocked: no network, no real key or token."""
 import io, json, os, sys, types, unittest
 from contextlib import redirect_stdout
@@ -59,12 +59,19 @@ class T(unittest.TestCase):
         self.run_gh(["pr", "list", "-R", PAN, "--author", "@me"]); self.assertEqual(self.runs[-1]["GH_TOKEN"], FAKE)
         n = len(self.runs); self.run_gh(["api", "user"]); self.assertEqual(len(self.runs), n)
 
-    def test_mint_failure_falls_back_to_pat_without_leaking(self):
-        self.flag_on()
+    def test_mint_failure_raises_alerts_and_never_uses_pat(self):
+        """11-05 R2 gap 3: no silent fall back to the default (PraiseZhu) gh login: GhAppMintFailed, nothing run, alert, no leak"""
+        self.flag_on(); al = lib.gh_app_mint_alert_file()
+        if os.path.exists(al): os.remove(al)
         def boom(repo): raise RuntimeError(f"HTTP 401 {FAKE}")
         sys.modules["ghtoken"].token = boom
-        _, out = self.run_gh(["pr", "list", "-R", PAN])
-        self.assertIsNone(self.runs[-1]); self.assertIn("using the default gh login", out); self.assertNotIn(FAKE, out)
+        e, out = self.run_gh(["pr", "list", "-R", PAN])
+        self.assertIsInstance(e, lib.GhAppMintFailed); self.assertEqual(self.runs, [], "no gh process at all (no PAT)")
+        self.assertNotIn(FAKE, out); self.assertNotIn(FAKE, str(e)); self.assertIn("no fallback", out)
+        self.run_gh(["pr", "list", "-R", PAN]); doc = json.load(open(al))
+        self.assertEqual((doc["check"], doc["consecutive_failures"], doc["owner"]), ("gh_app_mint", 2, "Pi 线运维")); self.assertNotIn(FAKE, json.dumps(doc))
+        sys.modules["ghtoken"].token = lambda repo: FAKE
+        self.run_gh(["pr", "list", "-R", PAN]); self.assertEqual(self.runs[-1]["GH_TOKEN"], FAKE); self.assertFalse(os.path.exists(al))
 
     def test_app_has_its_own_rate_limit_marker(self):
         self.flag_on()

@@ -656,8 +656,34 @@ def pat_reason(args, repo=None):
     if any(re.match(r"/?user(?:$|/)", x) for x in args[1:]): return "/user"
     if product_write_identity(args, repo or gh_target_repo(args)) == "pat": return "switch off"
     return "non-App repo"
+# 11-05 R2 gap 3 (ACCEPTANCE-R2 §1): an App token that cannot be minted is an ERROR, never a silent fall back to the default
+# (PraiseZhu) gh login. The caller gets GhAppMintFailed (a RuntimeError, so existing `except Exception` paths record it as a failed
+# step) and one alert lands in $PI_STATE/out/stdcheck/alerts/gh_app_mint.json (Jasper's 09:00 brief reads every alerts/*.json via
+# stdcheck.brief_facts; the next successful mint removes it). The explicit PAT routes (G2 CI rerun, switch off, @me, non-App repo,
+# the gh_wrapper CALLER_ALLOWLIST / PAT_KEEP_REASONS) are unchanged: they never try to mint.
+class GhAppMintFailed(RuntimeError): pass
+def gh_app_mint_alert_file(): return f"{PI_STATE}/out/stdcheck/alerts/gh_app_mint.json"
+def gh_app_mint_alert(why=None, source=None, argv=()):
+    """why=None -> recovered (alert removed); else write / bump the alert (masked, no token ever). Never raises."""
+    f = gh_app_mint_alert_file()
+    try:
+        if why is None:
+            if os.path.exists(f): os.unlink(f)
+            return
+        try: prev = json.load(open(f))
+        except (OSError, ValueError): prev = {}
+        now = dt.datetime.now(CST).isoformat(timespec="seconds")
+        src = source or os.path.basename(self_script() or "?")
+        doc = {"check": "gh_app_mint", "consecutive_failures": int(prev.get("consecutive_failures") or 0) + 1, "since": prev.get("since") or now,
+               "last": now, "error": _TOKEN_RE.sub("***", str(why))[:300], "owner": "Pi 线运维", "for_brief": now[:10],
+               "breaches": {src: "Praise QA App token mint failed: call refused, no PraiseZhu PAT fallback (" + " ".join(_TOKEN_RE.sub("***", str(x)) for x in list(argv)[:3]) + ")"}}
+        os.makedirs(os.path.dirname(f), exist_ok=True)
+        tmp = f"{f}.{os.getpid()}.tmp"
+        with open(tmp, "w") as fh: json.dump(doc, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, f)
+    except Exception as e: print(f"gh app mint alert: write failed ({e.__class__.__name__})", file=sys.stderr)
 def gh_env(args, repo=None):
-    """-> (identity "app"|"pat", env for subprocess or None = inherit). Minting failures fall back to the PAT with one masked line."""
+    """-> (identity "app"|"pat", env for subprocess or None = inherit). A minting failure raises GhAppMintFailed (+ alert); no PAT."""
     if pat_rerun(args, repo): log_pat("product CI rerun", args); return "pat", pat_env()   # G2: product CI rerun -> the PAT explicitly
     if not gh_app_wanted(args, repo): log_pat(pat_reason(args, repo), args); return "pat", None
     try:
@@ -666,8 +692,11 @@ def gh_env(args, repo=None):
     except Exception as e:
         try: import ghtoken as _g; msg = _g.mask(e)
         except Exception: msg = e.__class__.__name__
-        log(f"gh app token unavailable ({str(msg)[:160]}); using the default gh login for this call")
-        log_pat("App token mint failed", args); return "pat", None
+        msg = _TOKEN_RE.sub("***", str(msg))[:160]
+        log(f"gh app token unavailable ({msg}); refusing the call (no fallback to the default gh login)")
+        gh_app_mint_alert(msg, argv=args)
+        raise GhAppMintFailed(f"gh {' '.join(args[:2])}: Praise QA App token mint failed ({msg}); not sent, no PAT fallback") from None
+    gh_app_mint_alert(None)
     env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN")}
     env["GH_TOKEN"] = tok
     return "app", env
