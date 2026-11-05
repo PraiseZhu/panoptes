@@ -331,7 +331,9 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   triage.jevStatus = jev.ok ? 'ok' : jev.capped ? 'capped' : jevConfigured ? 'failed' : 'not-configured'
   out.triage = { ...toApplicability(triage), duration_ms: jevConfigured ? Date.now() - jevT0 : null, usage: jev.usage ?? null }
   recordTriage(health, number, out.triage)
-  const plan = toStepPlan({ profile: baseProfile, riskClass, triage, files })
+  const origFailed = originalFailedSteps(pr, { mergedDir: opts.mergedDir })
+  if (origFailed.stepIds.length) out.forced_steps = origFailed
+  const plan = toStepPlan({ profile: baseProfile, riskClass, triage, files, forceStepIds: origFailed.stepIds })
   for (const sk of plan.skipped) sk.reason ??= 'triage: change does not touch what this optional step covers'
   if (opts.skipSteps?.length) {
     for (const id of plan.stepIds.filter((x) => opts.skipSteps.includes(x))) {
@@ -1246,6 +1248,27 @@ export function checkUmask(health) {
   if (inh != null && inh !== want) health.env_problems.push({ message: `inherited umask was ${inh} (expected ${want}); panoptes pinned it to ${want} for this run, but the QA environment should be fixed (umask 002 caused false RUNNER_OWNER_MISMATCH on mivo #1385)` })
 }
 
+
+// ── 修复 PR：原报告失败过的步骤（分诊不得跳过，11-05 #1742 ← #1490 e2e-browser） ─────
+// 与 pi/bin/pm_extra.py fix_refs 同规则：正文/标题「QA: #N」「QA #N」「QA 来源：#N」「QA 对 #N」；标题含「更新日志」的不算
+const QA_REF_RE = /(?<![A-Za-z])QA\s*(?:来源|对)?\s*[:：]?\s*#(\d+)/g
+export function qaFixRefs(pr) {
+  if (/更新日志/.test(pr?.title ?? '')) return []
+  const all = [...String(pr?.title ?? '').matchAll(QA_REF_RE), ...String(pr?.body ?? '').matchAll(QA_REF_RE)].map((m) => Number(m[1]))
+  return [...new Set(all)].filter((n) => n !== pr?.number)
+}
+export function originalFailedSteps(pr, { mergedDir } = {}) {
+  const refs = qaFixRefs(pr); const stepIds = new Set(); const from = []
+  for (const n of refs) {
+    let doc
+    try { doc = JSON.parse(readFileSync(mergedReportPath(n, mergedDir), 'utf8')) } catch { continue }
+    const p = (doc.prs ?? []).find((x) => x.number === n) ?? doc.prs?.[0]
+    const ids = [...new Set((p?.failed_checks ?? []).map((c) => c.check_id).filter(Boolean))]
+    for (const id of ids) stepIds.add(id)
+    if (ids.length) from.push({ pr: n, step_ids: ids })
+  }
+  return { stepIds: [...stepIds], from, reasonZh: from.length ? `修复 PR 的原问题 ${from.map((x) => `#${x.pr}`).join('、')} 在这些步骤失败过，分诊不跳过` : null }
+}
 
 // ── 合并即测结果的复用 / 输出路径 ─────────────────────────
 export const mergedReportsDir = () => process.env.ARGUS_MERGED_REPORTS_DIR ?? join(REPORTS_DIR, 'merged')

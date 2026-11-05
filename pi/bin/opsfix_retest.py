@@ -25,7 +25,10 @@ TRANSIENT = ("本轮模型调用已达上限",)             # blocked for budget
 # one-shot look-back after a qa_refs widening: the next watermark run scans from go-live once (done PRs still skipped),
 # then records the tag in state so later runs use the normal watermark window.
 REF_BACKFILL = ("qa-refs-2026-11-03", "2026-10-29T12:34:00+08:00")
-PERMANENT = ("没有合并报告", "原报告缺", "原 PR 的新增代码文件", "可执行新增行为 0", "没有轻量复跑")  # retry can't help
+NO_TARGET = "没有可复测目标"                     # pick_targets found nothing in the source report (#1742, 11-04)
+NO_TARGET_ALERT = f"{BASE}/out/ops/retest-no-target-alert.json"   # read by watchdog.retest_no_target_check
+NO_TARGET_KEEP = dt.timedelta(hours=72)
+PERMANENT = ("没有合并报告", "原报告缺", "原 PR 的新增代码文件", "可执行新增行为 0", "没有轻量复跑", NO_TARGET)  # retry can't help
 
 def qa_refs(body, title=""):
     """原问题 PR 号：同 pm_extra.fix_refs（正文/标题 QA: #N、QA #N、QA 来源：#N、QA 对 #N）。11-03 bug：只认正文 QA: #N，#1440/#1559/#1627/#1677 不复测。"""
@@ -132,13 +135,69 @@ def record_unmatched(items, ledger=None, path=None, stamp=None):
             for x in new: f.write(json.dumps(x, ensure_ascii=False) + "\n")
     return new
 
+def no_target(orig_report):
+    """Placeholder target for a source report with nothing pick_targets can retest (11-04 #1742: PR-1490.json findings=[],
+    only pending_verification, fix body names no fingerprint). It becomes a blocked result + an alert instead of an empty
+    target list that run() silently drops (no result -> settle never records it -> the watermark passes it)."""
+    r = orig_report or {}
+    pv = [x.get("fingerprint") for x in r.get("pending_verification") or []]
+    fc = [x.get("check_id") for x in r.get("failed_checks") or []]
+    return {"source": "no-target", "fingerprint": None, "no_target": True,
+            "why": f"{NO_TARGET}：原报告 findings(P0-P2) {len(r.get('findings') or [])} 条可用 0 条；pending_verification {len(pv)} 条"
+                   f"（修复 PR 正文/标题没点名指纹）；failed_checks {fc or '无'}"}
+
 def targets_for(p):
     tg = []
     for o in qa_refs(p.get("body"), p.get("title")):
         rep = load_pr(o)
-        for f in pick_targets(p.get("body"), o, rep, p.get("title")): tg.append((o, f))
+        picked = pick_targets(p.get("body"), o, rep, p.get("title"))
+        for f in picked: tg.append((o, f))
         if not rep: tg.append((o, None))
+        elif not picked: tg.append((o, no_target(rep)))
     return tg
+
+def no_target_alert(results, stamp, path=None, prev=None):
+    """Pure-ish: merge this run's no-target results into the alert state (kept NO_TARGET_KEEP after last seen).
+    Returns the new state dict ({"items": {...}}) or None when nothing is left (caller removes the file)."""
+    items = dict((prev or {}).get("items") or {})
+    for r in results:
+        if r.get("source") != "no-target": continue
+        k = f"{r['fix_pr']}<-{r['original_pr']}"
+        items[k] = {"fix_pr": r["fix_pr"], "original_pr": r["original_pr"], "why": r.get("reason"),
+                    "since": (items.get(k) or {}).get("since") or stamp.isoformat(timespec="seconds"), "last": stamp.isoformat(timespec="seconds")}
+    items = {k: v for k, v in items.items() if (parse_at(v.get("last")) or stamp) >= stamp - NO_TARGET_KEEP}
+    return {"items": items, "updated": stamp.isoformat(timespec="seconds")} if items else None
+
+def write_no_target_alert(results, stamp, path=None):
+    path = path or NO_TARGET_ALERT
+    try: prev = json.load(open(path))
+    except Exception: prev = None
+    st = no_target_alert(results, stamp, prev=prev)
+    if st is None:
+        if os.path.exists(path): os.remove(path)
+        return None
+    os.makedirs(os.path.dirname(path), exist_ok=True); write_atomic(path, json.dumps(st, ensure_ascii=False, indent=1))
+    for v in st["items"].values():
+        if v["last"] == st["updated"]: log(f"ALERT retest: #{v['fix_pr']} ← #{v['original_pr']} {v['why']} -> {path}（watchdog retest:no-target）")
+    return st
+
+def report_entries(results, n, done=None):
+    """Write-back entries for reports/merged/PR-<n>.json prs[0].retest[]. 11-05: blocked (incl. given up after
+    MAX_ATTEMPTS, and no-target) is written too — before, only pass/fail were, so #1725/#1710 left no trace in the report.
+    `done` = state["done"] after settle: a blocked entry of a fix PR given up is marked gave_up (+ attempts)."""
+    d = (done or {}).get(str(n)) or {}
+    out = []
+    for r in results:
+        if r["fix_pr"] != n or r["result"] not in ("pass", "fail", "blocked"): continue
+        if not r.get("fingerprint") and r.get("source") != "no-target": continue
+        e = {"fingerprint": r.get("fingerprint"), "original_pr": r["original_pr"], "result": r["result"], "method": r.get("source"),
+             "reason": r["reason"], "evidence": r.get("evidence"), "at": r["at"], "by": BY,
+             **({"target_source": r["target_source"]} if r.get("target_source") == "pending_verification" else {})}
+        if r["result"] == "blocked":
+            e["outcome"] = "gave_up" if d.get("gave_up_after") else ("blocked_permanent" if any(m in str(r.get("reason")) for m in PERMANENT) else "blocked")
+            if d.get("gave_up_after"): e["attempts"] = d["gave_up_after"]
+        out.append(e)
+    return out
 
 def plan(day, only=None):
     """[(fix_pr_dict, [(orig_pr, finding)])] for fix PRs merged on `day` with QA: #N (pm_extra.retest rule)."""
@@ -551,6 +610,10 @@ def run(a):
                 if f is None:
                     results.append(dict(fix_pr=n, original_pr=o, fingerprint=None, source=None, result="blocked",
                                         reason=f"原 PR #{o} 没有合并报告", evidence=None, at=at)); continue
+                if f.get("no_target"):
+                    results.append(dict(fix_pr=n, original_pr=o, fingerprint=None, source="no-target", target_source="findings", title=None,
+                                        result="blocked", reason=f["why"], evidence=None, at=at, detail={}))
+                    log(f"#{n} ← #{o} no-target: blocked — {f['why']}"); continue
                 fp = f["fingerprint"]; ev_base = f"{odir}/PR{n}-{fp}"
                 res = precheck(n, fp, f.get("source")); det = {}
                 try:
@@ -565,12 +628,14 @@ def run(a):
                            reason=why, evidence=f"{ev_base}.json", at=at, detail=det)
                 write_atomic(f"{ev_base}.json", json.dumps(rec, ensure_ascii=False, indent=1))
                 results.append(rec); log(f"#{n} ← #{o} {fp} {f.get('source')}: {res} — {why}")
-        # write-back
+        # settle first so a blocked entry can say whether its fix PR was given up (gave_up_after) — state saved below
+        by_fix = {}
+        for r in results: by_fix.setdefault(r["fix_pr"], []).append(r)
+        _, done_now, retry_now = settle(state, by_fix, {p["number"]: p.get("headRefOid") for p, _ in P}, stamp.isoformat(timespec="seconds"))
+        write_no_target_alert(results, stamp)
+        # write-back (pass / fail / blocked / gave_up)
         for n in sorted({r["fix_pr"] for r in results}):
-            ents = [{"fingerprint": r["fingerprint"], "original_pr": r["original_pr"], "result": r["result"], "method": r["source"],
-                     "reason": r["reason"], "evidence": r["evidence"], "at": r["at"], "by": BY,
-                     **({"target_source": r["target_source"]} if r.get("target_source") == "pending_verification" else {})}
-                    for r in results if r["fix_pr"] == n and r["fingerprint"] and r["result"] in ("pass", "fail")]
+            ents = report_entries(results, n, state.get("done"))
             f = f"{RPT}/PR-{n}.json"
             if not ents or not os.path.exists(f): continue
             bak = f"{f}.bak-{stamp:%Y%m%d}-retest"
@@ -607,9 +672,6 @@ def run(a):
             **({"watermark_to": stamp.isoformat(timespec="seconds")} if advance else {}),
             "fix_prs": sorted({r['fix_pr'] for r in results}), "results": {k: sum(r["result"] == k for r in results) for k in ("pass", "fail", "blocked")},
             "unmatched": len(unmatched), "at": stamp.isoformat(timespec="seconds"), "by": BY}, ensure_ascii=False) + "\n")
-        by_fix = {}
-        for r in results: by_fix.setdefault(r["fix_pr"], []).append(r)
-        _, done_now, retry_now = settle(state, by_fix, {p["number"]: p.get("headRefOid") for p, _ in P}, stamp.isoformat(timespec="seconds"))
         for p, _ in P:   # remember merge time of retry entries so the next scan window still covers them
             if str(p["number"]) in state.get("retry", {}): state["retry"][str(p["number"])]["merged_at"] = p.get("mergedAt")
         if advance: state["watermark"] = stamp.isoformat(timespec="seconds")
