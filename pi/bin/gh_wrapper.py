@@ -385,6 +385,9 @@ def main(argv, env=None, execve=os.execve, run=subprocess.run, caller=None, stdi
         if tok:
             sys.stdout.write(f"protocol=https\nhost=github.com\nusername=x-access-token\npassword={tok}\n"); sys.stdout.flush()
             return 0
+        why = ("credential: repo unresolved" if not r else "credential: switch off" if not wrapper_on()
+               else "credential: product writes flag off" if pw == "pat" else "credential: no App installation")
+        lib.log_pat(why, ["git", "credential", "get", r or "?"], source="gh_wrapper", caller=script_of(chain))   # no token, host/repo only
         refeed_stdin(req)
         if pw == "pat": env = lib.pat_env(env)   # never an inherited installation token for a xindong/* credential while the flag is off
         gh = real_gh(env)
@@ -396,6 +399,7 @@ def main(argv, env=None, execve=os.execve, run=subprocess.run, caller=None, stdi
         return execve(gh, [gh] + list(argv), penv)
     pw = lib.product_write_identity(argv, repo)   # 11-05: the same decision as lib.gh_env for xindong/* writes (G2 rerun included)
     if pw == "pat":
+        lib.log_pat("product writes flag off", argv, source="gh_wrapper", caller=script_of(chain))
         penv = lib.pat_env(env); gh = lib.real_gh(penv)
         return execve(gh, [gh] + list(argv), penv)
     if wrapper_on() and not (env.get("GH_TOKEN") or "").startswith("ghs_"):
@@ -404,6 +408,8 @@ def main(argv, env=None, execve=os.execve, run=subprocess.run, caller=None, stdi
         if tok:
             env["GH_TOKEN"] = tok
             for k in ("GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"): env.pop(k, None)
+    else:   # the inherited login (default hosts.yml = PraiseZhu) unless the caller already carries an installation token
+        if not (env.get("GH_TOKEN") or "").startswith("ghs_"): lib.log_pat("switch off" if not wrapper_on() else "default login", argv, source="gh_wrapper", caller=script_of(chain))
     gh = real_gh(env)
     execve(gh, [gh] + list(argv), env)
 

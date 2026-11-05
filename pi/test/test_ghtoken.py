@@ -2,7 +2,7 @@
 """11-04 gh-app-1104 P0: ghtoken helper. A throwaway RSA key is generated per run (openssl); GitHub is mocked; no real key or token
 is read or printed. Checks: installation by repo, JWT signed RS256 and verifiable with the throwaway public key, token cached 0600 and
 reused, re-minted shortly before expiry, 401/invalidate path, unknown repo -> NoInstallation, tokens masked in every message."""
-import base64, io, json, os, stat, subprocess, sys, tempfile, time, unittest, urllib.error
+import base64, io, json, os, shutil, stat, subprocess, sys, tempfile, time, unittest, urllib.error
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bin"))
@@ -22,13 +22,13 @@ class Resp(io.BytesIO):
 class T(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.d = tempfile.mkdtemp(prefix="ghtoken-")
+        cls.d = tempfile.mkdtemp(prefix="ghtoken-"); cls.addClassCleanup(shutil.rmtree, cls.d, True)
         cls.key = os.path.join(cls.d, "throwaway.pem"); cls.pub = os.path.join(cls.d, "throwaway.pub")
         subprocess.run(["openssl", "genrsa", "-out", cls.key, "2048"], check=True, capture_output=True)
         subprocess.run(["openssl", "rsa", "-in", cls.key, "-pubout", "-out", cls.pub], check=True, capture_output=True)
 
     def setUp(self):
-        self.cache = tempfile.mkdtemp(prefix="ghtoken-cache-")
+        self.cache = tempfile.mkdtemp(prefix="ghtoken-cache-"); self.addCleanup(shutil.rmtree, self.cache, True)
         self.env = mock.patch.dict(os.environ, {"PRAISE_QA_KEY": self.key, "PRAISE_QA_CACHE": f"{self.cache}/c", "PRAISE_QA_APP_ID": "123"}); self.env.start()
         self.calls = []; self.exp = time.time() + 3600
 

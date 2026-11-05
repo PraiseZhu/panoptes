@@ -229,6 +229,7 @@ GQL_NODE_Q = ("query{nodes(ids:%s){__typename ... on Repository{nameWithOwner} .
 def gql_node_repos(ids):
     """[OWNER/REPO or None per id] by one `nodes(ids:)` query on the real gh (never the wrapper) with the inherited login; any error
     -> all None. Tests patch this."""
+    log_pat("default login: graphql node lookup (gql_node_repos)", ["api", "graphql", "nodes(ids)"] + [str(x) for x in ids][:20], source="lib.gql_node_repos")
     try:
         r = subprocess.run([real_gh(), "api", "graphql", "-f", "query=" + GQL_NODE_Q % json.dumps(list(ids))], capture_output=True, text=True, timeout=30)
         ns = (json.loads(r.stdout or "{}").get("data") or {}).get("nodes") or []
@@ -471,6 +472,7 @@ def is_ub_caller(script):
     return s == UB_CALLER or s.endswith("/" + UB_CALLER)
 def ub_lookup(n, env=None, run=subprocess.run):
     """the PR's head/base through the REAL gh (never the wrapper; a read): -> dict, raises on any failure"""
+    log_pat("default login: update-branch PR lookup (ub_lookup)", ["pr", "view", str(int(n)), "-R", PRODUCT_REPO_UB], source="lib.ub_lookup")
     r = run([real_gh(env), "pr", "view", str(int(n)), "-R", PRODUCT_REPO_UB, "--json", "headRefName,baseRefName,headRepository,headRepositoryOwner,isCrossRepository"],
             capture_output=True, text=True, timeout=60, env=env)
     if r.returncode != 0: raise RuntimeError(f"pr view #{n} failed")
@@ -642,10 +644,10 @@ def _rerun_repo(r): return bool(r) and r.lower() in {x.lower() for x in GH_APP_P
 #   {"ts", "reason", "source", "caller", "ppid", "argv"}; argv is masked (no token ever), a failed write is one stderr warning.
 _TOKEN_RE = re.compile(r"\b(gh[opsur]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,})")
 def pat_log_file(): return f"{PI_STATE}/out/logs/gh-pat.jsonl"
-def log_pat(reason, argv, source=None):
+def log_pat(reason, argv, source=None, caller=None):
     try:
         rec = {"ts": dt.datetime.now(CST).isoformat(timespec="seconds"), "reason": reason, "source": source or os.path.basename(self_script() or "?"),
-               "caller": self_script(), "ppid": os.getppid(), "argv": [_TOKEN_RE.sub("***", str(x)) for x in argv]}
+               "caller": caller or self_script(), "ppid": os.getppid(), "argv": [_TOKEN_RE.sub("***", str(x)) for x in argv]}
         os.makedirs(os.path.dirname(pat_log_file()), exist_ok=True)
         with open(pat_log_file(), "a") as f: f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except Exception as e: print(f"pat log: write failed ({e.__class__.__name__}); call not affected", file=sys.stderr)

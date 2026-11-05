@@ -11,6 +11,8 @@ Checks (each one: a list of objects that breach, from files on disk plus two gh 
                (PI_STDCHECK_ACK_FILE, default /workspace/fleet-standards/stdcheck-acknowledged.json) are listed but do not fail
                when that PR's merge is >1h before the run; newer merges ignore the entry and still fail.
   panoptes_prs open PraiseZhu/panoptes PRs <= 3 (lib.gh: Praise QA App identity while gh-app-enabled, PAT otherwise)
+  panoptes_author PraiseZhu/panoptes PRs created in the last LOOKBACK_H (not before AUTHOR_SINCE) must be opened by app/praise-qa
+               (gh pr create through the box wrapper); any other author (PraiseZhu via a connector / /usr/bin/gh) -> breach pr-N, owner Praise.
   fix_prs      OPEN Pi-line fix PRs in xindong/mivo-canvas-plugin, drafts included (Jasper), (prwatch.PILINE marker or qa-fix/* / fix/qa-* head) <= 2.
                Superseded PRs listed under the same ack file's "superseded" key are excluded from the count and shown as superseded.
   tasks        pmnudge (Beijing 09-22 :05), daily (07:35, retry 08:35) and ledger (23:40) ran clean: run.sh records
@@ -44,9 +46,10 @@ QA_START_MAX_MIN = 10; LOOKBACK_H = 24; MAX_PANOPTES_PRS = 3; REVIEW_STALL_MIN =
 ATTEMPTS = 3; RETRY_SLEEP_S = 20; ALERT_STREAK = 2
 TASKS = {  # job: (Beijing slots, judge this many minutes after the slot)
     "pmnudge": ([(h, 5) for h in range(9, 23)], 20), "daily": ([(7, 35)], 85), "ledger": ([(23, 40)], 20)}
-CHECKS = ("qa_start", "panoptes_prs", "fix_prs", "tasks", "review_pr")
-OWNER = {"qa_start": "Mivo QA 运维", "panoptes_prs": "Praise", "fix_prs": "Praise PR", "tasks": "Pi 线运维", "review_pr": "Jasper"}
-DEADLINE_H = {"qa_start": 4, "panoptes_prs": 24, "fix_prs": 4, "tasks": 4, "review_pr": 2}
+PANOPTES_AUTHOR = app_author(); AUTHOR_SINCE = dt.datetime(2026, 11, 5, 12, 0, tzinfo=CST)   # 11-05 #245: older PRs not judged
+CHECKS = ("qa_start", "panoptes_prs", "panoptes_author", "fix_prs", "tasks", "review_pr")
+OWNER = {"qa_start": "Mivo QA 运维", "panoptes_prs": "Praise", "panoptes_author": "Praise", "fix_prs": "Praise PR", "tasks": "Pi 线运维", "review_pr": "Jasper"}
+DEADLINE_H = {"qa_start": 4, "panoptes_prs": 24, "panoptes_author": 24, "fix_prs": 4, "tasks": 4, "review_pr": 2}
 TZ_ABBR = {"CST": 8, "UTC": 0, "GMT": 0, "PST": -8, "PDT": -7, "JST": 9}
 MW_LINE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) (\w+) (.*)$")
 MW_LAUNCH = re.compile(r"launched priority run pid \d+ for PR #(\d+)(?:.*?try (\d+)/\d+)?")
@@ -188,6 +191,19 @@ def first_run_fail(now):
 def check_panoptes_prs(now):
     prs = gh(["pr", "list", "-R", PANOPTES, "--state", "open", "--limit", "100", "--json", "number"])
     return {"open-prs": f"{len(prs)} open panoptes PRs > {MAX_PANOPTES_PRS}: " + " ".join(f"#{p['number']}" for p in prs)} if len(prs) > MAX_PANOPTES_PRS else {}
+
+def check_panoptes_author(now):
+    since = max(now - dt.timedelta(hours=LOOKBACK_H), AUTHOR_SINCE)
+    q = "created:>=" + since.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    prs = gh(["pr", "list", "-R", PANOPTES, "--state", "all", "--limit", "100", "--search", q, "--json", "number,author,createdAt"])
+    bad = {}
+    for p in prs:
+        c = parse_ts(p.get("createdAt"))
+        if not c or c < since: continue
+        who = (p.get("author") or {}).get("login") or "?"
+        if who != PANOPTES_AUTHOR:
+            bad[f"pr-{p['number']}"] = f"panoptes #{p['number']} opened by {who}, not {PANOPTES_AUTHOR} (open PRs only with `gh pr create` on the box)"
+    return bad
 
 PILINE = FIX_PR_MARK   # 11-05: is_fix_pr / MAX_FIX_PRS come from lib (shared with prwatch and outbound)
 
@@ -387,7 +403,7 @@ def brief_facts(d, y):
 def run(now=None):
     now = now or now_cst()
     st = jload(f"{OUT}/state.json", {})
-    fns = {"qa_start": (check_qa_start, {}), "panoptes_prs": (check_panoptes_prs, {}), "fix_prs": (check_fix_prs, {}),
+    fns = {"qa_start": (check_qa_start, {}), "panoptes_prs": (check_panoptes_prs, {}), "panoptes_author": (check_panoptes_author, {}), "fix_prs": (check_fix_prs, {}),
            "tasks": (check_tasks, {"retry": retry_task(st, now)}), "review_pr": (check_review_pr, {})}
     results, errors = {}, {}
     for c in CHECKS:
