@@ -1694,6 +1694,10 @@
       },
       "noteZh": "用仓里已有的性能测试和它们自带的阈值，不另编阈值；共享机器上耗时有波动，试运行期只记拿不准；排在单测之后，并等并行的覆盖率轮次跑完（负载敏感，审计 2026-10-18 S3）",
       "cache": false,
+      "perfRetry": {
+        "warmup": true,
+        "retries": 1
+      },
       "exercises": [
         "src/kernel/**",
         "src/render/**",
