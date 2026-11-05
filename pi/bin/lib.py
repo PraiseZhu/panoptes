@@ -532,10 +532,23 @@ def open_fix_prs(run=None, repo=None):
     prs = (run or gh)(["pr", "list", "-R", repo or REPO, "--state", "open", "--limit", "200", "--json", "number,headRefName,body,isDraft"])
     if not isinstance(prs, list): raise RuntimeError("open PR list unreadable")
     return [p for p in prs if is_fix_pr(p)]
+STDCHECK_ACK_FILE = os.environ.get("PI_STDCHECK_ACK_FILE") or "/workspace/fleet-standards/stdcheck-acknowledged.json"
+def superseded_fix_prs(path=None):
+    """11-05 fleet gap (c): PR numbers under "superseded" in the stdcheck ack file, so the outbound/prwatch cap counts the same set
+    as stdcheck fix_prs. Missing/unreadable file -> empty set (count everything: the cap stays as strict as before)."""
+    try:
+        with open(path or STDCHECK_ACK_FILE) as f: d = json.load(f)
+        out = set()
+        for e in (d.get("superseded") or []):
+            try: out.add(int(str(e.get("pr")).lstrip("#")))
+            except Exception: pass
+        return out
+    except Exception: return set()
 def fixpr_cap_reason(run=None, exclude=None):
     """-> why no new fix PR may open now, or None. >= MAX_FIX_PRS open fix PRs -> refused; the count cannot be read -> refused too
     (fail closed). exclude: a PR number that does not count (the closed one a superseding fix replaces)."""
-    try: prs = [p for p in open_fix_prs(run) if p.get("number") != exclude]
+    sup = superseded_fix_prs()
+    try: prs = [p for p in open_fix_prs(run) if p.get("number") != exclude and p.get("number") not in sup]
     except Exception as e: return f"open fix PR count unreadable ({str(e)[:120]}): fail closed"
     if len(prs) >= MAX_FIX_PRS: return f"{len(prs)} open fix PRs >= {MAX_FIX_PRS}: " + " ".join(f"#{p.get('number')}" for p in prs[:10])
     return None
