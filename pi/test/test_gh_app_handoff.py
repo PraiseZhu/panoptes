@@ -126,7 +126,8 @@ class MintFailure(Base):
              redirect_stdout(io.StringIO()) as out, redirect_stderr(io.StringIO()):
             with self.assertRaises(lib.GhAppMintFailed): lib.gh(["issue", "list", "-R", AJ])
         self.assertEqual(seen, []); self.assertNotIn(FAKE, out.getvalue())
-        self.assertTrue(os.path.exists(al)); self.assertNotIn(FAKE, open(al).read())
+        self.assertTrue(os.path.exists(al))
+        with open(al) as fh: self.assertNotIn(FAKE, fh.read())
 
 
 class GitCreds(Base):
@@ -160,6 +161,7 @@ class GitCreds(Base):
         q = "protocol=https\nhost=github.com\npath={}\n"
         out = io.StringIO(); m.main(["get"], stdin=io.StringIO(q.format(AJ + ".git")), stdout=out)
         self.assertEqual(out.getvalue(), "", "flag off -> next helper")
+        os.makedirs(lib.PI_STATE, exist_ok=True)
         open(lib.gh_app_flag(), "w").close(); open(f"{lib.PI_STATE}/gh-app-wrapper-enabled", "w").close()
         for r in HANDOFF:
             out = io.StringIO(); m.main(["get"], stdin=io.StringIO(q.format(r + ".git")), stdout=out)

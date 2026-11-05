@@ -89,7 +89,9 @@ def gh_rl_clear(f=None):
 # 11-04 (pi-work/gh-app-1104 P1): GitHub App "Praise QA" for PraiseZhu/panoptes READS, behind the flag file $PI_STATE/gh-app-enabled
 # (read at call time). Flag absent, a repo without an App route, an identity-dependent call (@me, /user) or a token that cannot be
 # minted -> the default gh login (PAT), exactly as before. The App has its own quota, so its rate-limit marker is a separate file.
-GH_APP_REPOS = {"PraiseZhu/panoptes"}      # + every PraiseZhu/* repo (task B: installation 164262283 covers the owner), gh_app_own_repo()
+# + every PraiseZhu/* repo (task B: installation 164262283 covers the owner), gh_app_own_repo()
+# 11-05: third-party handoff repos now have Praise QA installed (box R3 was PAT / "non-App repo")
+GH_APP_REPOS = {"PraiseZhu/panoptes", "aj0928/aj0928-handoff", "zhongxingtian-ai/handover-mivo"}
 def gh_app_own_repo(repo): return bool(repo) and (repo in GH_APP_REPOS or (repo.count("/") == 1 and repo.split("/")[0] == "PraiseZhu"))
 def gh_app_flag(): return f"{PI_STATE}/gh-app-enabled"
 def gh_app_rl_file(): return f"{PI_STATE}/gh-ratelimit-praise-qa.json"
@@ -186,11 +188,12 @@ def gh_component_on(name=None):
 def gh_component_node_env(name, repo=REPO):
     """node/shell jobs (ledgers -> build-ledger.mjs / track-followups.mjs, nightly -> argus): {PRAISE_QA_GH_TOKEN, PRAISE_QA_GH_REPOS}
     while that job's flag is on and the token mints, else {} (= the PAT). Those scripts use the token ONLY for calls whose target repo
-    is PRAISE_QA_GH_REPOS; every other repo (handoff repos, pr-qa-agent-deploy) keeps the inherited login."""
+    is PRAISE_QA_GH_REPOS; PraiseZhu/* uses PRAISE_QA_GH_OWN_TOKEN. Handoff repos are not in these env vars: the box gh wrapper
+    mints their installation tokens (ghtoken INSTALLATIONS) while the wrapper flag is on."""
     if not gh_component_on(name): return {}
     try:
         import ghtoken
-        # + PRAISE_QA_GH_OWN_TOKEN for every PraiseZhu/* repo (installation 164262283: handoff / deploy issue repos)
+        # + PRAISE_QA_GH_OWN_TOKEN for every PraiseZhu/* repo (installation 164262283: deploy issue repos)
         return {"PRAISE_QA_GH_TOKEN": ghtoken.token(repo), "PRAISE_QA_GH_REPOS": repo, "PRAISE_QA_GH_OWN_TOKEN": ghtoken.token("PraiseZhu/panoptes")}
     except Exception as e:
         try: import ghtoken as _g; msg = _g.mask(e)

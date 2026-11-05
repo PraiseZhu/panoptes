@@ -20,7 +20,8 @@ def _no_lookup(n, *a, **k): raise RuntimeError("no network in tests")
 lib.ub_lookup = _no_lookup
 
 PROD, PAN = "xindong/mivo-canvas-plugin", "PraiseZhu/panoptes"
-FAKE = {PROD: "ghs_" + "P" * 36, PAN: "ghs_" + "O" * 36}
+AJ, ZX = "aj0928/aj0928-handoff", "zhongxingtian-ai/handover-mivo"
+FAKE = {PROD: "ghs_" + "P" * 36, PAN: "ghs_" + "O" * 36, AJ: "ghs_" + "A" * 36, ZX: "ghs_" + "Z" * 36}
 def F(n): return f"{lib.PI_STATE}/{n}"
 FLAGS = ("gh-app-enabled", "gh-app-merger-enabled", "gh-app-wrapper-enabled", "gh-app-product-writes-enabled", "gh-ratelimit.json", "gh-ratelimit-praise-qa.json")
 
@@ -31,7 +32,7 @@ class Base(unittest.TestCase):
         def token(repo):
             self.minted.append(repo)
             if getattr(self, "mint_fail", False): raise RuntimeError("HTTP 401 Bad credentials " + FAKE[PAN])
-            return FAKE.get(repo, FAKE[PAN] if repo.startswith("PraiseZhu/") else FAKE[PROD])
+            return FAKE.get(repo) or (FAKE[PAN] if str(repo).startswith("PraiseZhu/") else FAKE[PROD])
         import ghtoken as real
         self.tok = mock.patch.dict(sys.modules, {"ghtoken": types.SimpleNamespace(token=token, invalidate=lambda r: None, mask=real.mask,
                                    installation=real.installation, NoInstallation=real.NoInstallation)}); self.tok.start()
@@ -320,8 +321,10 @@ class AcceptanceRound1(Base):
 
     def test_credential_helper_silent_for_repos_without_installation(self):
         self.on("gh-app-wrapper-enabled"); q = "protocol=https\nhost=github.com\npath={}\n\n"
-        for p in ("aj0928/aj0928-handoff.git", "zhongxingtian-ai/handover-mivo.git", "someone/else"):
-            self.minted.clear(); self.assertEqual(self.get(q.format(p)), "", p); self.assertEqual(self.minted, [], p)
+        # 11-05: the two handoff repos now have Praise QA installed; other uninstalled remotes stay silent
+        self.assertIn(FAKE[AJ], self.get(q.format("aj0928/aj0928-handoff.git")))
+        self.assertIn(FAKE[ZX], self.get(q.format("zhongxingtian-ai/handover-mivo.git")))
+        self.minted.clear(); self.assertEqual(self.get(q.format("someone/else")), ""); self.assertEqual(self.minted, [])
         self.assertIn(FAKE[PAN], self.get(q.format("PraiseZhu/panoptes.git")))
         self.on("gh-app-product-writes-enabled")
         self.assertIn(FAKE[PROD], self.get(q.format("xindong/mivo-canvas-plugin.git")))

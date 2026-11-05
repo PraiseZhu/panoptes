@@ -14,8 +14,14 @@ Env (tests / a moved key): PRAISE_QA_APP_ID, PRAISE_QA_KEY, PRAISE_QA_CACHE, PRA
 import base64, calendar, fcntl, json, os, re, subprocess, sys, tempfile, time, urllib.error, urllib.request
 
 APP_ID_DEFAULT = "5055491"
-INSTALLATIONS = {"PraiseZhu/panoptes": 164262283, "xindong/mivo-canvas-plugin": 178486896}
+INSTALLATIONS = {
+    "PraiseZhu/panoptes": 164262283,
+    "xindong/mivo-canvas-plugin": 178486896,
+    "aj0928/aj0928-handoff": 178902423,            # 11-05: installation 178902423 (aj0928 all repos; only this handoff repo is routed)
+    "zhongxingtian-ai/handover-mivo": 178909971,  # 11-05: installation 178909971 (selected repos)
+}
 OWNER_INSTALLATIONS = {"PraiseZhu": 164262283, "xindong": 178486896}   # every repo of the owner (11-04 PM: xindong/* -> 178486896)
+# zhongxingtian-ai is selected-only: no owner map. aj0928 is all-repos on GitHub but we only route aj0928-handoff (INSTALLATIONS).
 DEFAULT_REPO = "PraiseZhu/panoptes"
 MARGIN_S = 600          # re-mint when less than 10 min is left (tokens live 1 h)
 TOKEN_RE = re.compile(r"\b(gh[pousr]|github_pat)_[A-Za-z0-9_]+")

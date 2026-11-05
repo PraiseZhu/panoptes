@@ -145,6 +145,8 @@ class Flags(Base):
         import importlib; G = importlib.import_module("ghtoken")
         for r in (PAN, DEPLOY, "PraiseZhu/anything"): self.assertEqual(G.installation(r), 164262283, r)
         self.assertEqual(G.installation(PROD), 178486896)
+        self.assertEqual(G.installation("aj0928/aj0928-handoff"), 178902423)
+        self.assertEqual(G.installation("zhongxingtian-ai/handover-mivo"), 178909971)
         with self.assertRaises(G.NoInstallation): G.installation("someone/else")
         self.on("gh-app-writes-enabled"); self.tok.start()
         self.assertTrue(self.app(["issue", "create", "-R", DEPLOY, "--title", "t"]))
