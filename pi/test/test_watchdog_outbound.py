@@ -149,12 +149,26 @@ class TestPrBotAndVigil(unittest.TestCase):
         fresh = (self.now - watchdog.dt.timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
         old = (self.now - watchdog.dt.timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
         self.put(watchdog.PRWATCH_STATE, {"errors": {"fix": f"{fresh} boom", "drafts": f"{old} gone"}, "error_counts": {"fix": 3, "drafts": 5}, "fix_wait_since": watchdog.time.time() - 4 * 3600,
-                                          "fix_pending": 3})
+                                          "fix_pending": 3, "fix_checked_at": watchdog.time.time() - 60})
         p = {}; watchdog.prfix_check(self.now, p)
         self.assertEqual(sorted(p), ["prfix:human:4:mq1-dddddddd", "prfix:memwait", "prfix:nopr:2:mq1-bbbbbbbb", "prfix:stuck:1:mq1-aaaaaaaa",
                                      "prwatch:error:fix"])
         self.assertEqual((p["prfix:human:4:mq1-dddddddd"]["kind"], p["prfix:memwait"]["kind"]), ("fyi", "fyi"))   # no "已恢复" when it ages out
         self.assertIn("3 个问题", p["prfix:memwait"]["what"])
+    def test_fix_wait_names_the_real_cause(self):   # 11-05: the fix PR cap was reported as "waiting for memory"
+        self.put(watchdog.PRFIX_TICKETS, {"tickets": {}})
+        w = watchdog.time.time() - 4 * 3600
+        self.put(watchdog.PRWATCH_STATE, {"fix_wait_since": w, "fix_pending": 1, "fix_checked_at": w,
+                                          "fix_wait_reason": "5 open fix PRs >= 2: #1762 #1734 #1727 #1724 #1621"})
+        p = {}; watchdog.prfix_check(self.now, p)
+        self.assertEqual(sorted(p), ["prfix:fixprcap"])
+        self.assertIn("#1762 #1734 #1727 #1724 #1621", p["prfix:fixprcap"]["todo"])
+        self.assertNotIn("1 个问题", p["prfix:fixprcap"]["what"])   # fix_pending not refreshed for > 15 min: no stale number
+        self.put(watchdog.PRWATCH_STATE, {"fix_wait_since": w, "fix_pending": 2, "fix_checked_at": watchdog.time.time(),
+                                          "fix_wait_reason": "headroom 591 MB < 4979 MB", "fix_wait_mem": 6621})
+        p = {}; watchdog.prfix_check(self.now, p)
+        self.assertEqual(sorted(p), ["prfix:memwait"])
+        for x in ("2 个问题", "591 MB", "4979 MB", "MemAvailable 6621 MB", "预留 6030 MB"): self.assertIn(x, p["prfix:memwait"]["what"])
     def test_vigil_stall_only_ready_red_and_idle_for_4h_and_one_gh_call_per_30_min(self):
         calls = []
         def gh(args, js=True):
