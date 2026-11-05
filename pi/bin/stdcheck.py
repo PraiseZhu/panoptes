@@ -20,7 +20,9 @@ Checks (each one: a list of objects that breach, from files on disk plus two gh 
   review_pr    the Mac mini review-pr dispatcher is moving (Jasper ruling, 11-04): product repo via lib.gh (App identity, REST, at most
                REVIEW_MAX_PRS ready PRs). Ready open PRs waiting on review-pr (a review-pr / "review-pr (integration)" check run or status
                queued / pending / missing) while no review-pr check or status on any of them started or completed in the last 60 min
-               -> stalled; a review-pr check in_progress > 60 min -> stalled; nothing waiting -> ok. Gap owner Jasper. No file is read.
+               -> stalled; a review-pr check in_progress > 60 min -> stalled; nothing waiting -> ok. Gap owner Jasper. Does not read a vigil status file.
+               PRs listed under ACK_FILE "external_deps" (label e.g. 外部依赖（Mac mini）) have that label appended to breach text and are
+               logged; they still count as breaches (scoring exclusion is Jasper-only; see proposal-score-exclude).
 
 Breach -> gaps-open.json (fleet-standards list, $PI_GAPS_FILE overrides; jsonrec lock) entry id stdcheck:<check>:<object>, with owner
 and deadline, upserted (re-breach keeps opened/deadline, bumps last_seen); a check that ran clean closes its stdcheck entries that no
@@ -132,9 +134,9 @@ def _pr_num(v):
     return None
 
 def load_ack(path=None):
-    """-> {"acknowledged_breaches": [...], "superseded": [...]} or empty dicts when missing/invalid (today's behavior)."""
+    """-> {"acknowledged_breaches": [...], "superseded": [...], "external_deps": [...]} or empty lists when missing/invalid."""
     p = path or ACK_FILE
-    empty = {"acknowledged_breaches": [], "superseded": []}
+    empty = {"acknowledged_breaches": [], "superseded": [], "external_deps": []}
     try:
         d = json.load(open(p))
     except Exception:
@@ -142,7 +144,10 @@ def load_ack(path=None):
     if not isinstance(d, dict): return empty
     ack = d.get("acknowledged_breaches") if isinstance(d.get("acknowledged_breaches"), list) else []
     sup = d.get("superseded") if isinstance(d.get("superseded"), list) else []
-    return {"acknowledged_breaches": [x for x in ack if isinstance(x, dict)], "superseded": [x for x in sup if isinstance(x, dict)]}
+    ext = d.get("external_deps") if isinstance(d.get("external_deps"), list) else []
+    return {"acknowledged_breaches": [x for x in ack if isinstance(x, dict)],
+            "superseded": [x for x in sup if isinstance(x, dict)],
+            "external_deps": [x for x in ext if isinstance(x, dict)]}
 
 def ack_entries_by_pr(ack_list):
     """pr_number -> first matching entry"""
@@ -273,12 +278,31 @@ def review_state(sha):
             out.append(("status", st, None, None if st == "pending" else t))   # a pending status is a queue entry, not activity
     return out
 
+def external_dep_by_pr(ext_list, check=None):
+    """pr_number -> first matching external_deps entry (optionally filtered by check name)."""
+    out = {}
+    for e in ext_list:
+        n = _pr_num(e.get("pr"))
+        if n is None or n in out: continue
+        if check and e.get("check") and e.get("check") != check: continue
+        out[n] = e
+    return out
+
+def _annotate_external(why, n, ext_by):
+    e = ext_by.get(n)
+    if not e: return why
+    label = e.get("label") or "外部依赖"
+    return f"{why} [{label}]"
+
 def check_review_pr(now):
-    """Jasper (11-04): is the Mac mini review-pr dispatcher moving? REST only, at most REVIEW_MAX_PRS ready PRs (1 + 2 per PR calls)"""
+    """Jasper (11-04): is the Mac mini review-pr dispatcher moving? REST only, at most REVIEW_MAX_PRS ready PRs (1 + 2 per PR calls).
+    external_deps in ACK_FILE label matching PRs in breach text; they still count toward pass/fail (no score exclude yet)."""
     prs = gh(["api", f"repos/{REPO}/pulls?state=open&sort=updated&direction=desc&per_page=50"]) or []
     ready = [p for p in prs if not p.get("draft")][:REVIEW_MAX_PRS]
     bad, waiting, last = {}, [], None
     lim = dt.timedelta(minutes=REVIEW_STALL_MIN)
+    ext_by = external_dep_by_pr(load_ack()["external_deps"], check="review_pr")
+    labeled = []
     for p in ready:
         n, es = p["number"], review_state(p["head"]["sha"])
         if not es or any(st in WAITING for _, st, _, _ in es): waiting.append(n)
@@ -286,10 +310,25 @@ def check_review_pr(now):
             for t in (started, finished):
                 if t and (last is None or t > last): last = t
             if kind == "check" and st == "in_progress" and started and now - started > lim:
-                bad[f"running:PR-{n}"] = f"review-pr on #{n} in_progress since {cst(started)} ({int((now - started).total_seconds() // 60)} min > {REVIEW_STALL_MIN})"
+                why = f"review-pr on #{n} in_progress since {cst(started)} ({int((now - started).total_seconds() // 60)} min > {REVIEW_STALL_MIN})"
+                if n in ext_by: labeled.append({"pr": n, "object": f"running:PR-{n}", "label": ext_by[n].get("label")})
+                bad[f"running:PR-{n}"] = _annotate_external(why, n, ext_by)
     if waiting and (last is None or now - last > lim):
-        bad["queue"] = (f"{len(waiting)} ready PRs waiting on review-pr ({' '.join(f'#{n}' for n in waiting)}), last review-pr activity "
+        tags = [f"#{n}" + (f'[{ext_by[n].get("label")}]' if n in ext_by else "") for n in waiting]
+        for n in waiting:
+            if n in ext_by: labeled.append({"pr": n, "object": "queue", "label": ext_by[n].get("label")})
+        bad["queue"] = (f"{len(waiting)} ready PRs waiting on review-pr ({' '.join(tags)}), last review-pr activity "
                         f"{cst(last) if last else 'none seen'} (> {REVIEW_STALL_MIN} min)")
+    if labeled:
+        # dedupe by (pr, object)
+        seen, uniq = set(), []
+        for x in labeled:
+            k = (x["pr"], x["object"])
+            if k in seen: continue
+            seen.add(k); uniq.append(x)
+        log(f"stdcheck review_pr: external_deps {json.dumps(uniq, ensure_ascii=False)}")
+        if DRY: print("EXTERNAL_DEPS review_pr:", json.dumps(uniq, ensure_ascii=False))
+    check_review_pr.last_external = labeled
     return bad
 
 
