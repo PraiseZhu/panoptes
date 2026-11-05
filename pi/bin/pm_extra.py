@@ -128,7 +128,9 @@ def retest(day, prs, miss):
     for n, refs in fixes:
         try: p = json.load(open(f"{RPT}/PR-{n}.json"))["prs"][0]
         except Exception: p = {}
-        has = any(k in p for k in ("retest", "original_case_retest", "targeted_regression")) or p.get("run_mode") in ("fix-retest", "targeted")
+        # 11-05: opsfix now also writes blocked/gave_up entries into retest[]; only a pass/fail entry is a real retest
+        has = any(e.get("result") in ("pass", "fail") for e in p.get("retest") or []) or any(k in p for k in ("original_case_retest", "targeted_regression")) \
+            or p.get("run_mode") in ("fix-retest", "targeted")
         rt_ok += has
         rows = byfix.get(n, [])
         if rows and all(r.get("retest") not in (None, "pending") for r in rows): wb += 1

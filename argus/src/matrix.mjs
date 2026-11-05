@@ -126,7 +126,10 @@ export const stepRunsChangedFile = (step, paths) => (paths ?? []).find((p) => ma
 
 // 选步骤：基线（非 optional）步骤 B/C 级都跑；可选步骤在改动含它执行的测试文件、C 级且高风险文件落在它测的路径（exercises）里、
 // 分诊没做、或覆盖的维度里有「涉及 / 拿不准」时才跑
-export function toStepPlan({ profile, riskClass, triage, files = [] }) {
+// forceStepIds：修复 PR（正文/标题 QA: #N）的原报告里失败过的步骤（11-05 #1742：分诊跳过了 #1490 失败的 e2e-browser，
+// 修复 PR 的运行因此没有原用例证据）。这些步骤不受分诊 / 只改注释影响，必须跑
+export function toStepPlan({ profile, riskClass, triage, files = [], forceStepIds = [] }) {
+  const forced = new Set(forceStepIds)
   const verdictOf = Object.fromEntries((triage?.rows ?? []).map((r) => [r.key, r.verdict]))
   const paths = files.map((f) => f.filename)
   const cHits = highRiskFiles(files, profile)
@@ -136,6 +139,7 @@ export function toStepPlan({ profile, riskClass, triage, files = [] }) {
   for (const s of profile.steps) {
     if (s.kind === 'setup' || !s.optional) { run.push(s.id); continue }
     if (stepRunsChangedFile(s, paths)) { run.push(s.id); continue }
+    if (forced.has(s.id)) { run.push(s.id); continue }
     if (commentOnly && (s.covers ?? []).includes('performance')) { skipped.push({ id: s.id, nameZh: s.nameZh, reasonZh: '只改了注释，不跑性能基准' }); continue }
     if (riskClass === 'C' && stepExercises(s, cHits)) { run.push(s.id); continue }
     if (!triage || triage.status !== 'ok') { run.push(s.id); continue }

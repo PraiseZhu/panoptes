@@ -541,6 +541,20 @@ def pmnudge_gh_check(now, probs):
         "这些轮次没有催任何 PR；已记入 gaps-open.json。", todo=PN.ask_session(f"pmnudge 的 gh pr list 一直失败（{a.get('error', '')[:120]}），查 GitHub 额度/凭证"))
 
 
+def retest_no_target_check(now, probs, path=None):
+    """11-05 (#1742): opsfix retest found a fix PR (QA: #N) whose source report has nothing to retest (no P0-P2 finding,
+    no named pending_verification). Before, it was silently dropped; now opsfix_retest writes out/ops/retest-no-target-alert.json
+    (entries kept 72 h after last seen) and this raises one retest:no-target item while it exists."""
+    try: a = json.load(open(path or f"{BASE}/out/ops/retest-no-target-alert.json"))
+    except Exception: return
+    rows = list((a.get("items") or {}).values())
+    if not rows: return
+    desc = "；".join(f"#{x.get('fix_pr')} ← #{x.get('original_pr')}：{str(x.get('why'))[:120]}" for x in rows[-6:])
+    probs["retest:no-target"] = PN.item("action", "修复 PR 复测找不到可复测目标", desc,
+        "这些修复 PR 没有原用例复测证据，台账会一直停在「修复已合并，待复测」。",
+        todo=PN.ask_session(f"opsfix retest 找不到复测目标：{desc[:200]}，看原报告 pending_verification / failed_checks，决定手动复测还是在修复 PR 正文补指纹"))
+
+
 SLOT_WAIT_DIR = f"{QA}/argus-root/slot-wait-alerts"
 SLOT_WAIT_KEEP_S, SLOT_WAIT_SWEEP_S = 3600, 86400
 def slot_wait_check(now, probs, d=None):
@@ -694,7 +708,7 @@ def main():
                lambda: backup_check(now, probs), lambda: backup_rules_check(now, probs), lambda: panoptes_check(now, probs, st),
                lambda: infra_check(now, probs), lambda: prfix_check(now, probs, st), lambda: vigil_check(now, probs, st),
                lambda: outbound_health_check(now, probs), lambda: janitor_check(now, probs), lambda: gh_ratelimit_check(now, probs),
-               lambda: pmnudge_gh_check(now, probs), lambda: slot_wait_check(now, probs)):
+               lambda: pmnudge_gh_check(now, probs), lambda: slot_wait_check(now, probs), lambda: retest_no_target_check(now, probs)):
         try: fn()
         except Exception as e: probs[f"watchdog:{getattr(fn, '__name__', 'check')}"] = PN.item("action", "「看门狗」自己出错了",
             "专门盯各个自动化有没有停摆的看门狗，自己的一项检查出错了。", "那一项坏了也不会有人告诉你。",
