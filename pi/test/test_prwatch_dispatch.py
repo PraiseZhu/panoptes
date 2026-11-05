@@ -91,6 +91,16 @@ class TestDispatch(T):
         self.assertEqual(self.launches, []); self.assertEqual(sum("fix dispatch waits" in m for m in self.logs), 1)
         prwatch.mem_mb = lambda: 11000; prwatch.dispatch_fix(st)
         self.assertEqual(len(self.launches), 1)
+    def test_negative_and_positive_headroom_are_one_wait_and_reason_is_kept(self):   # 11-05: -N and N logged as two kinds
+        self.tickets(); st = {"fix_pending": 1}
+        need = prwatch.ADMIT_FREE_MB + prwatch.RUN_PEAK_MB
+        self.procs({}, need - 5); prwatch.dispatch_fix(st)
+        self.procs({}, need + 5 - 2 * need); prwatch.dispatch_fix(st)   # headroom goes negative
+        self.assertEqual(sum("fix dispatch waits" in m for m in self.logs), 1, self.logs)
+        self.assertTrue(st["fix_wait_reason"].startswith("headroom -"), st); self.assertEqual(st["fix_wait_mem"], need + 5 - 2 * need)
+        self.assertIn("fix_wait_since", st); self.assertEqual(self.launches, [])
+        prwatch.mem_mb = lambda: 11000; prwatch.dispatch_fix(st)
+        self.assertEqual(len(self.launches), 1); self.assertNotIn("fix_wait_reason", st); self.assertNotIn("fix_wait_mem", st)
     def test_wait_clear_is_logged(self):   # 11-04 headroom-1104 (c): the log shows when the gate opened, not only when it closed
         self.procs({}, prwatch.ADMIT_FREE_MB + prwatch.RUN_PEAK_MB - 1); self.tickets()
         st = {}; prwatch.dispatch_fix(st)
