@@ -111,6 +111,45 @@ class AllowlistLog(unittest.TestCase):
         self.assertEqual((l["caller"], l["argv"]), ("lifeline-tick", argv))
 
 
+class DefaultLoginLog(unittest.TestCase):
+    """11-05 R2 (e): the remaining default-login (PraiseZhu) real-gh paths leave a gh-pat.jsonl line: reason, caller, no token"""
+    def setUp(self):
+        rm(lib.pat_log_file())
+        import importlib.util   # a fresh lib: other test modules patch lib.ub_lookup / gql_node_repos module-wide
+        spec = importlib.util.spec_from_file_location("lib_fresh_dl", os.path.join(BIN, "lib.py")); self.L = importlib.util.module_from_spec(spec); spec.loader.exec_module(self.L)
+    def last(self, L=lib): return lines(L.pat_log_file())[-1]
+    def test_gql_node_repos(self):
+        r = mock.Mock(stdout='{"data":{"nodes":[{"nameWithOwner":"a/b"}]}}')
+        with mock.patch.object(self.L.subprocess, "run", return_value=r), mock.patch.object(self.L, "real_gh", return_value="/usr/bin/gh"):
+            self.assertEqual(self.L.gql_node_repos(["R_1"]), ["a/b"])
+        l = self.last(self.L); self.assertIn("gql_node_repos", l["reason"]); self.assertEqual(l["source"], "lib.gql_node_repos"); self.assertIn("R_1", l["argv"])
+    def test_ub_lookup(self):
+        run = mock.Mock(return_value=mock.Mock(returncode=0, stdout="{}"))
+        with mock.patch.object(self.L, "real_gh", return_value="/usr/bin/gh"): self.L.ub_lookup(7, run=run)
+        l = self.last(self.L); self.assertIn("ub_lookup", l["reason"]); self.assertEqual(l["argv"][:3], ["pr", "view", "7"])
+    def wrapper(self, argv, stdin=None, on=False, install=False):
+        import gh_wrapper as W
+        ex = mock.Mock(return_value=0)
+        fake = types.SimpleNamespace(installation=lambda r: 1 if install else (_ for _ in ()).throw(fake.NoInstallation()),
+                                     NoInstallation=type("NI", (Exception,), {}), token=lambda r: FAKE, mask=str)
+        with mock.patch.dict(sys.modules, {"ghtoken": fake}), mock.patch.object(W, "wrapper_on", return_value=on), \
+             mock.patch.object(W, "refeed_stdin"), mock.patch.object(W, "real_gh", return_value="/usr/bin/gh"), \
+             mock.patch.object(W, "script_of", return_value="/x/caller.py"), redirect_stdout(io.StringIO()) as out:
+            W.main(argv, env={"PATH": "/usr/bin"}, execve=ex, run=mock.Mock(return_value=mock.Mock(returncode=1, stdout="")), caller=[], stdin=stdin)
+        return ex, out.getvalue()
+    def test_wrapper_credential_no_install(self):
+        ex, out = self.wrapper(["auth", "git-credential", "get"], stdin="protocol=https\nhost=github.com\npath=aj0928/aj0928-handoff.git\n", on=True)
+        self.assertTrue(ex.called); l = self.last()
+        self.assertEqual((l["reason"], l["source"], l["caller"]), ("credential: no App installation", "gh_wrapper", "/x/caller.py"))
+        self.assertEqual(l["argv"], ["git", "credential", "get", "aj0928/aj0928-handoff"]); self.assertNotIn(FAKE, json.dumps(l))
+    def test_wrapper_credential_app_not_logged(self):
+        ex, out = self.wrapper(["auth", "git-credential", "get"], stdin="protocol=https\nhost=github.com\npath=PraiseZhu/panoptes.git\n", on=True, install=True)
+        self.assertFalse(ex.called); self.assertIn("password=", out); self.assertEqual(lines(lib.pat_log_file()), [])
+    def test_wrapper_switch_off(self):
+        ex, _ = self.wrapper(["pr", "list", "-R", "PraiseZhu/panoptes"])
+        self.assertTrue(ex.called); l = self.last(); self.assertEqual((l["reason"], l["caller"]), ("switch off", "/x/caller.py"))
+
+
 class DirectRealGh(unittest.TestCase):
     def test_credcheck_and_opsenv_log_source(self):
         src = {n: open(os.path.join(BIN, f"{n}.py")).read() for n in ("credcheck", "opsenv")}

@@ -92,6 +92,21 @@ class Checks(Base):
         open(f"{self.tmp}/out/logs/mergewatch-2026-11-04.log", "w").write(f"{t} branch merge #1903 into main\n")
         self.assertIn("PR-1903", S.check_qa_start(NOW))
 
+    def test_panoptes_author_breach(self):
+        z = lambda m: (NOW - dt.timedelta(minutes=m)).astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.prs["PraiseZhu/panoptes"] = [{"number": 250, "author": {"login": "app/praise-qa", "is_bot": True}, "createdAt": z(5)},
+                                          {"number": 251, "author": {"login": "PraiseZhu"}, "createdAt": z(10)},
+                                          {"number": 245, "author": {"login": "PraiseZhu"}, "createdAt": z(180)}]   # before AUTHOR_SINCE
+        bad = S.check_panoptes_author(NOW)
+        self.assertEqual(list(bad), ["pr-251"]); self.assertIn("PraiseZhu", bad["pr-251"])
+        a = self.gh_calls[-1]; self.assertIn("all", a); self.assertIn("--search", a); self.assertIn("author", a[-1])
+        self.prs["PraiseZhu/panoptes"] = self.prs["PraiseZhu/panoptes"][:1]; self.assertEqual(S.check_panoptes_author(NOW), {})
+
+    def test_panoptes_author_in_run(self):
+        self.prs["PraiseZhu/panoptes"] = [{"number": 251, "author": {"login": "PraiseZhu"}, "createdAt": "2026-11-05T04:20:00Z"}]
+        r = S.run(NOW); self.assertEqual(list(r["panoptes_author"]), ["pr-251"])
+        self.assertIn("stdcheck:panoptes_author:pr-251", self.open_ids())
+
     def test_panoptes_prs_breach(self):
         self.prs["PraiseZhu/panoptes"] = [{"number": n} for n in range(4)]
         self.assertEqual(list(S.check_panoptes_prs(NOW)), ["open-prs"])
@@ -294,7 +309,7 @@ class Alerts(Base):
         os.environ["_STD_GH_FAIL"] = "1"
         try: S.run(NOW); self.at(NOW + dt.timedelta(hours=1))
         finally: del os.environ["_STD_GH_FAIL"]
-        pan = [c for c in self.gh_calls if "PraiseZhu/panoptes" in c]
+        pan = [c for c in self.gh_calls if "PraiseZhu/panoptes" in c and "open" in c]   # panoptes_prs (panoptes_author lists --state all)
         self.assertEqual(len(pan), 2 * S.ATTEMPTS)                              # retried ATTEMPTS times per run
         a = json.load(open(f"{S.OUT}/alerts/panoptes_prs.json")); self.assertIn("HTTP 502", a["error"])
 
@@ -322,7 +337,7 @@ class Gate(Base):
         S.run(NOW); self.prs["PraiseZhu/panoptes"] = []; self.at(NOW + dt.timedelta(hours=1))
         p = json.load(open(f"{S.OUT}/passrate-2026-11-05.json"))
         self.assertEqual(p["runs"], 2); self.assertEqual(p["checks"]["panoptes_prs"], {"pass": 1, "fail": 1, "error": 0, "rate": 0.5})
-        self.assertEqual(p["checks"]["review_pr"]["rate"], 1.0); self.assertEqual(p["overall"], 0.9)
+        self.assertEqual(p["checks"]["review_pr"]["rate"], 1.0); self.assertEqual(p["overall"], 0.917)   # 6 checks x 2 runs, 1 fail
 
 
 if __name__ == "__main__":
