@@ -68,11 +68,12 @@ esac
 command -v "$GH" >/dev/null 2>&1 || die "$EX_GH" "gh not found (GH_BIN=${GH}); install/login gh on this machine"
 
 # 11-04: the queue read runs as the Praise QA App (praise-qa[bot]) while ~/.config/praise-qa/gh-app-enabled exists (praise-qa-gh.sh,
-# installed next to this script). Flag removed, helper missing or a mint failure -> the mini's own gh login, exactly as before.
+# installed next to this script). Flag removed or helper missing -> the mini's own gh login, exactly as before. 11-05 R2: a mint
+# failure while the flag is on is an error (exit EX_GH, cindy blocks and notifies; alert written by praise-qa-gh.sh), never the gh login.
 _PQA="${PRAISE_QA_GH:-$(cd "$(dirname "$0")" && pwd)/praise-qa-gh.sh}"
 if [ -f "$_PQA" ]; then
   # shellcheck source=/dev/null
-  . "$_PQA" --lib && pqa_env_for "$QUEUE_REPO"
+  . "$_PQA" --lib && { pqa_env_for "$QUEUE_REPO" || die "$EX_GH" "praise-qa App token unavailable for $QUEUE_REPO: not reading the queue with the gh login"; }
 fi
 
 sha256_file() {
