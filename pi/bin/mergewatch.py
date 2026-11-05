@@ -224,9 +224,9 @@ def priority_cmd(number, day):
             '--no-issues', '--trigger', 'event', '--out', os.path.join(REPORTS, 'catch-up', f'PR-{number}.json')]
 
 
-def launch(cmd, sha, env=None):
+def launch(cmd, sha, env=None, base='main'):
     with open(LAUNCH_LOG, 'a') as lf:
-        lf.write(f'=== {now()} mergewatch launch for main {sha[:8]}: {" ".join(cmd[1:])}\n')
+        lf.write(f'=== {now()} mergewatch launch for {base} {sha[:8]}: {" ".join(cmd[1:])}\n')
         lf.flush()
         return subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=lf, stderr=subprocess.STDOUT,
                                 start_new_session=True, cwd='/workspace/panoptes',
@@ -280,17 +280,20 @@ def main():
     inflight = st.setdefault('inflight', {})
     busy = running_prs()
 
-    def go(n, day, base='main'):
+    def go(n, day, base='main', msha=None):
         cmd = priority_cmd(n, day)
         if DRY:
             return log('DRY: would launch ' + ' '.join(cmd))
-        e = inflight.setdefault(str(n), {'day': day, 'tries': 0, 'base': base})
+        e = inflight.setdefault(str(n), {'day': day, 'tries': 0, 'base': base, 'sha': msha})
+        # 11-05 (#1740): label with the real base + the merge sha the run tests; main's head only for main merges / no merge sha
+        base = e.get('base') or 'main'
+        tsha = (e.get('sha') if base != 'main' else None) or sha or st.get('main_sha') or ''
         # 11-05: a requeue (try >= 2) waits behind fresh merges for a QA slot (scripts/qa-slot.sh slot_is_head)
-        p = launch(cmd, sha or st.get('main_sha') or '', {'PANOPTES_SLOT_KIND': 'rerun' if e['tries'] else 'merge'})
+        p = launch(cmd, tsha, {'PANOPTES_SLOT_KIND': 'rerun' if e['tries'] else 'merge'}, base)
         e['tries'] += 1
         e['next_at'] = time.time() + BACKOFF_S[min(e['tries'], len(BACKOFF_S)) - 1]
         busy.add(n)
-        log(f"launched priority run pid {p.pid} for PR #{n} (main {(sha or st.get('main_sha') or '')[:8]}, try {e['tries']}/{MAX_TRIES})")
+        log(f"launched priority run pid {p.pid} for PR #{n} ({base} {tsha[:8]}, try {e['tries']}/{MAX_TRIES})")
 
     # 失败 / 超时 / 内存门跳过（exit 76）的插队运行：不等 2 小时一次的 catch-up，退避到点就重排；放在 ls-remote 前，GitHub 连不上也照样重排
     for n, day in requeue(inflight, busy):
@@ -343,12 +346,13 @@ def main():
             # 11-04：拉取成功才记 last_poll_ts。原来先记再拉，URLError 后要再等满 10 分钟，合进 feat/* 的 PR 最坏 20 分钟才被发现
             st['last_poll_ts'] = time.time()
             bases = {p.get('number'): (p.get('base') or {}).get('ref', 'main') for p in pulls or []}
+            mshas = {p.get('number'): p.get('merge_commit_sha') for p in pulls or []}
             for n, day in fresh_merges(pulls, since):
                 if n not in busy and str(n) not in inflight:
                     if bases.get(n) != 'main':
                         log(f"branch merge #{n} into {bases.get(n)}")
                         st['dirty'] = True   # catch-up fallback below covers it too if the priority run fails
-                    go(n, day, bases.get(n) or 'main')
+                    go(n, day, bases.get(n) or 'main', mshas.get(n))
             ms = [p['merged_at'] for p in pulls if p.get('merged_at')]
             if ms:
                 st['merged_seen'] = max([since] + [m.replace('Z', '+00:00') for m in ms])
