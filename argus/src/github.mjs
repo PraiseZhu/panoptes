@@ -22,8 +22,8 @@ export const PRAISE_QA_APP_SLUG = 'praise-qa'   // = pi/bin/lib.py APP_SLUG (the
 const GHTOKEN = process.env.PANOPTES_GHTOKEN ?? fileURLToPath(new URL('../../pi/bin/ghtoken.py', import.meta.url))
 const REFRESH_MS = Number(process.env.PRAISE_QA_REFRESH_MS ?? 5 * 60_000)
 let lastRefresh = Date.now()
-export function refreshPraiseQaTokens(now = Date.now()) {
-  if (!process.env.PRAISE_QA_GH_TOKEN || now - lastRefresh < REFRESH_MS) return
+export function refreshPraiseQaTokens(now = Date.now(), { force = false } = {}) {
+  if (!process.env.PRAISE_QA_GH_TOKEN || (!force && now - lastRefresh < REFRESH_MS)) return
   lastRefresh = now
   const mint = (repo) => {
     try { const t = execFileSync('python3', [GHTOKEN, 'token', repo], { encoding: 'utf8', timeout: 60_000, stdio: ['ignore', 'pipe', 'ignore'] }); return t.startsWith('ghs_') ? t : null } catch { return null }
@@ -241,7 +241,26 @@ export async function listMergedByAuthor(repo, authorId, sinceIso, { maxPages = 
 
 export const getPull = (repo, n) => apiGet(`repos/${repo}/pulls/${n}`)
 export const getCommit = (repo, sha) => apiGet(`repos/${repo}/commits/${sha}`)
-export const getBranchHead = async (repo, branch) => (await apiGet(`repos/${repo}/branches/${encodeURIComponent(branch)}`))?.commit?.sha ?? null
+// 11-05 PR-1740: getBranchHead 的 401（安装令牌过期）不能拖垮整轮。#238 已有 refreshPraiseQaTokens；
+// 这里在 401 时强制重铸一次再读；仍失败则抛出可识别错误（含 branch + status），调用方降级为「主干没复查」。
+export async function getBranchHead(repo, branch) {
+  const path = `repos/${repo}/branches/${encodeURIComponent(branch)}`
+  try {
+    return (await apiGet(path))?.commit?.sha ?? null
+  } catch (err) {
+    if (err?.httpStatus !== 401) throw err
+    refreshPraiseQaTokens(Date.now(), { force: true })
+    try {
+      return (await apiGet(path))?.commit?.sha ?? null
+    } catch (err2) {
+      const status = err2?.httpStatus ?? 'unknown'
+      throw Object.assign(
+        new Error(`getBranchHead: branch ${branch} failed HTTP ${status}`),
+        { httpStatus: err2?.httpStatus ?? null, repo, branch, branchHeadAuthFailed: true },
+      )
+    }
+  }
+}
 
 export async function listPullFiles(repo, n, { maxPages = 30 } = {}) {
   const files = []
