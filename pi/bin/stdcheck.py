@@ -104,19 +104,29 @@ def report_first_run_failed(run):
     f, s = parse_ts(run.get("first_started_at")), parse_ts(run.get("started_at"))
     return bool(f and s and s - f > dt.timedelta(seconds=60))
 
+def gh_merged(now):
+    """{PR: (mergedAt, base)} of product-repo PRs merged in the last LOOKBACK_H (gh pr list --state merged, bounded window).
+    Covers merges mergewatch never logged and gives the real mergedAt when there is no report. gh down -> {} (mergewatch only)."""
+    since = (now - dt.timedelta(hours=LOOKBACK_H)).astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try: prs = gh(["pr", "list", "-R", REPO, "--state", "merged", "--search", f"merged:>={since}", "--limit", "200", "--json", "number,mergedAt,baseRefName"])
+    except Exception as e: log(f"stdcheck qa_start: gh merged list failed, mergewatch only: {str(e)[:200]}"); prs = []
+    return {p["number"]: (parse_ts(p.get("mergedAt")), p.get("baseRefName")) for p in prs if p.get("number")}
+
 def qa_start_rows(now):
     """[(n, merged_or_seen, first QA start or None, first_run_failed)] for the merges qa_start counts. Start = the earliest of the
     report's first start and mergewatch's first launch (a first run that died before writing a report leaves only the launch)."""
     rows, ev = [], mergewatch_events(now)
-    nums = set(ev)
+    gm = gh_merged(now)
+    nums = set(ev) | set(gm)
     for f in glob.glob(f"{REPORTS}/PR-*.json"):
         m = re.search(r"PR-(\d+)\.json$", f)
         if m and now.timestamp() - os.path.getmtime(f) < (LOOKBACK_H + 2) * 3600: nums.add(int(m[1]))
     for n in sorted(nums):
         rt, e = report_times(n), ev.get(n, {})
-        base = (rt[2] if rt else None) or e.get("base")
+        g = gm.get(n, (None, None))
+        base = (rt[2] if rt else None) or e.get("base") or g[1]
         if base and not BASE_RX.match(base): continue   # 11-04 acceptance #2: only main / integration/* / release/*
-        merged = rt[0] if rt and rt[0] else None
+        merged = (rt[0] if rt and rt[0] else None) or g[0]   # no report: gh mergedAt, not mergewatch's (40-60 s late) discovery
         if merged and now - merged > dt.timedelta(hours=LOOKBACK_H): continue
         start = min([t for t in ((rt[1] if rt else None), e.get("launched")) if t], default=None)
         ref = merged or e.get("seen")
