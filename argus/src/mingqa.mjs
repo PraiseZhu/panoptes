@@ -378,10 +378,12 @@ export async function codeReview({ secrets, pr, files, results, failedChecks = [
   const primary = deps.model ?? LLM_MODEL
   let res = await callChat({ secrets, effort: REVIEW_EFFORT, model: primary, messages, select: pickReviewJson })
   let fallback = null
-  // 主审查模型回空 / 非 JSON → 换 REVIEW_FALLBACK_MODEL 再试一次（只一次）；备用也不行就按原来的 bad_json 失败返回
-  if (!res.ok && res.error?.kind === 'bad_json' && primary !== REVIEW_FALLBACK_MODEL) {
-    fallback = { from: primary, to: REVIEW_FALLBACK_MODEL, reason: res.error.message ?? 'bad_json' }
-    log(`[panoptes] PR #${pr.number} code review: ${primary} returned bad_json (${fallback.reason}); retrying once with ${REVIEW_FALLBACK_MODEL}`)
+  // 主审查模型回空 / 非 JSON → 换 REVIEW_FALLBACK_MODEL 再试一次（只一次）；备用也不行就把原始错误按原样返回。
+  // chat 自 10-30 起把「模型回空」单独标成 kind=empty（mingqa-review-empty-content.test.mjs 钉住的），回空必须和 bad_json 走同一条兜底
+  const retryable = res.error?.kind === 'bad_json' || res.error?.kind === 'empty'
+  if (!res.ok && retryable && primary !== REVIEW_FALLBACK_MODEL) {
+    fallback = { from: primary, to: REVIEW_FALLBACK_MODEL, reason: res.error.message ?? res.error.kind }
+    log(`[panoptes] PR #${pr.number} code review: ${primary} returned ${res.error.kind} (${fallback.reason}); retrying once with ${REVIEW_FALLBACK_MODEL}`)
     const fb = await callChat({ secrets, effort: REVIEW_EFFORT, model: REVIEW_FALLBACK_MODEL, messages, select: pickReviewJson })
     fallback.ok = Boolean(fb.ok)
     if (fb.ok) res = fb
