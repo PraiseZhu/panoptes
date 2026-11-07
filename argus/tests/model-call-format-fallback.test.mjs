@@ -68,6 +68,35 @@ test('bad_json/empty review triggers exactly one retry with gpt-6-sol and record
   assert.match(logs.join('\n'), /retrying once with openai\/gpt-6-sol/)
 })
 
+// 10-30 (#95) 起 chat 把「模型回空」单独标成 kind=empty、并带上 finish_reason（mingqa-review-empty-content.test.mjs 钉住的），
+// 但 codeReview 的兜底条件还停在 kind === 'bad_json'：回空不再换 REVIEW_FALLBACK_MODEL 重试一次，审查整条不跑。
+// 生产上的回空都是 finish_reason=length（推理把 max_completion_tokens=16000 吃完），所以代码审查直接记成
+// llm_errors「model returned empty content (0 chars, finish_reason=length)」（qa 报告 11-05 00:50 / 11-07 23:37 两轮，PR #1780 #1542）。
+// mingqa.mjs:19 的约定是「审查模型回空 / 非 JSON 时只换这个模型再试一次」，回空必须走同一条兜底。
+const emptyLen = { ok: false, error: { kind: 'empty', finish_reason: 'length', message: 'model returned empty content (0 chars, finish_reason=length)' } }
+
+test('empty review (finish_reason=length) still retries once with gpt-6-sol instead of dead-ending', async () => {
+  const { out, calls, logs } = await run([emptyLen, { ...good, model: REVIEW_FALLBACK_MODEL }])
+  assert.deepEqual(calls, [LLM_MODEL, REVIEW_FALLBACK_MODEL], '回空要像 bad_json 一样换备用模型重试一次，今天只调了主模型就放弃')
+  assert.equal(out.status, 'ok')
+  assert.equal(out.model, REVIEW_FALLBACK_MODEL)
+  assert.deepEqual({ from: out.fallback?.from, to: out.fallback?.to, ok: out.fallback?.ok }, { from: LLM_MODEL, to: REVIEW_FALLBACK_MODEL, ok: true })
+  assert.match(logs.join('\n'), new RegExp(REVIEW_FALLBACK_MODEL), '日志要记下改用备用模型')
+})
+
+test('both models empty -> report keeps the empty + finish_reason diagnosis and records the failed fallback', async () => {
+  const solEmpty = { ok: false, error: { kind: 'empty', finish_reason: 'length', message: 'model returned empty content (0 chars, finish_reason=length) (sol)' } }
+  const { out, calls } = await run([emptyLen, solEmpty])
+  assert.deepEqual(calls, [LLM_MODEL, REVIEW_FALLBACK_MODEL], '备用模型也要试过才算「两条路都回空」')
+  assert.equal(out.status, 'error')
+  // 责任方仍能查出来：原始错误（主模型回空）的 kind / finish_reason 不能因为走了兜底就丢
+  assert.equal(out.error.kind, 'empty')
+  assert.equal(out.error.finish_reason, 'length')
+  assert.equal(out.error.message, emptyLen.error.message)
+  assert.equal(out.fallback.ok, false)
+  assert.equal(out.fallback.error.kind, 'empty')
+})
+
 test('good json review does not retry', async () => {
   const { out, calls } = await run([good])
   assert.deepEqual(calls, [LLM_MODEL])
