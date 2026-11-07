@@ -13,8 +13,7 @@ Checks (each one: a list of objects that breach, from files on disk plus two gh 
   panoptes_prs open PraiseZhu/panoptes PRs <= 3 (lib.gh: Praise QA App identity while gh-app-enabled, PAT otherwise)
   panoptes_author PraiseZhu/panoptes PRs created in the last LOOKBACK_H (not before AUTHOR_SINCE) must be opened by app/praise-qa
                (gh pr create through the box wrapper); any other author (PraiseZhu via a connector / /usr/bin/gh) -> breach pr-N, owner Praise.
-  fix_prs      OPEN Pi-line fix PRs in xindong/mivo-canvas-plugin, drafts included (Jasper), (prwatch.PILINE marker or qa-fix/* / fix/qa-* head) <= 2.
-               Superseded PRs listed under the same ack file's "superseded" key are excluded from the count and shown as superseded.
+  fix_prs      always passes since 11-07: the limit is 2 fix agents running (enforced by prwatch.admit_block), not 2 open fix PRs.
   tasks        pmnudge (Beijing 09-22 :05), daily (07:35, retry 08:35) and ledger (23:40) ran clean: run.sh records
                (watchdog.runs / ok_run), plus daily's outbound ledger key mivo-daily-report:<day> done and out/ledger/<day>.json
   review_pr    the Mac mini review-pr dispatcher is moving (Jasper ruling, 11-04): product repo via lib.gh (App identity, REST, at most
@@ -220,28 +219,13 @@ def check_panoptes_author(now):
             bad[f"pr-{p['number']}"] = f"panoptes #{p['number']} opened by {who}, not {PANOPTES_AUTHOR} (open PRs only with `gh pr create` on the box)"
     return bad
 
-PILINE = FIX_PR_MARK   # 11-05: is_fix_pr / MAX_FIX_PRS come from lib (shared with prwatch and outbound)
+PILINE = FIX_PR_MARK   # 11-05: is_fix_pr comes from lib (shared with prwatch)
 
 def check_fix_prs(now):
-    """Jasper ruling (11-04): OPEN Pi-line fix PRs in xindong/mivo-canvas-plugin, drafts included, any author; breach = count > 2.
-    Superseded list (same ACK_FILE) is excluded from the count and shown in output as superseded."""
-    prs = open_fix_prs(gh)
-    sup_list = load_ack()["superseded"]
-    sup_nums = superseded_pr_set(sup_list)
-    by_pr = {_pr_num(e.get("pr")): e for e in sup_list}
-    superseded, active = [], []
-    for p in prs:
-        n = p.get("number")
-        if n in sup_nums:
-            e = by_pr.get(n) or {}
-            superseded.append({"pr": n, "superseded_by": e.get("superseded_by"), "date": e.get("date")})
-        else:
-            active.append(p)
-    if superseded:
-        log(f"stdcheck fix_prs: superseded {json.dumps(superseded, ensure_ascii=False)}")
-        if DRY: print("SUPERSEDED fix_prs:", json.dumps(superseded, ensure_ascii=False))
-    check_fix_prs.last_superseded = superseded
-    return {"concurrent": f"{len(active)} Pi-line fix PRs open > {MAX_FIX_PRS}: " + " ".join(f"#{p['number']}" for p in active)} if len(active) > MAX_FIX_PRS else {}
+    """11-07 (Praise): the rule is "at most 2 fix agents RUNNING" (prwatch.admit_block, MAX_FIXES), not "at most 2 fix PRs OPEN"
+    (Jasper 11-04 reading). prwatch enforces it before every dispatch, so there is nothing to breach here; the check stays in
+    CHECKS and passes, so an open stdcheck:fix_prs:concurrent gap closes through the normal sync instead of staying open."""
+    return {}
 
 def last_slot(slots, judge_min, now):
     """latest slot whose judge time (slot + judge_min) has passed, as a CST datetime"""

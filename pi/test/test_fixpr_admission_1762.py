@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""11-05 (#1762 REPORT items 1-6): open-fix-PR cap in h_fixpr validate/do and prwatch.admit_block (fail closed), the reserve flag's
-polarity, one shared is_fix_pr, no pr-ci-freshness rerun loop when the head has no CI run, and xindong/* writes on the same identity
-in gh_wrapper as in lib.gh_env (the App only with gh-app-product-writes-enabled). Mocks only, no network."""
+"""11-05 (#1762 REPORT items 3-6): the reserve flag's polarity, one shared is_fix_pr, no pr-ci-freshness rerun loop when the head has no CI run, and xindong/* writes on the same identity
+in gh_wrapper as in lib.gh_env (the App only with gh-app-product-writes-enabled). 11-07 (Praise): NO cap on open fix PRs -- the
+limit is 2 fix agents running (prwatch MAX_FIXES); the 11-05 open-PR cap (items 1/2) stalled the bot for 2 days. Mocks only, no network."""
 import json, os, sys, tempfile, types, unittest
 from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bin")); sys.path.insert(0, HERE)
@@ -11,48 +11,34 @@ if not os.path.exists("/workspace/mivo-merger/app/scripts/loops/automerge/policy
 import lib, outbound, prwatch, stdcheck  # noqa: E402
 
 MARK = "<!-- pi-line fixpr: t1 -->"
-def prs(*specs): return ([{"number": n, "headRefName": h, "body": b, "isDraft": d} for n, h, b, d in specs])
-def fake_gh(out=None, fail=False):
-    def gh(args, *a, **k):
-        if args[:2] == ["pr", "list"]:
-            if fail: raise RuntimeError("HTTP 502")
-            if out is None: return "not a list"
-            return out
-        raise AssertionError(f"unexpected gh {args}")
-    return gh
-TWO = prs((1, "qa-fix/a", "", True), (2, "feature/x", MARK, False))   # a draft without marker + a marker on any branch: both count
-ONE = prs((1, "qa-fix/a", "", True), (3, "feature/y", "", False))
+def no_pr_list(args, *a, **k):
+    if args[:2] == ["pr", "list"]: raise AssertionError("admission must not count open fix PRs")
+    return {"viewerPermission": "WRITE", "defaultBranchRef": {"name": "main"}}
 
 
-class Cap(unittest.TestCase):
-    def test_count_like_stdcheck_and_fail_closed(self):
-        self.assertIn("2 open fix PRs", lib.fixpr_cap_reason(fake_gh(TWO)))
-        self.assertIsNone(lib.fixpr_cap_reason(fake_gh(ONE)))
-        self.assertIsNone(lib.fixpr_cap_reason(fake_gh(TWO), exclude=2))
-    def test_superseded_in_ack_file_not_counted(self):   # 11-05 gap (c): same exclusion as stdcheck fix_prs
-        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f: json.dump({"superseded": [{"pr": 2, "superseded_by": 9}]}, f)
-        with mock.patch.object(lib, "STDCHECK_ACK_FILE", f.name): self.assertIsNone(lib.fixpr_cap_reason(fake_gh(TWO)))
-        with mock.patch.object(lib, "STDCHECK_ACK_FILE", f.name + ".missing"): self.assertIn("2 open fix PRs", lib.fixpr_cap_reason(fake_gh(TWO)))
-        os.unlink(f.name)   # a superseding PR replaces its own predecessor
-        self.assertIn("fail closed", lib.fixpr_cap_reason(fake_gh(fail=True)))
-        self.assertIn("fail closed", lib.fixpr_cap_reason(fake_gh(None)))
+class NoOpenPrCap(unittest.TestCase):
+    def test_lib_has_no_open_fix_pr_cap(self):
+        self.assertFalse(hasattr(lib, "fixpr_cap_reason")); self.assertFalse(hasattr(lib, "MAX_FIX_PRS"))
 
-    def test_h_fixpr_validate_and_do_refuse_and_stay_pending(self):
-        a = {"ticket": "t1", "title": "x", "patch": "/nonexistent.patch"}
-        for out, fail in ((TWO, False), (None, True)):
-            with mock.patch.object(outbound, "gh", fake_gh(out, fail)), mock.patch.object(outbound, "fixpr_gate_reason", return_value=None), \
-                 mock.patch.object(outbound, "fixpr_base_ref", return_value="main"), mock.patch.object(outbound, "fixpr_check_source_base"), \
-                 mock.patch.object(outbound, "run", side_effect=AssertionError("no clone / push while gated")):
-                _, _, validate, do = outbound.h_fixpr(a)
-                with self.assertRaisesRegex(RuntimeError, "gated"): validate()
-                with self.assertRaisesRegex(RuntimeError, "refused: gated"): do()
-
-    def test_admit_block_uses_the_same_count(self):
-        with tempfile.TemporaryDirectory() as d, mock.patch.object(prwatch, "gh", fake_gh(TWO)), \
+    def test_admit_block_ignores_open_fix_prs_but_keeps_running_limit(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(prwatch, "gh", no_pr_list), \
              mock.patch.object(prwatch, "TEST_RESERVE_OFF", f"{d}/off"), mock.patch.object(prwatch, "headroom_mb", return_value=99999), \
-             mock.patch.object(prwatch, "prfix_runs", return_value=([], [])), mock.patch.object(prwatch, "tests_queued", return_value=0):
-            self.assertIn("2 open fix PRs", prwatch.admit_block({}, {})[0])
-            with mock.patch.object(prwatch, "gh", fake_gh(fail=True)): self.assertIn("fail closed", prwatch.admit_block({}, {})[0])
+             mock.patch.object(prwatch, "tests_queued", return_value=0):
+            with mock.patch.object(prwatch, "prfix_runs", return_value=([], [])): self.assertIsNone(prwatch.admit_block({}, {})[0])
+            with mock.patch.object(prwatch, "prfix_runs", return_value=([11], [])): self.assertIsNone(prwatch.admit_block({}, {})[0])
+            with mock.patch.object(prwatch, "prfix_runs", return_value=([11, 12], [])):   # 2 fix agents running = the real limit
+                self.assertIn("2 fixes running (max 2)", prwatch.admit_block({}, {})[0])
+        with mock.patch.object(prwatch, "headroom_mb", return_value=100):   # memory still yields to tests
+            self.assertIn("headroom", prwatch.admit_block({}, {})[0])
+
+    def test_h_fixpr_validate_and_do_do_not_count_open_fix_prs(self):
+        a = {"ticket": "t1", "title": "x", "patch": "/nonexistent.patch"}
+        with mock.patch.object(outbound, "gh", no_pr_list), mock.patch.object(outbound, "fixpr_gate_reason", return_value=None), \
+             mock.patch.object(outbound, "fixpr_base_ref", return_value="main"), mock.patch.object(outbound, "fixpr_check_source_base"), \
+             mock.patch.object(outbound, "run", side_effect=RuntimeError("clone reached")):
+            _, _, validate, do = outbound.h_fixpr(a)
+            with self.assertRaisesRegex(RuntimeError, "patch missing"): validate()   # past every gate; only the fake patch stops it
+            with self.assertRaisesRegex(RuntimeError, "clone reached"): do()         # not "refused: gated"
 
     def test_reserve_flag_polarity(self):
         # REPORT item 3 checked: flag_on(OFF_FILE) is True while the off file is ABSENT, so the cap is the default and the file rolls it back

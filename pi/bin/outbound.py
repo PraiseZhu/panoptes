@@ -440,8 +440,6 @@ def h_fixpr(a):
     def validate():
         why = fixpr_gate_reason(a)                                                  # (1) gate
         if why: raise RuntimeError(f"gated: {why}")
-        why = fixpr_cap_reason(gh, exclude=a.get("supersedes"))                     # 11-05 #1762: at most MAX_FIX_PRS open (stays pending)
-        if why: raise RuntimeError(f"gated: {why}")
         if not (patch and os.path.exists(patch)): raise RuntimeError("patch missing")
         v = gh(["repo", "view", REPO, "--json", "viewerPermission,defaultBranchRef"])
         return f"patch {os.path.getsize(patch)}B, perm={v['viewerPermission']}, base={fixpr_base_ref(a)} (default {v['defaultBranchRef']['name']}), docs={a.get('docs_dir_predicted') or '-'}"
@@ -450,8 +448,6 @@ def h_fixpr(a):
         if why: raise RuntimeError(f"refused: gated ({why})")
         bref = fixpr_base_ref(a)
         fixpr_check_source_base(a, bref)
-        why = fixpr_cap_reason(gh, exclude=a.get("supersedes"))                     # 11-05 #1762: re-counted right before cloning / pushing
-        if why: raise RuntimeError(f"refused: gated ({why})")
         d = W.mkdtemp("pi-fixpr-")   # PI_WORK/tmp: janitor removes what a killed run leaves
         try:
             try: run(["gh", "repo", "clone", REPO, d, "--", "--depth", "50", "-q", "--branch", bref])

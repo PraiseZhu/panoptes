@@ -39,7 +39,7 @@ def action(**kw):
 def outbound_do(a, current_base):
     cmds, ghs = [], []
     with mock.patch.object(O, "run", side_effect=lambda c, *k, **kw: cmds.append(list(c)) or ""), \
-         mock.patch.object(O, "apply_fix_patch", return_value="base"), mock.patch.object(O, "fixpr_gate_reason", return_value=None), mock.patch.object(O, "fixpr_cap_reason", return_value=None), \
+         mock.patch.object(O, "apply_fix_patch", return_value="base"), mock.patch.object(O, "fixpr_gate_reason", return_value=None), \
          mock.patch.object(O, "gh", side_effect=lambda c, *k, **kw: ghs.append(list(c)) or ({"baseRefName": current_base} if c[:2] == ["pr", "view"] else "https://github.com/x/y/pull/1\n")), \
          mock.patch.object(O, "fixpr_docs_rename", return_value="ok"):
         try: return O.h_fixpr(a)[3](), cmds, ghs
