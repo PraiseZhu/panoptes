@@ -136,19 +136,11 @@ class Checks(Base):
         self.prs["PraiseZhu/panoptes"] = [{"number": n} for n in range(3)]; self.assertEqual(S.check_panoptes_prs(NOW), {})
         self.assertNotIn("--author", self.gh_calls[0])   # all open PRs, through lib.gh (App identity when gh-app-enabled)
 
-    def test_fix_prs_breach(self):
-        fx = lambda n, **k: {"number": n, "headRefName": k.get("h", "feat/x"), "body": k.get("b", "")}
-        self.prs[S.REPO] = [fx(1, h="qa-fix/1"), fx(2, b="<!-- pi-line fixpr:2 -->"), fx(3, h="fix/qa-3-abcdef12"), fx(4)]
-        self.assertEqual(list(S.check_fix_prs(NOW)), ["concurrent"])
-        self.prs[S.REPO] = self.prs[S.REPO][:2] + [fx(4)]; self.assertEqual(S.check_fix_prs(NOW), {})
-
-    def test_fix_prs_drafts_count_any_author_product_repo(self):
-        """Jasper: open Pi-line fix PRs in xindong/mivo-canvas-plugin, drafts included; breach only when > 2"""
-        self.prs[S.REPO] = [{"number": n, "headRefName": f"qa-fix/{n}", "body": "", "isDraft": True} for n in range(3)]
-        self.assertEqual(list(S.check_fix_prs(NOW)), ["concurrent"])           # 3 drafts = breach
-        c = self.gh_calls[-1]; self.assertEqual(c[c.index("-R") + 1], "xindong/mivo-canvas-plugin")
-        self.assertNotIn("--draft", c); self.assertNotIn("--author", c); self.assertEqual(c[c.index("--state") + 1], "open")
-        self.prs[S.REPO] = self.prs[S.REPO][:2]; self.assertEqual(S.check_fix_prs(NOW), {})   # exactly 2 = pass
+    def test_fix_prs_open_count_never_breaches(self):
+        """11-07 (Praise): the limit is 2 fix agents RUNNING (prwatch), not 2 fix PRs OPEN: any number of open fix PRs passes"""
+        self.prs[S.REPO] = [{"number": n, "headRefName": f"qa-fix/{n}", "body": "", "isDraft": True} for n in range(6)]
+        self.assertEqual(S.check_fix_prs(NOW), {})
+        self.assertEqual(S.run(NOW)["fix_prs"], {}); self.assertNotIn("stdcheck:fix_prs:concurrent", self.open_ids())
 
     def test_tasks_breach_missing_failed_and_retry_once(self):
         self.runs["pmnudge"] = []
@@ -271,33 +263,6 @@ class Allowlist(Base):
         with mock.patch.object(S, "ACK_FILE", f"{self.tmp}/bad.json"):
             self.assertEqual(list(S.check_qa_start(NOW)), ["PR-1800"])
 
-    def test_fix_prs_superseded_excluded_from_count(self):
-        fx = lambda n, **k: {"number": n, "headRefName": k.get("h", f"qa-fix/{n}"), "body": k.get("b", "")}
-        # 5 open fix PRs; superseding 1734 and 1621 leaves 3 -> still breach; superseding one more leaves 2 -> pass
-        self.prs[S.REPO] = [fx(1762), fx(1734), fx(1727), fx(1724), fx(1621)]
-        self.ack_file({"acknowledged_breaches": [], "superseded": [
-            {"pr": 1734, "superseded_by": 1710, "date": "2026-11-05"},
-            {"pr": 1621, "superseded_by": 1648, "date": "2026-11-05"},
-        ]})
-        with mock.patch.object(S, "ACK_FILE", f"{self.tmp}/stdcheck-acknowledged.json"):
-            bad = S.check_fix_prs(NOW)
-        self.assertEqual(list(bad), ["concurrent"])
-        self.assertIn("#1762", bad["concurrent"]); self.assertIn("#1727", bad["concurrent"]); self.assertIn("#1724", bad["concurrent"])
-        self.assertNotIn("#1734", bad["concurrent"]); self.assertNotIn("#1621", bad["concurrent"])
-        sup = S.check_fix_prs.last_superseded
-        self.assertEqual({x["pr"] for x in sup}, {1734, 1621})
-        self.assertEqual({(x["pr"], x["superseded_by"]) for x in sup}, {(1734, 1710), (1621, 1648)})
-        # drop one more active -> 2 active = pass, superseded still listed
-        self.prs[S.REPO] = [fx(1762), fx(1734), fx(1727), fx(1621)]
-        with mock.patch.object(S, "ACK_FILE", f"{self.tmp}/stdcheck-acknowledged.json"):
-            self.assertEqual(S.check_fix_prs(NOW), {})
-            self.assertEqual({x["pr"] for x in S.check_fix_prs.last_superseded}, {1734, 1621})
-
-    def test_fix_prs_missing_ack_file_unchanged(self):
-        self.prs[S.REPO] = [{"number": n, "headRefName": f"qa-fix/{n}", "body": ""} for n in range(3)]
-        with mock.patch.object(S, "ACK_FILE", f"{self.tmp}/missing.json"):
-            self.assertEqual(list(S.check_fix_prs(NOW)), ["concurrent"])
-
 
 
 
@@ -326,15 +291,15 @@ class Gaps(Base):
         self.assertEqual(self.open_ids(), []); self.assertEqual(self.gaps()[0]["status"], "closed")
 
     def test_overdue_gap_escalates_once_for_jasper(self):
-        self.prs[S.REPO] = [{"number": n, "headRefName": f"qa-fix/{n}", "body": ""} for n in range(3)]
-        S.run(NOW); self.assertFalse(os.path.exists(f"{S.OUT}/escalations.json"))
-        late = NOW + dt.timedelta(hours=S.DEADLINE_H["fix_prs"], minutes=1)
-        self.at(late); self.at(late + dt.timedelta(hours=1))
+        late = NOW + dt.timedelta(hours=S.DEADLINE_H["qa_start"], minutes=1)
+        with mock.patch.object(S, "check_qa_start", return_value={"PR-1800": "15 min late"}):
+            S.run(NOW); self.assertFalse(os.path.exists(f"{S.OUT}/escalations.json"))
+            self.at(late); self.at(late + dt.timedelta(hours=1))
         esc = json.load(open(f"{S.OUT}/escalations.json"))
-        self.assertEqual(list(esc), ["stdcheck:fix_prs:concurrent"])
-        e = esc["stdcheck:fix_prs:concurrent"]; self.assertEqual((e["to"], e["owner"], e["for_brief"]), ("Jasper", "Praise PR", "2026-11-06"))
+        self.assertEqual(list(esc), ["stdcheck:qa_start:PR-1800"])
+        e = esc["stdcheck:qa_start:PR-1800"]; self.assertEqual((e["to"], e["owner"], e["for_brief"]), ("Jasper", "Mivo QA 运维", "2026-11-06"))
         self.assertEqual(e["escalated_at"], late.isoformat(timespec="seconds"))
-        f = S.brief_facts("2026-11-06", "2026-11-05"); self.assertEqual([x["id"] for x in f["escalations"]], ["stdcheck:fix_prs:concurrent"])
+        f = S.brief_facts("2026-11-06", "2026-11-05"); self.assertEqual([x["id"] for x in f["escalations"]], ["stdcheck:qa_start:PR-1800"])
 
 
 class Alerts(Base):

@@ -26,12 +26,11 @@ class T(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="yrk-")
         self.saved = {k: getattr(prwatch, k) for k in ("BASE", "TEST_RESERVE_OFF", "EMERG_KILL_OFF", "ARGUS", "mem_mb", "proc_table",
-                                                       "time", "qlog", "DRY", "STATE", "fixpr_cap_reason")}
+                                                       "time", "qlog", "DRY", "STATE")}
         self.saved_pf = {k: getattr(prfix, k) for k in ("mem_gb", "YIELD_OFF", "time")}
         prwatch.BASE = self.tmp; prwatch.ARGUS = f"{self.tmp}/argus"; prwatch.DRY = False; prwatch.STATE = f"{self.tmp}/state.json"
         prwatch.TEST_RESERVE_OFF = f"{self.tmp}/prwatch-test-reserve-off"; prwatch.EMERG_KILL_OFF = f"{self.tmp}/prwatch-emerg-kill-off"
         prfix.YIELD_OFF = f"{self.tmp}/prfix-yield-off"
-        prwatch.fixpr_cap_reason = lambda *a, **k: None   # 11-05: the open-fix-PR cap reads gh; covered in test_fixpr_admission_1762
         self.logs = []; prwatch.qlog = self.logs.append
         os.makedirs(f"{prwatch.ARGUS}/priority")
     def tearDown(self):

@@ -525,36 +525,11 @@ def self_pr_list(repo, state, fields, search=None, limit=100, extra=(), run=None
         args += (["--search", q[0]] if q else ["--author", au])
         for p in (run or gh)(args) or []: seen.setdefault(p.get("number"), p)   # run: the caller's gh (tests stub module.gh)
     return sorted(seen.values(), key=lambda p: -(p.get("number") or 0))
-# 11-05 (pr-1762 REPORT items 1/2/4): ONE definition of a Pi-line fix PR, shared by stdcheck (fix_prs), prwatch (admit_block) and
-# outbound (h_fixpr): Jasper's 11-04 rule -- pi-line marker in the body OR a qa-fix/* / fix/qa-* head; drafts included, any author.
-FIX_PR_MARK = "<!-- pi-line fixpr:"; FIX_PR_HEADS = ("qa-fix/", "fix/qa-"); MAX_FIX_PRS = 2
+# 11-05 (pr-1762 REPORT item 4): ONE definition of a Pi-line fix PR (stdcheck, prwatch): pi-line marker in the body OR a
+# qa-fix/* / fix/qa-* head. 11-07 (Praise): no cap on OPEN fix PRs -- the limit is 2 fix agents running (prwatch MAX_FIXES).
+FIX_PR_MARK = "<!-- pi-line fixpr:"; FIX_PR_HEADS = ("qa-fix/", "fix/qa-")
 def is_fix_pr(p):
     return FIX_PR_MARK in (p.get("body") or "") or (p.get("headRefName") or "").startswith(FIX_PR_HEADS)
-def open_fix_prs(run=None, repo=None):
-    """OPEN fix PRs of the product repo (is_fix_pr), drafts and any author included. Raises when the list cannot be read."""
-    prs = (run or gh)(["pr", "list", "-R", repo or REPO, "--state", "open", "--limit", "200", "--json", "number,headRefName,body,isDraft"])
-    if not isinstance(prs, list): raise RuntimeError("open PR list unreadable")
-    return [p for p in prs if is_fix_pr(p)]
-STDCHECK_ACK_FILE = os.environ.get("PI_STDCHECK_ACK_FILE") or "/workspace/fleet-standards/stdcheck-acknowledged.json"
-def superseded_fix_prs(path=None):
-    """11-05 fleet gap (c): PR numbers under "superseded" in the stdcheck ack file, so the outbound/prwatch cap counts the same set
-    as stdcheck fix_prs. Missing/unreadable file -> empty set (count everything: the cap stays as strict as before)."""
-    try:
-        with open(path or STDCHECK_ACK_FILE) as f: d = json.load(f)
-        out = set()
-        for e in (d.get("superseded") or []):
-            try: out.add(int(str(e.get("pr")).lstrip("#")))
-            except Exception: pass
-        return out
-    except Exception: return set()
-def fixpr_cap_reason(run=None, exclude=None):
-    """-> why no new fix PR may open now, or None. >= MAX_FIX_PRS open fix PRs -> refused; the count cannot be read -> refused too
-    (fail closed). exclude: a PR number that does not count (the closed one a superseding fix replaces)."""
-    sup = superseded_fix_prs()
-    try: prs = [p for p in open_fix_prs(run) if p.get("number") != exclude and p.get("number") not in sup]
-    except Exception as e: return f"open fix PR count unreadable ({str(e)[:120]}): fail closed"
-    if len(prs) >= MAX_FIX_PRS: return f"{len(prs)} open fix PRs >= {MAX_FIX_PRS}: " + " ".join(f"#{p.get('number')}" for p in prs[:10])
-    return None
 # P2 (11-04): panoptes WRITES (PR create / merge / comment / branch delete, git push of infra branches) use the App too while BOTH
 # $PI_STATE/gh-app-enabled and $PI_STATE/gh-app-writes-enabled exist. rm gh-app-writes-enabled -> writes back on the PAT (reads stay).
 def gh_app_writes_flag(): return f"{PI_STATE}/gh-app-writes-enabled"

@@ -357,8 +357,8 @@ def admit_block(t, st):
         if len(pys) + len(waiting) >= MAX_FIXES: return f"{len(pys) + len(waiting)} fixes running (max {MAX_FIXES})", room
         q = tests_queued()
         if q: return f"{q} merge test(s) queued", room
-    why = fixpr_cap_reason(gh)   # 11-05 #1762: the same open-fix-PR count as outbound / stdcheck (fail closed)
-    if why: return why, room
+    # 11-07 (Praise): "同时最多 2 个修复" = 2 fix agents running (MAX_FIXES above, memory yields to tests), NOT 2 open fix PRs.
+    # A finished fix frees its slot even while its PR stays open; the 11-05 open-fix-PR cap stalled the bot for 2 days.
     return None, room
 
 
