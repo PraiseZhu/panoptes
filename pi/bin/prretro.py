@@ -43,8 +43,15 @@ def note_index():
         for n in re.findall(r"(?<!\d)(\d{3,4})(?!\d)", f): idx.setdefault(int(n), []).append((f, lv))
     return idx
 
-def main():
-    d = today(); L = [f"# Praise PR 复盘 {d}（Pi line{' dry-run' if DRY else ''}，mode={mode()}）"]; acts = []
+def main(argv=None):
+    argv = list(sys.argv if argv is None else argv)
+    kind, payload = cli_preflight(argv, {"--dry-run"}, __doc__)
+    if kind == "help":
+        print(payload); return 0
+    if kind == "error":
+        print(payload, file=sys.stderr); return 2
+    dry = "--dry-run" in payload[1] or DRY  # tests may set module DRY before calling main()
+    d = today(); L = [f"# Praise PR 复盘 {d}（Pi line{' dry-run' if dry else ''}，mode={mode()}）"]; acts = []
     prs = self_pr_list(REPO, "all", "number,title,state,isDraft,body,headRefName,headRefOid,mergedAt", limit=2000, run=gh)
     fixmap = {}
     for p in prs:
@@ -105,6 +112,6 @@ def main():
     L.append(f"- 分离 HEAD worktree {len(det)} 个（无分支，人工判断）：{', '.join(os.path.basename(x) for x in det)}")
     L.append(f"- /tmp/pi-prfix 旧目录：{len(glob.glob('/tmp/pi-prfix/*'))}")
     txt = "\n".join(L) + "\n"
-    if DRY: print(txt); print("ACTIONS", json.dumps(acts, ensure_ascii=False, indent=1)); return
+    if dry: print(txt); print("ACTIONS", json.dumps(acts, ensure_ascii=False, indent=1)); return
     write_atomic(f"{BASE}/out/praise-pr/{d}.retro.md", txt); record_actions("praise-pr", d, acts)
-if __name__ == "__main__": main()
+if __name__ == "__main__": sys.exit(main() or 0)

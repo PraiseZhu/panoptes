@@ -9,7 +9,12 @@ from lib import *
 from p2 import src_tree
 def main(argv=None):
     argv = list(sys.argv if argv is None else argv)
-    dry = "--dry-run" in argv or os.environ.get("PI_OPSREVIEW_DRYRUN") == "1"
+    kind, payload = cli_preflight(argv, {"--dry-run"}, __doc__)
+    if kind == "help":
+        print(payload); return 0
+    if kind == "error":
+        print(payload, file=sys.stderr); return 2
+    dry = "--dry-run" in payload[1] or os.environ.get("PI_OPSREVIEW_DRYRUN") == "1"
     argv = [a for a in argv if a != "--dry-run"]
     sfx = ".dryrun" if dry else ""
     day = data_day(argv); out = f"{BASE}/out/ops/review-{day}{sfx}.md"
@@ -48,4 +53,4 @@ Findings:
         log("dry-run: no outbound action recorded", pp); print(f"[dry-run] {out}\n[dry-run] would post (not recorded):\n{post}"); return
     record_actions("ops", day, [{"key": f"ops-review:{day}", "type": "grok.group", "to": "MivoCanvas QA",
         "text_file": pp, "dedupe_basis": f"key ops-review:{day}; formal review = {out} (R13, since 10-29; review-ops/daily/ is the legacy hand-written fallback, no longer written by the Grok line); Grok group has no API (not executable)"}])
-if __name__ == "__main__": main()
+if __name__ == "__main__": sys.exit(main() or 0)

@@ -224,8 +224,14 @@ def raise_alert(d, hh, errs):
     write_atomic(ALERT, json.dumps(a, ensure_ascii=False, indent=1))
     log(f"ALERT pmnudge: gh 在 {len(errs)} 次尝试后仍失败 -> {ALERT}（watchdog pmnudge:gh）")
 
-def main():
-    dry = "--dry-run" in sys.argv
+def main(argv=None):
+    argv = list(sys.argv if argv is None else argv)
+    kind, payload = cli_preflight(argv, {"--dry-run"}, __doc__)
+    if kind == "help":
+        print(payload); return 0
+    if kind == "error":
+        print(payload, file=sys.stderr); return 2
+    dry = "--dry-run" in payload[1]
     d = today(); hh = now_cst().strftime("%H:%M")
     try:
         prs, errs = with_retry(lambda: self_pr_list(REPO, "open", FIELDS, run=gh))   # task B: PraiseZhu + App PRs
@@ -330,4 +336,4 @@ def main():
     write_atomic(PROGRESS, json.dumps(pst_new, ensure_ascii=False, indent=1))
     if b: write_atomic(SEGMENTS, json.dumps(seg_new, ensure_ascii=False, indent=1))
     record_actions("pm", d + ".nudges", acts)
-if __name__ == "__main__": main()
+if __name__ == "__main__": sys.exit(main() or 0)
