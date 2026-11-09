@@ -18,6 +18,21 @@ def data_day(argv):
     if len(argv) > 1: return argv[1]
     return (dt.datetime.now(CST).date() - dt.timedelta(days=1)).isoformat()
 
+def cli_preflight(argv, known, doc=""):
+    """Refuse --help/-h and unknown dash-options before a script generates or sends.
+    Returns ('help', doc) | ('error', msg) | ('ok', (positionals, flags_set)).
+    `known` is the set of allowed flag names (exact, or the key before '='). Positionals are untouched."""
+    args = list(argv[1:])
+    flags = [a for a in args if a.startswith("-")]
+    pos = [a for a in args if not a.startswith("-")]
+    if any(a in ("--help", "-h") for a in flags):
+        return "help", doc
+    known = set(known)
+    bad = sorted({a for a in flags if a.split("=", 1)[0] not in known})
+    if bad:
+        return "error", f"unknown option(s) {bad}\n{doc}"
+    return "ok", (pos, set(flags))
+
 def utc_window(day):
     d = dt.date.fromisoformat(day)
     a = dt.datetime(d.year, d.month, d.day, tzinfo=CST).astimezone(dt.timezone.utc)

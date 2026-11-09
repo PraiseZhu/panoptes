@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Mivo QA 日报 draft (REPORT-STYLE layout, no model). Files only; never sends.
-usage: daily.py [数据日] [--render-only] [--diff-sent] [--resend]
+usage: daily.py [数据日] [--render-only] [--diff-sent] [--resend] [--no-send]
+  --help / -h : print this help and exit 0 (never generate or send)
+  unknown flag: print usage to stderr and exit 2 (never generate or send)
   --resend      : 补发：日报第一行以「【补发】」开头；外发 key 不变（mivo-daily-report:<日>），已发过的照样不重发
   --render-only : no gh calls if out/daily/<day>.json has the PR list; writes nothing but <day>.render.md (+ .diff)
   --diff-sent   : diff the render against Grok's sent text (report/sent/<day>/group-content.txt)
@@ -242,8 +244,14 @@ def handoff_files_actions(day, routes):
     return [{"key": f"handoff-files:{r['repo']}:{day}", "type": "gh.handoff.files", "repo": r["repo"], "day": day}
             for r in (routes or {}).get("routes", []) if r.get("repo")]
 
-def main():
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]; fl = {a for a in sys.argv[1:] if a.startswith("--")}
+def main(argv=None):
+    argv = list(sys.argv if argv is None else argv)
+    kind, payload = cli_preflight(argv, {"--render-only", "--diff-sent", "--resend", "--no-send"}, __doc__)
+    if kind == "help":
+        print(payload); return 0
+    if kind == "error":
+        print(payload, file=sys.stderr); return 2
+    args, fl = payload
     day = args[0] if args else data_day([0]); ro = "--render-only" in fl
     meta = jl(f"{BASE}/out/daily/{day}.json")
     if ro and meta and meta.get("merged_prs"): prs = meta["merged_prs"]
@@ -289,4 +297,4 @@ def main():
             "counts": {"P0": len(P0), "P1": len(P1), "P2": len(P2), "P3": len(P3)}}
     write_atomic(f"{BASE}/out/daily/{day}.json", json.dumps(meta, ensure_ascii=False, indent=1))
 
-if __name__ == "__main__": main()
+if __name__ == "__main__": sys.exit(main() or 0)

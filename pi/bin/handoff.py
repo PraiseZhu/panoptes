@@ -348,11 +348,17 @@ def overdue_text(rt, x):
     return (f"交接 issue {rt['repo']}#{x['issue']['number']}（原 PR #{x['n']}{'：' + x['title'] if x.get('title') else ''}）"
             f"开了 {days} 天还没有回执，负责人 {x.get('author') or rt['owner']}。\n{x['url']}")
 
-def main():
-    a = [x for x in sys.argv[1:] if not x.startswith("--")]; fl = set(sys.argv[1:]) - set(a)
+def main(argv=None):
+    argv = list(sys.argv if argv is None else argv)
+    kind, payload = cli_preflight(argv, {"--render-only", "--diff-sent", "--since", "--pr"}, __doc__)
+    if kind == "help":
+        print(payload); return 0
+    if kind == "error":
+        print(payload, file=sys.stderr); return 2
+    a, fl = payload
     if a and a[0] == "plan": plan(a[1] if len(a) > 1 else data_day([0]), "--render-only" in fl, "--diff-sent" in fl)
     elif a and a[0] == "backfill":
-        v = sys.argv[2:]; since = v[v.index("--since") + 1] if "--since" in v else None
+        v = argv[2:]; since = v[v.index("--since") + 1] if "--since" in v else None
         backfill(since, {int(v[i + 1]) for i, x in enumerate(v) if x == "--pr"})
     else: scan("--render-only" in fl)
-if __name__ == "__main__": main()
+if __name__ == "__main__": sys.exit(main() or 0)

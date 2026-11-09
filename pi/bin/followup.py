@@ -66,11 +66,18 @@ def to_post_actions(items, od, tag):
         else: log(f"skip queued entry of unknown kind {x.get('kind')}")
     return acts
 
-def main():
-    a = [x for x in sys.argv[1:] if not x.startswith("--")]; kind = a[0] if a else ("scan" if now_cst().hour < 12 else "remind")
+def main(argv=None):
+    argv = list(sys.argv if argv is None else argv)
+    kind_, payload = cli_preflight(argv, {"--no-remind", "--shadow"}, __doc__)
+    if kind_ == "help":
+        print(payload); return 0
+    if kind_ == "error":
+        print(payload, file=sys.stderr); return 2
+    a, fl = payload
+    kind = a[0] if a else ("scan" if now_cst().hour < 12 else "remind")
     d = today(); od = f"{BASE}/out/followup"; os.makedirs(od, exist_ok=True); hm = now_cst().strftime("%H%M")
-    live = live_ok() and "--shadow" not in sys.argv
-    no_remind = kind == "scan" or "--no-remind" in sys.argv
+    live = live_ok() and "--shadow" not in fl
+    no_remind = kind == "scan" or "--no-remind" in fl
     # 3-day overdue group notice: live remind run, and only while takeover/group-overdue exists (OFF by default). 10-24 dry-run
     # preview would have named Praise in the group for #884/#898/#910/#923, whose fixes are merged and wait for retest (the tool
     # does not count a fix PR that covers several reports as a response) -- switch it on once the tool's detection is right.
@@ -103,4 +110,4 @@ def main():
     log(f"DM actions {len(acts)} (reminded {len(s.get('reminded') or [])}, thanked {len(s.get('thanked') or [])}, escalated {len(s.get('escalated') or [])}, errors {len(s.get('errors') or [])})")
     record_actions("followup", d, acts)
     if r.returncode: sys.exit(1)
-if __name__ == "__main__": main()
+if __name__ == "__main__": sys.exit(main() or 0)
