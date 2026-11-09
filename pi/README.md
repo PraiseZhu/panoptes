@@ -105,6 +105,8 @@ bot 建的、用完就扔的东西只放在 `/workspace/pi-work/`（`bin/workroo
 2. **必须执行** `git config --global credential.useHttpPath true`。不执行的话，git 的 credential 请求里不带 `path=`，`credential_repo()` 认不出仓库，`gh auth git-credential get` 就永远走不到 App token，只会退回本机登录。
 3. 不在 CALLER_ALLOWLIST 里的调用方，`auth git-credential store` / `erase` 直接 exit 0，不输出、什么也不做（这是 git push 之后自己的记账）；op 缺失或不认识的 exit 4。
 
+重装或重置后恢复（11-10）：`pi/restore/gh-wrapper/install.sh`（幂等：原生 gh 留在 /usr/bin/gh，/usr/local/bin/gh 软链到 gh_wrapper.py，配好上面第 2 条和 credential helper；9 个 gh-app-*-enabled 开关只检查，缺了打 NEED，不创建），再跑 `pi/restore/gh-wrapper/verify.sh`（wrapper 软链、`gh api user`=praise-qa[bot]、credential username=x-access-token，任一不过退出 1）。
+
 ## 调用 Pi：全机器人并行派任务（10-27）
 
 任何 bot 随时都能派一个或多个 Pi 任务，入口 `bin/pi-dispatch`（`pi_dispatch.py`）。每个任务是单独的后台进程，走 `lib.pi`（沙箱、环境白名单、按档位选模型），带 pstack。
