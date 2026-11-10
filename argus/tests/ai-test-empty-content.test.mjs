@@ -2,12 +2,26 @@
 // 看不出原因。现在给出明确原因 + finish_reason，并标 retryable。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 process.env.ARGUS_ROOT = mkdtempSync(join(tmpdir(), 'argus-aitest-empty-'))
 const { parseModelJson, generateTargetedTests } = await import('../src/aitests.mjs')
+const { CONTROL_LOG } = await import('../src/paths.mjs')
+
+const secrets = { ARGUS_LLM_BASE_URL: 'http://127.0.0.1:9', ARGUS_LLM_API_KEY: 'k' }
+const profile = { aiTests: { frameworkZh: 'vitest', pathGlobs: ['src/**/*.ai.test.ts'], run: ['x'] }, steps: [] }
+
+function lengthRetryLogs() {
+  try { return readFileSync(CONTROL_LOG, 'utf8').split('\n').filter((l) => l.includes('"msg":"aitests length retry"')) }
+  catch { return [] }
+}
+
+async function generate(fetchImpl, extra = {}) {
+  const quota = extra.quota ?? { check: () => ({ ok: true }), consume: () => {} }
+  return generateTargetedTests({ db: null, secrets, riskClass: 'B', pr: { title: 't', body: '' }, files: [], profile, gaps: ['boundary'], quota, fetchImpl, netRetryDelayMs: 0, sleep: async () => {}, ...extra })
+}
 
 test('parseModelJson: empty content → not ok, kind empty, keeps finish_reason', () => {
   const r = parseModelJson({ choices: [{ finish_reason: 'length', message: { content: '' } }] })
@@ -75,4 +89,79 @@ test('generateTargetedTests: finish_reason=length retries with a higher max_comp
   assert.equal(gen.status, 'empty')
   assert.equal(gen.reasonZh, 'AI 没写出可用的测试')
   assert.deepEqual(consumed, [['ai-test', 40054], ['ai-test', 100]])
+})
+
+function reply({ finish_reason, content, total_tokens, ok = true, status = 200 }) {
+  return { ok, status, json: async () => ({ choices: [{ finish_reason, message: { content } }], usage: { total_tokens } }) }
+}
+
+// length 重试要能被看见：写一条结构化日志，round/返回值里两次 tokens 都保留，第二次非 200 的 reasonZh 标明是重试。
+test('generateTargetedTests: length retry logs both attempts and keeps both token counts', async () => {
+  const before = lengthRetryLogs().length
+  const fetchImpl = async (_url, init) => {
+    const body = JSON.parse(init.body)
+    if (body.max_completion_tokens === 16_000) {
+      return reply({ finish_reason: 'length', content: '{"tests": [{"kind": "cov', total_tokens: 40054 })
+    }
+    return reply({ finish_reason: 'stop', content: '{"tests":[]}', total_tokens: 100 })
+  }
+  const gen = await generate(fetchImpl)
+  assert.equal(gen.status, 'empty')
+  assert.equal(gen.retried, true)
+  assert.equal(gen.attempts?.length, 2)
+  assert.equal(gen.attempts[0].status, 200)
+  assert.equal(gen.attempts[0].finish_reason, 'length')
+  assert.equal(gen.attempts[0].total_tokens, 40054)
+  assert.equal(gen.attempts[0].timed_out, false)
+  assert.equal(typeof gen.attempts[0].ms, 'number')
+  assert.ok(gen.attempts[0].ms >= 0)
+  assert.equal(gen.attempts[1].status, 200)
+  assert.equal(gen.attempts[1].finish_reason, 'stop')
+  assert.equal(gen.attempts[1].total_tokens, 100)
+  assert.equal(gen.attempts[1].timed_out, false)
+  assert.ok(gen.attempts[1].ms >= 0)
+  // usage / 报告里的 tokens 仍是最后一次请求的 total_tokens（原含义）
+  assert.equal(gen.usage?.total_tokens, 100)
+  const added = lengthRetryLogs().slice(before)
+  assert.equal(added.length, 1, `应当写一行 length 重试日志，实际 ${added.length} 行`)
+  const line = JSON.parse(added[0])
+  assert.equal(line.msg, 'aitests length retry')
+  assert.equal(line.level, 'info')
+  assert.deepEqual(line.first, gen.attempts[0])
+  assert.deepEqual(line.second, gen.attempts[1])
+})
+
+test('generateTargetedTests: length retry non-200 names the retry in reasonZh', async () => {
+  const before = lengthRetryLogs().length
+  const fetchImpl = async (_url, init) => {
+    const body = JSON.parse(init.body)
+    if (body.max_completion_tokens === 16_000) {
+      return reply({ finish_reason: 'length', content: '{"tests": [{"kind": "cov', total_tokens: 40054 })
+    }
+    return { ok: false, status: 502, json: async () => ({ error: { message: 'bad gateway' } }) }
+  }
+  const gen = await generate(fetchImpl)
+  assert.equal(gen.status, 'error')
+  assert.equal(gen.retried, true)
+  assert.match(gen.reasonZh, /length 重试/)
+  assert.match(gen.reasonZh, /502/)
+  assert.equal(gen.attempts?.length, 2)
+  assert.equal(gen.attempts[0].total_tokens, 40054)
+  assert.equal(gen.attempts[1].status, 502)
+  assert.equal(lengthRetryLogs().slice(before).length, 1)
+})
+
+test('generateTargetedTests: no length retry keeps a single attempt and writes no retry log', async () => {
+  const before = lengthRetryLogs().length
+  const fetchImpl = async () => reply({ finish_reason: 'stop', content: '{"tests":[]}', total_tokens: 321 })
+  const gen = await generate(fetchImpl)
+  assert.equal(gen.status, 'empty')
+  assert.equal(gen.retried, undefined)
+  assert.equal(gen.attempts?.length, 1)
+  assert.equal(gen.attempts[0].status, 200)
+  assert.equal(gen.attempts[0].finish_reason, 'stop')
+  assert.equal(gen.attempts[0].total_tokens, 321)
+  assert.equal(gen.attempts[0].timed_out, false)
+  assert.equal(gen.usage?.total_tokens, 321)
+  assert.equal(lengthRetryLogs().slice(before).length, 0)
 })
