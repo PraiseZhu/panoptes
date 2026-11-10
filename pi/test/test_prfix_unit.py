@@ -486,7 +486,7 @@ class TestRunTicket(Tmp):
         self.assertEqual(r["status"], "needs_praise")
         dm = [a for a in self.acts if a["type"] == "slack.dm"]
         self.assertEqual(len(dm), 1); self.assertEqual((dm[0]["key"], dm[0]["to"]), (f"needs-praise:1178:{A}", "Praise"))
-        self.assertIn("--allow-sensitive", dm[0]["text"])
+        self.assertIn("workflows 权限", dm[0]["text"]); self.assertNotIn("--allow-sensitive", dm[0]["text"])   # 11-10: no flag can push it
         for bad in ("SHADOW", "NOT SENT", "<!--"): self.assertNotIn(bad, dm[0]["text"])
 
     def test_sensitive_files_flagged_in_pr_body(self):   # 10-25: sensitive files no longer stop the bot; the PR says so instead
@@ -760,6 +760,27 @@ class TestFixOneEndToEnd(GitTmp):
         self.assertEqual(out["status"], "pr_action_written", out)
         fix3 = dict(self.prompts)["fix3"]; self.assertIn("weaken", fix3); self.assertIn("skip", fix3)
         self.assertNotIn("it.skip", rf(f"{self.wd}/src/other.test.js"))
+
+    def fix_touching(self, path):   # the model's fix also edits `path`
+        def fix(cwd, prompt):
+            wf(f"{cwd}/src/foo.js", "module.exports = () => 2 // FIXED\n"); os.makedirs(os.path.dirname(f"{cwd}/{path}"), exist_ok=True)
+            wf(f"{cwd}/{path}", "name: CI\n"); return "ROOT CAUSE src/foo.js:1 returned 1", "t2"
+        self.model["fix"] = fix
+        return self.run_fix()
+
+    def test_workflow_fix_goes_to_a_human_before_prepush(self):   # 11-10 #2022: the App can never push .github/workflows/
+        out, res = self.fix_touching(".github/workflows/ci.yml")
+        self.assertEqual((out["status"], out["kind"]), ("failed", "praise"), out)
+        self.assertIn(".github/workflows/ci.yml", out["error"]); self.assertIn("不重试", out["error"])
+        self.assertFalse([a for a in self.acts if a["type"].startswith("gh.pr.create")])
+        self.assertFalse([k for k, ok, _ in res["steps"] if k.startswith("推送前检查")])     # stopped before the ~15 min pre-push
+        tk, notify = prfix.apply_outcome(prfix.new_ticket(dict(self.c)), out, prfix.now_cst())
+        self.assertEqual((tk["status"], tk["next_retry_at"], notify), ("needs_praise", None, "needs_praise"))   # no retry, one DM
+
+    def test_other_github_file_fix_still_opens_the_pr(self):   # 11-10: only workflows stop; the rest stays 10-25 (flagged, pushed)
+        out, res = self.fix_touching(".github/labeler.yml")
+        self.assertEqual(out["status"], "pr_action_written", out)
+        self.assertEqual(res["sensitive"], [".github/labeler.yml"])
 
     def test_fix_rounds_run_out_then_deterministic(self):
         self.seed_commit({"BREAKS_OTHER": "1", "src/other.test.js": "it('old', () => { expect(1) })\n"})

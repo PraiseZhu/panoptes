@@ -71,7 +71,7 @@ class T(unittest.TestCase):
     def test_second_run_queues_nothing_again(self):
         self.main(); n = len(self.queue()); self.main()
         self.assertEqual(len(self.queue()), n)
-        self.assertIn("briefed(ledger)", self.report())
+        for _, a in ROUTED: self.assertNotIn(a["key"], self.report())   # 11-10: a final key is listed once, not every run
 
     def test_dry_run_writes_nothing(self):
         self.main("--dry-run")

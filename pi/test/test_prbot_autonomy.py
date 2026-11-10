@@ -185,23 +185,38 @@ class TestRevise(GitTmp):
         self.assertEqual(t["status"], "parked"); self.assertIn("不是这个 PR 能修的", t["last_error"]); self.assertTrue(t["next_retry_at"])
         self.assertFalse([a for a in self.acts if a["type"] == "slack.dm"])
 
-    def test_moving_a_ci_file_away_is_pushed_and_flagged(self):   # 10-24 review: a `git mv` out of .github/ used to show only its new name
-        # 10-25 (Praise: 全放行，交给审查机把关): no longer a kind-5 stop -- pushed, and the commit names the file for the reviewer
+    def move_away(self, path):   # the PR branch has `path`; the model's CI fix `git mv`s it to the repo root
         seed = f"{self.tmp}/seed"; g = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", seed]
-        sh(*g, "checkout", "-q", self.BR); os.makedirs(f"{seed}/.github/workflows"); wf(f"{seed}/.github/workflows/ci.yml", "name: CI\n")
+        sh(*g, "checkout", "-q", self.BR); os.makedirs(os.path.dirname(f"{seed}/{path}"), exist_ok=True); wf(f"{seed}/{path}", "name: CI\n")
         sh(*g, "add", "-A"); sh(*g, "commit", "-q", "-m", "ci"); sh(*g, "push", "-q", self.origin, self.BR)
         self.head = self.pr["headRefOid"] = sh(*g, "rev-parse", "HEAD").strip(); sh(*g, "checkout", "-q", "main")
         inner = prfix.pi
         def mv(tier, cwd, *a, **k):
             r = inner(tier, cwd, *a, **k)
-            if os.path.exists(f"{cwd}/.github/workflows/ci.yml"): sh("git", "-C", cwd, "mv", ".github/workflows/ci.yml", "ci.yml")
+            if os.path.exists(f"{cwd}/{path}"): sh("git", "-C", cwd, "mv", path, os.path.basename(path))
             return r
         prfix.pi = mv
-        rc, r = self.revise()
+        return self.revise()
+
+    def test_moving_a_ci_file_away_is_pushed_and_flagged(self):   # 10-24 review: a `git mv` out of .github/ used to show only its new name
+        # 10-25 (Praise: 全放行，交给审查机把关): no longer a kind-5 stop -- pushed, and the commit names the file for the reviewer
+        rc, r = self.move_away(".github/labeler.yml")   # 11-10: any .github/ file except workflows (those: next test)
         push = [a for a in self.acts if a["type"] == "gh.pr.push-fix"]
         self.assertEqual(len(push), 1, r); self.assertEqual(r["status"], "pr_action_written")
-        self.assertIn("Sensitive-Files: .github/workflows/ci.yml", push[0]["message"])   # the old path is seen, not only ci.yml
+        self.assertIn("Sensitive-Files: .github/labeler.yml", push[0]["message"])   # the old path is seen, not only labeler.yml
         self.assertFalse([a for a in self.acts if a["type"] == "slack.dm"])
+
+    def test_workflow_change_goes_to_a_human_and_is_not_retried(self):   # 11-10 #2022: the App cannot push .github/workflows/
+        rc, r = self.move_away(".github/workflows/ci.yml")
+        self.assertEqual((rc, r["status"], r["kind"]), (1, "failed", "praise"), r); self.assertIn("workflows 权限", r["error"])
+        self.assertFalse([a for a in self.acts if a["type"] == "gh.pr.push-fix"])
+        dm = [a for a in self.acts if a["type"] == "slack.dm"]
+        self.assertEqual([a["key"] for a in dm], [f"revise-needs-praise:1301:{self.head[:12]}"])
+        self.assertIn(".github/workflows/ci.yml", dm[0]["text"]); self.assertNotIn("--allow-sensitive", dm[0]["text"])
+        t = prfix.load_tickets()["tickets"]["rev:1301"]
+        self.assertEqual((t["status"], t.get("next_retry_at")), ("needs_praise", None))
+        n = len(self.acts); rc, r = self.revise()                                        # same head: waits for a human, no new try
+        self.assertEqual(r["status"], "needs_praise"); self.assertEqual(len(self.acts), n)
 
     def test_ownership_foreign_commit_or_claim_skips_and_gate_files_hard_stop(self):
         # 10-30 #1444: someone else's recent commit on the branch, or a valid branch claim -> skipped with the reason, nothing pushed
