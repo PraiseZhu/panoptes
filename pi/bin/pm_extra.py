@@ -100,11 +100,13 @@ def handoff(day, prs, p01, p2s, miss, unv):
     return L + [""]
 
 CHANGELOG_TITLE = re.compile(r"更新日志")
-QA_REF = re.compile(r"(?<![A-Za-z])QA\s*(?:来源|对)?\s*[:：]?\s*#(\d+)")
+QA_REF = re.compile(r"(?<![A-Za-z])QA\s*(?:来源|对)?\s*[:：]?\s*(?:xindong/mivo-canvas-plugin)?#(\d+)")
 def fix_refs(p):
-    """修复 PR 引用的原问题 PR：正文或标题里「QA: #N」「QA #N」「QA 来源：#N」「QA 对 #N」。纯「#N」「fixes #N」不算。
+    """修复 PR 引用的原问题 PR：正文或标题里「QA: #N」「QA #N」「QA 来源：#N」「QA 对 #N」，
+    以及「QA: xindong/mivo-canvas-plugin#N」（半角/全角冒号）。纯「#N」「fixes #N」不算；别的仓的 owner/repo#N 不算。
     11-02 bug：只认正文，#1440（标题 QA #1409）、#1559（标题 QA #1478）没算成修复 PR。
     11-03 bug：正文「QA 来源：#1409」「QA #943」「QA 对 #1449」不认（#1440/#1627/#1677）。
+    11-10 bug：只认「QA: #N」，#1196/#1225/#1541（正文 QA: xindong/mivo-canvas-plugin#N，#1541 全角冒号）返回 []。
     「chore: 更新日志补扫」PR 正文列的 QA #N 不是修复（#1585），标题含「更新日志」的整条不算。"""
     if CHANGELOG_TITLE.search(p.get("title") or ""): return []
     refs = QA_REF.findall(p.get("title") or "") + QA_REF.findall(p.get("body") or "")
