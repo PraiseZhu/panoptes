@@ -7,6 +7,8 @@ HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, os.path.jo
 import cindy  # noqa: E402
 
 SKIP = "STATUS=SKIP another ensure-cindy run holds lock"
+# Mirrors ensure-cindy.sh:9 (`exec 8>/tmp/ensure-cindy.v2.lock`). Fixture only, not the live script.
+_ENSURE_CINDY_LOCK = "/tmp/ensure-cindy.v2.lock"
 
 class T(unittest.TestCase):
     def setUp(self):
@@ -19,6 +21,12 @@ class T(unittest.TestCase):
         self.assertEqual(cindy.lock_skip_guard("STATUS=OK"), "STATUS=OK")
         self.assertEqual(cindy.lock_skip_guard(SKIP), SKIP)                          # counting starts again
         self.assertEqual(cindy.lock_skip_guard("STATUS=SKIP pi-line takeover/cindy active"), "STATUS=SKIP pi-line takeover/cindy active")
+
+    def test_lock_path_matches_ensure_cindy_sh(self):
+        # 11-10: ensure-cindy.sh:9 is `exec 8>/tmp/ensure-cindy.v2.lock` (old /tmp/ensure-cindy.lock
+        # is held forever by an inherited fd). Constant only: do not open the live script or take the lock.
+        self.assertEqual(cindy.LOCK, _ENSURE_CINDY_LOCK)
+        self.assertIn(_ENSURE_CINDY_LOCK, cindy.__doc__)
 
     def test_lowmem_blocked_relaunch_is_reported_once_per_episode(self):
         acts = []; saved = cindy.record_actions; cindy.record_actions = lambda job, day, a: acts.extend(a)
