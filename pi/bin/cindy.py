@@ -4,7 +4,7 @@ Equivalent to the Grok routine: each run calls ~/.config/cindy-launch/ensure-cin
 so ALL duties come from that one script (reinstall via apt from manifest + gnome-keyring/libsecret-tools/xdotool,
 start only via start-cindy.sh, relaunch if not started by the script, relaunch once/hour if no window,
 install newer downloaded .deb (sha256), daily manifest update, nudge mouse/xset on :2 + nudge-loop).
-ensure-cindy.sh itself holds /tmp/ensure-cindy.lock (single instance) and skips non-Pi callers while takeover exists;
+ensure-cindy.sh itself holds /tmp/ensure-cindy.v2.lock (single instance) and skips non-Pi callers while takeover exists;
 6 lock-SKIPs in a row (30 min) count as FAIL (10-24: the lock fd leaked into nudge-loop and silenced keep-alive).
 --dry-run: read-only report of what ensure WOULD do; never calls ensure, never kills/starts anything."""
 from lib import *
@@ -46,7 +46,7 @@ def notify(day, status):
             "text": f"Cindy 保活异常: {status}", "dedupe": "out/cindy/notify-state.json last-signature; same failure not repeated"}]); st["last"] = sig
     else: return "同一异常已记录，不重复"
     write_atomic(NSTATE, json.dumps(st, ensure_ascii=False)); return "ok"
-LOCK = "/tmp/ensure-cindy.lock"
+LOCK = "/tmp/ensure-cindy.v2.lock"
 def lock_holders():
     out = []
     for p in (x for x in os.listdir("/proc") if x.isdigit()):
