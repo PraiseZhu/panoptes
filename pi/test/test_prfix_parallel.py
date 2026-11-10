@@ -186,6 +186,11 @@ class TestTierAndRegex(GitTmp):
         for s in ("QA: #11789", "MivoQA #1178", "#1178", "QA: #1177 是另一个问题，见 #1178", "QA report PR-1179 #1178"):
             self.assertFalse(rq.search(s), s)
 
+    def test_qa_ref_product_repo_only(self):
+        rq = prfix.qa_ref_re(1178)
+        self.assertTrue(rq.search("QA: xindong/mivo-canvas-plugin#1178"))
+        self.assertFalse(rq.search("QA: other/repo#1178"))
+
     def test_cleanup_skips_a_ticket_that_is_running(self):
         wd = f"{prfix.WT_ROOT}/pi-wt-5-deadbeef"; self.wt(wd, "fix/qa-5-deadbeef")
         held = prfix.try_lock(f"{prfix.OUT}/locks/5-deadbeef.lock")                   # e.g. a dry-run: never marked running

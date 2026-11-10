@@ -22,6 +22,7 @@ import sys
 import jsonrec
 from lib import *
 from finding_policy import ruling_keys
+from pm_extra import fix_refs
 RULINGS = "/workspace/fleet-standards/p2-rulings.md"
 RED = ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE")
 PEND = ("", "PENDING", "QUEUED", "IN_PROGRESS", "EXPECTED", "WAITING", "REQUESTED")
@@ -53,13 +54,17 @@ def fix_fps(p):
     for q, fp in FP_MARK.findall(p.get("body") or "") + FP_HEAD.findall(p.get("headRefName") or ""): out.setdefault(int(q), set()).add(fp)
     return out
 
+def body_qa_refs(p):
+    """正文里的 QA 引用，正则与 pm_extra.fix_refs 相同；催办仍只看正文，不扫标题。"""
+    return fix_refs({"body": p.get("body")})
+
 def merged_refs():
     """(QA 单号, 指纹) -> 修掉它的已合并 PraiseZhu PR 号（最近 100 个）；没有指纹的已合并 PR 记 (单号, None)"""
     out = {}
     try:
         for p in self_pr_list(REPO, "merged", "number,body,headRefName", run=gh):
             fps = fix_fps(p)
-            for r in re.findall(r"QA[:：]\s*#(\d+)", p.get("body") or ""):
+            for r in body_qa_refs(p):
                 for fp in sorted(fps.get(int(r)) or [None]): out.setdefault((int(r), fp), p["number"])
     except Exception: pass
     return out
@@ -267,13 +272,13 @@ def main(argv=None):
     b = b_on()
     if b:
         try: prs += [p for p in gh(["pr", "list", "-R", REPO, "--author", KIRO, "--state", "open", "--limit", "100", "--json", FIELDS])
-                     if re.search(r"QA[:：]\s*#\d+", p.get("body") or "")]
+                     if body_qa_refs(p)]
         except Exception as e: log("pmnudge: kiro 的 PR 列表读取失败，本轮只看 PraiseZhu：", str(e)[:200])
     nof, p01 = nofix_prs(), p01_prs()
     fixed = merged_refs()   # 10-28：QA 单号已被合并的修复 PR 修掉（11-10 起按 (单号, 指纹) 比） -> 这个 draft 是重复 / 被取代的，不催（#1343 被 #1345 取代）
     qa, skip = [], []
     for p in prs:
-        refs = [int(x) for x in re.findall(r"QA[:：]\s*#(\d+)", p.get("body") or "")]
+        refs = body_qa_refs(p)
         if not refs: continue
         if re.search(r"keel|lifeline", (p.get("headRefName") or "") + " " + p["title"], re.I): skip.append(f"#{p['number']} keel/lifeline 叠加链"); continue
         if only_nofix(refs, p.get("body"), nof, p01): skip.append(f"#{p['number']} 只关联判「不修」的 P2（{refs}）"); continue

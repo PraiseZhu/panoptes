@@ -35,6 +35,10 @@ test('交接 issue 回执带上修复 PR 号与原因（台账据此认「已修
 test('「QA #原PR号」：QA #N / QA: #N / QA：#N / QA: owner/repo#N 都认；只写 #N 的不算统一格式（兜底规则另算）', () => {
   for (const t of ['QA #2000', 'QA: #2000', 'QA：#2000', 'qa:#2000', 'QA: xindong/mivo-canvas-plugin#2000']) assert.ok(qaRefRe(2000).test(t), t)
   for (const t of ['fix #2000', 'QA #20001', 'QA #200']) assert.ok(!qaRefRe(2000).test(t), t)
+  assert.ok(qaRefRe(2000).test('QA: xindong/mivo-canvas-plugin#2000'))
+  assert.ok(!qaRefRe(2000).test('QA: other/repo#2000'))
+  assert.deepEqual(qaRefs('QA: xindong/mivo-canvas-plugin#2000'), [2000])
+  assert.deepEqual(qaRefs('QA: other/repo#2000'), [])
   // 一个修复 PR 对应多份 QA 报告（2026-10-24 #918：「QA 回访 #904/#910/#898/#884」原来只认第一个号）
   const multi = 'fix: 修复 QA 回访 #904/#910/#898/#884 的四处问题'
   for (const pr of [904, 910, 898, 884]) assert.ok(qaRefRe(pr).test(multi), String(pr))

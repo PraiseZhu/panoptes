@@ -88,8 +88,9 @@ RECEIPT = _Receipt()
 MARK = re.compile(r"mivo-qa-handoff:\s*key=(\S+)\s+pr=(\d+)")
 QA_LOGINS = {x.strip() for x in os.environ.get("MIVO_QA_HANDOFF_QA_LOGINS", "PraiseZhu").split(",") if x.strip()}
 # 「QA」后面可以夹最多 8 个非 # 的字，然后是一串原 PR 号（/ , ， 、 & 和 隔开）：一个修复 PR 对应多份 QA 报告时写成
-# 「QA 回访 #904/#910/#898/#884」（2026-10-24 #918）。「QA」前不能是字母。同 panoptes report/handoff-receipts.mjs qaRefRe
-_QA_ONE = r"(?:[\w.-]+/[\w.-]+)?#"
+# 「QA 回访 #904/#910/#898/#884」（2026-10-24 #918）。「QA」前不能是字母。同 panoptes report/handoff-receipts.mjs qaRefRe。
+# 每个号只认裸 #N 或 xindong/mivo-canvas-plugin#N，别的仓的 owner/repo#N 不算。
+_QA_ONE = r"(?:xindong/mivo-canvas-plugin)?#"
 def qa_ref(n): return re.compile(rf"(?<![A-Za-z])QA[^#\n]{{0,8}}?(?:{_QA_ONE}[0-9]+(?![0-9])\s*[/,，、&和]\s*)*{_QA_ONE}{int(n)}(?![0-9])", re.I)
 
 def author_receipts(issue):
