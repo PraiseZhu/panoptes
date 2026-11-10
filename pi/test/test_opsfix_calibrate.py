@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""opsfix calibrate --fingerprint, and recompute of e2e-browser:unavailable.
+"""opsfix calibrate --fingerprint, recompute of e2e-browser:unavailable / pending_verification,
+and derived test_backed_severity after a finding-level calibration.
 
 calibrate used to match only a.title substring, so a check finding with no title
 (e.g. #2052 mq1-679cbc2876f9a2c99a34) could not be selected. recompute used to
@@ -24,7 +25,7 @@ OTHER = "mq1-aa7d6097d19fb3c3f461"
 
 def untitled_check(fp=FP, sev="P2", test="persistFlush.bench.test.ts"):
     return {"source": "check", "title": None, "id": None, "fingerprint": fp,
-            "check_id": "bench", "test": test, "severity": sev, "status": "introduced"}
+            "check_id": "bench", "test": test, "severity": sev, "status": "introduced", "test_backed": True, "flaky": False}
 
 def titled(title, fp="mq1-titled000000000000000", sev="P1", source="code-review"):
     return {"source": source, "title": title, "id": "cr-1", "fingerprint": fp, "severity": sev}
@@ -32,18 +33,26 @@ def titled(title, fp="mq1-titled000000000000000", sev="P1", source="code-review"
 def e2e(status):
     return {"id": "e2e-browser", "name": "浏览器端到端", "status": status, "dimension": "black-box"}
 
-def report(pr_no=2052, verdict="review-suggested", severity="P2", findings=None, checks=None):
-    pr = {"number": pr_no, "severity": severity, "verdict": verdict,
-          "findings": list(findings or []), "checks": list(checks or []), "code_review": {}}
+def report(pr_no=2052, verdict="review-suggested", severity="P2", findings=None, checks=None,
+           pending=None, outcome="defect", outcome_reason="合并后检查失败，合并前通过，最新主干仍然失败",
+           test_backed=True, test_backed_severity="P2"):
+    pr = {"number": pr_no, "severity": severity, "verdict": verdict, "outcome": outcome,
+          "outcome_reason": outcome_reason, "test_backed": test_backed,
+          "test_backed_severity": test_backed_severity,
+          "findings": list(findings or []), "checks": list(checks or []),
+          "pending_verification": list(pending or []), "code_review": {}}
     d = {"prs": [pr], "summary": {
         "prs_by_severity": {"P0": 0, "P1": 0, "P2": 1, "P3": 0},
-        "findings_by_severity": {"P0": 0, "P1": 0, "P2": 1, "P3": 0}}}
+        "findings_by_severity": {"P0": 0, "P1": 0, "P2": 1, "P3": 0},
+        "test_backed_findings_by_severity": {"P0": 0, "P1": 0, "P2": 1, "P3": 0},
+        "prs_test_backed": [pr_no] if test_backed else []}}
     return d, pr
 
 def args(**kw):
     return types.SimpleNamespace(pr=kw.get("pr", 2052), match=kw.get("match"),
                                  fingerprint=kw.get("fingerprint"), to=kw.get("to", "P3"),
-                                 reason=kw.get("reason", "test"), apply=kw.get("apply", False))
+                                 reason=kw.get("reason", "test"), apply=kw.get("apply", False),
+                                 reports_dir=kw.get("reports_dir"))
 
 
 class FingerprintMatch(unittest.TestCase):
@@ -151,6 +160,118 @@ class RecomputeUnavailable(unittest.TestCase):
         d, pr = report(verdict="clean", severity="P3", findings=[], checks=[e2e("unavailable")])
         m.recompute(d, pr)
         self.assertEqual(pr["verdict"], "partially-verified")
+
+    def test_pending_plus_e2e_pass_is_partially_verified(self):
+        f = untitled_check()
+        f["severity"] = "P3"
+        f["calibration"] = {"to": "P3"}
+        pend = [{"pending_kind": "own-tests", "fingerprint": "mq1-pending000000000000", "source": "own-tests"}]
+        d, pr = report(verdict="review-suggested", severity="P2", findings=[f],
+                       checks=[e2e("pass")], pending=pend)
+        m.recompute(d, pr)
+        self.assertEqual((pr["severity"], pr["verdict"]), ("P3", "partially-verified"))
+        self.assertEqual(pr["pending_verification"], pend)
+
+
+class DerivedFields(unittest.TestCase):
+    def test_only_check_p2_to_p3_aligns_grade_and_test_backed_severity(self):
+        f = untitled_check()
+        f["severity"] = "P3"
+        f["calibration"] = {"to": "P3"}
+        pend = [{"pending_kind": "own-tests", "fingerprint": "mq1-own0000000000000000", "source": "own-tests"},
+                {"pending_kind": "review-unverified", "fingerprint": "mq1-rev0000000000000000", "source": "code-review"}]
+        d, pr = report(findings=[f], checks=[e2e("unavailable")], pending=pend,
+                       outcome="defect", test_backed_severity="P2")
+        before_pv = list(pr["pending_verification"])
+        before_out, before_reason = pr["outcome"], pr["outcome_reason"]
+        m.recompute(d, pr)
+        self.assertEqual(pr["severity"], "P3")
+        self.assertEqual(pr["test_backed_severity"], "P3")
+        self.assertTrue(pr["test_backed"])
+        self.assertEqual(pr["verdict"], "partially-verified")
+        self.assertEqual(pr["outcome"], before_out)
+        self.assertEqual(pr["outcome_reason"], before_reason)
+        self.assertEqual(pr["pending_verification"], before_pv)
+        self.assertEqual(d["summary"]["test_backed_findings_by_severity"],
+                         {"P0": 0, "P1": 0, "P2": 0, "P3": 1})
+        self.assertEqual(d["summary"]["prs_test_backed"], [2052])
+        self.assertEqual(d["summary"]["prs_by_severity"]["P3"], 1)
+        self.assertEqual(d["summary"]["prs_by_severity"]["P2"], 0)
+
+    def test_misreport_drops_out_of_test_backed_aggregates(self):
+        f = untitled_check()
+        f["severity"] = "P3"
+        f["calibration"] = {"to": "误报"}
+        d, pr = report(findings=[f], checks=[e2e("pass")], pending=[],
+                       outcome="defect", test_backed_severity="P2")
+        m.recompute(d, pr)
+        self.assertEqual((pr["severity"], pr["verdict"]), ("P3", "clean"))
+        self.assertFalse(pr["test_backed"])
+        self.assertIsNone(pr["test_backed_severity"])
+        self.assertTrue(f["test_backed"])  # finding-level still follows status=introduced
+        self.assertEqual(pr["outcome"], "defect")
+        self.assertEqual(pr["pending_verification"], [])
+        self.assertEqual(d["summary"]["test_backed_findings_by_severity"],
+                         {"P0": 0, "P1": 0, "P2": 0, "P3": 0})
+        self.assertEqual(d["summary"]["prs_test_backed"], [])
+
+    def test_remaining_review_p2_keeps_grade_p2_and_tbs_follows_check(self):
+        keep = titled("SC1 测试未验证", fp="mq1-review00000000000000", sev="P2")
+        keep["test_backed"] = False
+        gone = untitled_check()
+        gone["severity"] = "P3"
+        gone["calibration"] = {"to": "P3"}
+        d, pr = report(findings=[keep, gone], checks=[e2e("unavailable")], pending=[],
+                       test_backed_severity="P2")
+        m.recompute(d, pr)
+        self.assertEqual((pr["severity"], pr["verdict"]), ("P2", "review-suggested"))
+        # grade is the review P2; the remaining test-backed finding is the calibrated P3 check
+        self.assertEqual(pr["test_backed_severity"], "P3")
+        self.assertTrue(pr["test_backed"])
+        self.assertEqual(pr["outcome"], "defect")
+
+    def test_unverified_check_is_not_test_backed(self):
+        f = untitled_check()
+        f["status"] = "unverified"
+        f["test_backed"] = True  # stale stored boolean, nightly would rewrite
+        f["severity"] = "P3"
+        f["calibration"] = {"to": "P3"}
+        d, pr = report(findings=[f], checks=[e2e("pass")], pending=[], test_backed_severity="P2")
+        m.recompute(d, pr)
+        self.assertFalse(f["test_backed"])
+        self.assertFalse(pr["test_backed"])
+        self.assertIsNone(pr["test_backed_severity"])
+
+    def test_calibrate_dry_via_reports_dir_does_not_write(self):
+        d, _ = report(findings=[untitled_check()], checks=[e2e("unavailable")],
+                      pending=[{"pending_kind": "own-tests", "fingerprint": "mq1-own0000000000000000"}],
+                      outcome="defect", test_backed_severity="P2")
+        tmp = tempfile.mkdtemp()
+        try:
+            path = os.path.join(tmp, "PR-2052.json")
+            with open(path, "w") as fh: json.dump(d, fh)
+            before = open(path).read()
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                m.calibrate(args(fingerprint=FP, to="P3", reports_dir=tmp))
+            out = buf.getvalue()
+            self.assertIn("DRY", out)
+            self.assertIn("P2/review-suggested → P3/partially-verified", out)
+            self.assertIn("test_backed_severity P2 → P3", out)
+            self.assertIn("outcome defect → defect (not recomputed)", out)
+            self.assertIn("pending_verification 1 → 1 (not recomputed)", out)
+            self.assertEqual(open(path).read(), before)
+        finally:
+            for fn in os.listdir(tmp):
+                os.remove(os.path.join(tmp, fn))
+            os.rmdir(tmp)
+
+    def test_cli_reports_dir_parses(self):
+        a = m.ap.parse_args(["calibrate", "--pr", "2052", "--fingerprint", FP, "--to", "P3",
+                             "--reason", "x", "--reports-dir", "/tmp/copy"])
+        self.assertEqual(a.reports_dir, "/tmp/copy")
+        self.assertFalse(a.apply)
+
 
 
 if __name__ == "__main__":
