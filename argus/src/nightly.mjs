@@ -63,7 +63,7 @@ function wholeStepSignature(r) {
 }
 
 // ── 单个失败键的归因（逐项，不依赖整体判定）────────────────
-function classifyKey(key, { first, rerun, base, latest, latestIsSame, skipLatest = false }) {
+function classifyKey(key, { first, rerun, base, latest, latestIsSame, skipLatest = false, trialOnly = false, prRuns = null, baseRuns = null }) {
   if (!rerun) return { status: 'unverified', why: 'no rerun available' }
   const vsRerun = compareKey(key, rerun, first)
   if (vsRerun === 'absent') return { status: 'flaky', why: 'unstable: failed once, passed on a clean rerun of the same commit; not attributed to this PR' }
@@ -72,6 +72,10 @@ function classifyKey(key, { first, rerun, base, latest, latestIsSame, skipLatest
   const vsBase = compareKey(key, base, first)
   if (vsBase === 'same') return { status: 'pre-existing', why: 'also fails on the base revision' }
   if (vsBase === 'unknown') return { status: 'unverified', why: 'reproduced; base comparison incomplete' }
+  // 试运行检查（bench）判 introduced：PR 与 base 须各跑满 3 次，且 PR 3 次全失败、base 3 次全通过。少一次或有一次相反结果都只记 unverified。
+  if (trialOnly && !trialIntroducedConfirmed(key, { first, prRuns: prRuns ?? [first, rerun], baseRuns: baseRuns ?? [base] })) {
+    return { status: 'unverified', why: trialIntroducedWhy(key, { first, prRuns: prRuns ?? [first, rerun], baseRuns: baseRuns ?? [base] }) }
+  }
   if (skipLatest) return { status: 'introduced', why: 'fails reproducibly on this PR and passes on the base revision (no latest-main recheck: a problem in the PR\'s own commits cannot be fixed by later commits)' }
   if (!latestIsSame && latest) {
     const vsLatest = compareKey(key, latest, first)
@@ -79,6 +83,21 @@ function classifyKey(key, { first, rerun, base, latest, latestIsSame, skipLatest
     if (vsLatest === 'unknown') return { status: 'introduced', why: 'fails here and passes on base; latest-main comparison incomplete' }
   }
   return { status: 'introduced', why: 'fails reproducibly on this PR and passes on the base revision' }
+}
+
+const ofStep = (key, id) => key.startsWith(`${id}::`)
+export function trialIntroducedConfirmed(key, { first, prRuns, baseRuns }) {
+  const pr = (prRuns ?? []).filter(Boolean)
+  const base = (baseRuns ?? []).filter(Boolean)
+  return pr.length >= 3 && pr.every((run) => compareKey(key, run, first) === 'same')
+    && base.length >= 3 && base.every((run) => compareKey(key, run, first) === 'absent')
+}
+function trialIntroducedWhy(key, { first, prRuns, baseRuns }) {
+  const pr = (prRuns ?? []).filter(Boolean)
+  const base = (baseRuns ?? []).filter(Boolean)
+  const prFails = pr.filter((run) => compareKey(key, run, first) === 'same').length
+  const basePasses = base.filter((run) => compareKey(key, run, first) === 'absent').length
+  return `trial-only check needs 3 failing PR runs and 3 passing base runs to count as introduced; got ${prFails} failing of ${pr.length} PR runs and ${basePasses} passing of ${base.length} base runs`
 }
 
 export const TEST_SCRIPT_WHY = 'test script error (runner_error): the test script / harness failed before the product steps ran, so the product steps never executed; not attributable to this PR'
@@ -407,6 +426,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   out.coverage_gate = computeCoverageGate({ first: Array.isArray(cov) ? cov : [], prDiff, covError: cov?.error, changedFiles: files.map((f) => f.filename), readFile: readAtSha })
 
   let rerun = null, base = null, latest = null, latestIsSame = true
+  let prConfirm = [], baseConfirm = [], trialConfirmWait = {}
   const failed = failedIds(first)
   if (!setupFailed(first) && failed.length) {
     // 有试运行检查（bench）失败：重跑前先等机器空闲
@@ -422,14 +442,38 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     // 2026-10-26：base 上单跑一次的失败里 10/48 是试运行检查（bench）在重跑刚结束、机器还忙时跑的 → base 前也先等机器空闲
     if (failed.length && baseSha && needsIdleBeforeBase(failed, profile)) { out.base_idle_wait = await waitForIdle(); if (overBudget()) return budgetPartial() }
     if (failed.length && baseSha) base = await executeOnSha({ ...common, label: 'b', sha: baseSha, stepIds: failed })
+    // 试运行检查若首轮+重跑仍失败、且第一轮 base 通过：再补 1 次 PR（h3）和 2 次 base（b2/b3），凑满各 3 次才能判 introduced
+    const trialStill = still.filter((id) => profile.steps.find((x) => x.id === id)?.trialOnly)
+    const trialConfirmIds = (base && trialStill.length)
+      ? trialStill.filter((id) => failureKeys(first).some((k) => ofStep(k, id) && compareKey(k, base, first) === 'absent'))
+      : []
+    if (trialConfirmIds.length && !overBudget()) {
+      trialConfirmWait.h3 = await waitForIdle()
+      if (!overBudget()) {
+        const h3 = await executeOnSha({ ...common, label: 'h3', sha, stepIds: trialConfirmIds })
+        prConfirm.push(h3)
+        const stillConfirm = trialConfirmIds.filter((id) => failureKeys(first).some((k) => ofStep(k, id) && compareKey(k, h3, first) === 'same' && compareKey(k, base, first) === 'absent'))
+        for (const label of stillConfirm.length ? ['b2', 'b3'] : []) {
+          trialConfirmWait[label] = await waitForIdle()
+          if (overBudget()) break
+          baseConfirm.push(await executeOnSha({ ...common, label, sha: baseSha, stepIds: stillConfirm }))
+        }
+      }
+    }
     if (merged) {
       const prelim = decideOutcome({ first, rerun, base, latest: null, baseKnown: Boolean(baseSha), latestIsSame: true })
-      if (prelim.outcome === 'defect') {
+      const prRuns = [first, rerun, ...prConfirm].filter(Boolean)
+      const baseRuns = [base, ...baseConfirm].filter(Boolean)
+      const stillIntroduced = (prelim.failureKeys ?? []).filter((key) => {
+        const step = profile.steps.find((x) => x.id === key.slice(0, key.indexOf('::')))
+        return classifyKey(key, { first, rerun, base, latest: null, latestIsSame: true, skipLatest: Boolean(step?.noLatestRecheck), trialOnly: Boolean(step?.trialOnly), prRuns, baseRuns }).status === 'introduced'
+      })
+      if (prelim.outcome === 'defect' && stillIntroduced.length) {
         let head = null
         try { head = await getBranchHead(repo, pr.base.ref) } catch (err) { if (!err?.branchHeadAuthFailed) throw err }
         latestIsSame = Boolean(head) && head === sha
         // noLatestRecheck 的步骤（secret-scan）不在最新主干复查：泄露进了历史，后续提交修不掉
-        const recheck = prelim.failedSteps.filter((id) => !profile.steps.find((x) => x.id === id)?.noLatestRecheck)
+        const recheck = [...new Set(stillIntroduced.map((k) => k.slice(0, k.indexOf('::'))))].filter((id) => !profile.steps.find((x) => x.id === id)?.noLatestRecheck)
         if (head && !latestIsSame && recheck.length) latest = await executeOnSha({ ...common, label: 'l', sha: head, stepIds: recheck })
         out.latest_main_sha = head
       }
@@ -471,7 +515,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     const test = key.slice(key.indexOf('::') + 2)
     const r = first.find((x) => x.id === stepId)
     const step = stepById[stepId] ?? { id: stepId, kind: r?.kind }
-    let { status, why } = classifyKey(key, { first, rerun, base, latest, latestIsSame, skipLatest: Boolean(step.noLatestRecheck) })
+    let { status, why } = classifyKey(key, { first, rerun, base, latest, latestIsSame, skipLatest: Boolean(step.noLatestRecheck), trialOnly: Boolean(step.trialOnly), prRuns: [first, rerun, ...prConfirm].filter(Boolean), baseRuns: [base, ...baseConfirm].filter(Boolean) })
     if (r?.timedOut) { status = 'timeout'; why = 'check timed out; no comparable failure evidence' }
     // 试运行检查（bench）在基线版本上同样失败（PR #1686 #1713 #1720）：只说明这台机器 / 这套阈值测不出东西，既不是 PR 的问题，
     // 也不证明主线坏了。按试运行约定只记「拿不准」交 QA 自查：不进 findings、不置 pre_existing、不定级。
@@ -511,9 +555,15 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
       evidence: {
         tested_sha: sha, base_sha: baseSha, exit_code: r?.exitCode, signal: r?.signal ?? null, ended_at: r?.endedAt ?? null, timed_out: Boolean(r?.timedOut),
         first_run: 'fail', rerun: compareOn(rerun), base_run: baseRun, ...(latest ? { latest_main_run: compareOn(latest) } : {}),
+        ...(step.trialOnly ? { pr_runs: ['fail', compareOn(rerun), ...prConfirm.map(compareOn)], base_runs: [baseRun, ...baseConfirm.map(compareOn)] } : {}),
         command: (step.cmd ?? []).join(' '), log_tail: evidenceTail(r, named ? test : null), log_file: join(evDir, 'h1/logs', `${stepId}.log`),
         ...(!misattribOff && r?.checkReasons?.length ? { check_reasons: r.checkReasons } : {}),
-        ...(step.trialOnly ? { machine_load: { first_run: r?.machine ?? null, rerun_wait: out.rerun_idle_wait ?? null, rerun: rerun?.find((y) => y.id === stepId)?.machine ?? null } } : {}),
+        ...(step.trialOnly ? { machine_load: {
+          first_run: r?.machine ?? null, rerun_wait: out.rerun_idle_wait ?? null, rerun: rerun?.find((y) => y.id === stepId)?.machine ?? null,
+          ...(prConfirm[0] ? { h3_wait: trialConfirmWait.h3 ?? null, h3: prConfirm[0].find((y) => y.id === stepId)?.machine ?? null } : {}),
+          ...(baseConfirm[0] ? { b2_wait: trialConfirmWait.b2 ?? null, b2: baseConfirm[0].find((y) => y.id === stepId)?.machine ?? null } : {}),
+          ...(baseConfirm[1] ? { b3_wait: trialConfirmWait.b3 ?? null, b3: baseConfirm[1].find((y) => y.id === stepId)?.machine ?? null } : {}),
+        } } : {}),
         ...(baseComparison?.compared ? { base_log_file: join(evDir, 'b/logs', `${stepId}.log`) } : {}),
       },
       ...(baseComparison ? { base_comparison: baseComparison } : {}),
@@ -565,6 +615,15 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
       : { reason: `check ${c.status}: not attributable to the PR author; QA re-runs / fixes the environment first`, reasonZh: `检查结果是 ${c.status}，不是作者的问题，QA 先自己查清（重跑、修环境）` }))
   }
   out.findings = [...out.failed_checks.filter((c) => !c.not_a_pr_finding && !c.low_memory && !QA_SELF_CHECK_STATUSES.includes(c.status)).map(asCheck), ...out.findings]
+  // decideOutcome 只看 h1/h2/b：试运行检查未凑满 3+3 时 failed_checks 已是 unverified，不能再把 PR 写成 defect
+  if (out.outcome === 'defect' && (decision.failureKeys ?? []).length) {
+    const introduced = new Set(out.failed_checks.filter((c) => c.status === 'introduced').map((c) => `${c.check_id}::${c.test ?? '*'}`))
+    const onlyUnconfirmedTrial = decision.failureKeys.every((key) => !introduced.has(key) && stepById[key.slice(0, key.indexOf('::'))]?.trialOnly)
+    if (onlyUnconfirmedTrial) {
+      out.outcome = 'needs_review'
+      out.outcome_reason = '试运行检查未达到「PR 与 base 各 3 次、PR 全失败且 base 全通过」的引入判定门槛，不能认定为这个 PR 引入的缺陷'
+    }
+  }
   out.severity = out.findings.length ? maxSev(out.findings.map((f) => f.severity)) : 'P3'
   if (out.pending_verification.length) out.pending_summary = pendingSummary(out.pending_verification)
   Object.assign(out, dimensionsOf(out.checks, out.skipped_steps))
