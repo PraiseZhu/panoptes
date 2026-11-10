@@ -185,11 +185,16 @@ def _err_out(r):
     t = (r.stderr or r.stdout).strip(); tail = t[-300:]
     extra = [l for l in t.splitlines() if l.lstrip().startswith("remote:") and l not in tail]
     return _redact(("\n".join(extra) + "\n" if extra else "") + tail)
+# 11-10 (#2022: 11 refused pushes on 11-09): the App has no `workflows` permission and never gets it, so a push that changes
+# .github/workflows/ fails the same way every time -> gave_up at once, not FAIL_GIVE_UP retries (prfix stops such fixes before this).
+WORKFLOW_REFUSED = re.compile(r"refusing to allow a GitHub App to create or update workflow")
 def run(cmd, **kw):
     cmd, env = _run_route(cmd)
     if env is not None and "env" not in kw: kw["env"] = env
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=600, **kw)
-    if r.returncode != 0: raise RuntimeError(f"{os.path.basename(cmd[0])} rc={r.returncode}: {_err_out(r)}")
+    if r.returncode != 0:
+        msg = f"{os.path.basename(cmd[0])} rc={r.returncode}: {_err_out(r)}"
+        raise (GiveUp if WORKFLOW_REFUSED.search(msg) else RuntimeError)(msg)
     return r.stdout
 def body_of(a):
     f = a.get("body_file")
@@ -989,7 +994,7 @@ def main():
             legacy_mute = (ledger.get(k) == {**ledger.get(k, {}), "status": "skipped", "reason": "praise-dm-mute"}   # pre-#153 record:
                            and k.startswith(BRIEF_ROUTED) and not os.path.exists(BRIEF_ROUTE_OFF()) and praise_dm_blocked(k))   # -> briefed branch below
             if ledger.get(k, {}).get("status") in TERMINAL and not legacy_mute and not (resend and not resend_blocker(ledger.get(k))) or a.get("status") == "done":
-                rows.append((job, k, t, "-", f"{ledger.get(k, {}).get('status', 'done')}(ledger)", ledger.get(k, {}).get("reason", ""))); continue
+                continue   # 11-10: listed once, in the run that set the status (SENT / GAVE_UP / ...), not again every run (rerun-ruled:2030 x139 on 11-09)
             is_merge = t.startswith("gh.pr.merge"); prev = ledger.get(k, {})
             if prev.get("status") == "sending":   # the previous run died mid-send (crash or VM snapshot fork)
                 if t.startswith(("slack.", "feishu.")) or t in RELAY_TYPES:

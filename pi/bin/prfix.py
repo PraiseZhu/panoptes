@@ -192,6 +192,10 @@ A_ALLOW = {"sensitive": False}   # --allow-sensitive: kept for old commands / DM
 # files is no longer a kind-5 stop. The files are listed at the top of the PR's risk section so the reviewer (审查机) and the merge
 # gate (humanOnlyPaths) see them; nothing here waits for Praise any more.
 def sensitive_files(files): return sorted(f for f in files if SENSITIVE_RE.search(f))
+# 11-10 (#2022, 11 refused pushes on 11-09): the App has no `workflows` permission (never added), so GitHub refuses any push that
+# changes .github/workflows/. Such a fix goes to a human at once (kind 5, needs_praise), before pre-push and never retried.
+def workflow_files(files): return sorted(f for f in files if f.startswith(".github/workflows/"))
+WORKFLOW_STOP = "改了 .github/workflows/（{}），App 没有 workflows 权限、推送必被拒：不重试，转人工"
 def gated_ruling(kind, c, wd, base, question, tag, step, **facts):
     """G2 + G3 around ruling(): -> (verdict | None, text, judged) ; judged False = decided without asking the judge now."""
     v, why = mechanical_ruling(kind, c, wd, base, **facts)
@@ -871,12 +875,12 @@ def apply_outcome(tk, out, now):
     return tk, notify
 
 def dm_action(kind, c, text_detail):
-    """kind 5 only (10-24 evening): the fix touches CI config / repo rules / secrets -- Praise decides."""
+    """kind 5 only: since 11-10 the one case is a fix that changes .github/workflows/ (the App cannot push it, WORKFLOW_STOP)."""
     n, fp, sev = c["qa"], c["fp"], c["sev"]; title = (c.get("title") or "")[:60]
-    it = PN.item("action", f"你的 PR #{n} 上的一个修复要动敏感文件，等你点头",
-                 f"#{n} 测出的 {sev} 问题「{title}」，修 PR bot 已经修好，但修复要改 CI 配置、仓库规则或密钥相关的文件（{text_detail[:200]}），按规则这类改动要你同意。",
-                 "你不点头，这个修复就不开 PR。",
-                 todo=[f"同意：跟会话说「跑 bin/run.sh prfix --qa {n} --fp {fp[:12]} --allow-sensitive」", "不同意：不用管，它不会再自动修这一条"],
+    it = PN.item("action", f"你的 PR #{n} 上的一个修复要改 workflow 文件，bot 推不上去，转人工",
+                 f"#{n} 测出的 {sev} 问题「{title}」，修 PR bot 已经修好，但修复要改 .github/workflows/（{text_detail[:200]}）。Praise QA App 没有 workflows 权限，推送会被 GitHub 拒绝，所以没开 PR，也不会重试。",
+                 "没人处理，这个修复就不开 PR。",
+                 todo=["要修：用有 workflows 权限的账号按证据里的补丁手动开 PR", "不修：不用管，它不会再自动修这一条"],
                  link=f"https://github.com/{REPO}/pull/{n}")
     return {"key": f"needs-praise:{n}:{fp}", "type": "slack.dm", "to": "Praise", "pr": n, "fingerprint": fp, "text": PN.text(it)[:1500]}
 
@@ -1670,6 +1674,7 @@ def fix_one(c, A, d):
         files, tests, src = split_files()
         prot = protected_files(files)   # gate files: hard stop, --allow-sensitive does not apply
         if prot: raise Deterministic(f"修复要改闸门文件（PROTECTED_RE），硬停不开 PR：{prot[:5]}")
+        if workflow_files(files): raise PraiseNeeded("修复" + WORKFLOW_STOP.format(", ".join(workflow_files(files)[:3])))
         res["sensitive"] = sensitive_files(files)
         if res["sensitive"]: step(f"修复改了 CI 配置 / 仓库规则 / 密钥相关的文件（放行，PR 里标出交审查机把关）：{', '.join(res['sensitive'][:4])}", True)
         ptype = "docs" if src and all(f.endswith(".md") or f.startswith("docs/") for f in src) else "fix"
@@ -2048,11 +2053,11 @@ def finding_of(qa, fp):
     return {}
 
 def revise_dm(n, qa, fp, head, why):
-    """kind 5 only: the CI fix touches CI config / repo rules / secrets."""
-    it = PN.item("action", f"修复 PR #{n} 的 CI 修正要动敏感文件，等你点头",
-                 f"修 PR bot 为 #{qa} 开的修复 PR #{n}（草稿）CI 没过，bot 已经修好，但修正要改 CI 配置、仓库规则或密钥相关的文件（{why[:200]}）。",
-                 f"你不点头，这个修复 PR 就一直红着。",
-                 todo=[f"同意：跟会话说「跑 bin/run.sh prfix --revise {n} --allow-sensitive」", "不同意：不用管"],
+    """kind 5 only: since 11-10 the one case is a CI fix that changes .github/workflows/ (the App cannot push it, WORKFLOW_STOP)."""
+    it = PN.item("action", f"修复 PR #{n} 的 CI 修正要改 workflow 文件，bot 推不上去，转人工",
+                 f"修 PR bot 为 #{qa} 开的修复 PR #{n}（草稿）CI 没过，bot 已经修好，但修正要改 .github/workflows/（{why[:200]}）。Praise QA App 没有 workflows 权限，推送会被拒绝，不会重试。",
+                 f"没人处理，这个修复 PR 就一直红着。",
+                 todo=["要修：用有 workflows 权限的账号手动推这个修正", "不修：不用管"],
                  link=f"https://github.com/{REPO}/pull/{n}")
     return {"key": f"revise-needs-praise:{n}:{head[:12]}", "type": "slack.dm", "to": "Praise", "pr": n, "qa": qa, "fingerprint": fp, "text": PN.text(it)[:1500]}
 
@@ -2326,6 +2331,7 @@ def revise_one(A, d, n, qa, fp, p, red):
         if stray: raise Deterministic(f"相对 PR head 改动了模型没碰过的文件，拒绝推送：{stray[:5]}")
         prot = protected_files(files)   # gate files: hard stop, --allow-sensitive does not apply
         if prot: raise Deterministic(f"CI 修正要改闸门文件（PROTECTED_RE），硬停不推送：{prot[:5]}")
+        if workflow_files(files): raise PraiseNeeded("CI 修正" + WORKFLOW_STOP.format(", ".join(workflow_files(files)[:3])))
         sens = sensitive_files(files)   # 10-25: no longer a stop (see A_ALLOW); the commit message names them for the reviewer
         if sens: step(f"CI 修正改了 CI 配置 / 仓库规则 / 密钥相关的文件（放行，交审查机把关）：{', '.join(sens[:4])}", True)
         title = f"fix: CI 没过的修正（{', '.join(names[:3])}）"[:120]
