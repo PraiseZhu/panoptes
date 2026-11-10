@@ -44,18 +44,33 @@ def p01_prs():
             if r["level"] in ("P0", "P1"): s.add(r["pr"])
     return s
 
+FP_MARK = re.compile(r"<!-- pi-line fixpr:(\d+):(mq1-[0-9a-f]{20})")   # prfix 写进正文的标记（prfix.PILINE_MARK）
+FP_HEAD = re.compile(r"fixpr-(\d+)-(mq1-[0-9a-f]{20})")                   # qa-fix/fixpr-<单号>-<指纹>[-a2] 分支名
+
+def fix_fps(p):
+    """QA 单号 -> 这个 PR 修的问题指纹集合。只认 pi-line 标记和分支名（正文别处提到的 mq1- 不算）"""
+    out = {}
+    for q, fp in FP_MARK.findall(p.get("body") or "") + FP_HEAD.findall(p.get("headRefName") or ""): out.setdefault(int(q), set()).add(fp)
+    return out
+
 def merged_refs():
-    """QA 单号 -> 修掉它的已合并 PraiseZhu PR 号（最近 100 个）"""
+    """(QA 单号, 指纹) -> 修掉它的已合并 PraiseZhu PR 号（最近 100 个）；没有指纹的已合并 PR 记 (单号, None)"""
     out = {}
     try:
-        for p in self_pr_list(REPO, "merged", "number,body", run=gh):
-            for r in re.findall(r"QA[:：]\s*#(\d+)", p.get("body") or ""): out.setdefault(int(r), p["number"])
+        for p in self_pr_list(REPO, "merged", "number,body,headRefName", run=gh):
+            fps = fix_fps(p)
+            for r in re.findall(r"QA[:：]\s*#(\d+)", p.get("body") or ""):
+                for fp in sorted(fps.get(int(r)) or [None]): out.setdefault((int(r), fp), p["number"])
     except Exception: pass
     return out
 
 def superseded(p, refs, fixed):
-    """open PR 的 QA 单号全都已被别的已合并 PR 修掉"""
-    return bool(refs) and all(r in fixed and fixed[r] != p["number"] for r in refs)
+    """-> 取代它的已合并 PR 号列表（空 = 没被取代）。11-10：按问题指纹比，不按 QA 单号（#2056 mq1-d966f735 不被同单号 #2012 的
+    #2063 mq1-3a05907e 取代）；open PR 某个单号没有指纹 -> 保守，不判取代（照催）"""
+    fps = fix_fps(p)
+    keys = [(r, fp) for r in refs for fp in sorted(fps.get(r, ()))]
+    if not refs or any(r not in fps for r in refs) or not all(k in fixed and fixed[k] != p["number"] for k in keys): return []
+    return sorted({fixed[k] for k in keys})
 
 def draft_since(n, created):
     try:
@@ -255,14 +270,15 @@ def main(argv=None):
                      if re.search(r"QA[:：]\s*#\d+", p.get("body") or "")]
         except Exception as e: log("pmnudge: kiro 的 PR 列表读取失败，本轮只看 PraiseZhu：", str(e)[:200])
     nof, p01 = nofix_prs(), p01_prs()
-    fixed = merged_refs()   # 10-28：QA 单号已被合并的修复 PR 修掉 -> 这个 draft 是重复 / 被取代的，不催（#1343 被 #1345 取代）
+    fixed = merged_refs()   # 10-28：QA 单号已被合并的修复 PR 修掉（11-10 起按 (单号, 指纹) 比） -> 这个 draft 是重复 / 被取代的，不催（#1343 被 #1345 取代）
     qa, skip = [], []
     for p in prs:
         refs = [int(x) for x in re.findall(r"QA[:：]\s*#(\d+)", p.get("body") or "")]
         if not refs: continue
         if re.search(r"keel|lifeline", (p.get("headRefName") or "") + " " + p["title"], re.I): skip.append(f"#{p['number']} keel/lifeline 叠加链"); continue
         if only_nofix(refs, p.get("body"), nof, p01): skip.append(f"#{p['number']} 只关联判「不修」的 P2（{refs}）"); continue
-        if superseded(p, refs, fixed): skip.append(f"#{p['number']} 被已合并的 {'、'.join(sorted(set('#' + str(fixed[r]) for r in refs)))} 取代"); continue
+        sup = superseded(p, refs, fixed)
+        if sup: skip.append(f"#{p['number']} 被已合并的 {'、'.join('#' + str(x) for x in sup)} 取代"); continue
         p["refs"] = refs; qa.append(p)
     st = lambda c: (c.get("conclusion") or c.get("state") or c.get("status") or "").upper()
     nm = lambda c: c.get("name") or c.get("context") or "?"
