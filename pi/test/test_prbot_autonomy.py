@@ -133,7 +133,7 @@ class TestRevise(GitTmp):
         prfix.failed_check_logs = lambda checks, cap=12000: "Error: expected '/' got '\\\\' (windows path)"
         prfix.load_reports = lambda: {1178: report(1178, "PraiseZhu", [finding(A, file="src/foo.js", line=1)])}
         prfix.takeover = lambda name: True; prfix.mem_gb = lambda: 8.0
-        self.pr = {"number": 1301, "state": "OPEN", "isDraft": True, "author": {"login": "PraiseZhu"}, "headRefName": self.BR,
+        self.pr = {"number": 1301, "state": "OPEN", "isDraft": True, "author": {"login": "PraiseZhu"}, "headRefName": self.BR, "baseRefName": "main",
                    "headRefOid": self.head, "title": "fix: x (QA #1178)", "body": f"QA: #1178\n{A}\n<!-- pi-line fixpr:1178:{A} -->",
                    "statusCheckRollup": [{"name": "unit (windows, 2)", "conclusion": "FAILURE", "detailsUrl": "https://github.com/x/y/actions/runs/9/job/1"},
                                          {"name": "review-pr", "conclusion": "FAILURE"}]}
