@@ -10,10 +10,14 @@
       backs up PR-N.json to PR-N.json.bak-<YYYYMMDD>-calibration, then sets the finding's severity and appends a
       calibration record (pr.calibrations[]). --fingerprint selects a check finding with no title (exact mq1-…).
       --match and/or --fingerprint; both together AND. Then recomputes like the Grok line's manual calibration (PR-1145, 10-22):
-      pr.severity, pr.verdict (needs-attention/review-suggested/clean, plus partially-verified when e2e-browser is
-      unavailable instead of clean; other verdicts left + flagged), summary
-      prs_by_severity/findings_by_severity, and when no unrejected code-review P0/P1 remains: code_review.status/gate
-      → passed with gate.calibrated_from and verdict.status passed.
+      pr.severity, pr.verdict (needs-attention/review-suggested/clean, plus partially-verified when leftover is P3 but
+      pending_verification is non-empty, a check is unavailable/timeout, dimensions are missing, or code_review is
+      capped — same arms as nightly.verdictOf; other verdicts left + flagged), pr.test_backed / test_backed_severity
+      / finding_sources (same as nightly.annotateTestBacked; 误报 findings are excluded from the PR-level aggregates),
+      summary prs_by_severity/findings_by_severity/test_backed_findings_by_severity/prs_test_backed, and when no
+      unrejected code-review P0/P1 remains: code_review.status/gate → passed with gate.calibrated_from and
+      verdict.status passed. outcome, outcome_reason and pending_verification are left as they are (not derived
+      from finding severity). --reports-dir reads/writes PR-N.json from that directory instead of production reports.
   opsfix.py retest [--day YYYY-MM-DD | --since ISO] [--pr N ...] [--execute] [--max-model 12] [--keep] [--wait-lock S] [--no-handoff]
       Fix-PR original-case retest; logic + write-back format in opsfix_retest.py. Default dry-run (plan only).
       Scope (10-23): fix PRs (body "QA: #N") merged after the last successful run — watermark + done/retry sets in
@@ -62,6 +66,46 @@ SEV = ["P0", "P1", "P2", "P3"]
 VERDICT = {"P1": "needs-attention", "P2": "review-suggested"}
 def e2e_browser_unavailable(pr):
     return any(c.get("id") == "e2e-browser" and c.get("status") == "unavailable" for c in pr.get("checks") or [])
+# Mirrors argus/src/nightly.mjs:1686-1700 (TEST_BACKED_STATUSES / checkIsTestBacked / isTestBacked / annotateTestBacked).
+# A failed-check finding is test-backed only for introduced / pre-existing / fixed-later (or a missing status on very
+# old reports); flaky / unverified / timeout / setup-failed are not. Other sources keep the stored boolean.
+TEST_BACKED_STATUSES = ("introduced", "pre-existing", "fixed-later")
+def check_is_test_backed(c):
+    return c.get("flaky") is not True and (c.get("status") is None or c.get("status") in TEST_BACKED_STATUSES)
+def is_test_backed(f):
+    if (f.get("source") or "check") == "check":
+        return check_is_test_backed(f) and f.get("test_backed") is not False
+    return f.get("test_backed") is True
+def live_finding(x):
+    return (x.get("calibration") or {}).get("to") != "误报"
+def annotate_test_backed(pr):
+    """Set finding.test_backed and PR-level test_backed / test_backed_severity / finding_sources.
+    Same as nightly.annotateTestBacked, except findings calibrated to 误报 stay in findings[] but
+    are excluded from the PR-level aggregates (the same live set recompute uses for severity)."""
+    fs = pr.get("findings") or []
+    for f in fs:
+        if not f.get("source"): f["source"] = "check"
+        f["test_backed"] = is_test_backed(f)
+    backed = [f for f in fs if f.get("test_backed") and live_finding(f)]
+    pr["test_backed"] = bool(backed)
+    pr["test_backed_severity"] = min((f.get("severity") for f in backed if f.get("severity") in SEV), key=SEV.index, default=None)
+    pr["finding_sources"] = list(dict.fromkeys(f.get("source") for f in fs if f.get("source")))
+    return pr
+def verdict_of(pr):
+    """Mirrors nightly.verdictOf (nightly.mjs:1248-1258), ignoring findings calibrated to 误报."""
+    if pr.get("outcome") == "infra_failed": return "qa-env-problem"
+    live = [x for x in pr.get("findings") or [] if live_finding(x)]
+    if any(x.get("severity") in ("P0", "P1") for x in live): return "needs-attention"
+    if any(x.get("severity") == "P2" for x in live): return "review-suggested"
+    if pr.get("pending_verification"): return "partially-verified"
+    if any(c.get("status") in ("unavailable", "timeout") for c in pr.get("checks") or []): return "partially-verified"
+    if pr.get("dimensions_missing"): return "partially-verified"
+    if (pr.get("code_review") or {}).get("status") == "capped": return "partially-verified"
+    return "clean"
+def reports_merged(a=None):
+    """calibrate input/output dir. --reports-dir wins; otherwise the production RPT from lib.py."""
+    d = getattr(a, "reports_dir", None) if a is not None else None
+    return d or RPT
 def finding_hits(findings, match=None, fingerprint=None):
     """Select findings for calibrate: exact fingerprint and/or title substring. Either or both; both AND."""
     hits = list(findings or [])
@@ -69,19 +113,22 @@ def finding_hits(findings, match=None, fingerprint=None):
     if match: hits = [x for x in hits if match in (x.get("title") or "")]
     return hits
 def recompute(d, pr):
-    """PR-level fields after a finding-level calibration; returns list of notes. Pure (mutates d only)."""
+    """PR-level fields after a finding-level calibration; returns list of notes. Pure (mutates d only).
+    Recomputes severity, verdict, test_backed / test_backed_severity / finding_sources, and the
+    summary counts that follow from them. Does not rewrite outcome, outcome_reason, or
+    pending_verification: those are decided from check runs / QA-self-check status, not from
+    finding severity (nightly.mjs:482-484, 610-626, 1248-1258)."""
     notes = []; fs = pr.get("findings", [])
-    live = [x for x in fs if not (x.get("calibration") or {}).get("to") == "误报"]
+    live = [x for x in fs if live_finding(x)]
     sev = min((x.get("severity") for x in live if x.get("severity") in SEV), key=SEV.index, default="P3")
     old_s, old_v = pr.get("severity"), pr.get("verdict")
+    old_tbs, old_out = pr.get("test_backed_severity"), pr.get("outcome")
+    old_pv = len(pr.get("pending_verification") or [])
     pr["severity"] = sev
     if old_v in ("needs-attention", "review-suggested", "clean"):
-        others = [x for x in live if x.get("source") != "code-review" and x.get("severity") in ("P0", "P1", "P2")]
-        if VERDICT.get(sev): pr["verdict"] = VERDICT[sev]
-        elif not others and sev == "P3":
-            pr["verdict"] = "partially-verified" if e2e_browser_unavailable(pr) else "clean"
-        else: pr["verdict"] = old_v
+        pr["verdict"] = verdict_of(pr)
     elif old_s != sev: notes.append(f"verdict {old_v!r} not auto-mapped; check by hand")
+    annotate_test_backed(pr)
     cr = pr.get("code_review") or {}
     blocking = [x for x in fs if x.get("source") == "code-review" and x.get("severity") in ("P0", "P1")
                 and x.get("verdict") != "REJECTED" and (x.get("calibration") or {}).get("to") != "误报"]
@@ -103,12 +150,23 @@ def recompute(d, pr):
             for x in p.get("findings", []):
                 if x.get("severity") in c: c[x["severity"]] += 1
         sm["findings_by_severity"] = c
+    if "test_backed_findings_by_severity" in sm:
+        c = {k: 0 for k in SEV}
+        for p in d.get("prs", []):
+            for x in p.get("findings", []):
+                if x.get("test_backed") and live_finding(x) and x.get("severity") in c: c[x["severity"]] += 1
+        sm["test_backed_findings_by_severity"] = c
+    if "prs_test_backed" in sm:
+        sm["prs_test_backed"] = [p.get("number") for p in d.get("prs", []) if p.get("test_backed")]
     notes.append(f"PR {old_s}/{old_v} → {pr.get('severity')}/{pr.get('verdict')}; gate {((cr.get('gate') or {}).get('status'))}")
+    notes.append(f"test_backed_severity {old_tbs} → {pr.get('test_backed_severity')}")
+    notes.append(f"outcome {old_out} → {pr.get('outcome')} (not recomputed)")
+    notes.append(f"pending_verification {old_pv} → {len(pr.get('pending_verification') or [])} (not recomputed)")
     return notes
 def calibrate(a):
     match, fp = getattr(a, "match", None) or None, getattr(a, "fingerprint", None) or None
     if not match and not fp: sys.exit("need --match and/or --fingerprint")
-    f = f"{RPT}/PR-{a.pr}.json"; d = json.load(open(f))
+    f = f"{reports_merged(a)}/PR-{a.pr}.json"; d = json.load(open(f))
     pr = next(p for p in d["prs"] if p.get("number") == a.pr)
     hits = finding_hits(pr.get("findings", []), match, fp)
     label = " ".join(s for s in (repr(match) if match else "", f"fingerprint={fp}" if fp else "") if s)
@@ -136,6 +194,7 @@ c = s.add_parser("calibrate"); c.add_argument("--pr", type=int, required=True)
 c.add_argument("--match", help="finding title substring")
 c.add_argument("--fingerprint", help="finding fingerprint (mq1-...), for check findings with no title")
 c.add_argument("--to", required=True, choices=["P1", "P2", "P3", "误报"]); c.add_argument("--reason", required=True); c.add_argument("--apply", action="store_true")
+c.add_argument("--reports-dir", help="directory of PR-N.json (default: production reports/merged); use this to DRY a copy")
 r = s.add_parser("retest"); r.add_argument("--day"); r.add_argument("--pr", type=int, nargs="*")
 r.add_argument("--execute", action="store_true"); r.add_argument("--max-model", type=int, default=12); r.add_argument("--keep", action="store_true")
 r.add_argument("--since", help="ISO time; overrides the watermark in out/ops/retest-state.json")
