@@ -6,10 +6,12 @@
       skips if MemAvailable<3G; --rerun also re-tests PRs that have a report (old copy kept as history/PR-N.vK.json).
       Every run appends {pr, reason, cmd, rc} to reports/merged/manual-runs.jsonl.
       Alternative for yesterday+today: /workspace/mivo-qa/run-nightly.sh --catch-up --no-issues
-  opsfix.py calibrate --pr N --match "<finding title substring>" --to P2|P3|误报 --reason "..." [--apply]
+  opsfix.py calibrate --pr N [--match "<finding title substring>"] [--fingerprint mq1-...] --to P2|P3|误报 --reason "..." [--apply]
       backs up PR-N.json to PR-N.json.bak-<YYYYMMDD>-calibration, then sets the finding's severity and appends a
-      calibration record (pr.calibrations[]). Then recomputes like the Grok line's manual calibration (PR-1145, 10-22):
-      pr.severity, pr.verdict (only needs-attention/review-suggested/clean; others left + flagged), summary
+      calibration record (pr.calibrations[]). --fingerprint selects a check finding with no title (exact mq1-…).
+      --match and/or --fingerprint; both together AND. Then recomputes like the Grok line's manual calibration (PR-1145, 10-22):
+      pr.severity, pr.verdict (needs-attention/review-suggested/clean, plus partially-verified when e2e-browser is
+      unavailable instead of clean; other verdicts left + flagged), summary
       prs_by_severity/findings_by_severity, and when no unrejected code-review P0/P1 remains: code_review.status/gate
       → passed with gate.calibrated_from and verdict.status passed.
   opsfix.py retest [--day YYYY-MM-DD | --since ISO] [--pr N ...] [--execute] [--max-model 12] [--keep] [--wait-lock S] [--no-handoff]
@@ -58,6 +60,14 @@ def backfill(a):
                                           "at": now_cst().isoformat(timespec="seconds"), "by": "pi-line opsfix"}, ensure_ascii=False) + "\n")
 SEV = ["P0", "P1", "P2", "P3"]
 VERDICT = {"P1": "needs-attention", "P2": "review-suggested"}
+def e2e_browser_unavailable(pr):
+    return any(c.get("id") == "e2e-browser" and c.get("status") == "unavailable" for c in pr.get("checks") or [])
+def finding_hits(findings, match=None, fingerprint=None):
+    """Select findings for calibrate: exact fingerprint and/or title substring. Either or both; both AND."""
+    hits = list(findings or [])
+    if fingerprint: hits = [x for x in hits if x.get("fingerprint") == fingerprint]
+    if match: hits = [x for x in hits if match in (x.get("title") or "")]
+    return hits
 def recompute(d, pr):
     """PR-level fields after a finding-level calibration; returns list of notes. Pure (mutates d only)."""
     notes = []; fs = pr.get("findings", [])
@@ -67,7 +77,10 @@ def recompute(d, pr):
     pr["severity"] = sev
     if old_v in ("needs-attention", "review-suggested", "clean"):
         others = [x for x in live if x.get("source") != "code-review" and x.get("severity") in ("P0", "P1", "P2")]
-        pr["verdict"] = VERDICT.get(sev) or ("clean" if not others and sev == "P3" else old_v)
+        if VERDICT.get(sev): pr["verdict"] = VERDICT[sev]
+        elif not others and sev == "P3":
+            pr["verdict"] = "partially-verified" if e2e_browser_unavailable(pr) else "clean"
+        else: pr["verdict"] = old_v
     elif old_s != sev: notes.append(f"verdict {old_v!r} not auto-mapped; check by hand")
     cr = pr.get("code_review") or {}
     blocking = [x for x in fs if x.get("source") == "code-review" and x.get("severity") in ("P0", "P1")
@@ -93,21 +106,24 @@ def recompute(d, pr):
     notes.append(f"PR {old_s}/{old_v} → {pr.get('severity')}/{pr.get('verdict')}; gate {((cr.get('gate') or {}).get('status'))}")
     return notes
 def calibrate(a):
+    match, fp = getattr(a, "match", None) or None, getattr(a, "fingerprint", None) or None
+    if not match and not fp: sys.exit("need --match and/or --fingerprint")
     f = f"{RPT}/PR-{a.pr}.json"; d = json.load(open(f))
     pr = next(p for p in d["prs"] if p.get("number") == a.pr)
-    hits = [x for x in pr.get("findings", []) if a.match in (x.get("title") or "")]
-    if len(hits) != 1: sys.exit(f"need exactly 1 finding matching {a.match!r}, got {len(hits)}")
+    hits = finding_hits(pr.get("findings", []), match, fp)
+    label = " ".join(s for s in (repr(match) if match else "", f"fingerprint={fp}" if fp else "") if s)
+    if len(hits) != 1: sys.exit(f"need exactly 1 finding matching {label}, got {len(hits)}")
     x = hits[0]; old = x.get("severity")
-    print(f"#{a.pr} '{x.get('title')}' {old} → {a.to}")
+    print(f"#{a.pr} '{x.get('title') or x.get('fingerprint')}' {old} → {a.to}")
     if not a.apply:
         import copy; d2 = copy.deepcopy(d); p2 = next(p for p in d2["prs"] if p.get("number") == a.pr)
-        x2 = next(y for y in p2["findings"] if a.match in (y.get("title") or ""))
+        x2 = finding_hits(p2.get("findings", []), match, fp)[0]
         x2["severity"] = "P3" if a.to == "误报" else a.to; x2["calibration"] = {"to": a.to}
         print("DRY (use --apply):", "; ".join(recompute(d2, p2))); return
     bak = f"{f}.bak-{now_cst():%Y%m%d}-calibration"
     if not os.path.exists(bak): shutil.copy2(f, bak); print("backup", bak)
     x["severity"] = "P3" if a.to == "误报" else a.to
-    rec = {"finding": x.get("id") or x.get("title"), "from": old, "to": a.to, "reason": a.reason,
+    rec = {"finding": x.get("id") or x.get("title") or x.get("fingerprint"), "from": old, "to": a.to, "reason": a.reason,
            "at": now_cst().isoformat(timespec="seconds"), "by": "Mivo QA 运维 (pi-line)"}
     x["calibration"] = rec; pr.setdefault("calibrations", []).append(rec)
     for note in recompute(d, pr): print(note)
@@ -116,7 +132,9 @@ ap = argparse.ArgumentParser(); s = ap.add_subparsers(dest="cmd", required=True)
 b = s.add_parser("backfill"); b.add_argument("--from", dest="from_", required=True); b.add_argument("--to")
 b.add_argument("--pr", type=int, nargs="*"); b.add_argument("--reason", required=True)
 b.add_argument("--execute", action="store_true"); b.add_argument("--rerun", action="store_true")
-c = s.add_parser("calibrate"); c.add_argument("--pr", type=int, required=True); c.add_argument("--match", required=True)
+c = s.add_parser("calibrate"); c.add_argument("--pr", type=int, required=True)
+c.add_argument("--match", help="finding title substring")
+c.add_argument("--fingerprint", help="finding fingerprint (mq1-...), for check findings with no title")
 c.add_argument("--to", required=True, choices=["P1", "P2", "P3", "误报"]); c.add_argument("--reason", required=True); c.add_argument("--apply", action="store_true")
 r = s.add_parser("retest"); r.add_argument("--day"); r.add_argument("--pr", type=int, nargs="*")
 r.add_argument("--execute", action="store_true"); r.add_argument("--max-model", type=int, default=12); r.add_argument("--keep", action="store_true")
