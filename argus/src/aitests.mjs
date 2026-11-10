@@ -5,7 +5,7 @@ import { aiUsageToday, addAiUsage } from './db.mjs'
 import { globToRegExp, TEST_HELPER_RE } from './classify.mjs'
 import { toDimensionLabel, stepExercises } from './matrix.mjs'
 import { prTestDimensions } from './pr-tests.mjs'
-import { redact, toShanghaiDay, truncate, jsonObjectBody } from './util.mjs'
+import { redact, toShanghaiDay, truncate, jsonObjectBody, log } from './util.mjs'
 import { toChatCompletionsUrl, fetchRetryingNetwork, isNetworkError } from './util.mjs'
 
 const MODEL = 'openai/gpt-6-luna'
@@ -157,32 +157,51 @@ export async function generateTargetedTests({ db, secrets, riskClass, pr, files,
     '按系统提示的格式只输出一个 json 对象。',
   ].filter((x) => x != null).join('\n\n'))
   try {
+    const attempts = []
     const request = async (maxCompletionTokens) => {
-      const body = jsonObjectBody({ model: MODEL, reasoning_effort: EFFORT[riskClass], response_format: { type: 'json_object' }, max_completion_tokens: maxCompletionTokens, messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: user }] })
-      const resp = await fetchRetryingNetwork(fetchImpl, toChatCompletionsUrl(secrets.ARGUS_LLM_BASE_URL), () => ({
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${secrets.ARGUS_LLM_API_KEY}` },
-        body,
-        signal: AbortSignal.timeout(Math.max(30_000, Math.floor(Number(timeoutMs)) || 30_000)),
-      }), { delayMs: netRetryDelayMs, sleep, deadline })
-      const data = await resp.json().catch(() => ({}))
-      if (quota) quota.consume('ai-test', data?.usage?.total_tokens ?? 0)
-      else addAiUsage(db, day, data?.usage?.total_tokens ?? 0)
-      return { resp, data }
+      const started = Date.now()
+      const record = (fields) => {
+        attempts.push({ status: null, finish_reason: null, total_tokens: null, ms: Date.now() - started, timed_out: false, ...fields })
+      }
+      try {
+        const body = jsonObjectBody({ model: MODEL, reasoning_effort: EFFORT[riskClass], response_format: { type: 'json_object' }, max_completion_tokens: maxCompletionTokens, messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: user }] })
+        const resp = await fetchRetryingNetwork(fetchImpl, toChatCompletionsUrl(secrets.ARGUS_LLM_BASE_URL), () => ({
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${secrets.ARGUS_LLM_API_KEY}` },
+          body,
+          signal: AbortSignal.timeout(Math.max(30_000, Math.floor(Number(timeoutMs)) || 30_000)),
+        }), { delayMs: netRetryDelayMs, sleep, deadline })
+        const data = await resp.json().catch(() => ({}))
+        if (quota) quota.consume('ai-test', data?.usage?.total_tokens ?? 0)
+        else addAiUsage(db, day, data?.usage?.total_tokens ?? 0)
+        const parsed = parseModelJson(data)
+        record({ status: resp.status, finish_reason: parsed.finish_reason ?? null, total_tokens: data?.usage?.total_tokens ?? null })
+        return { resp, data, parsed }
+      } catch (err) {
+        record({ timed_out: err?.name === 'TimeoutError' || err?.name === 'AbortError' })
+        throw err
+      }
     }
-    let { resp, data } = await request(MAX_COMPLETION_TOKENS)
-    if (!resp.ok) return { status: 'error', reasonZh: `模型网关返回 ${resp.status}`, tests: [] }
-    let parsed = parseModelJson(data)
+    const done = (fields) => ({ ...fields, attempts, ...(attempts.length > 1 ? { retried: true } : {}) })
+    const logRetry = () => { if (attempts.length > 1) log('info', 'aitests length retry', { first: attempts[0], second: attempts[1] }) }
+    let { resp, data, parsed } = await request(MAX_COMPLETION_TOKENS)
+    if (!resp.ok) return done({ status: 'error', reasonZh: `模型网关返回 ${resp.status}`, tests: [] })
     if (!parsed.ok && parsed.finish_reason === 'length') {
-      ({ resp, data } = await request(LENGTH_RETRY_MAX_COMPLETION_TOKENS))
-      if (!resp.ok) return { status: 'error', reasonZh: `模型网关返回 ${resp.status}`, tests: [] }
-      parsed = parseModelJson(data)
+      try {
+        ({ resp, data, parsed } = await request(LENGTH_RETRY_MAX_COMPLETION_TOKENS))
+      } catch (err) {
+        logRetry()
+        const network = isNetworkError(err)
+        return done({ status: 'error', ...(network ? { retryable: true, network: true } : {}), reasonZh: `length 重试请求失败：${redact(err.message).slice(0, 80)}`, tests: [] })
+      }
+      logRetry()
+      if (!resp.ok) return done({ status: 'error', reasonZh: `length 重试请求失败：模型网关返回 ${resp.status}`, tests: [] })
     }
-    if (!parsed.ok) return { status: 'error', retryable: parsed.finish_reason !== 'length', reasonZh: parsed.reasonZh, finish_reason: parsed.finish_reason, usage: data?.usage ?? null, model: MODEL, tests: [] }
+    if (!parsed.ok) return done({ status: 'error', retryable: parsed.finish_reason !== 'length', reasonZh: parsed.reasonZh, finish_reason: parsed.finish_reason, usage: data?.usage ?? null, model: MODEL, tests: [] })
     const raw = parsed.value
     const tests = toValidTests(raw, { profile, gaps, maxTests, uncovered, handoffIds: handoffCases.map((c) => c.id) })
     const offered = Array.isArray(raw?.tests) ? raw.tests.length : 0
-    return { status: tests.length ? 'ok' : 'empty', reasonZh: tests.length ? null : 'AI 没写出可用的测试', tests, offered, rejected_by_validation: Math.max(0, offered - tests.length), usage: data?.usage ?? null, model: MODEL }
+    return done({ status: tests.length ? 'ok' : 'empty', reasonZh: tests.length ? null : 'AI 没写出可用的测试', tests, offered, rejected_by_validation: Math.max(0, offered - tests.length), usage: data?.usage ?? null, model: MODEL })
   } catch (err) {
     // 原地重试 5 次后仍连不上网关（fetch failed / 连接被重置 / DNS 临时失败）：没用掉模型额度，还有调用次数就下一轮再试（夜间另补 1 轮，不计 maxCalls，见 nightly runAiTests）（#1008 10-17 重跑时遇到）；超时不重试
     const network = isNetworkError(err)

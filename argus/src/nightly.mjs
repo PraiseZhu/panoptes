@@ -707,7 +707,7 @@ export async function runAiTests({ out, repo, pr, files, profile, riskClass, sha
     const called = !['skipped'].includes(gen.status) && !gen.network
     if (called) ai.model_calls++
     if (gen.model) ai.model = gen.model
-    const rr = { round, gaps: [...remaining], status: gen.status, reason: gen.reasonZh ?? null, offered: gen.offered ?? 0, rejected_by_validation: gen.rejected_by_validation ?? 0, tokens: gen.usage?.total_tokens ?? null, tests: [] }
+    const rr = { round, gaps: [...remaining], status: gen.status, reason: gen.reasonZh ?? null, offered: gen.offered ?? 0, rejected_by_validation: gen.rejected_by_validation ?? 0, tokens: gen.usage?.total_tokens ?? null, tests: [], ...(gen.attempts ? { attempts: gen.attempts } : {}), ...(gen.retried ? { retried: true } : {}) }
     ai.rounds.push(rr)
     // 可重试的模型错误（空内容 / 半截 JSON）：还有调用次数就再试一轮；之后有一轮写出了测试就不算 QA 故障（rounds 里仍留记录）
     if (gen.status === 'error' && gen.retryable) pendingLlmErrors.push({ pr: number, stage: 'ai-tests', model: gen.model ?? null, message: gen.reasonZh })
