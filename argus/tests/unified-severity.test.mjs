@@ -52,10 +52,12 @@ function fakeReader(files = {}) {
 const scripted = (acts) => { let i = 0; const seen = []; const fn = async ({ messages }) => { seen.push(messages); return { ok: true, json: acts[Math.min(i++, acts.length - 1)], tokens: 5, model: 'm' } }; fn.seen = seen; return fn }
 
 // ── 钉住副本 ─────────────────────────────────────────────
-test('统一分级：config/severity.md 与锁文件的 sha256 一致（= Review-PR 651265f 的 eced0dee…），版本是 sha256 前 12 位', () => {
+test('统一分级：config/severity.md 与锁文件的 sha256 一致（= Review-PR #222 / f949413 的 8eb0ed55b718…），版本是 sha256 前 12 位', () => {
   const std = S.loadSeverityStandard({ fresh: true })
-  assert.equal(std.sha256, 'eced0deeeaa83fa8b3324d2a1a86436c21f4b33d4f2f4fa099b5f18ed0f328c5')
-  assert.equal(std.version, 'eced0deeeaa8')
+  assert.equal(std.sha256, '8eb0ed55b7188677215e93370f26b8a32674b9eedd357218514115686ebbd45e')
+  assert.equal(std.version, '8eb0ed55b718')
+  assert.match(std.text, /故意写坏的输入能绕过检查或骗过校验器/)
+  assert.match(std.text, /明确承诺了这项检查的除外/)
   assert.equal(std.source_repo, 'PraiseZhu/Review-PR')
   assert.equal(std.path, 'mivo/config/severity.md')
   assert.match(std.text, /P2 必修的三类/)
@@ -228,7 +230,7 @@ test('合并前裁定：盯梢核实「不需要改代码」、维护者「维�
   ]
   const threads = R.threadsFromReviewComments(comments)
   assert.equal(threads.length, 4)
-  const { rulings, rejected } = R.collectPriorRulings({ threads, reviewer: 'PraiseZhu', maintainers: ['aj0928', 'PraiseZhu'], standardVersion: 'eced0deeeaa8' })
+  const { rulings, rejected } = R.collectPriorRulings({ threads, reviewer: 'PraiseZhu', maintainers: ['aj0928', 'PraiseZhu'], standardVersion: '8eb0ed55b718' })
   assert.deepEqual(rulings.map((r) => [r.path, r.kind, r.verdict]).sort(), [[F1191.file, 'watcher', 'invalid-or-p3'], ['src/b.ts', 'maintainer', 'intended']].sort())
   assert.ok(rejected.some((r) => /分级版本/.test(r.reason)), 'mivo-ruling std 不是当前版本 → 拒收')
   assert.ok(rejected.some((r) => /不在维护者名单/.test(r.reason)))
@@ -347,7 +349,7 @@ test('覆盖率目标识别：只认写成目标的说法，不认对现状的�
 
 test('报告：severity_standard 指向钉住的原文，severity_scale 只有等级名称', () => {
   const ref = S.severityStandardRef()
-  assert.deepEqual([ref.status, ref.sha256.slice(0, 12), ref.ref.slice(0, 7)], ['pinned', 'eced0deeeaa8', '651265f'])
+  assert.deepEqual([ref.status, ref.sha256.slice(0, 12), ref.ref.slice(0, 7)], ['pinned', '8eb0ed55b718', 'f949413'])
   assert.equal(S.SEVERITY_LEVEL_NAMES.P1, 'P1 严重缺陷')
 })
 
@@ -366,7 +368,7 @@ test('system_health.severity_pin：每日比对的结果进报告；上游变了
 // sha256 小工具与 severity.mjs 一致
 test('severityVersion = sha256 前 12 位（与审查机 SEVERITY_VERSION、盯梢裁决 std= 同一算法）', () => {
   const buf = readFileSync(new URL('../config/severity.md', import.meta.url))
-  assert.equal(S.severityVersion(createHash('sha256').update(buf).digest('hex')), 'eced0deeeaa8')
+  assert.equal(S.severityVersion(createHash('sha256').update(buf).digest('hex')), '8eb0ed55b718')
 })
 
 // ── AI 补测线索：人确认后才从待核实移进 findings ───────────────────────

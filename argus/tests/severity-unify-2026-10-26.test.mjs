@@ -73,9 +73,9 @@ test('p0_candidate：已合并 + 引入的产品类失败 + 主干仍失败的�
   assert.deepEqual(built, JSON.parse(readFileSync(join(here, '../../pi/test/p0-candidate-report.json'), 'utf8')))
 })
 
-test('统一分级钉到 Review-PR 651265f，副本 sha256 不变', () => {
+test('统一分级钉到 Review-PR #222（f949413），副本 sha256 为 8eb0ed55b718…', () => {
   const lock = JSON.parse(readFileSync(join(here, '../config/severity.lock.json'), 'utf8'))
-  assert.equal(lock.ref, '651265ffb5baacef7866e6ad20b77eed30cfd791')
+  assert.equal(lock.ref, 'f949413dd3d32bd7d6efa1a8a7f59834acdf3f5f')
   assert.equal(createHash('sha256').update(readFileSync(join(here, '../config/severity.md'))).digest('hex'), lock.sha256)
-  assert.equal(lock.sha256, 'eced0deeeaa83fa8b3324d2a1a86436c21f4b33d4f2f4fa099b5f18ed0f328c5')
+  assert.equal(lock.sha256, '8eb0ed55b7188677215e93370f26b8a32674b9eedd357218514115686ebbd45e')
 })

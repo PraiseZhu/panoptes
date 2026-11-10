@@ -2,8 +2,8 @@
   "_doc": "测试侧 P0–P3 分级以审查机统一分级为准（Praise 2026-10-23）。config/severity.md 是下面这份文件的只读副本，按 sha256 钉住；不要手改副本。上游变了：scripts/check-severity-pin.mjs 每天比一次并在运维日志里报警，由人核对后改这里的 ref / sha256 并换副本。",
   "source_repo": "PraiseZhu/Review-PR",
   "path": "mivo/config/severity.md",
-  "ref": "651265ffb5baacef7866e6ad20b77eed30cfd791",
-  "ref_source": "xindong/mivo-canvas-plugin 仓库变量 MIVO_REVIEW_SKILL_SHA",
-  "sha256": "eced0deeeaa83fa8b3324d2a1a86436c21f4b33d4f2f4fa099b5f18ed0f328c5",
-  "pinned_at": "2026-10-23"
+  "ref": "f949413dd3d32bd7d6efa1a8a7f59834acdf3f5f",
+  "ref_source": "PraiseZhu/Review-PR #222 合入提交 f949413（Jasper 2026-11-10 决定采纳其中对 severity.md 新增的一行；当时 main 上该文件与此提交字节级相同）",
+  "sha256": "8eb0ed55b7188677215e93370f26b8a32674b9eedd357218514115686ebbd45e",
+  "pinned_at": "2026-11-10"
 }
