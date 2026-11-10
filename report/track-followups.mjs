@@ -18,7 +18,19 @@ function ghTargetRepo(args) {
   }
   return null
 }
-function ghExec(args, opts = {}) { return execFileSync('gh', args, { ...opts, env: ghEnvFor(args) }) }
+// 11-10: 11-09 15:27 the --group-overdue run hit followup.py's 900s kill (rc=1, no state / summary written, the 2 queued reminders
+// dropped): every gh call here is serial and had no timeout, so on a day GitHub kept dropping connections (mergewatch: 22
+// ls-remote failures on 11-09, 0 on 11-07/08) one stalled call could hold the run until the kill. Each call now has a timeout and
+// the run a gh budget below the caller's 900s: past either, the call fails like any gh error (that item goes to errors; the overdue
+// notice is held, "下次重跑"), so the run still ends normally and writes state + summary.
+const GH_TIMEOUT_MS = Number(process.env.MIVO_QA_GH_TIMEOUT_MS) || 60e3
+const GH_BUDGET_MS = Number(process.env.MIVO_QA_GH_BUDGET_MS) || 600e3
+const GH_T0 = Date.now()
+function ghExec(args, opts = {}) {
+  const left = GH_BUDGET_MS - (Date.now() - GH_T0)
+  if (left <= 0) throw new Error(`gh budget ${GH_BUDGET_MS}ms used up (MIVO_QA_GH_BUDGET_MS); not calling gh ${args.slice(0, 2).join(' ')}`)
+  return execFileSync('gh', args, { ...opts, env: ghEnvFor(args), timeout: Math.min(GH_TIMEOUT_MS, left), killSignal: 'SIGKILL' })
+}
 function ghEnvFor(args) {
   const tok = process.env.PRAISE_QA_GH_TOKEN, repos = (process.env.PRAISE_QA_GH_REPOS || '').split(',').filter(Boolean)
   const r = ghTargetRepo(args), own = process.env.PRAISE_QA_GH_OWN_TOKEN
@@ -145,12 +157,19 @@ let routesCfg = null
 try { routesCfg = loadRoutes() } catch { /* 读不到路由表就只认作者本人 */ }
 const respondersOf = (login) => { const r = login && routesCfg ? routeFor(login, routesCfg) : null; return [...new Set([login, r?.owner, ...(r?.cc ?? [])].filter(Boolean))] }
 const prCache = new Map()
+// a PR's changed files, fetched once per run: prCache is keyed per notice date, so before 11-10 the same author PR's files were
+// re-fetched for every DM'd item of that author (11-09: ~740 of ~900 gh calls, e.g. one PR up to 13 times)
+const filesCache = new Map()
+function prFiles(n) {
+  if (!filesCache.has(n)) filesCache.set(n, ghPaged(`repos/${REPO}/pulls/${n}/files?per_page=100`).map(f => f.filename))
+  return filesCache.get(n)
+}
 function authorPrsSince(login, since) {
   const k = `${login}|${since.slice(0, 10)}`
   if (!prCache.has(k)) {
     const list = gh(['pr', 'list', '-R', REPO, '--author', login, '--state', 'all', '--limit', '100',
       '--search', `created:>=${since.slice(0, 10)}`, '--json', 'number,title,body,createdAt,url,mergedAt'])
-    prCache.set(k, list.filter(p => p.createdAt > since).map(p => ({ ...p, files: ghPaged(`repos/${REPO}/pulls/${p.number}/files?per_page=100`).map(f => f.filename) })))
+    prCache.set(k, list.filter(p => p.createdAt > since).map(p => ({ ...p, files: prFiles(p.number) })))
   }
   return prCache.get(k)
 }
