@@ -626,11 +626,19 @@ export function coverageDirFor(step, runDir, execution) {
   return dir
 }
 
+// 没跑成的原因。不能直接取输出末行：e2e-browser 的 stdout 是 JSON 摘要，末行只有 "}"（11-07 起 reports/merged 里的 "}" 就是这么来的）。
+// 依次取：步骤报告里第一条没跑成检查的原因 → 输出里最后一条像报错的行（chromium / apt / E: …）→ 最后一条有字且不是 JSON 片段的行
+function toUnavailableReason(step, result, runDir) {
+  const fromReport = step.failureReport ? (readFailureReport(step.failureReport, runDir).checkReasons ?? []).find((c) => c.status === 'unavailable' && c.reason)?.reason : null
+  const lines = String(result.tail ?? '').split('\n').map((l) => l.trim()).filter((l) => /[\p{L}\p{N}]/u.test(l) && !/^[{}[\]"]/.test(l) && !l.startsWith('$ '))
+  const errorLine = lines.findLast((l) => /chrom|\bapt(-get)?\b|^E:\s|error|missing|not found|cannot|failed/i.test(l))
+  return toPlainZh(fromReport || errorLine || lines.at(-1) || '').slice(0, 120) || '检查没能启动'
+}
+
 // 步骤约定的「没跑成」退出码（例如浏览器或服务起不来）不算失败也不算通过；报告文件里的失败项覆盖从输出认出的用例名
 export function toStepOutcome(step, result, runDir) {
   if (!result.ok && !result.timedOut && (step.unavailableExitCodes ?? []).includes(result.exitCode)) {
-    const lastLine = String(result.tail ?? '').split('\n').map((l) => l.trim()).filter(Boolean).pop() ?? ''
-    Object.assign(result, { unavailable: true, unavailableReasonZh: toPlainZh(lastLine).slice(0, 120) || '检查没能启动', failures: [], failureDetails: [], failureParseStatus: 'incomplete' })
+    Object.assign(result, { unavailable: true, unavailableReasonZh: toUnavailableReason(step, result, runDir), failures: [], failureDetails: [], failureParseStatus: 'incomplete' })
     return result
   }
   if (step.failureReport && !result.ok) {
