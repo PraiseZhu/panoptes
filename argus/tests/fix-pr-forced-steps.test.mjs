@@ -23,6 +23,8 @@ test('toStepPlan：forceStepIds 里的可选步骤不被分诊跳过，其余照
 test('qaFixRefs：与 pm_extra.fix_refs 同规则', () => {
   assert.deepEqual(qaFixRefs({ number: 1742, title: 'fix', body: 'QA: #1490\nQA 来源：#12 QA #1490 fixes #9' }), [1490, 12])
   assert.deepEqual(qaFixRefs({ number: 1, title: 'chore: 更新日志补扫', body: 'QA #5' }), [])
+  assert.deepEqual(qaFixRefs({ number: 1742, title: 'fix', body: 'QA: xindong/mivo-canvas-plugin#1490' }), [1490])
+  assert.deepEqual(qaFixRefs({ number: 1742, title: 'fix', body: 'QA: other/repo#1490' }), [])
 })
 
 test('originalFailedSteps：读原报告 failed_checks[].check_id；原报告缺失 → 空', () => {

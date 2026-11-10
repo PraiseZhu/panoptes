@@ -1310,8 +1310,9 @@ export function checkUmask(health) {
 
 
 // ── 修复 PR：原报告失败过的步骤（分诊不得跳过，11-05 #1742 ← #1490 e2e-browser） ─────
-// 与 pi/bin/pm_extra.py fix_refs 同规则：正文/标题「QA: #N」「QA #N」「QA 来源：#N」「QA 对 #N」；标题含「更新日志」的不算
-const QA_REF_RE = /(?<![A-Za-z])QA\s*(?:来源|对)?\s*[:：]?\s*#(\d+)/g
+// 与 pi/bin/pm_extra.py:103 QA_REF / fix_refs 同规则：正文/标题「QA: #N」「QA #N」「QA 来源：#N」「QA 对 #N」
+// 以及「QA: xindong/mivo-canvas-plugin#N」（半角/全角冒号）。别的仓的 owner/repo#N 不算。标题含「更新日志」的不算。
+const QA_REF_RE = /(?<![A-Za-z])QA\s*(?:来源|对)?\s*[:：]?\s*(?:xindong\/mivo-canvas-plugin)?#(\d+)/g
 export function qaFixRefs(pr) {
   if (/更新日志/.test(pr?.title ?? '')) return []
   const all = [...String(pr?.title ?? '').matchAll(QA_REF_RE), ...String(pr?.body ?? '').matchAll(QA_REF_RE)].map((m) => Number(m[1]))

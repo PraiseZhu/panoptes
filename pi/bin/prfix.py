@@ -634,10 +634,11 @@ def times(c, reps):
 
 def qa_ref_re(n):
     """QA: #N / QA #N / QA#N / qa：#N, also right after Chinese text ("修复QA：#N"; \b would not match there), and since 10-24 one fix
-    PR for several reports: up to 8 non-# chars after QA, then a list of PR numbers split by / , ， 、 & 和
-    ("QA 回访 #904/#910/#898/#884", #918). Same rule as handoff.qa_ref and panoptes report/handoff-receipts.mjs qaRefRe."""
-    one = r"(?:[\w.-]+/[\w.-]+)?#"
-    return re.compile(rf"(?<![A-Za-z])QA[^#\n]{{0,8}}?(?:{one}[0-9]+(?![0-9])\s*[/,，、&和]\s*)*{one}{int(n)}(?![0-9])", re.I)
+    PR for several reports: up to 8 chars after QA that are not #, /, or a newline, then a list of PR numbers split by / , ， 、 & 和
+    ("QA 回访 #904/#910/#898/#884", #918). Same rule as handoff.qa_ref and panoptes report/handoff-receipts.mjs qaRefRe.
+    Only a bare #N or xindong/mivo-canvas-plugin#N counts; other owner/repo#N is rejected."""
+    one = r"(?:xindong/mivo-canvas-plugin)?#"
+    return re.compile(rf"(?<![A-Za-z])QA[^#/\n]{{0,8}}?(?:{one}[0-9]+(?![0-9])\s*[/,，、&和]\s*)*{one}{int(n)}(?![0-9])", re.I)
 def fmt_prs(ps): return " ".join(f"#{p['number']}({(p.get('state') or '?').lower()})" for p in ps)
 
 def ticket_view(t, now):

@@ -35,6 +35,10 @@ test('交接 issue 回执带上修复 PR 号与原因（台账据此认「已修
 test('「QA #原PR号」：QA #N / QA: #N / QA：#N / QA: owner/repo#N 都认；只写 #N 的不算统一格式（兜底规则另算）', () => {
   for (const t of ['QA #2000', 'QA: #2000', 'QA：#2000', 'qa:#2000', 'QA: xindong/mivo-canvas-plugin#2000']) assert.ok(qaRefRe(2000).test(t), t)
   for (const t of ['fix #2000', 'QA #20001', 'QA #200']) assert.ok(!qaRefRe(2000).test(t), t)
+  assert.ok(qaRefRe(2000).test('QA: xindong/mivo-canvas-plugin#2000'))
+  assert.ok(!qaRefRe(2000).test('QA: other/repo#2000'))
+  assert.deepEqual(qaRefs('QA: xindong/mivo-canvas-plugin#2000'), [2000])
+  assert.deepEqual(qaRefs('QA: other/repo#2000'), [])
   // 一个修复 PR 对应多份 QA 报告（2026-10-24 #918：「QA 回访 #904/#910/#898/#884」原来只认第一个号）
   const multi = 'fix: 修复 QA 回访 #904/#910/#898/#884 的四处问题'
   for (const pr of [904, 910, 898, 884]) assert.ok(qaRefRe(pr).test(multi), String(pr))
@@ -47,6 +51,14 @@ test('「QA #原PR号」：QA #N / QA: #N / QA：#N / QA: owner/repo#N 都认；
     { number: 2101, title: 'QA #2000 进行中', body: '', mergedAt: null, files: ['src/cache.ts'] },
     { number: 2102, title: 'QA #2000 只改文档', body: '', mergedAt: '2026-10-23T01:00:00Z', files: ['README.md'] }]
   assert.deepEqual(fixPrResolutions(prs, { pr: 2000, files: ['src/cache.ts'] }).map((r) => [r.fix_pr, r.kind, r.by]), [[2100, '已修', 'fix-pr-merged']])
+})
+
+test('qaRefRe / qaRefs 拒短的他仓前缀（间隔段不能吞掉 a/b、x/y）', () => {
+  const cases = [['QA: a/b#12', 12], ['QA: x/y#1089', 1089], ['QA 回访 a/b#904', 904]]
+  for (const [s, n] of cases) {
+    assert.ok(!qaRefRe(n).test(s), s)
+    assert.deepEqual(qaRefs(s), [], s)
+  }
 })
 
 test('作者口径：新报告 findings 都算；旧报告里的覆盖率 P2、未核实 AI 补测、flaky / unverified、PLAUSIBLE、qa-error、own-tests 不算', () => {
