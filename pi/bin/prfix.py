@@ -2010,7 +2010,7 @@ def run_ticket(A, ctx, vs):
 PILINE_MARK = re.compile(r"<!-- pi-line fixpr:(\d+):(mq1-[0-9a-f]{20})")
 REVISE_FLAG = "prfix-revise"
 BAD_CONCL = ("FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR")
-PR_VIEW = "number,state,isDraft,author,headRefName,headRefOid,body,title,statusCheckRollup,mergeStateStatus"
+PR_VIEW = "number,state,isDraft,author,headRefName,headRefOid,baseRefName,body,title,statusCheckRollup,mergeStateStatus"
 MAX_MERGES = 3          # --revise conflict rounds per PR (main moves; every round is a fresh merge of the current main)
 
 def red_checks(p):
@@ -2053,7 +2053,15 @@ def finding_of(qa, fp):
     return {}
 
 def revise_dm(n, qa, fp, head, why):
-    """kind 5 only: since 11-10 the one case is a CI fix that changes .github/workflows/ (the App cannot push it, WORKFLOW_STOP)."""
+    """kind 5 only: a CI fix that changes .github/workflows/ (the App cannot push it, WORKFLOW_STOP), or (11-10) a PR whose base
+    cannot be read or whose head already holds a wrong main merge (revise_base)."""
+    if "workflows" not in why:
+        it = PN.item("action", f"修复 PR #{n} 的 base 不对，bot 不再自动合，转人工",
+                     f"修 PR bot 为 #{qa} 开的修复 PR #{n}（草稿）停下了：{why[:300]}。bot 不会再合、不会重试。",
+                     "没人处理，这个修复 PR 就一直冲突、CI 不跑。",
+                     todo=["要修：按 PR 的 base 手动处理这个分支（退回合错之前的提交要 force-push，由人定）", "不修：不用管"],
+                     link=f"https://github.com/{REPO}/pull/{n}")
+        return {"key": f"revise-needs-praise:{n}:{head[:12]}", "type": "slack.dm", "to": "Praise", "pr": n, "qa": qa, "fingerprint": fp, "text": PN.text(it)[:1500]}
     it = PN.item("action", f"修复 PR #{n} 的 CI 修正要改 workflow 文件，bot 推不上去，转人工",
                  f"修 PR bot 为 #{qa} 开的修复 PR #{n}（草稿）CI 没过，bot 已经修好，但修正要改 .github/workflows/（{why[:200]}）。Praise QA App 没有 workflows 权限，推送会被拒绝，不会重试。",
                  f"没人处理，这个修复 PR 就一直红着。",
@@ -2130,9 +2138,27 @@ def revise(A):
     finally: unlock(lk)
 
 CONFLICT_MARK_RE = re.compile(r"(?m)^(?:<{7}|>{7})(?: |$)|^={7}$")
+WRONG_BASE_STOP = "head 已含 main 上 base {} 没有的提交（{} 不在 origin/{} 里，之前合错过 main）：不再自动合、不重试，转人工"
+def revise_base(p, br, head):
+    """call inside repo_lock(): fetch the PR's base (baseRefName), main and the PR branch -> (base_ref, origin/<base_ref> sha).
+    11-10 #2056: --revise merged origin/main into a PR on integration/cindy-media-phase2 (DIRTY, every pull_request check skipped).
+    No readable baseRefName -> a human, never a default main. A head that already holds main commits its base lacks (an earlier
+    wrong merge) -> a human, no merge, no retry (PraiseNeeded: one DM per head, then the ticket stops at needs_praise)."""
+    b = p.get("baseRefName")
+    if not b or not re.fullmatch(r"[A-Za-z0-9._/-]+", str(b)): raise PraiseNeeded(f"PR 的 base 读不出来（{b!r}）：不默认 main，转人工")
+    refs = [f"+refs/heads/{x}:refs/remotes/origin/{x}" for x in dict.fromkeys([b, "main", br])]
+    rc, o = git("fetch", "-q", "origin", *refs)
+    if rc: raise Transient(f"git fetch 失败 rc={rc}：{tail(o, 2)}")
+    if git("rev-parse", f"refs/remotes/origin/{br}")[1].strip() != head: raise Transient("PR 的 head 在这期间变了")
+    up = git("rev-parse", f"origin/{b}")[1].strip()
+    if b != "main":
+        mb = git("merge-base", "origin/main", head)[1].strip()
+        if mb and git("merge-base", "--is-ancestor", mb, f"origin/{b}")[0] == 1: raise PraiseNeeded(WRONG_BASE_STOP.format(b, mb[:9], b))
+    return b, up
+
 def revise_merge(A, d, n, qa, fp, p, red):
-    """Our own draft fix PR conflicts with main (DIRTY: GitHub runs no checks, update-branch cannot merge). Merge the current main
-    into the PR head here, let the model resolve the conflicts (keep main's changes AND the fix), re-run the PR's regression tests,
+    """Our own draft fix PR conflicts with its base (DIRTY: GitHub runs no checks, update-branch cannot merge). Merge the current base
+    (baseRefName, revise_base; 11-10: never a hard-coded main) into the PR head here, let the model resolve the conflicts (keep the base's changes AND the fix), re-run the PR's regression tests,
     the related tests and pre-push, then hand outbound a bundle with the merge commit (gh.pr.push-fix mode merge: plain push, a
     fast-forward of the PR branch). A clean local merge is committed as is."""
     head, br = p["headRefOid"], p["headRefName"]
@@ -2140,17 +2166,14 @@ def revise_merge(A, d, n, qa, fp, p, red):
     res = {"qa": qa, "sev": "", "fp": fp, "steps": [], "model": [], "base": None, "pred_pr": n, "wd": wd, "branch": None, "round": "merge"}
     out = {"status": "failed", "kind": "transient", "error": None, "action_key": None}
     created = False; ev = f"{OUT}/{d}-{tag}-merge{'-dry' if A.dry_run else ''}"
-    c = {"qa": qa, "fp": fp, "sev": "", "tag": tag, "title": f"修复 PR #{n} 跟 main 冲突：合入 main", "finding": {}, "source": "revise"}
+    c = {"qa": qa, "fp": fp, "sev": "", "tag": tag, "title": f"修复 PR #{n} 跟 base 冲突：合入 base", "finding": {}, "source": "revise"}
     def step(k, ok, text=""): res["steps"].append((k, ok, text)); log(k, "OK" if ok else "FAIL")
-    log("merge main into", n, head[:9])
+    log("merge the PR base into", n, head[:9])
     try:
         os.makedirs(_TMPROOT(), exist_ok=True)
         with repo_lock():
             if os.path.exists(wd): log("leftover ->", drop_worktree(wd))
-            rc, o = git("fetch", "-q", "origin", "main", f"+refs/heads/{br}:refs/remotes/origin/{br}")
-            if rc: raise Transient(f"git fetch 失败 rc={rc}：{tail(o, 2)}")
-            if git("rev-parse", f"refs/remotes/origin/{br}")[1].strip() != head: raise Transient("PR 的 head 在这期间变了")
-            main = git("rev-parse", "origin/main")[1].strip(); res["base"] = main
+            b, main = revise_base(p, br, head); res["base"] = main; res["base_ref"] = b   # main = the PR base's sha (outbound key "main")
             old_base = git("merge-base", main, head)[1].strip()
             rc, o = git("worktree", "add", "-q", "--detach", wd, head)
             if rc == 0: W.mark(wd, "dry" if A.dry_run else "revise", repo="mivo", clone=os.path.abspath(_GIT()), ticket=tag, base_sha=head,
@@ -2165,9 +2188,9 @@ def revise_merge(A, d, n, qa, fp, p, red):
         conflicted = [f for f in git("diff", "--name-only", "--diff-filter=U", cwd=wd)[1].split() if f]
         if "package-lock.json" in conflicted:   # bot fixes never change dependencies: main's lock file
             git("checkout", main, "--", "package-lock.json", cwd=wd); git("add", "package-lock.json", cwd=wd); conflicted.remove("package-lock.json")
-        step(f"合入 main {main[:9]}：{'冲突 ' + '、'.join(conflicted) if conflicted else '没有冲突'}", True, tail(o, 20))
+        step(f"合入 {b} {main[:9]}：{'冲突 ' + '、'.join(conflicted) if conflicted else '没有冲突'}", True, tail(o, 20))
         if git("rev-parse", "-q", "--verify", "MERGE_HEAD", cwd=wd)[0]:
-            raise Deterministic(f"本地合入 main 没有进行中的合并（GitHub 说有冲突，本地 git merge：{tail(o, 3)}）")
+            raise Deterministic(f"本地合入 {b} 没有进行中的合并（GitHub 说有冲突，本地 git merge：{tail(o, 3)}）")
         x = finding_of(qa, fp); c["finding"] = x; c["sev"] = res["sev"] = x.get("severity") or ""
         session = f"pi-line-prfix-{tag}-merge-{now_cst():%m%d%H%M%S}"
         def ask(k, prompt):
@@ -2179,43 +2202,43 @@ def revise_merge(A, d, n, qa, fp, p, red):
         for i in range(1, 4):
             if not left: break
             ask(f"merge{i}", (f"This worktree is our own draft fix PR #{n} (branch {br}) for QA report PR-{qa} {c['sev']}: {x.get('title') or p.get('title')}. "
-                              f"The current main {main[:9]} is being merged into it and these files have conflicts: {left}. Resolve every conflict: keep "
-                              f"main's changes AND the PR's fix (the PR's own diff is below), remove all conflict markers, change nothing else. Do not run "
+                              f"The current {b} {main[:9]} (the PR's base) is being merged into it and these files have conflicts: {left}. Resolve every conflict: keep "
+                              f"the base's changes AND the PR's fix (the PR's own diff is below), remove all conflict markers, change nothing else. Do not run "
                               f"git commands.\n\nThe PR's diff:\n{pdiff[:12000]}\n{RULES}") if i == 1 else
-                (f"Conflict markers are still in: {left}. Resolve them (keep main's changes and the fix). {RULES}"))
+                (f"Conflict markers are still in: {left}. Resolve them (keep the base's changes and the fix). {RULES}"))
             left = [f for f in conflicted if os.path.isfile(os.path.join(wd, f)) and CONFLICT_MARK_RE.search(_read(os.path.join(wd, f), "rb").decode("utf-8", "replace"))]
-        if left: raise Deterministic(f"跟 main 的冲突解了 3 轮还有冲突标记：{left[:4]}")
+        if left: raise Deterministic(f"跟 {b} 的冲突解了 3 轮还有冲突标记：{left[:4]}")
         if conflicted: git("add", "--", *conflicted, cwd=wd)
         if conflicted: step("冲突已解开", True, "、".join(conflicted))
         rc, o = npm_ci(wd); step("npm ci", rc == 0, f"rc={rc}\n{o}")
         if rc: raise Transient(f"npm ci rc={rc}")
         live_tests = [f for f in tests if os.path.isfile(os.path.join(wd, f))]
         if live_tests:
-            rc, o = vitest(wd, live_tests); v = vitest_verdict(rc, o); step("合入 main 后 PR 的回归测试通过", v == "pass", f"rc={rc}\n{o}")
-            if v != "pass": raise Deterministic(f"合入 main 后 PR 的回归测试不过：{failing_blocks(o, 300)}")
+            rc, o = vitest(wd, live_tests); v = vitest_verdict(rc, o); step("合入 base 后 PR 的回归测试通过", v == "pass", f"rc={rc}\n{o}")
+            if v != "pass": raise Deterministic(f"合入 base 后 PR 的回归测试不过：{failing_blocks(o, 300)}")
         src = [f for f in pr_files if not is_test(f) and not f.startswith("docs/") and os.path.isfile(os.path.join(wd, f))]
         rc4, o4, _ = related_run(wd, src, live_tests)
-        step("合入 main 后相关的已有测试", rc4 == 0, tail(o4, 40))
-        if rc4: raise Deterministic(f"合入 main 后相关的已有测试不过：{failing_blocks(o4, 300)}")
+        step("合入 base 后相关的已有测试", rc4 == 0, tail(o4, 40))
+        if rc4: raise Deterministic(f"合入 base 后相关的已有测试不过：{failing_blocks(o4, 300)}")
         akey = f"revise:{n}:{head[:12]}:merge"
         if git("diff", "--quiet", "--", "package-lock.json", cwd=wd)[0]: git("checkout", "--", "package-lock.json", cwd=wd)
-        rc, o = git(*GIT_ID, "commit", "-q", "--no-verify", "-m", f"Merge main {main[:9]} into {br}", "-m", f"QA: #{qa}\nFingerprint: {fp}\nPi-Revise: {akey}", cwd=wd)
+        rc, o = git(*GIT_ID, "commit", "-q", "--no-verify", "-m", f"Merge {b} {main[:9]} into {br}", "-m", f"QA: #{qa}\nFingerprint: {fp}\nPi-Revise: {akey}", cwd=wd)
         step("合并提交（作者 Praise，本地）", rc == 0, o)
         if rc: raise Deterministic(f"合并提交失败：{tail(o, 3)}")
         new = git("rev-parse", "HEAD", cwd=wd)[1].strip()
         pf, pfo = preflight(wd); res["preflight"] = pf
         step(f"推送前检查 .githooks/pre-push（{pf['passed']}/{pf['total']}，{pf['seconds']}s）", pf["ok"], pfo)
         if pf["timeout"]: raise Transient("推送前检查超时（1 小时）")
-        if not pf["ok"]: raise Deterministic(f"合入 main 后推送前检查没过：{pf['failed'] or 'rc=' + str(pf['rc'])}")
+        if not pf["ok"]: raise Deterministic(f"合入 base 后推送前检查没过：{pf['failed'] or 'rc=' + str(pf['rc'])}")
         if A.dry_run: out = {"status": "dry_ok", "kind": None, "error": None, "action_key": None}
         else:
             bundle = f"{OUT}/{d}-{tag}.merge.bundle"
             rc, o = git("bundle", "create", bundle, "HEAD", "--not", head, main, cwd=wd)
             if rc: raise Deterministic(f"打包合并提交失败：{tail(o, 3)}")
-            record_actions("praise-pr", d, [{"key": akey, "type": "gh.pr.push-fix", "mode": "merge", "pr": n, "branch": br, "head": head, "main": main,
+            record_actions("praise-pr", d, [{"key": akey, "type": "gh.pr.push-fix", "mode": "merge", "pr": n, "branch": br, "head": head, "main": main, "base_ref": b,
                 "new_head": new, "bundle": bundle, "qa": qa, "fingerprint": fp, "conflicts": conflicted,
                 "preflight": f"{pf['passed']}/{pf['total']} ok in {pf['seconds']}s",
-                "note": "outbound: clone the PR branch, require HEAD == head, fetch main + the bundle, require new_head's parents == [head, main], plain push"}])
+                "note": "outbound: clone the PR branch, require HEAD == head, fetch main (the sha of base_ref) + the bundle, require new_head's parents == [head, main], plain push"}])
             out = {"status": "pr_action_written", "kind": None, "error": None, "action_key": akey}
     except Transient as e:
         out = {"status": "failed", "kind": "waiting" if isinstance(e, Waiting) else "transient", "error": str(e), "action_key": None}
@@ -2250,10 +2273,8 @@ def revise_one(A, d, n, qa, fp, p, red):
         os.makedirs(_TMPROOT(), exist_ok=True)
         with repo_lock():
             if os.path.exists(wd): log("leftover ->", drop_worktree(wd))
-            rc, o = git("fetch", "-q", "origin", "main", f"+refs/heads/{br}:refs/remotes/origin/{br}")
-            if rc: raise Transient(f"git fetch 失败 rc={rc}：{tail(o, 2)}")
-            if git("rev-parse", f"refs/remotes/origin/{br}")[1].strip() != head: raise Transient("PR 的 head 在这期间变了")
-            base = git("merge-base", "origin/main", head)[1].strip(); res["base"] = base
+            b, _ = revise_base(p, br, head); res["base_ref"] = b
+            base = git("merge-base", f"origin/{b}", head)[1].strip(); res["base"] = base
             rc, o = git("worktree", "add", "-q", "--detach", wd, head)
             if rc == 0: W.mark(wd, "dry" if A.dry_run else "revise", repo="mivo", clone=os.path.abspath(_GIT()), ticket=tag, base_sha=head,
                                lock=f"{OUT}/locks/rev-{n}.lock", tickets=f"{OUT}/tickets.json", ticket_key=f"rev:{n}")
@@ -2283,7 +2304,7 @@ def revise_one(A, d, n, qa, fp, p, red):
                   "If a check fails for a reason this PR cannot fix (CI infrastructure, the same failure on main), change nothing and say so.")
         first = (f"This worktree is the head of our own DRAFT fix PR #{n} (branch {br}) for QA report PR-{qa} {c['sev']} ({fp}): "
                  f"{x.get('title') or p.get('title')}\nfile: {x.get('file')}:{x.get('line')}\n\nGitHub CI failed on this head: {', '.join(names)}.\n"
-                 f"Failed-step logs:\n{logs}\n\nThe PR's diff against main:\n{pdiff[:12000]}\n\nFind why these checks fail and fix it in this worktree. "
+                 f"Failed-step logs:\n{logs}\n\nThe PR's diff against its base {b}:\n{pdiff[:12000]}\n\nFind why these checks fail and fix it in this worktree. "
                  f"{follow} {RULES}\nEnd with CAUSE: one paragraph, and the files you changed.")
         fb = None
         for i in range(1, FIX_ROUNDS):
