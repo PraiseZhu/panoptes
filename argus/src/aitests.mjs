@@ -108,10 +108,14 @@ export function toAiTestSteps(tests, profile, { offset = 0 } = {}) {
   } })
 }
 
+export const MAX_COMPLETION_TOKENS = 16_000
+// finish_reason=length 重试上限：pi/restore/models.json 里 openai/gpt-6-luna 的 maxTokens（仓库里该模型唯一写明的数字上限）
+export const LENGTH_RETRY_MAX_COMPLETION_TOKENS = 64_000
+
 // 模型回包 → JSON。回包缺 choices（网关没给内容）照旧当空对象；但 content 是空串或半截 JSON
 // （常见于推理把 max_completion_tokens 用完，finish_reason=length）以前直接 JSON.parse 抛
-// 「Unexpected end of JSON input」，原因看不出来（PR #966，2026-10-14）。现在明确说出是空内容还是被截断，
-// 并标 retryable：同一 PR 还有调用次数时，nightly 会再试一轮。
+// 「Unexpected end of JSON input」，原因看不出来（PR #966，2026-10-14）。现在明确说出是空内容还是被截断。
+// finish_reason=length 在 generateTargetedTests 里用更高上限再试一次，不再标 retryable；其它可重试解析失败仍交给 nightly。
 export function parseModelJson(data) {
   const choice = data?.choices?.[0]
   const finish = choice?.finish_reason ?? null
@@ -153,19 +157,28 @@ export async function generateTargetedTests({ db, secrets, riskClass, pr, files,
     '按系统提示的格式只输出一个 json 对象。',
   ].filter((x) => x != null).join('\n\n'))
   try {
-    const body = jsonObjectBody({ model: MODEL, reasoning_effort: EFFORT[riskClass], response_format: { type: 'json_object' }, max_completion_tokens: 16_000, messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: user }] })
-    const resp = await fetchRetryingNetwork(fetchImpl, toChatCompletionsUrl(secrets.ARGUS_LLM_BASE_URL), () => ({
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${secrets.ARGUS_LLM_API_KEY}` },
-      body,
-      signal: AbortSignal.timeout(Math.max(30_000, Math.floor(Number(timeoutMs)) || 30_000)),
-    }), { delayMs: netRetryDelayMs, sleep, deadline })
-    const data = await resp.json().catch(() => ({}))
-    if (quota) quota.consume('ai-test', data?.usage?.total_tokens ?? 0)
-    else addAiUsage(db, day, data?.usage?.total_tokens ?? 0)
+    const request = async (maxCompletionTokens) => {
+      const body = jsonObjectBody({ model: MODEL, reasoning_effort: EFFORT[riskClass], response_format: { type: 'json_object' }, max_completion_tokens: maxCompletionTokens, messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: user }] })
+      const resp = await fetchRetryingNetwork(fetchImpl, toChatCompletionsUrl(secrets.ARGUS_LLM_BASE_URL), () => ({
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${secrets.ARGUS_LLM_API_KEY}` },
+        body,
+        signal: AbortSignal.timeout(Math.max(30_000, Math.floor(Number(timeoutMs)) || 30_000)),
+      }), { delayMs: netRetryDelayMs, sleep, deadline })
+      const data = await resp.json().catch(() => ({}))
+      if (quota) quota.consume('ai-test', data?.usage?.total_tokens ?? 0)
+      else addAiUsage(db, day, data?.usage?.total_tokens ?? 0)
+      return { resp, data }
+    }
+    let { resp, data } = await request(MAX_COMPLETION_TOKENS)
     if (!resp.ok) return { status: 'error', reasonZh: `模型网关返回 ${resp.status}`, tests: [] }
-    const parsed = parseModelJson(data)
-    if (!parsed.ok) return { status: 'error', retryable: true, reasonZh: parsed.reasonZh, finish_reason: parsed.finish_reason, usage: data?.usage ?? null, model: MODEL, tests: [] }
+    let parsed = parseModelJson(data)
+    if (!parsed.ok && parsed.finish_reason === 'length') {
+      ({ resp, data } = await request(LENGTH_RETRY_MAX_COMPLETION_TOKENS))
+      if (!resp.ok) return { status: 'error', reasonZh: `模型网关返回 ${resp.status}`, tests: [] }
+      parsed = parseModelJson(data)
+    }
+    if (!parsed.ok) return { status: 'error', retryable: parsed.finish_reason !== 'length', reasonZh: parsed.reasonZh, finish_reason: parsed.finish_reason, usage: data?.usage ?? null, model: MODEL, tests: [] }
     const raw = parsed.value
     const tests = toValidTests(raw, { profile, gaps, maxTests, uncovered, handoffIds: handoffCases.map((c) => c.id) })
     const offered = Array.isArray(raw?.tests) ? raw.tests.length : 0
