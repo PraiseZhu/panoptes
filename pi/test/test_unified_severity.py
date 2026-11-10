@@ -99,6 +99,10 @@ class Receipts(unittest.TestCase):
     def test_qa_ref_product_repo_only(self):
         self.assertTrue(handoff.qa_ref(2000).search("QA: xindong/mivo-canvas-plugin#2000"))
         self.assertFalse(handoff.qa_ref(2000).search("QA: other/repo#2000"))
+    def test_qa_ref_rejects_short_other_repo(self):
+        cases = (("QA: a/b#12", 12), ("QA: x/y#1089", 1089), ("QA 回访 a/b#904", 904))
+        for s, n in cases:
+            self.assertFalse(handoff.qa_ref(n).search(s), s)
     def test_merged_fix_pr_with_qa_ref(self):
         rows = [{"number": 2100, "title": "fix: 串号 (QA #2000)", "body": "", "mergedAt": "2026-10-23T01:00:00Z", "files": [{"path": "src/cache.ts"}]},
                 {"number": 2101, "title": "QA #2000 wip", "body": "", "mergedAt": None, "files": [{"path": "src/cache.ts"}]},

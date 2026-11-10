@@ -53,6 +53,14 @@ test('「QA #原PR号」：QA #N / QA: #N / QA：#N / QA: owner/repo#N 都认；
   assert.deepEqual(fixPrResolutions(prs, { pr: 2000, files: ['src/cache.ts'] }).map((r) => [r.fix_pr, r.kind, r.by]), [[2100, '已修', 'fix-pr-merged']])
 })
 
+test('qaRefRe / qaRefs 拒短的他仓前缀（间隔段不能吞掉 a/b、x/y）', () => {
+  const cases = [['QA: a/b#12', 12], ['QA: x/y#1089', 1089], ['QA 回访 a/b#904', 904]]
+  for (const [s, n] of cases) {
+    assert.ok(!qaRefRe(n).test(s), s)
+    assert.deepEqual(qaRefs(s), [], s)
+  }
+})
+
 test('作者口径：新报告 findings 都算；旧报告里的覆盖率 P2、未核实 AI 补测、flaky / unverified、PLAUSIBLE、qa-error、own-tests 不算', () => {
   assert.equal(notifiable({ severity: 'P1', source: 'code-review', verdict: 'CONFIRMED', verification: { status: 'confirmed' } }), true)
   assert.equal(notifiable({ severity: 'P1', source: 'code-review', verdict: 'CONFIRMED', verification: { status: 'undetermined' } }), false)
