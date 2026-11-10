@@ -61,6 +61,9 @@ R=/workspace/panoptes/pi/bin/run.sh
 # --- takeover-gated jobs (no-op unless takeover/<name> exists) + outbound executor (no-op unless fleet-mode=pi AND outbound-enabled) ---
 */5 * * * * box $R cindy
 17 * * * * box $R boxhealth
+# 11-10: boxhealth catch-up -- VM pauses made cron skip :17 (06:17/07:17); run.sh runs it only when this Beijing hour has no
+# "start boxhealth" in today's log, else logs one skip line
+47 * * * * box $R boxhealth catchup
 23 * * * * box $R roster @08
 56 * * * * box $R dailyretro @09
 */10 * * * * box $R outbound

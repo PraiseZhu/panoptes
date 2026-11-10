@@ -13,8 +13,20 @@ LOGDIR=$BASE/out/logs; mkdir -p "$LOGDIR"
 LOG=$LOGDIR/$JOB-$(date +%F).log
 # optional Beijing-hour gate: run.sh JOB @HH  (cron fires hourly; DST-proof)
 if [[ "${1:-}" == @* ]]; then [[ ",${1#@}," == *",$(date +%H),"* ]] || exit 0; shift; fi
+# 11-10 boxhealth catch-up (cron :47 "boxhealth catchup"): the platform pauses the VM and cron loses minutes (06:17/07:17 never
+# started). Run only if today's boxhealth log has no "start boxhealth" in this Beijing hour; otherwise log one skip line and exit.
+# PI_TEST_NOW (tests only) fakes the time; date and hour come from one call so midnight cannot split them.
+CATCHUP=
+if [ "$JOB" = boxhealth ] && [ "${1:-}" = catchup ]; then
+  shift; now=$(date -d "${PI_TEST_NOW:-now}" '+%F %H'); day=${now% *}; hh=${now#* }
+  if grep -q "^=== $day $hh:[0-9][0-9]:[0-9][0-9] [^ ]* start boxhealth " "$LOGDIR/boxhealth-$day.log" 2>/dev/null; then
+    echo "=== $(date -d "${PI_TEST_NOW:-now}" '+%F %T %Z') skip boxhealth catchup: hour $hh already started" >>"$LOGDIR/boxhealth-$day.log"; exit 0
+  fi
+  CATCHUP="catchup: hour $hh has no start boxhealth -> run"
+fi
 exec >>"$LOG" 2>&1
 echo "=== $(date '+%F %T %Z') start $JOB $* mode=${PI_FLEET_MODE:-$(cat /workspace/fleet-mode 2>/dev/null || echo grok)} outbound=$([ -e $BASE/outbound-enabled ] && echo open || echo closed)"
+[ -n "$CATCHUP" ] && echo "$CATCHUP"
 avail=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
 [ -n "${PI_TEST_MEM_AVAIL_MB:-}" ] && { avail=$PI_TEST_MEM_AVAIL_MB; echo "TEST: MemAvailable overridden to ${avail}MB"; }
 export PI_MEM_AVAIL_MB=$avail
