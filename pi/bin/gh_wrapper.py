@@ -82,6 +82,8 @@ PRODUCT_WRITE_EXCEPTIONS = (
     # infra_outbound's issue comment: matches only when infra_outbound.py is the process script (normally it is imported by
     # outbound.py, whose ops above do not include issue comment); its target is pr-qa-agent-deploy, not a product repo, anyway.
     ("panoptes-infra-outbound", "pi/bin/infra_outbound.py", frozenset({("issue", "comment")})),
+    # 11-11 (#2022, Praise): ready product PRs on the App token; the script itself refuses --draft, other repos/bases and other args.
+    ("panoptes-open-product-pr", "pi/bin/open_product_pr.py", frozenset({("pr", "create")})),
 )
 
 
