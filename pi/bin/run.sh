@@ -10,7 +10,7 @@ BASE=${PI_STATE:-/workspace/mivo-qa/pi}
 export PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 export TZ=Asia/Shanghai
 LOGDIR=$BASE/out/logs; mkdir -p "$LOGDIR"
-LOG=$LOGDIR/$JOB-$(date +%F).log
+LOG=$LOGDIR/$JOB-$(date -d "${PI_TEST_NOW:-now}" +%F).log   # PI_TEST_NOW: tests only (the catch-up gate below reads the same day)
 # optional Beijing-hour gate: run.sh JOB @HH  (cron fires hourly; DST-proof)
 if [[ "${1:-}" == @* ]]; then [[ ",${1#@}," == *",$(date +%H),"* ]] || exit 0; shift; fi
 # 11-10 boxhealth catch-up (cron :47 "boxhealth catchup"): the platform pauses the VM and cron loses minutes (06:17/07:17 never

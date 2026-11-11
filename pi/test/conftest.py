@@ -17,6 +17,7 @@ SANDBOX_ENV = {
     "PI_OUTAGE_WITNESS": f"{_T}/work/locks/outage-seq-witness", "PI_ROLLBACK_MARK": f"{_T}/state/ROLLBACK-SUSPECTED",
     "PI_ARGUS_ROOT": f"{_T}/argus",   # prwatch.tests_running/queued: the qa-slot files (else the live merge-test slot)
     "npm_config_cache": f"{_T}/home/.npm", "PI_LOCK_DIR": f"{_T}/tmp",
+    "PRAISE_QA_KEY": f"{_T}/no-app-key", "PRAISE_QA_CACHE": f"{_T}/praise-qa-cache",   # 11-11: ghtoken can never mint a real App token
     "PI_GAPS_FILE": f"{_T}/state/gaps-open.json",   # pmnudge.record_gap (else fleet-standards/gaps-open.json when fleet-mode=pi)   # mergewatch / outbound job flocks (else the real /tmp ones)
 }
 for _d in ("state", "work", "home", "tmp", "logs", "memguard"): os.makedirs(f"{_T}/{_d}", exist_ok=True)

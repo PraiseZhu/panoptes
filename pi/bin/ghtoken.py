@@ -77,7 +77,7 @@ def _parse_exp(s):
 
 
 def mint(inst, now=None):
-    """-> {"token", "expires_at" (epoch), "installation"} straight from GitHub"""
+    """-> {"token", "expires_at" (epoch), "installation", "permissions"} straight from GitHub"""
     req = urllib.request.Request(f"{_api()}/app/installations/{inst}/access_tokens", data=b"{}", method="POST",
                                  headers={"Authorization": f"Bearer {jwt(now)}", "Accept": "application/vnd.github+json",
                                           "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "panoptes-ghtoken"})
@@ -88,7 +88,8 @@ def mint(inst, now=None):
     except (urllib.error.URLError, OSError, ValueError) as e:
         raise MintError(f"installation {inst}: {mask(e)[:200]}") from None
     if not d.get("token"): raise MintError(f"installation {inst}: no token in the answer")
-    return {"token": d["token"], "expires_at": _parse_exp(d.get("expires_at")), "installation": inst}
+    return {"token": d["token"], "expires_at": _parse_exp(d.get("expires_at")), "installation": inst,
+            "permissions": d.get("permissions") or {}}   # 11-11: what the installation may do (prfix.app_workflows_write)
 
 
 def _cache_file(inst): return os.path.join(_cache_dir(), f"inst-{inst}.json")
@@ -115,14 +116,14 @@ def _write_cache(inst, d):
 
 
 def token_info(repo=DEFAULT_REPO, now=None):
-    """cached {"token", "expires_at", "installation", "minted": bool}; re-mints when < MARGIN_S is left"""
+    """cached {"token", "expires_at", "installation", "permissions", "minted": bool}; re-mints when < MARGIN_S is left"""
     inst = installation(repo)
     now = now or time.time()
     os.makedirs(_cache_dir(), mode=0o700, exist_ok=True)
     with open(os.path.join(_cache_dir(), f"inst-{inst}.lock"), "a") as lk:
         fcntl.flock(lk, fcntl.LOCK_EX)
         c = _read_cache(inst)
-        if c and c["expires_at"] - now > MARGIN_S: return {**c, "minted": False}
+        if c and "permissions" in c and c["expires_at"] - now > MARGIN_S: return {**c, "minted": False}   # pre-11-11 cache: re-mint
         d = mint(inst, now); _write_cache(inst, d)
         print(f"praise-qa token minted for installation {inst}, exp {time.strftime('%H:%M', time.localtime(d['expires_at']))}", file=sys.stderr)
         return {**d, "minted": True}

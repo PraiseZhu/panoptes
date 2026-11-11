@@ -12,7 +12,8 @@ for f in "$B"/bin/*.sh "$B"/bin/run.sh; do bash -n "$f" || { echo "FAIL parse $(
 # lib.model_env.
 CLEAN=(env -i "PATH=$PATH" "HOME=$HOME" "USER=${USER:-$(id -un)}" "LOGNAME=${LOGNAME:-$(id -un)}" "LANG=C.UTF-8" "LC_ALL=C.UTF-8"
        "TZ=Asia/Shanghai" "TMPDIR=${TMPDIR:-/tmp}" "PI_WORK=$tmp/pi-work" "PI_WORK_ROOT=$tmp/pi-work"
-       "PI_STATE=$tmp/pi-state" "PI_ARGUS_ROOT=$tmp/argus" "PI_GAPS_FILE=$tmp/pi-state/gaps-open.json")   # 10-27: never the real state dir (#68: tests appended 44 fake relays to the real muted-*.md)   # 10-24: never the real work root
+       "PI_STATE=$tmp/pi-state" "PI_ARGUS_ROOT=$tmp/argus" "PI_GAPS_FILE=$tmp/pi-state/gaps-open.json"
+       "PRAISE_QA_KEY=$tmp/no-app-key" "PRAISE_QA_CACHE=$tmp/praise-qa-cache")   # 11-11: a test that reaches ghtoken can never mint a real App token   # 10-27: never the real state dir (#68: tests appended 44 fake relays to the real muted-*.md)   # 10-24: never the real work root
 for t in "$B"/test/test_*.py; do
   out=$(cd "$B/bin" && "${CLEAN[@]}" PYTHONPYCACHEPREFIX=$tmp timeout 300 python3 "$t" 2>&1) || { echo "FAIL $(basename "$t")"; echo "$out" | tail -"${PI_SELFTEST_TAIL:-5}"; rc=1; }
 done

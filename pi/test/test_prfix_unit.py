@@ -768,14 +768,23 @@ class TestFixOneEndToEnd(GitTmp):
         self.model["fix"] = fix
         return self.run_fix()
 
-    def test_workflow_fix_goes_to_a_human_before_prepush(self):   # 11-10 #2022: the App can never push .github/workflows/
-        out, res = self.fix_touching(".github/workflows/ci.yml")
+    def perms(self, p):   # the installation token answer (ghtoken.token_info); no network, no key
+        import ghtoken
+        return mock.patch.object(ghtoken, "token_info", lambda repo: {"token": "x", "expires_at": 0, "installation": 1, "permissions": p})
+
+    def test_workflow_fix_goes_to_a_human_before_prepush(self):   # 11-10 #2022: without workflows=write GitHub refuses the push
+        with self.perms({"contents": "write", "workflows": "read"}): out, res = self.fix_touching(".github/workflows/ci.yml")
         self.assertEqual((out["status"], out["kind"]), ("failed", "praise"), out)
         self.assertIn(".github/workflows/ci.yml", out["error"]); self.assertIn("不重试", out["error"])
         self.assertFalse([a for a in self.acts if a["type"].startswith("gh.pr.create")])
         self.assertFalse([k for k, ok, _ in res["steps"] if k.startswith("推送前检查")])     # stopped before the ~15 min pre-push
         tk, notify = prfix.apply_outcome(prfix.new_ticket(dict(self.c)), out, prfix.now_cst())
         self.assertEqual((tk["status"], tk["next_retry_at"], notify), ("needs_praise", None, "needs_praise"))   # no retry, one DM
+
+    def test_workflow_fix_opens_the_pr_when_the_installation_has_workflows_write(self):   # 11-11
+        with self.perms({"contents": "write", "workflows": "write"}): out, res = self.fix_touching(".github/workflows/ci.yml")
+        self.assertEqual(out["status"], "pr_action_written", out)
+        self.assertTrue(any("workflows=write，放行" in k and ok for k, ok, _ in res["steps"]), res["steps"])
 
     def test_other_github_file_fix_still_opens_the_pr(self):   # 11-10: only workflows stop; the rest stays 10-25 (flagged, pushed)
         out, res = self.fix_touching(".github/labeler.yml")
@@ -1073,6 +1082,37 @@ class TestOutboundSnippet(GitTmp):
         self.assertEqual(m.fixpr_docs_rename(d, br, a, 1240), "docs/pr/1240: already renamed")       # idempotent
         log = sh("git", "--git-dir", self.origin, "log", "--format=%s", br).splitlines()
         self.assertEqual(len(log), 3)   # seed, fix, rename: no rewrite of history (no force)
+
+
+class TestWorkflowGate(unittest.TestCase):   # 11-11: fix_one (first fix) and revise_one (CI fix) both call workflow_gate
+    def gate(self, info):
+        import ghtoken
+        steps, calls = [], []
+        def token_info(repo):
+            calls.append(repo)
+            if isinstance(info, Exception): raise info
+            return info
+        with mock.patch.object(ghtoken, "token_info", token_info):
+            try: prfix.workflow_gate([".github/workflows/ci.yml", "src/a.ts"], "CI 修正", lambda k, ok, t="": steps.append((k, ok)))
+            except prfix.PraiseNeeded as e: return "stop", str(e), calls
+        return "go", steps, calls
+
+    def test_write_goes_on(self):
+        how, steps, calls = self.gate({"permissions": {"workflows": "write"}})
+        self.assertEqual((how, calls), ("go", [prfix.REPO])); self.assertTrue(steps[0][1]); self.assertIn("workflows=write", steps[0][0])
+
+    def test_read_missing_or_unknown_stays_a_hard_stop(self):
+        import ghtoken
+        for info in ({"permissions": {"workflows": "read"}}, {"permissions": {}}, {}, ghtoken.MintError("HTTP 401"), ghtoken.NoInstallation("x")):
+            how, why, _ = self.gate(info)
+            self.assertEqual(how, "stop", info); self.assertTrue(why.startswith("CI 修正改了 .github/workflows/（.github/workflows/ci.yml）"), why)
+            self.assertIn("不重试", why)
+
+    def test_no_workflow_file_asks_nothing(self):
+        steps = []
+        with mock.patch("ghtoken.token_info", side_effect=AssertionError("no token needed")):
+            prfix.workflow_gate(["src/a.ts", ".github/labeler.yml"], "修复", lambda *a: steps.append(a))
+        self.assertEqual(steps, [])
 
 
 class TestCiBrief(Tmp):
