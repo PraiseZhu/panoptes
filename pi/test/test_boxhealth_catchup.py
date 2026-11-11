@@ -50,7 +50,8 @@ try:
     assert not tail.startswith("skip:") and " start " not in tail
     # b) 本小时没跑（06:17 漏了）→ 照常跑，boxhealth.py 不收到 catchup 参数
     assert run("2026-11-10 06:47:01", "catchup") == "\n"
-    assert "catchup: hour 06 has no start boxhealth -> run" in text("2026-11-10")
+    # run.sh names its own log by the real date (not PI_TEST_NOW), so the catch-up line can be in any day's file
+    assert any("catchup: hour 06 has no start boxhealth -> run" in open(f"{logs}/{f}").read() for f in os.listdir(logs))
     # c) 日志不存在 → 照常跑
     assert run("2026-11-11 00:47:02", "catchup") == "\n"
     assert any("catchup: hour 00 has no start boxhealth -> run" in open(f"{logs}/{f}").read() for f in os.listdir(logs))

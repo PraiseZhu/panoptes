@@ -401,7 +401,7 @@ PRODUCT_READ_CMDS = {"pr": {"view", "list", "status", "diff", "checks", "checkou
                      "run": {"view", "list", "watch", "download"}, "workflow": {"view", "list"}, "release": {"view", "list", "download"},
                      "repo": {"view", "clone"}, "label": {"list"}, "cache": {"list"}, "search": None, "browse": None, "status": None}
 NON_REPO_CMDS = {"auth", "config", "version", "--version", "help", "--help", "completion", "alias", "extension", "extensions", "ext", "gist", "org"}   # alias/extension writes, auth token, auth login/setup-git/switch/refresh, config set: gh_wrapper.cli_refusal
-PRODUCT_WRITE_EXCUSABLE = frozenset({("issue", "create"), ("issue", "comment"), ("issue", "close"), ("pr", "comment")})   # never pr close/review
+PRODUCT_WRITE_EXCUSABLE = frozenset({("issue", "create"), ("issue", "comment"), ("issue", "close"), ("pr", "comment"), ("pr", "create")})   # never pr close/review
 REVIEW_PR_CMDS = frozenset({("issue", "comment"), ("pr", "comment"), ("pr", "review")})   # B5 ruling: review-pr may approve
 REVIEW_PR_REST = re.compile(r"repos/[^/]+/[^/]+/(issues/\d+/comments|pulls/\d+/comments(/\d+/replies)?|pulls/\d+/reviews"
                             r"(/\d+(/events|/dismissals)?)?)$")
