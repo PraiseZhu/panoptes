@@ -144,6 +144,10 @@ $P --status [--caller <名>]
 2026-10-24 实测：mivo 工作树里 vitest、eslint、tsc、git add/stash 在沙箱内外结果一致；一次真实模型调用能在工作树里写文件，写 `/workspace/panoptes` 被拒。
 单测 `test/test_model_env.py`（机器允许 bwrap 时会真的跑一次，按真实磁盘上的结果判断）。`PI_NO_SANDBOX=1` 只用于排查问题。
 
+### fleet_status（11-11，只读汇总，ORG.md 第 7 条）
+`bin/fleet_status.py`，由运维在 pi-fallback cron 加 `*/30 * * * * box $R fleet_status`（零模型，在 run.sh 的 LIGHT 里，低内存照跑）。写 `/workspace/fleet-standards/fleet-status.json` 和 `fleet-status.md`（`--json` / `--md` 改路径），整份写临时文件再 `os.replace`。
+内容：cron 里每个 `$R` 作业最近一次 run.sh 记录（watchdog.runs）、分钟级作业最近写入、各 `out/` 目录最新产出；gh 是否指向包装脚本、`gh api user -q .login`（包装脚本本地应答，不发请求、不碰 token）、gh-app 开关；grok-usage.json 最新样本；当天 QA 报告、日报、台账、pm-daily 在不在；argus catch-up / nightly / priority 锁和 ensure-cindy.v2.lock 由谁持有（读 /proc/locks，不加锁）、run-nightly.sh 和 batch-run.sh 进程。查不到的项写 `unknown` 并说明原因。不写别的文件、不发消息、不调模型。回滚：删掉那条 cron。
+
 ### stdcheck（11-05，每小时标准检查）
 `bin/stdcheck.py`，cron `:55`（`run.sh stdcheck`，零模型）。开关 `$PI_STATE/stdcheck-enabled`：没有这个文件 = 什么都不做；回滚 = 删掉它。
 检查：合并后 10 分钟内开测（只算 base 为 main / integration/* / release/* 的合并，mergewatch 日志 + reports/merged 时间）、panoptes 开着的 PR ≤3（App 身份）、Pi 修复 PR 同时 ≤2、pmnudge / 日报 / 台账跑成功（run.sh 记录 + 外发台账 + out/ledger）、Mac mini review-pr 派发在动（Jasper 11-04 裁定；产品仓 REST + App 身份，最多 15 个 ready PR：有 PR 在等 review-pr（检查 / status 为 queued、pending 或没有）且 60 分钟内任何 PR 的 review-pr 都没开始或结束 = 卡住；某个 review-pr in_progress 超 60 分钟 = 卡住；没人在等 = 正常；gap owner = Jasper；不读任何心跳文件）。
