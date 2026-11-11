@@ -192,10 +192,21 @@ A_ALLOW = {"sensitive": False}   # --allow-sensitive: kept for old commands / DM
 # files is no longer a kind-5 stop. The files are listed at the top of the PR's risk section so the reviewer (审查机) and the merge
 # gate (humanOnlyPaths) see them; nothing here waits for Praise any more.
 def sensitive_files(files): return sorted(f for f in files if SENSITIVE_RE.search(f))
-# 11-10 (#2022, 11 refused pushes on 11-09): the App has no `workflows` permission (never added), so GitHub refuses any push that
-# changes .github/workflows/. Such a fix goes to a human at once (kind 5, needs_praise), before pre-push and never retried.
+# 11-10 (#2022, 11 refused pushes on 11-09): GitHub refuses a push that changes .github/workflows/ unless the App installation has
+# `workflows: write`. 11-11: decided by the installation's real permissions (GitHub returns them with every installation token,
+# ghtoken.token_info): write -> the fix goes on; anything else (read, missing, no installation, mint failure) -> a human at once
+# (kind 5, needs_praise), before pre-push and never retried.
 def workflow_files(files): return sorted(f for f in files if f.startswith(".github/workflows/"))
-WORKFLOW_STOP = "改了 .github/workflows/（{}），App 没有 workflows 权限、推送必被拒：不重试，转人工"
+WORKFLOW_STOP = "改了 .github/workflows/（{}），App 安装没有 workflows=write 权限、推送必被拒：不重试，转人工"
+def app_workflows_write(repo=REPO):
+    import ghtoken
+    try: return (ghtoken.token_info(repo).get("permissions") or {}).get("workflows") == "write"
+    except (ghtoken.NoInstallation, ghtoken.MintError, OSError): return False
+def workflow_gate(files, what, step):
+    wf = workflow_files(files)
+    if not wf: return
+    if not app_workflows_write(): raise PraiseNeeded(what + WORKFLOW_STOP.format(", ".join(wf[:3])))
+    step(f"{what}改了 .github/workflows/（{', '.join(wf[:3])}），App 安装有 workflows=write，放行", True)
 def gated_ruling(kind, c, wd, base, question, tag, step, **facts):
     """G2 + G3 around ruling(): -> (verdict | None, text, judged) ; judged False = decided without asking the judge now."""
     v, why = mechanical_ruling(kind, c, wd, base, **facts)
@@ -876,7 +887,7 @@ def apply_outcome(tk, out, now):
     return tk, notify
 
 def dm_action(kind, c, text_detail):
-    """kind 5 only: since 11-10 the one case is a fix that changes .github/workflows/ (the App cannot push it, WORKFLOW_STOP)."""
+    """kind 5 only: since 11-10 the one case is a fix that changes .github/workflows/ (the installation has no workflows=write, WORKFLOW_STOP)."""
     n, fp, sev = c["qa"], c["fp"], c["sev"]; title = (c.get("title") or "")[:60]
     it = PN.item("action", f"你的 PR #{n} 上的一个修复要改 workflow 文件，bot 推不上去，转人工",
                  f"#{n} 测出的 {sev} 问题「{title}」，修 PR bot 已经修好，但修复要改 .github/workflows/（{text_detail[:200]}）。Praise QA App 没有 workflows 权限，推送会被 GitHub 拒绝，所以没开 PR，也不会重试。",
@@ -1675,7 +1686,7 @@ def fix_one(c, A, d):
         files, tests, src = split_files()
         prot = protected_files(files)   # gate files: hard stop, --allow-sensitive does not apply
         if prot: raise Deterministic(f"修复要改闸门文件（PROTECTED_RE），硬停不开 PR：{prot[:5]}")
-        if workflow_files(files): raise PraiseNeeded("修复" + WORKFLOW_STOP.format(", ".join(workflow_files(files)[:3])))
+        workflow_gate(files, "修复", step)
         res["sensitive"] = sensitive_files(files)
         if res["sensitive"]: step(f"修复改了 CI 配置 / 仓库规则 / 密钥相关的文件（放行，PR 里标出交审查机把关）：{', '.join(res['sensitive'][:4])}", True)
         ptype = "docs" if src and all(f.endswith(".md") or f.startswith("docs/") for f in src) else "fix"
@@ -2054,7 +2065,7 @@ def finding_of(qa, fp):
     return {}
 
 def revise_dm(n, qa, fp, head, why):
-    """kind 5 only: a CI fix that changes .github/workflows/ (the App cannot push it, WORKFLOW_STOP), or (11-10) a PR whose base
+    """kind 5 only: a CI fix that changes .github/workflows/ (the installation has no workflows=write, WORKFLOW_STOP), or (11-10) a PR whose base
     cannot be read or whose head already holds a wrong main merge (revise_base)."""
     if "workflows" not in why:
         it = PN.item("action", f"修复 PR #{n} 的 base 不对，bot 不再自动合，转人工",
@@ -2353,7 +2364,7 @@ def revise_one(A, d, n, qa, fp, p, red):
         if stray: raise Deterministic(f"相对 PR head 改动了模型没碰过的文件，拒绝推送：{stray[:5]}")
         prot = protected_files(files)   # gate files: hard stop, --allow-sensitive does not apply
         if prot: raise Deterministic(f"CI 修正要改闸门文件（PROTECTED_RE），硬停不推送：{prot[:5]}")
-        if workflow_files(files): raise PraiseNeeded("CI 修正" + WORKFLOW_STOP.format(", ".join(workflow_files(files)[:3])))
+        workflow_gate(files, "CI 修正", step)
         sens = sensitive_files(files)   # 10-25: no longer a stop (see A_ALLOW); the commit message names them for the reviewer
         if sens: step(f"CI 修正改了 CI 配置 / 仓库规则 / 密钥相关的文件（放行，交审查机把关）：{', '.join(sens[:4])}", True)
         title = f"fix: CI 没过的修正（{', '.join(names[:3])}）"[:120]

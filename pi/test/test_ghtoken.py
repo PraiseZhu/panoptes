@@ -87,6 +87,18 @@ class T(unittest.TestCase):
         with redirect_stderr(io.StringIO()) as err: self.assertEqual(G.main(["check", "someone/else"]), 2)
         self.assertIn("keep this caller on the PAT", err.getvalue())
 
+    def test_installation_permissions_are_kept_and_an_old_cache_is_reminted(self):   # 11-11: prfix.app_workflows_write reads them
+        perms = {"contents": "write", "workflows": "write"}
+        def urlopen(req, timeout=None):
+            self.calls.append(req); e = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.exp))
+            return Resp(json.dumps({"token": FAKE, "expires_at": e, "permissions": perms}).encode())
+        os.makedirs(f"{self.cache}/c", mode=0o700)
+        json.dump({"token": FAKE, "expires_at": self.exp, "installation": 178486896}, open(f"{self.cache}/c/inst-178486896.json", "w"))
+        with mock.patch.object(G.urllib.request, "urlopen", urlopen), redirect_stderr(io.StringIO()):
+            self.assertEqual(G.token_info("xindong/mivo-canvas-plugin")["permissions"], perms)    # cache without permissions: re-mint
+            self.assertEqual(G.token_info("xindong/mivo-canvas-plugin")["permissions"], perms)    # now from the cache
+        self.assertEqual(len(self.calls), 1)
+
     def test_missing_key_is_a_clear_error(self):
         with mock.patch.dict(os.environ, {"PRAISE_QA_KEY": os.path.join(self.cache, "nope.pem")}):
             with self.assertRaises(G.MintError): G.jwt()

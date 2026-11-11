@@ -7,6 +7,7 @@ import os as _os
 _os.environ.setdefault('PRFIX_OWNERS', '*')
 _os.environ['PRFIX_DISPATCHED'] = '1'
 for _k in [k for k in _os.environ if k.startswith('GIT_')]: del _os.environ[_k]
+from unittest import mock
 import argparse, contextlib, datetime as dt, io, json, os, re, subprocess, sys, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -206,9 +207,13 @@ class TestRevise(GitTmp):
         self.assertIn("Sensitive-Files: .github/labeler.yml", push[0]["message"])   # the old path is seen, not only labeler.yml
         self.assertFalse([a for a in self.acts if a["type"] == "slack.dm"])
 
-    def test_workflow_change_goes_to_a_human_and_is_not_retried(self):   # 11-10 #2022: the App cannot push .github/workflows/
-        rc, r = self.move_away(".github/workflows/ci.yml")
-        self.assertEqual((rc, r["status"], r["kind"]), (1, "failed", "praise"), r); self.assertIn("workflows 权限", r["error"])
+    def perms(self, p):   # the installation token answer (ghtoken.token_info); no network, no key
+        import ghtoken
+        return mock.patch.object(ghtoken, "token_info", lambda repo: {"token": "x", "expires_at": 0, "installation": 1, "permissions": p})
+
+    def test_workflow_change_goes_to_a_human_and_is_not_retried(self):   # 11-10 #2022: without workflows=write the push is refused
+        with self.perms({"contents": "write"}): rc, r = self.move_away(".github/workflows/ci.yml")
+        self.assertEqual((rc, r["status"], r["kind"]), (1, "failed", "praise"), r); self.assertIn("workflows=write 权限", r["error"])
         self.assertFalse([a for a in self.acts if a["type"] == "gh.pr.push-fix"])
         dm = [a for a in self.acts if a["type"] == "slack.dm"]
         self.assertEqual([a["key"] for a in dm], [f"revise-needs-praise:1301:{self.head[:12]}"])
@@ -217,6 +222,11 @@ class TestRevise(GitTmp):
         self.assertEqual((t["status"], t.get("next_retry_at")), ("needs_praise", None))
         n = len(self.acts); rc, r = self.revise()                                        # same head: waits for a human, no new try
         self.assertEqual(r["status"], "needs_praise"); self.assertEqual(len(self.acts), n)
+
+    def test_workflow_change_is_pushed_when_the_installation_has_workflows_write(self):   # 11-11
+        with self.perms({"contents": "write", "workflows": "write"}): rc, r = self.move_away(".github/workflows/ci.yml")
+        self.assertEqual(r["status"], "pr_action_written", r)
+        self.assertEqual(len([a for a in self.acts if a["type"] == "gh.pr.push-fix"]), 1)
 
     def test_ownership_foreign_commit_or_claim_skips_and_gate_files_hard_stop(self):
         # 10-30 #1444: someone else's recent commit on the branch, or a valid branch claim -> skipped with the reason, nothing pushed
