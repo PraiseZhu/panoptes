@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """11-05 (#1762 REPORT items 3-6): the reserve flag's polarity, one shared is_fix_pr, no pr-ci-freshness rerun loop when the head has no CI run, and xindong/* writes on the same identity
-in gh_wrapper as in lib.gh_env (the App only with gh-app-product-writes-enabled). 11-07 (Praise): NO cap on open fix PRs -- the
-limit is 2 fix agents running (prwatch MAX_FIXES); the 11-05 open-PR cap (items 1/2) stalled the bot for 2 days. Mocks only, no network."""
+in gh_wrapper as in lib.gh_env (the App only with gh-app-product-writes-enabled). 11-07 (Praise): NO cap on open fix PRs.
+11-12 (Praise): NO counting cap on running fix agents either -- concurrency is prwatch headroom plus the queued-merge-test yield;
+the 11-05 open-PR cap (items 1/2) stalled the bot for 2 days. Mocks only, no network."""
 import json, os, sys, tempfile, types, unittest
 from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bin")); sys.path.insert(0, HERE)
@@ -20,16 +21,24 @@ class NoOpenPrCap(unittest.TestCase):
     def test_lib_has_no_open_fix_pr_cap(self):
         self.assertFalse(hasattr(lib, "fixpr_cap_reason")); self.assertFalse(hasattr(lib, "MAX_FIX_PRS"))
 
-    def test_admit_block_ignores_open_fix_prs_but_keeps_running_limit(self):
+    def test_admit_block_ignores_open_fix_prs_and_has_no_running_count_cap(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.object(prwatch, "gh", no_pr_list), \
              mock.patch.object(prwatch, "TEST_RESERVE_OFF", f"{d}/off"), mock.patch.object(prwatch, "headroom_mb", return_value=99999), \
              mock.patch.object(prwatch, "tests_queued", return_value=0):
             with mock.patch.object(prwatch, "prfix_runs", return_value=([], [])): self.assertIsNone(prwatch.admit_block({}, {})[0])
             with mock.patch.object(prwatch, "prfix_runs", return_value=([11], [])): self.assertIsNone(prwatch.admit_block({}, {})[0])
-            with mock.patch.object(prwatch, "prfix_runs", return_value=([11, 12], [])):   # 2 fix agents running = the real limit
-                self.assertIn("2 fixes running (max 2)", prwatch.admit_block({}, {})[0])
-        with mock.patch.object(prwatch, "headroom_mb", return_value=100):   # memory still yields to tests
+            # (a) enough memory: 2 already running admits a 3rd; 3 running admits a 4th. No counting cap.
+            with mock.patch.object(prwatch, "prfix_runs", return_value=([11, 12], [])):
+                self.assertIsNone(prwatch.admit_block({}, {})[0])
+            with mock.patch.object(prwatch, "prfix_runs", return_value=([11, 12, 13], [])):
+                self.assertIsNone(prwatch.admit_block({}, {})[0])
+        with mock.patch.object(prwatch, "headroom_mb", return_value=100):   # (b) insufficient memory still blocks
             self.assertIn("headroom", prwatch.admit_block({}, {})[0])
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(prwatch, "TEST_RESERVE_OFF", f"{d}/off"), \
+             mock.patch.object(prwatch, "headroom_mb", return_value=99999), \
+             mock.patch.object(prwatch, "tests_queued", return_value=2), \
+             mock.patch.object(prwatch, "prfix_runs", return_value=([], [])):
+            self.assertIn("queued", prwatch.admit_block({}, {})[0])  # (c) merge tests queued still blocks
 
     def test_h_fixpr_validate_and_do_do_not_count_open_fix_prs(self):
         a = {"ticket": "t1", "title": "x", "patch": "/nonexistent.patch"}

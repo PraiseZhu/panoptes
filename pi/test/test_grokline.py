@@ -33,6 +33,13 @@ class Grok(Base):
                 "started_at": started.isoformat(), "progress_at": started.isoformat(), "attempts": 1}
     def both_pi_slots(self):   # A and B run on the Pi line (this test process stands in for live prfix runs)
         return {f"1178:{A}": running(1178, A, os.getpid()), f"1178:{B}": running(1178, B, os.getpid())}
+    def mem_block(self, on=True):
+        """prwatch last dispatch waited on headroom: the only Grok-overflow trigger after Praise 11-12."""
+        path = G().PRWATCH_STATE
+        if on:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f: json.dump({"fix_wait": "headroom 100 MB < 2000 MB"}, f)
+        elif os.path.exists(path): os.remove(path)
 
 class TestGate(unittest.TestCase):
     def test_thresholds(self):
@@ -47,16 +54,19 @@ class TestGate(unittest.TestCase):
         m = G().may_open
         self.assertFalse(m(False, "open", 2, 3, 0)[0])
         self.assertFalse(m(True, "hold", 2, 3, 0)[0])
-        self.assertFalse(m(True, "open", 1, 3, 0)[0])  # a Pi slot is free
+        self.assertFalse(m(True, "open", 1, 3, 0)[0])  # not memory-blocked
         self.assertFalse(m(True, "open", 2, 0, 0)[0])  # no backlog
-        self.assertTrue(m(True, "open", 2, 1, 0)[0])
+        self.assertFalse(m(True, "open", 2, 1, 0)[0])  # many running, not memory-blocked: do not open
+        self.assertFalse(m(True, "open", 5, 3, 0)[0])  # running count is not a gate
         self.assertTrue(m(True, "open", 0, 0, 1)[0])   # handed over by Pi
         self.assertFalse(m(True, "stop", 0, 0, 1)[0])
 
-    def test_may_open_when_pi_blocked_by_memory(self):   # 11-03: Pi 0 running (memory gate) + 6 queued -> both lines idle
+    def test_may_open_when_pi_blocked_by_memory(self):   # 11-12: Grok opens only when Pi is memory-blocked AND there is backlog
         m = G().may_open
         self.assertTrue(m(True, "open", 0, 6, 0, 0, True)[0])
+        self.assertTrue(m(True, "open", 3, 6, 0, 0, True)[0])    # running count does not matter once memory-blocked
         self.assertFalse(m(True, "open", 0, 0, 0, 0, True)[0])   # no backlog
+        self.assertFalse(m(True, "open", 3, 6, 0, 0, False)[0])  # many running, not blocked
         self.assertFalse(m(True, "hold", 0, 6, 0, 0, True)[0])   # usage gate unchanged
         self.assertFalse(m(True, "open", 0, 6, 0, 2, True)[0])   # GROK_CAP unchanged
         import tempfile, json as J
@@ -104,8 +114,10 @@ class TestPiSide(Grok):
         self.assertEqual((v["state"], v["skips"]), ("skip", [prfix.GROK_HANDOVER]))
 
 class TestClaim(Grok):
-    def test_claims_when_pi_full_and_backlog(self):
+    def test_claims_when_pi_memory_blocked_and_backlog(self):
         self.switch(); self.put(tickets(**self.both_pi_slots()))
+        self.assertEqual(G().claim(5.0, now=NOW)["status"], "no")   # many running is not enough
+        self.mem_block()
         r = G().claim(5.0, now=NOW)
         self.assertEqual((r["status"], r["ticket"]), ("claimed", f"1179:{C}"))
         t = self.tk(f"1179:{C}")
@@ -119,7 +131,7 @@ class TestClaim(Grok):
         self.assertEqual(G().claim(5.0, now=NOW)["status"], "no")
         self.assertNotIn("owner", self.tk(f"1179:{C}"))
     def test_gate_hold_and_week_cap(self):
-        self.switch(); self.put(tickets(**self.both_pi_slots()))
+        self.switch(); self.put(tickets(**self.both_pi_slots())); self.mem_block()
         g = G(); g.claim(5.0, now=NOW - dt.timedelta(hours=3))   # baseline 5, claims C
         g.give_back(f"1179:{C}", 6.0, "test", now=NOW - dt.timedelta(hours=2))
         r = g.claim(13.0, now=NOW)                               # +8
@@ -134,7 +146,7 @@ class TestClaim(Grok):
         with g.usage_locked() as U: g.record(U, 68.0, NOW - dt.timedelta(hours=1)); d = g.record(U, 70.5, NOW)
         self.assertEqual(g.day_gate(d)[0], "hold"); self.assertEqual(d["trips"], ["week70"]); self.assertTrue(d["pm_report_due"])
     def test_finish_hands_back_with_usage(self):
-        self.switch(); self.put(tickets(**self.both_pi_slots()))
+        self.switch(); self.put(tickets(**self.both_pi_slots())); self.mem_block()
         g = G(); g.claim(5.0, now=NOW)
         r = g.finish(f"1179:{C}", 6.5, 1700, now=NOW + dt.timedelta(minutes=50))
         self.assertEqual(r["status"], "ok")
@@ -193,13 +205,13 @@ class TestFollowup(Grok):
         cm = [{"sha": "abc", "commit": {"message": m["commit_message"], "committer": {"date": dt.datetime.now(dt.timezone.utc).isoformat()}}}]
         self.assertEqual(lib.foreign_recent_commits(cm), [])
     def test_claims_only_praise_or_kirozeng(self):
-        self.switch(); self.put(tickets(**self.both_pi_slots()))
+        self.switch(); self.put(tickets(**self.both_pi_slots())); self.mem_block()
         self.ctx["reports"][1179]["cur"][1]["author"] = "someone"
         self.assertEqual(G().claim(5.0, now=NOW)["status"], "no")
         self.ctx["reports"][1179]["cur"][1]["author"] = "kirozeng"
         self.assertEqual(G().claim(5.0, now=NOW)["ticket"], f"1179:{C}")
     def test_backlog_cleared_stops_taking_work(self):
-        self.switch(); self.put(tickets(**self.both_pi_slots()))
+        self.switch(); self.put(tickets(**self.both_pi_slots())); self.mem_block()
         g = G(); self.assertEqual(g.claim(5.0, now=NOW)["status"], "claimed")
         g.finish(f"1179:{C}", 5.5, 1700, now=NOW)
         r = g.claim(5.6, now=NOW)
@@ -213,7 +225,7 @@ class TestFollowup(Grok):
         self.assertEqual(r["status"], "stop")
         t = self.tk(f"1179:{C}"); self.assertEqual((t["status"], t.get("owner")), ("queued", None))
     def test_gate_dry_run_reads_only_and_bad_file_is_hold(self):
-        self.switch(); self.put(tickets(**self.both_pi_slots())); g = G()
+        self.switch(); self.put(tickets(**self.both_pi_slots())); self.mem_block(); g = G()
         with g.usage_locked() as U: g.record(U, 5.0, NOW)
         before = open(g.usage_path()).read(), open(f"{prfix.OUT}/tickets.json").read()
         r = g.gate_dry_run(now=NOW)
@@ -223,7 +235,7 @@ class TestFollowup(Grok):
         r = g.gate_dry_run(now=NOW)
         self.assertEqual((r["gate"], r["may_open"]), ("hold", False))
     def test_skip_key_pending_ruling(self):   # 11-04: 1590 merged into 1610's session, --claim must be able to leave a key alone
-        self.switch(); self.put(tickets(**self.both_pi_slots())); g = G(); k = f"1179:{C}"
+        self.switch(); self.put(tickets(**self.both_pi_slots())); self.mem_block(); g = G(); k = f"1179:{C}"
         r = g.gate_dry_run(now=NOW, skip=[k])
         self.assertEqual((r["would_claim"], r["skipped"], r["may_open"]), (None, [k], False))
         r = g.claim(5.0, now=NOW, skip=[k])
@@ -240,7 +252,7 @@ class TestFollowup(Grok):
         g = G(); r = g.claim(5.0, now=NOW)                       # C is a qualifying todo, but Grok already holds 2
         self.assertEqual(r["status"], "no", r); self.assertNotIn("owner", self.tk(f"1179:{C}"))
         self.assertFalse(g.gate_dry_run(now=NOW)["may_open"])
-        self.put(tickets(**self.both_pi_slots(), **{f"1180:{f1}": self.grok_owned(1180, f1)}))   # 1 held -> may claim the 2nd
+        self.put(tickets(**self.both_pi_slots(), **{f"1180:{f1}": self.grok_owned(1180, f1)})); self.mem_block()   # 1 held -> may claim the 2nd
         self.assertEqual(g.claim(5.0, now=NOW)["ticket"], f"1179:{C}")
     def test_gate_dry_run_parseable_bad_day_is_hold(self):
         self.switch(); self.put(tickets(**self.both_pi_slots())); g = G(); day = NOW.date().isoformat()

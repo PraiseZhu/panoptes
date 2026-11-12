@@ -151,11 +151,12 @@ RO_FLAGS = (b"--list", b"--pending-json", b"--cleanup-stale", b"--dry-run")   # 
 # the last 20 x 1.3 (minute samples miss short tsc / vitest spikes). A merge test may start any minute (cron :07, every merge),
 # so from the second fix on its peak is reserved even while none runs. On this 16 GB box that usually means one fix beside a
 # merge test (10-23 17:08 the box already dipped to 2.1 GB free); more memory -> more fixes.
-# 11-03 (concurrency plan §2.2): tests first. A whole merge-test peak is always reserved (even with no fix running), at most
-# MAX_FIXES fixes run at once, and no fix starts while a merge test is queued (live qa-slot req-* files).
+# 11-03 (concurrency plan §2.2): tests first. A whole merge-test peak is always reserved (even with no fix running),
+# and no fix starts while a merge test is queued (live qa-slot req-* files).
+# 11-12 (Praise): no counting cap on concurrent fixes (the MAX_FIXES=2 gate is removed). Concurrency is decided only by
+# headroom memory admission. The queued-test yield stays. TEST_RESERVE and EMERG kill are unchanged.
 # Rollback: touch {BASE}/prwatch-test-reserve-off -> the rule above (reserve from the 2nd fix on, no cap, queue ignored).
 TEST_RESERVE_OFF = f"{BASE}/prwatch-test-reserve-off"
-MAX_FIXES = 2
 # 11-03 (§2.3): MemAvailable < EMERG_MB for EMERG_S seconds while a fix runs -> kill that fix's current step (not prfix.py itself);
 # prfix sees the mark, puts the ticket back as "waiting" (not a failed try). Rollback: touch {BASE}/prwatch-emerg-kill-off.
 EMERG_KILL_OFF = f"{BASE}/prwatch-emerg-kill-off"
@@ -352,13 +353,11 @@ def admit_block(t, st):
     """-> (why a new fix / revise may not start, or None; headroom MB)"""
     room, need = headroom_mb(t, st=st), ADMIT_FREE_MB + learned(st, "fix", RUN_PEAK_MB)
     if room < need: return f"headroom {room} MB < {need} MB", room
-    if flag_on(TEST_RESERVE_OFF):   # flag_on(off_file) = the off file is ABSENT: the cap / queue rule is the default (11-05: not inverted)
-        pys, waiting = prfix_runs(t)
-        if len(pys) + len(waiting) >= MAX_FIXES: return f"{len(pys) + len(waiting)} fixes running (max {MAX_FIXES})", room
+    if flag_on(TEST_RESERVE_OFF):   # flag_on(off_file) = the off file is ABSENT: the queue rule is the default (11-05: not inverted)
         q = tests_queued()
         if q: return f"{q} merge test(s) queued", room
-    # 11-07 (Praise): "同时最多 2 个修复" = 2 fix agents running (MAX_FIXES above, memory yields to tests), NOT 2 open fix PRs.
-    # A finished fix frees its slot even while its PR stays open; the 11-05 open-fix-PR cap stalled the bot for 2 days.
+    # 11-07 (Praise): no cap on OPEN fix PRs. 11-12 (Praise): no counting cap on RUNNING fix agents either;
+    # concurrency is headroom only; a finished fix frees memory even while its PR stays open.
     return None, room
 
 
@@ -496,10 +495,10 @@ UB_PER_DAY = 6          # update-branch per PR per day (10-24: the old cap of 2 
 MAX_REVISIONS = 2       # = prfix.MAX_REVISIONS
 MAX_MERGES = 3          # = prfix.MAX_MERGES
 PILINE = FIX_PR_MARK
-# is_fix_pr (from lib): the one counting rule (stdcheck / outbound / admit_block)
+# is_fix_pr (from lib): shared definition (stdcheck / outbound / prwatch)
 def is_bot_fixpr(p):
     """a draft fix PR the Pi line (or the Grok line via grokline.pr_meta) opened: pi-line marker + qa-fix/* branch. Driving rule only
-    (ready / rerun / revise); counting toward the cap is the wider shared lib.is_fix_pr"""
+    (ready / rerun / revise); the wider shared definition is lib.is_fix_pr"""
     return PILINE in (p.get("body") or "") and (p.get("headRefName") or "").startswith("qa-fix/")
 
 

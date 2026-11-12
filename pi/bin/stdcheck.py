@@ -13,7 +13,8 @@ Checks (each one: a list of objects that breach, from files on disk plus two gh 
   panoptes_prs open PraiseZhu/panoptes PRs <= 3 (lib.gh: Praise QA App identity while gh-app-enabled, PAT otherwise)
   panoptes_author PraiseZhu/panoptes PRs created in the last LOOKBACK_H (not before AUTHOR_SINCE) must be opened by app/praise-qa
                (gh pr create through the box wrapper); any other author (PraiseZhu via a connector / /usr/bin/gh) -> breach pr-N, owner Praise.
-  fix_prs      always passes since 11-07: the limit is 2 fix agents running (enforced by prwatch.admit_block), not 2 open fix PRs.
+  fix_prs      always passes since 11-07: no cap on open fix PRs. 11-12: no counting cap on running agents either
+               (prwatch.admit_block is headroom + queued-merge-test yield only).
   tasks        pmnudge (Beijing 09-22 :05), daily (07:35, retry 08:35) and ledger (23:40) ran clean: run.sh records
                (watchdog.runs / ok_run), plus daily's outbound ledger key mivo-daily-report:<day> done and out/ledger/<day>.json
   review_pr    the Mac mini review-pr dispatcher is moving (Jasper ruling, 11-04): product repo via lib.gh (App identity, REST, at most
@@ -222,8 +223,8 @@ def check_panoptes_author(now):
 PILINE = FIX_PR_MARK   # 11-05: is_fix_pr comes from lib (shared with prwatch)
 
 def check_fix_prs(now):
-    """11-07 (Praise): the rule is "at most 2 fix agents RUNNING" (prwatch.admit_block, MAX_FIXES), not "at most 2 fix PRs OPEN"
-    (Jasper 11-04 reading). prwatch enforces it before every dispatch, so there is nothing to breach here; the check stays in
+    """11-07 (Praise): no cap on OPEN fix PRs. 11-12 (Praise): no counting cap on RUNNING fix agents either
+    (prwatch.admit_block is headroom + queued-merge-test yield). There is nothing to breach here; the check stays in
     CHECKS and passes, so an open stdcheck:fix_prs:concurrent gap closes through the normal sync instead of staying open."""
     return {}
 
