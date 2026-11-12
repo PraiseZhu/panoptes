@@ -541,7 +541,8 @@ def self_pr_list(repo, state, fields, search=None, limit=100, extra=(), run=None
         for p in (run or gh)(args) or []: seen.setdefault(p.get("number"), p)   # run: the caller's gh (tests stub module.gh)
     return sorted(seen.values(), key=lambda p: -(p.get("number") or 0))
 # 11-05 (pr-1762 REPORT item 4): ONE definition of a Pi-line fix PR (stdcheck, prwatch): pi-line marker in the body OR a
-# qa-fix/* / fix/qa-* head. 11-07 (Praise): no cap on OPEN fix PRs -- the limit is 2 fix agents running (prwatch MAX_FIXES).
+# qa-fix/* / fix/qa-* head. 11-07 (Praise): no cap on OPEN fix PRs. 11-12 (Praise): no counting cap on RUNNING
+# fix agents either (prwatch.admit_block is headroom + queued-merge-test yield).
 FIX_PR_MARK = "<!-- pi-line fixpr:"; FIX_PR_HEADS = ("qa-fix/", "fix/qa-")
 def is_fix_pr(p):
     return FIX_PR_MARK in (p.get("body") or "") or (p.get("headRefName") or "").startswith(FIX_PR_HEADS)

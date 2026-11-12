@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""11-03 concurrency plan items 2-4 (tests first): prwatch always reserves a merge-test peak, runs at most 2 fixes and starts none
+"""11-03 concurrency plan items 2-4 (tests first): prwatch always reserves a merge-test peak and starts no fix
 while a merge test is queued; prfix waits between steps while a merge test runs or is queued; MemAvailable < 2G for 30 s kills the
 current step of a fix and the ticket goes back to the queue without using up a retry. Each has a flag-file rollback.
+11-12 (Praise): no counting cap on concurrent fixes; concurrency is headroom only (queued-test yield stays).
 Local only: no network, no real processes killed, no writes outside a temp dir. Run: cd bin && python3 ../test/test_fix_yield_reserve_kill.py"""
 import os, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -65,11 +66,14 @@ class Reserve(T):
         self.procs({}, 7413); self.assertIsNone(prwatch.admit_block({}, ST)[0])
         self.procs({}, 7412); self.assertIn("headroom", prwatch.admit_block({}, ST)[0])
 
-    def test_at_most_two_fixes_even_with_memory(self):
+    def test_third_fix_admitted_when_memory_allows(self):
+        # 11-12 (Praise): no counting cap. Two already running + plenty of memory admits a third; three running admits a fourth.
         t = {10: (1, 300, PY), 20: (1, 300, PY)}
         self.procs(t, 64000)
-        self.assertIn("max 2", prwatch.admit_block(t, ST)[0])
-        touch(prwatch.TEST_RESERVE_OFF); self.assertIsNone(prwatch.admit_block(t, ST)[0])   # rollback: memory alone
+        self.assertIsNone(prwatch.admit_block(t, ST)[0])
+        t[30] = (1, 300, PY)
+        self.assertIsNone(prwatch.admit_block(t, ST)[0])
+        touch(prwatch.TEST_RESERVE_OFF); self.assertIsNone(prwatch.admit_block(t, ST)[0])   # rollback: still memory alone
 
     def test_no_fix_starts_while_a_merge_test_is_queued(self):
         self.procs({}, 64000)

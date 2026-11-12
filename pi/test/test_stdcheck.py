@@ -137,7 +137,7 @@ class Checks(Base):
         self.assertNotIn("--author", self.gh_calls[0])   # all open PRs, through lib.gh (App identity when gh-app-enabled)
 
     def test_fix_prs_open_count_never_breaches(self):
-        """11-07 (Praise): the limit is 2 fix agents RUNNING (prwatch), not 2 fix PRs OPEN: any number of open fix PRs passes"""
+        """11-07 (Praise): no cap on OPEN fix PRs; 11-12: no counting cap on RUNNING agents either. Any number of open fix PRs passes."""
         self.prs[S.REPO] = [{"number": n, "headRefName": f"qa-fix/{n}", "body": "", "isDraft": True} for n in range(6)]
         self.assertEqual(S.check_fix_prs(NOW), {})
         self.assertEqual(S.run(NOW)["fix_prs"], {}); self.assertNotIn("stdcheck:fix_prs:concurrent", self.open_ids())

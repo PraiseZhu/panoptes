@@ -7,8 +7,8 @@ Switch: PI_STATE/takeover/prfix-grok-overflow (present = on, re-read on every ca
 Usage gate (pure: gate()): weekly % from CheckSubscriptionUsage, written here by the bot (--claim/--record/--finish --pct).
   baseline = first record of the Beijing day (lowered if a later record is smaller, e.g. the weekly reset).
   rise >= 10 -> stop: every Grok ticket goes back to Pi now; rise >= 8 or week >= 70 -> hold: no new ticket, running ones finish.
-When (may_open()): switch on, gate open, and either both Pi slots busy (or Pi blocked by memory admission) with Pi-line todo still queued, or a ticket Pi handed
-  over (emergency-killed > 3 times today, prfix sets grok_wanted).
+When (may_open()): switch on, gate open, and either Pi blocked by memory admission with Pi-line todo still queued, or a ticket Pi handed
+  over (emergency-killed > 3 times today, prfix sets grok_wanted). Many Pi fixes running is not enough by itself (Praise 11-12: no slot-count cap).
 Claim: --claim --pct P takes the first todo in Pi's own priority order under tickets.json's flock: owner=grok, pid=null,
   host=cloud, status=running, usage_start; refused while Grok already holds GROK_CAP (2) owner=grok tickets. Pi never takes owner=grok. --progress KEY keeps it; 90 min without -> back to Pi.
   --skip QA:FP (repeatable, also on gate --dry-run): that key is left out of this call's queue (held pending a ruling); bad key -> error.
@@ -30,7 +30,6 @@ import prfix
 
 HOLD_RISE, STOP_RISE, WEEK_CAP = 8.0, 10.0, 70.0
 STALE_MIN = 90
-PI_SLOTS = 2                     # = prwatch.MAX_FIXES
 PRWATCH_STATE = f"{BASE}/out/prwatch/state.json"   # prwatch's own state (read-only here)
 GROK_CAP = 2                     # DESIGN §3: Grok holds at most 2 tickets at once
 GROK_AUTHORS = ("PraiseZhu", "kirozeng")   # 11-03: Grok claims only tickets whose source PR is by one of these
@@ -65,9 +64,8 @@ def may_open(switch, g, pi_running, pi_todo, wanted, held=0, pi_blocked=False):
     if g != "open": return False, f"用量闸门 {g}"
     if held >= GROK_CAP: return False, f"Grok 已占 {held}/{GROK_CAP} 张"
     if wanted: return True, f"{wanted} 张单 Pi 今天被杀超过 {prfix.KILLS_TO_GROK} 次，交给 Grok"
-    if pi_todo and pi_running >= PI_SLOTS: return True, f"Pi 线 {pi_running} 个位置都满，还有 {pi_todo} 张待修"
-    if pi_todo and pi_blocked: return True, f"Pi 线被内存准入挡住（{pi_running}/{PI_SLOTS} 在跑），还有 {pi_todo} 张待修"
-    return False, ("没有积压" if not pi_todo else f"Pi 线只占了 {pi_running}/{PI_SLOTS} 个位置")
+    if pi_todo and pi_blocked: return True, f"Pi 线被内存准入挡住（{pi_running} 在跑），还有 {pi_todo} 张待修"
+    return False, ("没有积压" if not pi_todo else f"Pi 线未被内存挡住（{pi_running} 在跑）")
 
 
 def stale(t, now):
