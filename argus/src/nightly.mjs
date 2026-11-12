@@ -402,7 +402,16 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   const stepById = Object.fromEntries(profile.steps.map((s) => [s.id, s]))
   const checkRows = (results) => (results ?? []).map((r) => {
     const step = stepById[r.id] ?? { id: r.id, kind: r.kind }
-    if (r.unavailable) health.qa_tool_failures.push({ pr: number, stage: r.id, dimension: toBox(step, profile), message: `check could not run: ${r.unavailableReasonZh}` })
+    if (r.unavailable) {
+      // 箱子缺浏览器可执行文件时 Mivo 的浏览器层如实报 unavailable（"no trusted Chrome/Chromium executable…"）：
+      // 那是箱子的环境问题，不是 panoptes 的检查坏了 —— 记 env_problems。记成 qa_tool_failures 会被
+      // pi/bin/infrafix.py 当成 panoptes 自己的故障开票（11-13 PR-2146）
+      const reason = String(r.unavailableReasonZh ?? '')
+      const browserMissing = /chrom(?:e|ium)/i.test(reason) && /missing|not found|no trusted|executable|unavailable/i.test(reason)
+      const message = `check could not run: ${reason}`
+      if (browserMissing) health.env_problems.push({ pr: number, message: `${r.id} ${message} — the box has no usable Chrome/Chromium, so this is an environment problem, not a QA tool failure` })
+      else health.qa_tool_failures.push({ pr: number, stage: r.id, dimension: toBox(step, profile), message })
+    }
     if (r.timedOut) health.qa_tool_failures.push({ pr: number, stage: r.id, dimension: toBox(step, profile), message: `check timed out after ${Math.round(r.durationMs / 60000)} min` })
     return {
       id: r.id, name: r.nameZh, kind: r.kind, dimension: toBox(step, profile), qa_dimensions: step.covers ?? [],
