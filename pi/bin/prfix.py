@@ -41,7 +41,8 @@ Tickets: out/praise-pr/tickets.json (flock + atomic write). Transient failures (
 Exit: 0 handled (pr_action_written / norepro / dry-run ok) or nothing to do; 75 busy (MemAvailable < 3G, panoptes lock if taken,
   the --qa ticket already running elsewhere); 1 failed / needs_human / gated / error. Last stdout line: RESULT {json}; also
   out/praise-pr/last-result.json (last finisher only; prwatch kicks outbound from tickets.json, which has every run's action).
-Usage: prfix.py [--next] | --qa N [--fp FP] | --revise PR | --list | --pending-json | --cleanup-stale [--yes]   [--dry-run] [--base SHA]
+Usage: prfix.py [--next] | --qa N [--fp FP] [--allow-protected PATH]... | --revise PR | --list | --pending-json | --cleanup-stale [--yes]   [--dry-run] [--base SHA]
+  --allow-protected PATH (repeatable, requires --qa; --fp optional): exact repo-relative path of a PROTECTED_RE gate file to allow for this ticket; no wildcards; other gate files still hard-stop. prwatch --next / --revise never pass it.
   --list / --pending-json are read-only (gh reads only, zero model; the one write is the shared PR-list cache out/praise-pr/cache/).
   --cleanup-stale lists prfix leftovers
   (pi-wt-* worktrees on unpushed fix/qa-<N>-<fp8> branches, /tmp/pi-prfix/*); --yes deletes them.
@@ -187,11 +188,54 @@ def mechanical_ruling(kind, c, wd, base, failure_text="", changed_files=(), fail
             if not near: return "REJECT", f"改了跟这次修复无关的旧测试 {t}（不在被改源码的目录里，也没引用它）"
     return None, None
 SENSITIVE_RE = re.compile(r"^\.github/|(^|/)CODEOWNERS$|(^|/)\.env(\.|$)|secret|credential|\.pem$|\.key$|(^|/)rulesets?/", re.I)
-A_ALLOW = {"sensitive": False}   # --allow-sensitive: kept for old commands / DMs; since 10-25 sensitive files no longer stop the bot
+A_ALLOW = {"sensitive": False, "protected": []}
+# --allow-sensitive: kept for old commands / DMs; since 10-25 sensitive files no longer stop the bot.
+# --allow-protected: exact repo-relative paths (with --qa only) that may pass the PROTECTED_RE hard stop for this ticket.
 # 10-25 (Praise: 「全放行，交给审查机把关」「保证 pr bot 能顺利推进所有 pr」): a fix that touches CI config / repo rules / secrets
 # files is no longer a kind-5 stop. The files are listed at the top of the PR's risk section so the reviewer (审查机) and the merge
 # gate (humanOnlyPaths) see them; nothing here waits for Praise any more.
 def sensitive_files(files): return sorted(f for f in files if SENSITIVE_RE.search(f))
+def norm_repo_path(p):
+    """Repo-relative path for exact allow-list equality: slashes normalized, . and .. collapsed; no glob expansion."""
+    p = (p or "").replace("\\", "/").strip()
+    p = os.path.normpath(p).replace("\\", "/")
+    if p.startswith("./"): p = p[2:]
+    return p
+def allow_protected_log_file():
+    return globals()["ALLOW_PROTECTED_LOG"] if "ALLOW_PROTECTED_LOG" in globals() else f"{BASE}/out/logs/prfix-allow-protected.jsonl"
+def log_allow_protected(ticket, path):
+    """One JSONL line (ticket, path, ts) per allowance; also a process log line. A failed write does not undo the allow."""
+    rec = {"ts": dt.datetime.now(CST).isoformat(timespec="seconds"), "ticket": ticket, "path": path}
+    try:
+        fpath = allow_protected_log_file(); d = os.path.dirname(fpath)
+        if d: os.makedirs(d, exist_ok=True)
+        with open(fpath, "a") as f: f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception as e: log("allow-protected log write failed", e)
+    log("allow-protected", ticket, path)
+def apply_allow_flags(A, ap=None):
+    """Set A_ALLOW from parsed flags. --allow-protected requires --qa (argparse error / SystemExit 2); --fp is optional."""
+    A_ALLOW["sensitive"] = bool(getattr(A, "allow_sensitive", False)) and bool(getattr(A, "qa", None) or getattr(A, "revise", None))
+    paths = [p for p in (getattr(A, "allow_protected", None) or []) if p]
+    if paths and not getattr(A, "qa", None):
+        A_ALLOW["protected"] = []
+        if ap is not None: ap.error("--allow-protected needs --qa")
+        raise SystemExit("--allow-protected needs --qa")
+    A_ALLOW["protected"] = paths if getattr(A, "qa", None) else []
+    return A
+def gate_protected(files, what, ticket=None, allowed=None):
+    """PROTECTED_RE hard stop, minus --allow-protected exact paths (norm_repo_path equality, no globs).
+    Returns the allowed hits (and writes an audit JSONL line for each). Leftover hits raise Deterministic.
+    `what` is '修复' or 'CI 修正' — the two call sites share this helper."""
+    prot = protected_files(files)
+    allow = {norm_repo_path(p) for p in (A_ALLOW.get("protected") if allowed is None else allowed) or [] if p}
+    let, stop = [], []
+    for f in prot:
+        (let if norm_repo_path(f) in allow else stop).append(f)
+    for f in let: log_allow_protected(ticket, f)
+    if stop:
+        end = "硬停不开 PR" if what == "修复" else "硬停不推送"
+        raise Deterministic(f"{what}要改闸门文件（PROTECTED_RE），{end}：{stop[:5]}")
+    return let
 # 11-10 (#2022, 11 refused pushes on 11-09): GitHub refuses a push that changes .github/workflows/ unless the App installation has
 # `workflows: write`. 11-11: decided by the installation's real permissions (GitHub returns them with every installation token,
 # ghtoken.token_info): write -> the fix goes on; anything else (read, missing, no installation, mint failure) -> a human at once
@@ -1444,7 +1488,8 @@ def pr_body(c, res, tests, src, pf, docs_ok, issue_url, plat):
          "### 实际任务验证", "", "不涉及（缺陷由回归单测复现并验证）", "",
          "### 未执行的验证", "", "- Cindy / Windows 实机手测（Windows 以本 PR 当前 HEAD 的 CI Windows unit 分片为准）", "",
          "## 风险", ""] + ([f"> ⚠️ 本 PR 改了 CI 配置 / 仓库规则 / 密钥相关的文件：{fm(res['sensitive'])}。修 PR bot 按规则直接放行，请审查重点看这几处。", ""]
-                         if res.get("sensitive") else []) + (plat or []) + [
+                         if res.get("sensitive") else []) + ([f"> ⚠️ 本 PR 按 --allow-protected 放行了闸门文件（PROTECTED_RE）：{fm(res['allowed_protected'])}。仅本单、仅列出的精确路径；请审查重点看这几处。", ""]
+                         if res.get("allowed_protected") else []) + (plat or []) + [
          "### 需要特别留意", "", "- [ ] 无已知风险", "- [ ] 生成结果或模型行为发生变化", "- [ ] 可能产生额外任务或费用",
          "- [ ] 影响已有参数、默认值或调用方", "- [ ] 影响任务提交、轮询或失败重试", "- [ ] 影响素材、产物、下载或数据留存",
          "- [ ] 涉及用户数据、凭证或第三方服务", "- [x] 其他：自动生成的最小修复，没有实机验证；请核对根因与改动范围"]
@@ -1684,8 +1729,10 @@ def fix_one(c, A, d):
             files = chg()
             return files, [f for f in files if is_test(f)], [f for f in files if not is_test(f) and not f.startswith(ddir)]
         files, tests, src = split_files()
-        prot = protected_files(files)   # gate files: hard stop, --allow-sensitive does not apply
-        if prot: raise Deterministic(f"修复要改闸门文件（PROTECTED_RE），硬停不开 PR：{prot[:5]}")
+        let = gate_protected(files, "修复", ticket=f"{n}:{fp}")   # --allow-protected exact paths only; others still hard-stop
+        if let:
+            res["allowed_protected"] = let
+            step(f"按 --allow-protected 放行闸门文件：{', '.join(let[:4])}", True)
         workflow_gate(files, "修复", step)
         res["sensitive"] = sensitive_files(files)
         if res["sensitive"]: step(f"修复改了 CI 配置 / 仓库规则 / 密钥相关的文件（放行，PR 里标出交审查机把关）：{', '.join(res['sensitive'][:4])}", True)
@@ -2362,8 +2409,8 @@ def revise_one(A, d, n, qa, fp, p, red):
         if not files: raise Deterministic("改完后相对 PR 当前 head 没有任何改动")
         stray = sorted(set(files) - touched)
         if stray: raise Deterministic(f"相对 PR head 改动了模型没碰过的文件，拒绝推送：{stray[:5]}")
-        prot = protected_files(files)   # gate files: hard stop, --allow-sensitive does not apply
-        if prot: raise Deterministic(f"CI 修正要改闸门文件（PROTECTED_RE），硬停不推送：{prot[:5]}")
+        let = gate_protected(files, "CI 修正", ticket=f"{qa}:{fp}")   # same rule as the create-PR gate; --revise auto path never sets the allow list
+        if let: step(f"按 --allow-protected 放行闸门文件：{', '.join(let[:4])}", True)
         workflow_gate(files, "CI 修正", step)
         sens = sensitive_files(files)   # 10-25: no longer a stop (see A_ALLOW); the commit message names them for the reviewer
         if sens: step(f"CI 修正改了 CI 配置 / 仓库规则 / 密钥相关的文件（放行，交审查机把关）：{', '.join(sens[:4])}", True)
@@ -2445,7 +2492,9 @@ def main(argv=None):
     ap.add_argument("--dry-run", action="store_true"); ap.add_argument("--base")
     ap.add_argument("--revise", type=int, help="our own draft fix PR N went red on GitHub CI: fix it (prwatch launches this)")
     ap.add_argument("--allow-sensitive", action="store_true", help="no-op since 10-25 (sensitive files no longer stop the bot); kept so old commands still run")
-    A = ap.parse_args(argv); A_ALLOW["sensitive"] = bool(A.allow_sensitive) and bool(A.qa or A.revise)
+    ap.add_argument("--allow-protected", action="append", metavar="PATH",
+                    help="with --qa only: exact repo-relative path of a PROTECTED_RE gate file to allow for this ticket (repeatable; no wildcards; other gate files still stop)")
+    A = ap.parse_args(argv); apply_allow_flags(A, ap)
     if A.fp and not A.qa: ap.error("--fp needs --qa")
     if A.supersedes and not A.qa: ap.error("--supersedes needs --qa")
     if A.cleanup_stale: return cleanup_stale(A.yes)
