@@ -5,6 +5,7 @@
 6 rate limit on --pending-json is a skip (rc 0), not rc 1. Scratch state only, no network."""
 import argparse, contextlib, os, sys, tempfile, types, unittest
 from unittest import mock
+from test_prfix_evidence_gate import evidence_finding
 HERE = os.path.dirname(os.path.abspath(__file__)); BIN = os.path.join(os.path.dirname(HERE), "bin"); sys.path.insert(0, BIN)
 sys.path.insert(0, HERE); import isolation  # noqa: E402
 isolation.sandbox_state()
@@ -24,11 +25,13 @@ def fix_one(git_extra, base=None):
         if a[0] == "rev-parse": return 0, "f" * 40
         if a[0] == "worktree" and a[1] == "add": return 1, "stop here"
         return 0, ""
+    evidence = tempfile.TemporaryDirectory()
     A = argparse.Namespace(dry_run=True, base=base)
     with mock.patch.object(P, "_gh_json", side_effect=lambda args, t=None: {"baseRefName": S2} if args[:2] == ["pr", "view"] else {}), \
          mock.patch.object(P, "git", side_effect=git), mock.patch.object(P, "worktrees", return_value=[]), \
          mock.patch.object(P, "repo_lock", contextlib.nullcontext), mock.patch.object(P, "_TMPROOT", return_value=tempfile.mkdtemp()):
-        out, res = P.fix_one({"qa": 1597, "sev": "P1", "fp": FP, "title": "t"}, A, "2026-11-04")
+        out, res = P.fix_one({"qa": 1597, "sev": "P1", "fp": FP, "title": "t", "finding": evidence_finding(evidence.name, FP)}, A, "2026-11-04")
+    evidence.cleanup()
     return out, calls
 
 def action(**kw):

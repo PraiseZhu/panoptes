@@ -30,9 +30,14 @@ def rf(p):
     with open(p) as f: return f.read()
 def FP(c): return "mq1-" + (c * 20)[:20]                     # fake 20-hex fingerprints
 def utc(t): return t.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-def finding(fp, sev="P1", title="问题", file="src/a.ts", line=10): return {"fingerprint": fp, "severity": sev, "title": title, "file": file, "line": line}
+# All runnable fixtures now carry the same local v2 evidence required in production.
+from test_prfix_evidence_gate import evidence_finding
+_FIXTURE_EVIDENCE = tempfile.mkdtemp(prefix="prfix-evidence-")
+_ax.register(_sh.rmtree, _FIXTURE_EVIDENCE, True)
+def finding(fp, sev="P1", title="问题", file="src/a.ts", line=10):
+    return evidence_finding(os.path.join(_FIXTURE_EVIDENCE, fp), fp, severity=sev, title=title, file=file, line=line)
 def report(n, author, findings, t=T0, hist=()):
-    return {"cur": (t, {"number": n, "author": author, "findings": findings}, f"PR-{n}.json"),
+    return {"cur": (t, {"number": n, "author": author, "findings": findings, "tested_sha": "1" * 40, "base_sha": "2" * 40}, f"PR-{n}.json"),
             "hist": [(ht, {"number": n, "author": author, "findings": hf}, f"history/PR-{n}.v{i + 1}.json") for i, (ht, hf) in enumerate(hist)]}
 def pr(num, author, body="", title="t", created=NOW - dt.timedelta(hours=2), state="OPEN"):
     return {"number": num, "author": {"login": author}, "body": body, "title": title, "createdAt": utc(created), "state": state}

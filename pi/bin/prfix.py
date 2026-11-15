@@ -644,7 +644,7 @@ def collect(reps, ledger, fix2, nofix=frozenset()):
         fp = x.get("fingerprint")
         out[(n, fp)] = {"qa": n, "fp": fp, "sev": x.get("severity") or (row or {}).get("level"), "source": source, "author": author,
                         "title": x.get("title") or x.get("check_name") or x.get("check_id") or (row or {}).get("summary") or "",
-                        "finding": x, "row": row}
+                        "finding": x, "row": row, "source_report": ((reps.get(n) or {}).get("cur") or (None, None))[1]}
     for n, r in reps.items():
         if not r["cur"]: continue
         _, p, _ = r["cur"]; fs = (p.get("findings") or []) + (p.get("pending_verification") or [])
@@ -836,7 +836,7 @@ def next_ticket(vs): return next((v for v in vs if v["state"] == "todo"), None)
 def pending(vs):
     """--pending-json rows: every candidate nobody has claimed; reason_if_skipped null = there is work for --next."""
     return [{"qa": v["c"]["qa"], "fp": v["c"]["fp"], "sev": v["c"]["sev"], "first_seen": iso(v["first_seen"]), "deadline": iso(v["deadline"]),
-             "reason_if_skipped": None if v["state"] == "todo" else v["reason"], "title": v["c"]["title"][:80], "source": v["c"]["source"],
+             "reason_if_skipped": (lib.finding_evidence_error(v["c"].get("finding"), v["c"].get("source_report")) if v["state"] == "todo" else v["reason"]), "title": v["c"]["title"][:80], "source": v["c"]["source"],
              **({"manual_order": "待派单"} if v["state"] == "manual" else {})}
             for v in vs if v["state"] != "claimed"]
 
@@ -1544,6 +1544,8 @@ def fix_one(c, A, d):
     def step(k, ok, text=""): res["steps"].append((k, ok, text)); log(k, "OK" if ok else "FAIL")
     log("pick", tag, sev, c.get("title"), f"round {res['round']}", "dry-run" if A.dry_run else "real")
     try:
+        try: lib.read_finding_evidence(c.get("finding"), c.get("source_report"))
+        except (ValueError, OSError, TypeError, KeyError) as error: raise Deterministic("finding evidence rejected: " + str(error))
         os.makedirs(_TMPROOT(), exist_ok=True)
         with repo_lock():   # 10-24: parallel prfix processes share one clone; its refs / worktree list change one at a time
             if not A.dry_run:   # a legacy prfix worktree (pi-wt-<N>) may still hold this branch
@@ -1959,7 +1961,7 @@ def pick_qa(A, ctx, vs, now):
                           "error": f"p2-rulings.md 已按指纹裁了不修（{ruled[0]['fingerprint']}），--qa 不强修；要修先改裁决"}
         if x:
             c = {"qa": A.qa, "fp": x["fingerprint"], "sev": x["severity"], "source": "report", "author": author_of(rep[1]), "finding": x,
-                 "title": x.get("title") or "", "row": ctx["ledger"].get((A.qa, x["fingerprint"]))}
+                 "title": x.get("title") or "", "row": ctx["ledger"].get((A.qa, x["fingerprint"])), "source_report": rep[1]}
             c["first_seen"] = times(c, ctx["reports"])[0]; mine = [evaluate(c, ctx, now)]
             log(f"warn: --qa {A.qa} {x['severity']} 不在自动范围（P2 未判「修」），按人工指定处理")
     if not mine: return None, {"status": "error", "qa": A.qa, "fp": A.fp, "error": "找不到这条 finding（P0–P2；--fp 按前缀匹配）"}
@@ -2004,7 +2006,7 @@ def run_ticket(A, ctx, vs):
         if not v: return finish({"status": "idle", "pending_after": 0}, 0, A)
     if mem_gb() < MIN_MEM_GB:
         return finish({"status": "busy", "reason": f"MemAvailable {mem_gb():.1f}G < {MIN_MEM_GB}G", "ticket": v["key"]}, BUSY, A)
-    qa_lk = None; tk_lk = None; tk = {}
+    qa_lk = None; tk_lk = None; fp_claim = None; tk = {}; out = {}
     try:
         gates, _ = load_gates()   # fresh read right before acting (defence in depth; --qa included)
         qa_lk = None if SHARE_WITH_PANOPTES else try_lock(_QA_LOCK())
@@ -2027,7 +2029,11 @@ def run_ticket(A, ctx, vs):
                 if cur.get("status") == "running" and pid_alive(cur.get("pid")): continue      # another process is on it
                 if cur.get("owner") == "grok": continue                                         # the Grok line has it (--qa too)
                 lk = try_lock(f"{OUT}/locks/{w['c']['qa']}-{fp8(w['c']['fp'])}.lock")
-                if lk: v, tk_lk = w, lk; break
+                if lk:
+                    try: fp_claim = lib.claim_fingerprint(f"{OUT}/fingerprints", REPO, w['c']['fp'], w['key'])
+                    except lib.FingerprintBusy:
+                        unlock(lk); continue
+                    v, tk_lk = w, lk; break
             if not v:
                 stop = gated or (({"status": "busy", "reason": "这一单正由另一个 prfix 在修", "ticket": cands[0]["key"]}, BUSY) if fixed_pick and cands
                                  else ({"status": "idle", "pending_after": 0}, 0))
@@ -2052,6 +2058,7 @@ def run_ticket(A, ctx, vs):
             if notify == "needs_praise": acts.append(dm_action("needs_praise", c, f"{tk.get('last_error')}；证据 {res['evidence']}"))
             if acts: record_actions("praise-pr", d, acts)
     finally:
+        if fp_claim: lib.release_fingerprint(fp_claim, reserve=out.get("status") == "pr_action_written")
         _QA_HOLD.pop("f", None); unlock(qa_lk); unlock(tk_lk)
     left = [w for w in vs if w["state"] == "todo" and w["key"] != v["key"]]
     r = {"ticket": v["key"], "qa": c["qa"], "fp": c["fp"], "sev": c["sev"], "round": c["round"],

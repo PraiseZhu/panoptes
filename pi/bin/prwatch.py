@@ -482,7 +482,7 @@ def dispatch_fix(st):
     if DRY: qlog(f"DRY: would launch prfix --next {msg}"); return
     os.makedirs(f"{BASE}/out/logs", exist_ok=True)
     with open(f"{BASE}/out/logs/prwatch-launches.log", "a") as lf:
-        subprocess.Popen([f"{PI_CODE}/bin/run.sh", "prfix", "--next"], stdin=subprocess.DEVNULL, stdout=lf, stderr=subprocess.STDOUT,
+        subprocess.Popen([f"{PI_CODE}/bin/run.sh", "prfix", "--qa", str(top["qa"]), "--fp", top["fp"]], stdin=subprocess.DEVNULL, stdout=lf, stderr=subprocess.STDOUT,
                          start_new_session=True, env=dict(os.environ, PRFIX_DISPATCHED="1"))
     st.pop("fix_wait_since", None); qlog(f"launched prfix --next {msg}")
 

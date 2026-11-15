@@ -151,7 +151,7 @@ test('试运行检查（bench）在基线版本上也失败：只记「拿不准
   assert.equal(pending[0].owner, 'qa', `待核实归 QA 自查，不算作者的问题：${pending[0].owner}`)
 })
 
-test('对照：普通产品检查（非 trialOnly）在基线版本上也失败时仍是 pre-existing P3 提醒，不能被这条规则吞掉', async () => {
+test('普通检查的基线失败保留 pre-existing 诊断，不生成产品 finding', async () => {
   const run = await runPr({ number: 4102, steps: [unitStep] })
   const [entry] = (run.out.failed_checks ?? []).filter((c) => c.check_id === 'unit')
   const dump = brief(entry)
@@ -159,5 +159,5 @@ test('对照：普通产品检查（非 trialOnly）在基线版本上也失败�
   assert.equal(entry?.status, 'pre-existing', `普通产品检查的基线失败仍是 pre-existing（docs/report-schema.md）：${dump}`)
   assert.equal(entry?.severity, 'P3', `pre-existing 记 P3，只提醒：${dump}`)
   const graded = (run.out.findings ?? []).filter((f) => f.check_id === 'unit')
-  assert.equal(graded.length, 1, `普通检查的 pre-existing P3 仍要进 findings：${JSON.stringify((run.out.findings ?? []).map(brief))}`)
+  assert.equal(graded.length, 0, `普通检查的 pre-existing 只保留 failed_checks 诊断：${JSON.stringify((run.out.findings ?? []).map(brief))}`)
 })

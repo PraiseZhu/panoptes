@@ -148,16 +148,17 @@ const benchStep = (failLabels) => ({
 const profileOf = (failLabels) => ({ sandbox: false, steps: [installStep, benchStep(failLabels)] })
 
 function fixture(number) {
+  const sourceFile = number === 5204 ? 'src/persist/value.mjs' : 'src/persist/persistFlush.ts'
   const repo = `fixture/pr${number}`
   const src = join(root, `source-${number}`)
   mkdirSync(src)
   const git = (...a) => execFileSync('git', ['-C', src, '-c', 'user.name=F', '-c', 'user.email=f@example.invalid', ...a], { encoding: 'utf8' }).trim()
   git('init', '-q', '-b', 'main')
   mkdirSync(join(src, 'src/persist'), { recursive: true })
-  writeFileSync(join(src, 'src/persist/persistFlush.ts'), 'export const v = 1\n')
+  writeFileSync(join(src, sourceFile), 'export const v = 1\n')
   git('add', '.'); git('commit', '-qm', 'base')
   const baseSha = git('rev-parse', 'HEAD')
-  writeFileSync(join(src, 'src/persist/persistFlush.ts'), 'export const v = 2\n'); git('commit', '-qam', `code (#${number})`)
+  writeFileSync(join(src, sourceFile), 'export const v = 2\n'); git('commit', '-qam', `code (#${number})`)
   const mergeSha = git('rev-parse', 'HEAD')
   mkdirSync(MIRRORS_DIR, { recursive: true })
   execFileSync('git', ['clone', '-q', '--bare', src, join(MIRRORS_DIR, `fixture__pr${number}.git`)])
@@ -167,7 +168,7 @@ function fixture(number) {
     merged_at: new Date().toISOString(), merge_commit_sha: mergeSha, state: 'closed',
   }
   const stateFile = join(root, `github-fixture-${number}.json`)
-  writeFileSync(stateFile, JSON.stringify({ pr, baseSha, files: [{ filename: 'src/persist/persistFlush.ts', additions: 1, deletions: 1 }], calls: [] }))
+  writeFileSync(stateFile, JSON.stringify({ pr, baseSha, files: [{ filename: sourceFile, additions: 1, deletions: 1 }], calls: [] }))
   return { repo, stateFile }
 }
 
@@ -189,12 +190,12 @@ N.idleHooks.sample = () => ({ loadavg: [0.1, 0.1, 0.1], cores: 8, mem_available_
 N.idleHooks.wait = async () => {}
 after(() => { N.idleHooks.sample = origIdle.sample; N.idleHooks.wait = origIdle.wait })
 
-async function runPr({ number, failLabels }) {
+async function runPr({ number, failLabels, profile }) {
   const { repo, stateFile } = fixture(number)
   process.env.ARGUS_E2E_GH_STATE = stateFile
   const evDir = join(root, `ev-${number}`)
   const out = await N.processPr({
-    repo, project: { repo, profileData: profileOf(failLabels) }, number, discovery: 'merged',
+    repo, project: { repo, profileData: profile ?? profileOf(failLabels) }, number, discovery: 'merged',
     secrets: {}, db: null, health: health(), evidenceRoot: evDir,
     opts: { noReview: true, noAiTests: true, reuseMerged: false },
   })
@@ -217,6 +218,13 @@ describe('processPr：试运行检查的 3+3 引入门槛', { concurrency: 1 }, 
     }
     const graded = (out.findings ?? []).filter((f) => f.check_id === 'bench')
     assert.equal(graded.length, 1, `introduced 应进 findings：${JSON.stringify(graded.map(brief))}`)
+    assert.equal(graded[0].decision_status, 'confirmed')
+    assert.equal(graded[0].fix_eligible, true)
+    const findingFile = join(graded[0].evidence_root, 'fixture-finding.json')
+    writeFileSync(findingFile, JSON.stringify(graded[0]))
+    // Consumer contract: the real nightly artifacts must satisfy Pi's admission.
+    const consumer = fileURLToPath(new URL('../../pi/bin', import.meta.url))
+    execFileSync('python3', ['-c', 'import sys,json;sys.path.insert(0,sys.argv[1]);import lib;lib.read_finding_evidence(json.load(open(sys.argv[2])))', consumer, findingFile])
   })
 
   test('PR 第 3 次通过：报告为 unverified，不再跑多余的 base 轮', async () => {
@@ -249,4 +257,18 @@ describe('processPr：试运行检查的 3+3 引入门槛', { concurrency: 1 }, 
       assert.ok(labels.includes(need), `应留下 ${need} 轮证据，实际=${labels.join(',')}`)
     }
   })
+})
+
+test('processPr: independent cov round contributes actual V8 changed-line evidence', async () => {
+  const profile = { sandbox: false, steps: [installStep,
+    { id: 'cov-trigger', nameZh: 'coverage trigger', kind: 'product', cmd: ['true'], coverage: { kind: 'istanbul' }, exercises: ['other/**'] },
+    { id: 'node-test', nameZh: 'real source import', kind: 'product', cmd: [process.execPath, '-e', 'await import("./src/persist/value.mjs")'],
+      exercises: ['src/**'], covers: ['unit'], coverage: { kind: 'v8' } }] }
+  const { out } = await runPr({ number: 5204, profile })
+  const file = out.coverage.changed_source.files.find((f) => f.file === 'src/persist/value.mjs')
+  assert.ok(file, JSON.stringify(out.coverage.changed_source))
+  assert.deepEqual(file.loaded_by, ['node-test'])
+  assert.equal(file.lines.changed[0].status, 'pass')
+  assert.deepEqual(file.lines.changed[0].covered_by, ['node-test'])
+  assert.equal(out.findings.length, 0, 'coverage run is never a product failure')
 })

@@ -14,7 +14,7 @@ import { listNightlyPrs, getPull, getCommit, getBranchHead, listPullFiles, addFu
 import { classifyChange, highRiskFiles, withoutHandoff, isTestPath } from './classify.mjs'
 import { parseHandoff, splitHandoffCases, toHandoffReport, settleHandoff } from './handoff.mjs'
 import { executeOnSha, ensureMirror, mergeBase, sandboxMode, janitor, mirrorPath, currentUmask, INHERITED_UMASK, PINNED_UMASK, fmtUmask, isVersionMissingError } from './runner.mjs'
-import { decideOutcome, failedIds, setupFailed, failureKeys, compareKey } from './decide.mjs'
+import { decideOutcome, failedIds, setupFailed, failureKeys, compareKey, decideFinding, findingEligibility, completeRun } from './decide.mjs'
 import { analyzePr } from './ai.mjs'
 import { evaluateJev } from './jev.mjs'
 import { toMatrixQuestions, toMatrixState, toTriage, toStepPlan, toCoverage, toApplicability, stepExercises, stepRunsChangedFile } from './matrix.mjs'
@@ -26,12 +26,15 @@ import { repoReaderFor, verifyReviewFinding, verifyCacheKey, lookupVerification,
 import { ALL_DIRS, CACHE_DIR, EVIDENCE_DIR, REPORTS_DIR, CODE_DIR, LOGS_DIR } from './paths.mjs'
 import { log, redact, sleep, tail, toShanghaiDay, toShanghaiIso, waitWithinBudget } from './util.mjs'
 import { setBudget, overBudget } from './exec.mjs'
-import { coverageGate, parseAddedLines, mergeCoverageFiles, COVERAGE_THRESHOLDS, statedCoverageTarget, evaluateStatedTarget } from './coverage.mjs'
+import { coverageGate, coverageMapping, parseAddedLines, mergeCoverageFiles, COVERAGE_THRESHOLDS, statedCoverageTarget, evaluateStatedTarget } from './coverage.mjs'
 import { recentGiveUps } from './catchup.mjs'
 import { prTestDimensions } from './pr-tests.mjs'
 import { generateTargetedTests, toAiTestSteps, toAiGaps, toUncoveredTargets, toAiTestResult, aiTestCaps, aiTestTier, degradeForQuota, toSourceHead } from './aitests.mjs'
 import { createQuota, memoryQuota, resolvePool, CAPPED_ZH } from './quota.mjs'
 import { qaMisattribOff } from './misattrib-flag.mjs'
+import { createRunManifest } from './run-contract.mjs'
+import { writeReport as writeEvidenceReport } from './report.mjs'
+import { findingStatus } from './test-outcomes.mjs'
 import { groupTestScriptFailures, gitIsAncestor, isScriptFailure } from './test-script-failures.mjs'
 
 // 代码版本在进程启动（模块加载）时记下：运行中 checkout 前进不会让报告冒认新提交（#1086 曾在 dfbc980 之前启动，却记成 153e03e）
@@ -64,25 +67,13 @@ function wholeStepSignature(r) {
 
 // ── 单个失败键的归因（逐项，不依赖整体判定）────────────────
 function classifyKey(key, { first, rerun, base, latest, latestIsSame, skipLatest = false, trialOnly = false, prRuns = null, baseRuns = null }) {
-  if (!rerun) return { status: 'unverified', why: 'no rerun available' }
-  const vsRerun = compareKey(key, rerun, first)
-  if (vsRerun === 'absent') return { status: 'flaky', why: 'unstable: failed once, passed on a clean rerun of the same commit; not attributed to this PR' }
-  if (vsRerun === 'unknown') return { status: 'unverified', why: 'rerun result incomplete or failure type not comparable' }
-  if (!base) return { status: 'unverified', why: 'reproduced, but the base revision could not be run for comparison' }
-  const vsBase = compareKey(key, base, first)
-  if (vsBase === 'same') return { status: 'pre-existing', why: 'also fails on the base revision' }
-  if (vsBase === 'unknown') return { status: 'unverified', why: 'reproduced; base comparison incomplete' }
-  // 试运行检查（bench）判 introduced：PR 与 base 须各跑满 3 次，且 PR 3 次全失败、base 3 次全通过。少一次或有一次相反结果都只记 unverified。
-  if (trialOnly && !trialIntroducedConfirmed(key, { first, prRuns: prRuns ?? [first, rerun], baseRuns: baseRuns ?? [base] })) {
-    return { status: 'unverified', why: trialIntroducedWhy(key, { first, prRuns: prRuns ?? [first, rerun], baseRuns: baseRuns ?? [base] }) }
-  }
-  if (skipLatest) return { status: 'introduced', why: 'fails reproducibly on this PR and passes on the base revision (no latest-main recheck: a problem in the PR\'s own commits cannot be fixed by later commits)' }
-  if (!latestIsSame && latest) {
-    const vsLatest = compareKey(key, latest, first)
-    if (vsLatest === 'absent') return { status: 'fixed-later', why: 'introduced by this PR but already passing on latest main' }
-    if (vsLatest === 'unknown') return { status: 'introduced', why: 'fails here and passes on base; latest-main comparison incomplete' }
-  }
-  return { status: 'introduced', why: 'fails reproducibly on this PR and passes on the base revision' }
+  const decision = decideFinding({ key, first, rerun, base, latest, latestIsSame, skipLatest, trialOnly, prRuns, baseRuns })
+  const status = { confirmed: 'introduced', pending_verification: 'unverified' }[decision.status] ?? decision.status
+  const why = decision.reason === 'trial_requires_three_head_and_base_runs'
+    ? trialIntroducedWhy(key, { first, prRuns: prRuns ?? [first, rerun], baseRuns: baseRuns ?? [base] })
+    : ['head_evidence_incomplete', 'rerun_evidence_incomplete'].includes(decision.reason) ? 'rerun result incomplete or failure type not comparable' : decision.reason
+  return { status, why, decision }
+
 }
 
 const ofStep = (key, id) => key.startsWith(`${id}::`)
@@ -494,7 +485,14 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   out.mem_low_water_mb = lowWater.stop()
   const lowMem = lowMemoryEnvProblem(out.outcome, out.mem_low_water_mb)
   if (lowMem) { out.outcome = lowMem.outcome; out.outcome_reason = lowMem.reasonZh; health.env_problems.push({ pr: number, message: lowMem.message }) }
+  // Coverage runs only contribute measured coverage, never product check outcomes.
   out.coverage = toCoverage({ profile, triage, results: first, files })
+  // Keep coverage-round status and step provenance intact. Replace only a head
+  // row with no measurement; V8 head measurements remain available too.
+  const covResults = Array.isArray(cov) ? cov : []
+  out.coverage.changed_source = coverageMapping({ added: parseAddedLines(prDiff.text),
+    results: [...first.filter((r) => !covResults.some((c) => c.id === r.id)), ...covResults], profile })
+
   // 计划要跑却没有结果的步骤（安装失败后中止、时间预算用完等）也列进 skipped_steps
   const ranIds = new Set(first.map((r) => r.id))
   for (const id of plan.stepIds) {
@@ -524,7 +522,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     const test = key.slice(key.indexOf('::') + 2)
     const r = first.find((x) => x.id === stepId)
     const step = stepById[stepId] ?? { id: stepId, kind: r?.kind }
-    let { status, why } = classifyKey(key, { first, rerun, base, latest, latestIsSame, skipLatest: Boolean(step.noLatestRecheck), trialOnly: Boolean(step.trialOnly), prRuns: [first, rerun, ...prConfirm].filter(Boolean), baseRuns: [base, ...baseConfirm].filter(Boolean) })
+    let { status, why, decision: findingDecision } = classifyKey(key, { first, rerun, base, latest, latestIsSame, skipLatest: Boolean(step.noLatestRecheck), trialOnly: Boolean(step.trialOnly), prRuns: [first, rerun, ...prConfirm].filter(Boolean), baseRuns: [base, ...baseConfirm].filter(Boolean) })
     if (r?.timedOut) { status = 'timeout'; why = 'check timed out; no comparable failure evidence' }
     // 试运行检查（bench）在基线版本上同样失败（PR #1686 #1713 #1720）：只说明这台机器 / 这套阈值测不出东西，既不是 PR 的问题，
     // 也不证明主线坏了。按试运行约定只记「拿不准」交 QA 自查：不进 findings、不置 pre_existing、不定级。
@@ -553,7 +551,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     const envTimeout = isTrialTimeout(step, r, test, { status, rerun: compareOn(rerun), idle: out.rerun_idle_wait?.idle })
     out.failed_checks.push({
       check_id: stepId, check_name: r?.nameZh, dimension: toBox(step, profile), qa_dimensions: step.covers ?? [],
-      test: named ? test : null, failure_type: type, status, flaky: status === 'flaky', related_to_pr: status === 'flaky' ? false : undefined,
+      test: named ? test : null, failure_type: type, status, decision: findingDecision, decision_status: findingStatus(status), flaky: status === 'flaky', related_to_pr: status === 'flaky' ? false : undefined,
       pre_existing: preExisting,
       ...(!misattribOff && type === 'runner_error' && status === 'unverified' ? { test_script_failure: scriptFailure } : {}),
       severity: envTimeout ? 'P3' : severityFor({ status, step, merged }), attribution: envTimeout ? `${why}; test timed out in a trial-only check and passed on the idle-machine rerun: treated as environment load, not a PR finding` : why,
@@ -563,7 +561,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
       fingerprint: fp, pr_fingerprint: prFingerprint(fp, number),
       evidence: {
         tested_sha: sha, base_sha: baseSha, exit_code: r?.exitCode, signal: r?.signal ?? null, ended_at: r?.endedAt ?? null, timed_out: Boolean(r?.timedOut),
-        first_run: 'fail', rerun: compareOn(rerun), base_run: baseRun, ...(latest ? { latest_main_run: compareOn(latest) } : {}),
+        first_run: 'fail', rerun: compareOn(rerun), base_run: baseRun, latest_required: merged && !step.noLatestRecheck && !latestIsSame, latest_sha: out.latest_main_sha ?? null, ...(latest ? { latest_main_run: compareOn(latest) } : {}),
         ...(step.trialOnly ? { pr_runs: ['fail', compareOn(rerun), ...prConfirm.map(compareOn)], base_runs: [baseRun, ...baseConfirm.map(compareOn)] } : {}),
         command: (step.cmd ?? []).join(' '), log_tail: evidenceTail(r, named ? test : null), log_file: join(evDir, 'h1/logs', `${stepId}.log`),
         ...(!misattribOff && r?.checkReasons?.length ? { check_reasons: r.checkReasons } : {}),
@@ -623,7 +621,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
       ? { reason: 'test script error: the product steps never ran; QA fixes the test script / harness first, nothing to attribute to the PR', reasonZh: '测试脚本自身出错，产品步骤没跑：QA 先修测试脚本 / harness，不归到这个 PR' }
       : { reason: `check ${c.status}: not attributable to the PR author; QA re-runs / fixes the environment first`, reasonZh: `检查结果是 ${c.status}，不是作者的问题，QA 先自己查清（重跑、修环境）` }))
   }
-  out.findings = [...out.failed_checks.filter((c) => !c.not_a_pr_finding && !c.low_memory && !QA_SELF_CHECK_STATUSES.includes(c.status)).map(asCheck), ...out.findings]
+  out.findings = [...out.failed_checks.filter((c) => !c.not_a_pr_finding && !c.low_memory && c.status === 'introduced').map(asCheck), ...out.findings]
   // decideOutcome 只看 h1/h2/b：试运行检查未凑满 3+3 时 failed_checks 已是 unverified，不能再把 PR 写成 defect
   if (out.outcome === 'defect' && (decision.failureKeys ?? []).length) {
     const introduced = new Set(out.failed_checks.filter((c) => c.status === 'introduced').map((c) => `${c.check_id}::${c.test ?? '*'}`))
@@ -633,6 +631,7 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
       out.outcome_reason = '试运行检查未达到「PR 与 base 各 3 次、PR 全失败且 base 全通过」的引入判定门槛，不能认定为这个 PR 引入的缺陷'
     }
   }
+  attachFindingEvidence(out, { first, rerun, base, latest, prConfirm, baseConfirm, evDir, health })
   out.severity = out.findings.length ? maxSev(out.findings.map((f) => f.severity)) : 'P3'
   if (out.pending_verification.length) out.pending_summary = pendingSummary(out.pending_verification)
   Object.assign(out, dimensionsOf(out.checks, out.skipped_steps))
@@ -644,6 +643,71 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   out.sha_consistent = out.reviewed_sha == null || out.reviewed_sha === out.tested_sha
   if (!out.sha_consistent) health.notes.push(`PR #${number}: tests ran on ${String(out.tested_sha).slice(0, 12)} but code review looked at ${String(out.reviewed_sha).slice(0, 12)} (${out.review_diff_source})`)
   return out
+}
+
+// The legacy daily report remains readable. A separate v2 manifest is the
+// immutable admission contract; artifacts contain metadata only, not log text.
+export function attachFindingEvidence(out, { first, rerun, base, latest, prConfirm = [], baseConfirm = [], evDir, health }) {
+  const binding = { run_id: `qa-${randomUUID()}`, tested_sha: out.tested_sha, base_sha: out.base_sha }
+  const findings = [...out.findings, ...out.pending_verification]
+  for (const f of findings) Object.assign(f, { ...binding, artifact_refs: [] }, findingEligibility(f))
+  if (![binding.tested_sha, binding.base_sha].every((s) => /^[a-f0-9]{40}$/.test(s ?? ''))) return
+  const steps = [], artifacts = []
+  const phases = [['head', first, binding.tested_sha], ['rerun', rerun, binding.tested_sha], ['base', base, binding.base_sha],
+    ['latest', latest, out.latest_main_sha], ...prConfirm.map((r) => ['head', r, binding.tested_sha]), ...baseConfirm.map((r) => ['base', r, binding.base_sha])]
+  try {
+    mkdirSync(join(evDir, 'admission'), { recursive: true, mode: 0o700 })
+    for (const [index, [phase, results, revision]] of phases.entries()) for (const [j, r] of (results ?? []).entries()) {
+      if (r.kind === 'setup') continue
+      const id = `step-${index}-${j}`, ref = `result-${index}-${j}`
+      // Checkout identity is supplied by runner, including commands without a test reporter.
+      const observed = r.execution?.checkedOutSha ?? r.checkedOutSha ?? r.testOutcomeSource?.checkedOutSha
+      const actual = observed === revision ? revision : null
+      const status = !actual ? 'runner_error' : completeRun(r) ? (r.ok ? 'pass' : 'fail')
+        : ['timeout', 'runner_error', 'environment_unavailable', 'invalid'].includes(r.status) ? r.status : 'runner_error'
+      const artifact = { ...binding, phase, revision_sha: actual, check_id: r.id, status,
+        exit_code: r.exitCode ?? null, failure_keys: failureKeys([r]).map((k) => sha256(k)),
+        passed_cases: (r.testOutcomes ?? []).filter((t) => t.status === 'passed').map((t) => sha256(`${r.id}::${t.failureName}`)) }
+      const data = JSON.stringify(artifact) + '\n', path = `admission/${ref}.json`
+      writeFileSync(join(evDir, path), data, { mode: 0o600, flag: 'wx' })
+      artifacts.push({ id: ref, path, sha256: sha256(data), kind: 'test-result' })
+      steps.push({ ...binding, id, status, phase, ...(actual ? { revision_sha: actual } : {}), artifact_refs: [ref], exit_code: r.exitCode ?? null })
+      // Keep the runtime check identity alongside the schema projection locally.
+    }
+    const projected = []
+    for (const [i, f] of findings.entries()) {
+      const relevant = steps.filter((step) => {
+        const [index, j] = step.id.slice(5).split('-').map(Number)
+        return phases[index][1][j].id === f.check_id
+      })
+      f.artifact_refs = relevant.flatMap((r) => r.artifact_refs)
+      f.decision_status ??= findingStatus(f.status) === 'confirmed' ? 'confirmed' : 'pending_verification'
+      if (f.source !== 'check') f.decision_status = 'pending_verification'
+      const enough = ['head', 'rerun', 'base'].every((phase) => relevant.some((r) => r.phase === phase && ['pass', 'fail'].includes(r.status)))
+      if (!enough && f.decision_status === 'confirmed') {
+        f.decision_status = 'pending_verification'
+        f.decision = { status: 'pending_verification', reason: 'artifact_evidence_incomplete' }
+      }
+      Object.assign(f, findingEligibility(f))
+      f.evidence_manifest = 'admission/manifest.json'
+      f.evidence_root = evDir
+      if (relevant.length && f.artifact_refs.length) projected.push({ ...binding, id: `finding-${i}`, check_id: relevant[0].id,
+        fingerprint: sha256(f.fingerprint), status: f.decision_status, severity: f.severity ?? null, artifact_refs: f.artifact_refs })
+    }
+    const manifest = createRunManifest({ ...binding, status: out.findings.some((f) => f.finding_eligible) ? 'failed' : 'passed',
+      artifact_refs: artifacts.map((a) => a.id), artifacts, steps, findings: projected })
+    writeEvidenceReport(manifest, join(evDir, 'admission/manifest.json'))
+    out.evidence_manifest = 'admission/manifest.json'
+    out.evidence_version = 'qa.evidence/v2'
+    // New findings may only advertise product failures with a complete binding.
+    for (const f of out.findings.filter((f) => f.source === 'check' && !f.finding_eligible)) out.pending_verification.push(toPending('check-qa', f, { reason: 'admission evidence incomplete', reasonZh: '运行证据不完整，先核实' }))
+    out.findings = out.findings.filter((f) => f.source !== 'check' || f.finding_eligible)
+  } catch (err) {
+    for (const f of findings) Object.assign(f, { artifact_refs: [], finding_eligible: false, issue_eligible: false, fix_eligible: false })
+    health?.qa_tool_failures?.push({ pr: out.number, stage: 'evidence', message: 'admission evidence could not be written' })
+    for (const f of out.findings.filter((f) => f.source === 'check')) out.pending_verification.push(toPending('check-qa', f, { reason: 'admission evidence unavailable', reasonZh: '无法保存运行证据，先核实' }))
+    out.findings = out.findings.filter((f) => f.source !== 'check')
+  }
 }
 
 // run.args 里的 ai_test_caps / ai_test_tier：单 PR 运行就是这个 PR 的生效值；多 PR 取各 PR 中最大的一档并附 per_pr
@@ -964,7 +1028,7 @@ async function gitCodeState({ repo, number, sha, heads = [] }) {
 // 复核模型默认 Opus（VERIFY_MODEL；ARGUS_VERIFY_MODEL 覆盖），不再沿用审查模型自己复核自己
 export const VERIFY_MODEL = 'anthropic/claude-opus-5-5'
 export function reproOnHead(out, finding, sha) {
-  const t = (out?.ai_tests?.tests ?? []).find((x) => x.result === 'fails-on-current' && x.reproduced === true && finding?.file && (x.mutation_file === finding.file || x.file === finding.file))
+  const t = (out?.ai_tests?.tests ?? []).find((x) => x.result === 'fails-on-current' && !x.invalid && x.validation?.status !== 'invalid' && x.validation?.status !== 'blocked' && x.reproduced === true && finding?.file && (x.mutation_file === finding.file || x.file === finding.file))
   return t ? { status: 'failed-on-head', test_id: t.id, test_file: t.file, purpose: t.purpose ?? null, tested_sha: sha ?? null, log_tail: t.log_tail ?? null } : null
 }
 export async function verifyReviewP1s({ entries, out, repo, pr, sha, profile, secrets, health, number, quota, opts = {}, prDiff, handoffRaw, rulingsText, deps = {} }) {
@@ -1548,7 +1612,8 @@ export function selectIssueCandidates(report, { authors = ISSUE_AUTHORS } = {}) 
   for (const pr of report.prs ?? []) {
     for (const f of (pr.findings ?? []).filter((x) => ['P0', 'P1'].includes(x.severity))) {
       // 规则按 test_backed（有失败检查佐证）判断，不只看严重度；旧报告没有该字段时按 source === 'check'
-      const why = !isTestBacked(f) ? `not test-backed (source ${f.source ?? 'unknown'}; e.g. llm-review-only)`
+      const why = f.issue_eligible === false || (f.decision && !findingEligibility(f).issue_eligible) ? 'finding evidence admission denied'
+        : !isTestBacked(f) ? `not test-backed (source ${f.source ?? 'unknown'}; e.g. llm-review-only)`
         : !authors.includes(pr.author) ? `author ${pr.author} not in ${authors.join(',')}`
           : null
       if (why) skipped.push({ pr: pr.number, fingerprint: f.fingerprint, severity: f.severity, source: f.source, reason: why })

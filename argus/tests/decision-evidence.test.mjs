@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { decideOutcome, compareKey } from '../src/decide.mjs'
+import { decideOutcome, compareKey, decideFinding, findingEligibility } from '../src/decide.mjs'
 import { toCoverage } from '../src/matrix.mjs'
 
 const step = (statuses, extra = {}) => {
@@ -74,4 +74,23 @@ test('退出0但配置的报告缺失时不能当成功或贡献覆盖', () => {
   assert.equal(decideOutcome({ first, rerun: first }).outcome, 'needs_review')
   const coverage = toCoverage({ profile: { steps: [{ id: 'unit', covers: ['unit'] }] }, triage: { rows: [{ key: 'unit', verdict: 'applicable' }] }, results: first })
   assert.deepEqual(coverage.missed, ['unit'])
+})
+
+test('unified per-check decision fails closed on all missing or non-product phases', () => {
+  const fail = step({ A: 'failed' }), pass = step({ A: 'passed' })
+  const args = { key: 'unit::A', first: fail, rerun: fail, base: pass, latestIsSame: true }
+  assert.equal(decideFinding(args).status, 'confirmed')
+  assert.equal(decideFinding({ ...args, base: fail }).status, 'pre-existing')
+  assert.equal(decideFinding({ ...args, rerun: pass }).status, 'flaky')
+  assert.equal(decideFinding({ ...args, latestIsSame: false, latest: pass }).status, 'fixed-later')
+  assert.equal(decideFinding({ ...args, latestIsSame: false }).status, 'pending_verification')
+  for (const phase of ['first', 'rerun', 'base']) {
+    assert.equal(decideFinding({ ...args, [phase]: null }).status, 'pending_verification')
+    for (const status of ['timeout', 'environment_unavailable', 'runner_error', 'invalid']) {
+      const bad = args[phase].map((r) => ({ ...r, status }))
+      assert.equal(decideFinding({ ...args, [phase]: bad }).status, 'pending_verification')
+    }
+  }
+  assert.equal(decideFinding({ ...args, trialOnly: true }).status, 'pending_verification')
+  assert.equal(findingEligibility({ source: 'code-review', status: 'confirmed', decision: { status: 'confirmed' } }).fix_eligible, false)
 })
