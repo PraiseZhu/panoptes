@@ -1,9 +1,11 @@
 // 报告字段：not-tested、qa-error 记 P2、system_health.heartbeat / complete；白盒覆盖率门禁
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, readdirSync, symlinkSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { readReport, parseReport, writeReport as writeEvidenceReport } from '../src/report.mjs'
+import { validateRunManifest } from '../src/run-contract.mjs'
 
 process.env.ARGUS_ROOT ??= mkdtempSync(join(tmpdir(), 'argus-fields-'))
 const { planTargets, processTargets, finalizeHealth, notTestedEntry, parseDeadline, selectIssueCandidates } = await import('../src/nightly.mjs')
@@ -13,6 +15,133 @@ const { run, setBudget } = await import('../src/exec.mjs')
 
 const health = () => ({ status: 'ok', qa_tool_failures: [], env_problems: [], llm_errors: [], notes: [] })
 const disc = [{ number: 1, reason: 'merged' }, { number: 2, reason: 'merged' }, { number: 3, reason: 'open-updated' }]
+
+const evidenceFixture = (version) => JSON.parse(readFileSync(new URL(`./fixtures/evidence-${version}.json`, import.meta.url), 'utf8'))
+const evidenceDir = (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'argus-evidence-report-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  return dir
+}
+
+test('evidence report dual reader keeps legacy missing data absent and round-trips v2 fixture', (t) => {
+  const old = readReport(new URL('./fixtures/evidence-v1.json', import.meta.url))
+  assert.deepEqual(old, evidenceFixture('v1'))
+  assert.equal(Object.hasOwn(old, 'tested_sha'), false)
+  assert.equal(Object.hasOwn(old, 'base_sha'), false)
+  assert.equal(Object.hasOwn(old, 'run_id'), false)
+  const input = evidenceFixture('v1'); input.extension = { future: true }
+  assert.deepEqual(parseReport(input), input, 'legacy unknown fields stay readable')
+  const file = join(evidenceDir(t), 'PR-1.json')
+  const manifest = evidenceFixture('v2')
+  assert.equal(writeEvidenceReport(manifest, file), file)
+  assert.deepEqual(readReport(file), manifest)
+  validateRunManifest(readReport(file))
+  assert.equal(statSync(file).mode & 0o777, 0o600)
+})
+
+test('evidence writer preserves v1 original bytes, then v2 versions and previous_version chain', (t) => {
+  const dir = evidenceDir(t), file = join(dir, 'PR-7.json')
+  const legacyBytes = '  ' + JSON.stringify(evidenceFixture('v1')) + '\n\n'
+  writeFileSync(file, legacyBytes)
+  const first = evidenceFixture('v2')
+  const inputBefore = structuredClone(first)
+  writeEvidenceReport(first, file)
+  assert.deepEqual(first, inputBefore, 'writer must not stamp caller-owned evidence')
+  assert.equal(readFileSync(join(dir, 'history/PR-7.v1.json'), 'utf8'), legacyBytes)
+  assert.equal(readReport(file).previous_version, 'history/PR-7.v1.json')
+  const v2Bytes = readFileSync(file, 'utf8')
+  const next = evidenceFixture('v2'); next.status = 'blocked'
+  writeEvidenceReport(next, file)
+  assert.equal(readFileSync(join(dir, 'history/PR-7.v2.json'), 'utf8'), v2Bytes)
+  assert.equal(readReport(join(dir, 'history/PR-7.v2.json')).previous_version, 'history/PR-7.v1.json')
+  assert.equal(readReport(file).previous_version, 'history/PR-7.v2.json')
+  assert.deepEqual(readReport(join(dir, 'history/PR-7.v1.json')), evidenceFixture('v1'))
+  assert.deepEqual(readdirSync(dir).sort(), ['PR-7.json', 'history'])
+})
+
+test('evidence writer skips existing flat/history versions without changing any original', (t) => {
+  const dir = evidenceDir(t), file = join(dir, 'PR-1.json')
+  mkdirSync(join(dir, 'history'))
+  writeFileSync(join(dir, 'PR-1.v1.json'), 'flat original')
+  writeFileSync(join(dir, 'history/PR-1.v2.json'), 'history original')
+  writeEvidenceReport(evidenceFixture('v2'), file)
+  const original = readFileSync(file, 'utf8')
+  writeEvidenceReport(evidenceFixture('v2'), file)
+  assert.equal(readReport(file).previous_version, 'history/PR-1.v3.json')
+  assert.equal(readFileSync(join(dir, 'history/PR-1.v3.json'), 'utf8'), original)
+  assert.equal(readFileSync(join(dir, 'PR-1.v1.json'), 'utf8'), 'flat original')
+  assert.equal(readFileSync(join(dir, 'history/PR-1.v2.json'), 'utf8'), 'history original')
+})
+
+test('invalid/sensitive reports fail before touching old reports or creating output directories', (t) => {
+  const dir = evidenceDir(t), file = join(dir, 'PR-1.json')
+  const legacy = readFileSync(new URL('./fixtures/evidence-v1.json', import.meta.url), 'utf8')
+  writeFileSync(file, legacy)
+  for (const mutate of [
+    (d) => { delete d.tested_sha }, (d) => { d.prompt = 'private prompt' },
+    (d) => { d.steps[0].token = 'private token' }, (d) => { d.findings[0].user_material = 'private image' },
+    (d) => { d.artifacts[0].error = 'full upstream response' },
+    (d) => { d.findings[0].error = { stack: 'private stack trace' } },
+  ]) {
+    const doc = evidenceFixture('v2'); mutate(doc)
+    assert.throws(() => writeEvidenceReport(doc, file), TypeError)
+    assert.throws(() => writeEvidenceReport(doc, join(dir, 'absent/PR-1.json')), TypeError)
+    assert.equal(readFileSync(file, 'utf8'), legacy)
+    assert.deepEqual(readdirSync(dir), ['PR-1.json'])
+  }
+  assert.throws(() => writeEvidenceReport(evidenceFixture('v1'), file), TypeError, 'v1 stays read-only')
+})
+
+test('unknown versions, malformed JSON and malformed v2 fail visibly without leaking input', (t) => {
+  const dir = evidenceDir(t), file = join(dir, 'bad.json')
+  writeFileSync(file, '{ private prompt, upstream response: invalid json }')
+  assert.throws(() => readReport(file), { message: 'Cannot read QA report JSON' })
+  assert.throws(() => parseReport({ schema_version: '3.0', prs: [] }), /Unsupported/)
+  assert.throws(() => parseReport({ schema: 'qa.evidence/v3', schema_version: '1.0', prs: [] }), /Unsupported/)
+  const doc = evidenceFixture('v2'); delete doc.run_id
+  writeFileSync(file, JSON.stringify(doc))
+  assert.throws(() => readReport(file), /run_id: required/)
+})
+
+test('new destination clears source previous_version; existing writer lock is respected', (t) => {
+  const dir = evidenceDir(t), file = join(dir, 'PR-1.json')
+  const source = evidenceFixture('v2'); source.previous_version = 'history/elsewhere.v9.json'
+  writeEvidenceReport(source, file)
+  assert.equal(Object.hasOwn(readReport(file), 'previous_version'), false)
+  assert.equal(source.previous_version, 'history/elsewhere.v9.json')
+  const original = readFileSync(file, 'utf8')
+  writeFileSync(`${file}.write-lock`, 'other writer')
+  assert.throws(() => writeEvidenceReport(source, file), { code: 'EEXIST' })
+  assert.equal(readFileSync(file, 'utf8'), original)
+  assert.equal(readFileSync(`${file}.write-lock`, 'utf8'), 'other writer')
+  assert.ok(!existsSync(join(dir, 'history')))
+})
+
+test('writer rejects report and history symlinks, preserving unrelated destination', (t) => {
+  const dir = evidenceDir(t), file = join(dir, 'PR-1.json'), target = join(dir, 'private.json')
+  writeFileSync(target, 'unrelated')
+  symlinkSync(target, file)
+  assert.throws(() => writeEvidenceReport(evidenceFixture('v2'), file), /regular file/)
+  assert.equal(readFileSync(target, 'utf8'), 'unrelated')
+  rmSync(file)
+  writeFileSync(file, JSON.stringify(evidenceFixture('v1')))
+  const other = join(dir, 'other'); mkdirSync(other)
+  symlinkSync(other, join(dir, 'history'))
+  assert.throws(() => writeEvidenceReport(evidenceFixture('v2'), file), /not a symlink/)
+  assert.deepEqual(readdirSync(other), [])
+  assert.deepEqual(readReport(file), evidenceFixture('v1'))
+})
+
+test('failure preparing replacement leaves current bytes and existing history untouched', (t) => {
+  // Name fits NAME_MAX, but the unique temporary suffix does not (Linux and macOS).
+  const dir = evidenceDir(t), file = join(dir, `${'a'.repeat(220)}.json`)
+  const original = JSON.stringify(evidenceFixture('v1'))
+  writeFileSync(file, original)
+  assert.throws(() => writeEvidenceReport(evidenceFixture('v2'), file), { code: 'ENAMETOOLONG' })
+  assert.equal(readFileSync(file, 'utf8'), original)
+  assert.deepEqual(readdirSync(join(dir, 'history')), [])
+  assert.ok(!existsSync(`${file}.write-lock`))
+})
 
 test('发现了但没测的 PR 仍进 prs[]：severity 固定 untested（绝不是 P3）、tested=false，都带原因', () => {
   // --pr：只报告点名的 PR；别的发现结果只记在 excluded（→ system_health.discovery.excluded_by_pr_filter）

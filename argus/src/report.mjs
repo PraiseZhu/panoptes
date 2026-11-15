@@ -3,6 +3,81 @@
 import { jobsFinishedBetween, getMeta } from './db.mjs'
 import { toReadableTitle, toShanghaiClock, toShanghaiDay, toPlainZh, log } from './util.mjs'
 import { toDimensionLabel } from './matrix.mjs'
+import { constants, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, closeSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { EVIDENCE_SCHEMA, validateRunManifest } from './run-contract.mjs'
+
+// Evidence report APIs are additive. nightly.mjs keeps its legacy writer until the finding-gate integration.
+// Legacy documents are read-only data: do not synthesize SHA/run IDs or silently upgrade them to v2.
+export function parseReport(doc) {
+  if (doc?.schema === EVIDENCE_SCHEMA) validateRunManifest(doc)
+  else if (doc?.schema !== undefined || doc?.schema_version !== '1.0' || !Array.isArray(doc.prs)) throw new TypeError('Unsupported QA report schema')
+  return JSON.parse(JSON.stringify(doc))
+}
+
+export function readReport(file) {
+  // JSON parser errors can include the raw input; never expose that input in a report error.
+  let doc
+  try { doc = JSON.parse(readFileSync(file, 'utf8')) } catch { throw new TypeError('Cannot read QA report JSON') }
+  return parseReport(doc)
+}
+
+function regularFile(file) {
+  try {
+    if (!lstatSync(file).isFile()) throw new TypeError('QA report must be a regular file')
+    return true
+  } catch (err) {
+    if (err.code === 'ENOENT') return false
+    throw err
+  }
+}
+
+/** Write v2 only, preserving prior bytes in history; concurrent callers fail visibly. */
+export function writeReport(report, file) {
+  validateRunManifest(report) // Validate before any filesystem mutation, including preservation.
+  const stem = basename(file).replace(/\.json$/, '')
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(stem) || !file.endsWith('.json')) throw new TypeError('Invalid QA report filename')
+  const dir = dirname(file)
+  mkdirSync(dir, { recursive: true })
+  const lock = `${file}.write-lock`
+  const fd = openSync(lock, 'wx', 0o600)
+  const tmp = join(dir, `.${basename(file)}.${randomUUID()}.tmp`)
+  let kept = null
+  let committed = false
+  try {
+    const doc = JSON.parse(JSON.stringify(report))
+    // previous_version belongs to this destination's chain, not to a copied source report.
+    delete doc.previous_version
+    if (regularFile(file)) {
+      const history = join(dir, 'history')
+      if (!existsSync(history)) mkdirSync(history)
+      if (!lstatSync(history).isDirectory() || lstatSync(history).isSymbolicLink()) throw new TypeError('QA history must be a directory, not a symlink')
+      for (let n = 1; ; n++) {
+        const name = `${stem}.v${n}.json`
+        if (existsSync(join(dir, name))) continue // Include versions from the old flat layout.
+        const candidate = join(history, name)
+        try { copyFileSync(file, candidate, constants.COPYFILE_EXCL) } catch (err) {
+          if (err.code === 'EEXIST') continue
+          throw err
+        }
+        kept = candidate
+        doc.previous_version = `history/${name}`
+        break
+      }
+    }
+    validateRunManifest(doc)
+    writeFileSync(tmp, JSON.stringify(doc, null, 2) + '\n', { flag: 'wx', mode: 0o600 })
+    renameSync(tmp, file)
+    committed = true
+    return file
+  } finally {
+    if (existsSync(tmp)) unlinkSync(tmp)
+    if (kept && !committed) unlinkSync(kept)
+    closeSync(fd)
+    unlinkSync(lock)
+  }
+}
 
 const HEARTBEAT_STALE_MS = 30 * 60_000
 const SCAN_STALE_MS = 6 * 3600_000
