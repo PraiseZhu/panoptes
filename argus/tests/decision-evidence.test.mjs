@@ -115,3 +115,17 @@ test('finding/issue/fix eligibility shares SHA and replay admission across sever
   const report = { prs: [{ number: 1, author: 'PraiseZhu', findings: [f, ...bad] }] }
   assert.equal(selectIssueCandidates(report).candidates.length, 1)
 })
+
+
+test('completed wrapper with an internal case timeout retains independent known assertions', () => {
+  const first = step({ old: 'failed', timeout: 'failed' }, { status: 'timeout',
+    failureDetails: [{ name: 'old', type: 'assertion' }, { name: 'timeout', type: 'test_timeout' }] })
+  const base = step({ old: 'failed', timeout: 'passed' })
+  const d = decideOutcome({ first, rerun: first, base, latestIsSame: true })
+  assert.equal(d.outcome, 'needs_review')
+  assert.equal(d.knownFailureCount, 1)
+  assert.deepEqual(d.knownOnlyStepIds, [])
+  assert.equal(decideFinding({ key: 'unit::timeout', first, rerun: first, base, latestIsSame: true }).status, 'pending_verification')
+  const killed = first.map((r) => ({ ...r, timedOut: true }))
+  assert.equal(compareKey('unit::old', killed, first), 'unknown')
+})

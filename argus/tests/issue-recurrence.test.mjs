@@ -17,7 +17,7 @@ const REPO = 'PraiseZhu/pr-qa-agent-deploy'
 const health = { status: 'ok', qa_tool_failures: [], env_problems: [], llm_errors: [] }
 const reportFor = (runId, fp) => ({ date: '2026-10-11', repo: 'xindong/mivo-canvas-plugin', run: { id: runId }, system_health: health,
   prs: [{ number: 7, author: 'PraiseZhu', title: 't', url: 'https://github.com/xindong/mivo-canvas-plugin/pull/7', state: 'merged', tested_sha: 'a'.repeat(40), base_sha: 'b'.repeat(40), merge_sha: 'a'.repeat(40),
-    findings: [{ source: 'check', test_backed: true, check_id: 'unit', check_name: 'unit', severity: 'P0', status: 'introduced', attribution: 'x', fingerprint: fp, pr_fingerprint: `${fp}-pr7`, dimension: 'white-box', evidence: { rerun: 'fail', base_run: 'pass', log_tail: 'AssertionError: boom' } }] }] })
+    findings: [{ source: 'check', test_backed: true, check_id: 'unit', check_name: 'unit', severity: 'P0', status: 'introduced', attribution: 'x', fingerprint: fp, pr_fingerprint: `${fp}-pr7`, dimension: 'white-box', decision: { status: 'confirmed' }, tested_sha: 'a'.repeat(40), base_sha: 'b'.repeat(40), run_id: runId, artifact_refs: ['result'], evidence: { tested_sha: 'a'.repeat(40), base_sha: 'b'.repeat(40), first_run: 'fail', rerun: 'fail', base_run: 'pass', log_tail: 'AssertionError: boom' } }] }] })
 const setState = (issues, comments = {}) => writeFileSync(statePath, JSON.stringify({ issues, comments, log: [] }))
 const state = () => JSON.parse(readFileSync(statePath, 'utf8'))
 const issue = (n, fp, extra = {}) => ({ number: n, html_url: `https://github.com/x/y/issues/${n}`, state: 'open', state_reason: null, title: 'i', body: nightly.fingerprintMarker(fp), labels: ['qa-auto', 'cindy-dispatch'], ...extra })

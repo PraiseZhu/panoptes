@@ -24,7 +24,9 @@ const WHOLE = '*'
 export const failedIds = (results) => (results ?? []).filter((r) => r.kind !== 'setup' && (!r.ok || r.testOutcomeStatus === 'incomplete') && !r.unavailable).map((r) => r.id)
 export const setupFailed = (results) => (results ?? []).some((r) => r.kind === 'setup' && !r.ok)
 
-export const completeRun = (r) => r && !['timeout', 'runner_error', 'environment_unavailable', 'invalid', 'skipped', 'pending', 'running'].includes(r.status) && !r.runnerError && !r.invalid && r.validation?.status !== 'invalid' && r.validation?.status !== 'blocked' && !r.unavailable && !r.timedOut && r.exitCode != null && r.testOutcomeStatus !== 'incomplete' && r.failureParseStatus !== 'incomplete' && (r.ok || ['complete', 'not_detected'].includes(r.failureParseStatus))
+// An internal case timeout does not erase completed sibling assertion evidence.
+// compareKey still refuses to confirm the timed-out case; outer timeouts remain incomplete.
+export const completeRun = (r) => r && !['runner_error', 'environment_unavailable', 'invalid', 'skipped', 'pending', 'running'].includes(r.status) && (r.status !== 'timeout' || r.failureDetails?.some((f) => f.type === 'test_timeout')) && !r.runnerError && !r.invalid && r.validation?.status !== 'invalid' && r.validation?.status !== 'blocked' && !r.unavailable && !r.timedOut && r.exitCode != null && r.testOutcomeStatus !== 'incomplete' && r.failureParseStatus !== 'incomplete' && (r.ok || ['complete', 'not_detected'].includes(r.failureParseStatus))
 const hasFailures = (r) => (r?.failures?.length ?? 0) > 0
 const typeOf = (key, r) => r?.failureDetails?.find((f) => f.name === key.slice(key.indexOf('::') + 2))?.type ?? 'unknown'
 const confirmable = (type) => ['assertion', 'test_error'].includes(type)
