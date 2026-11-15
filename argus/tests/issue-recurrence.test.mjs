@@ -62,6 +62,24 @@ test('不修（not_planned 或 wontfix 标签）→ 沉默：不评论、不重�
   assert.ok(!s.log.some((l) => /^(PATCH|POST)/.test(l)))
 })
 
+test('同样的 issue 复发场景缺准入证据时不查询、创建、评论或重开', async () => {
+  const scenarios = [[], [issue(3, 'mq1-denied')],
+    [issue(4, 'mq1-denied', { state: 'closed', state_reason: 'completed' })],
+    [issue(5, 'mq1-denied', { state: 'closed', state_reason: 'not_planned' })]]
+  const missing = ['decision', 'run_id', 'tested_sha', 'base_sha', 'artifact_refs', 'first_run', 'rerun', 'base_run']
+  for (const issues of scenarios) for (const field of missing) {
+    setState(issues)
+    const before = state()
+    const report = reportFor('denied-run', 'mq1-denied')
+    const finding = report.prs[0].findings[0]
+    if (['first_run', 'rerun', 'base_run'].includes(field)) delete finding.evidence[field]
+    else delete finding[field]
+    const r = await nightly.createIssues(report, { repo: REPO })
+    assert.equal(r[0].action, 'not-eligible', `missing ${field}`)
+    assert.deepEqual(state(), before, `missing ${field}: no GitHub calls or issue changes`)
+  }
+})
+
 // ── system_health：一次运行一个 issue（清单），只收自修复后仍存在的问题；已有开放的 system_health issue 时只评论 ──
 const healthReport = (runId, h) => ({ date: '2026-10-12', repo: 'xindong/mivo-canvas-plugin', run: { id: runId }, prs: [],
   system_health: { status: 'degraded', qa_tool_failures: [], env_problems: [], llm_errors: [], notes: [], ...h } })
