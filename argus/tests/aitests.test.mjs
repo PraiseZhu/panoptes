@@ -2,7 +2,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -167,4 +167,50 @@ test('被测源文件开头按字符截断：一行特别长（压缩过的 JS�
   assert.equal(toSourceHead('a\nb'), 'a\nb')
   assert.equal(toSourceHead(Array.from({ length: 100 }, (_, i) => `l${i}`).join('\n')).split('\n').length, 60)
   assert.equal(toSourceHead(undefined), '')
+})
+
+test('prepareTool copies the shared validator: the copied executor runs without access to Argus sources', async (t) => {
+  const { prepareTool } = await import('../src/runner.mjs')
+  const scratch = join(here, '../../_tmp')
+  mkdirSync(scratch, { recursive: true })
+  const dir = mkdtempSync(join(scratch, 'ai-tool-contract-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const src = join(dir, 'src')
+  const run = join(dir, 'run')
+  mkdirSync(src)
+  mkdirSync(run)
+  writeFileSync(join(src, 'sum.mjs'), 'export const sum = (xs) => xs.reduce((a, b) => a + b, 0)\n')
+  const spec = { ...good, content: testBody, runCmd: [process.execPath, '--test', '{file}'], mutation: { file: 'sum.mjs', find: ', 0)', replace: ', 1)' } }
+  prepareTool({ id: 'ai-test-1', aiTest: spec }, run, {})
+  assert.ok(existsSync(join(run, 'tools/ai-test-validator.mjs')))
+  const { NODE_TEST_CONTEXT, ...env } = process.env
+  const exec = () => spawnSync(process.execPath, [join(run, 'tools/ai-test-run.mjs'), join(run, 'ai-test-1.json')], { cwd: src, env, encoding: 'utf8', timeout: 30_000 })
+  const result = exec()
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  rmSync(join(run, 'tools/ai-test-validator.mjs'))
+  const missing = exec()
+  assert.notEqual(missing.status, 0, 'removing the copied validator must break the isolated execution')
+  assert.match(missing.stderr, /ERR_MODULE_NOT_FOUND/)
+})
+
+test('AI result contract distinguishes invalid, valid and blocked without changing candidate counts', async () => {
+  const { toAiTestResult } = await import('../src/aitests.mjs')
+  const { VALIDATION_PREFIX } = await import('../src/ai-test-validator.mjs')
+  const row = (validation, extra = {}) => toAiTestResult({ ok: false, unavailable: true, exitCode: 4, tail: VALIDATION_PREFIX + JSON.stringify(validation), ...extra })
+  const invalid = row({ status: 'invalid', kind: 'wrong-arguments', reason: 'bad fixture' })
+  assert.equal(invalid.invalid, true)
+  assert.equal(invalid.invalid_kind, 'wrong-arguments')
+  assert.equal(invalid.result, 'discarded')
+  const blocked = row({ status: 'blocked', kind: 'execution', reason: 'runner unavailable' }, { exitCode: 2 })
+  assert.equal(blocked.result, 'discarded')
+  assert.equal(blocked.invalid, undefined)
+  const valid = row({ status: 'valid', mutation: { status: 'caught' } }, { ok: true, unavailable: false, exitCode: 0 })
+  assert.equal(valid.result, 'kept')
+  const candidate = row({ status: 'valid', product_candidate: true }, { exitCode: 1, unavailable: false })
+  assert.equal(candidate.result, 'fails-on-current')
+  assert.equal(candidate.invalid, undefined)
+  const noMutation = row({ status: 'valid', mutation: { status: 'not_applicable', reason: 'native dependency cannot be mutated safely' } }, { ok: true, unavailable: false, exitCode: 0 })
+  assert.match(noMutation.reason, /not_applicable: native dependency/)
+  const accepted = toValidTests({ tests: [{ ...good, mutation: { file: 'sum.mjs', status: 'not_applicable', reason: 'native dependency' } }] }, { profile, gaps: ['boundary'] })
+  assert.equal(accepted[0].mutation.reason, 'native dependency')
 })

@@ -444,6 +444,21 @@ test('AI 补测步骤编号可接着上一轮编；每次调用的测试数上�
   assert.equal(ai.toValidTests({ tests: [t, t, t, t] }, { profile, gaps: ['boundary'], maxTests: 3 }).length, 3)
 })
 
+test('AI pre-assertion argument and initialization failures are invalid; assertion failures remain candidates', () => {
+  const spec = { filePath: 'tests/generated.test.mjs', content: 'const fixture = {}; fixture.read(); missingImport()' }
+  for (const tail of [
+    'TypeError [ERR_INVALID_ARG_TYPE]: expected an array',
+    'TypeError: fixture.read is not a function\n at tests/generated.test.mjs:1:1',
+    'ReferenceError: missingImport is not defined\n at tests/generated.test.mjs:1:1',
+  ]) {
+    const result = ai.toAiTestResult({ ok: false, exitCode: 1, tail }, spec)
+    assert.equal(result.result, 'discarded', tail)
+    assert.equal(result.invalid, true, tail)
+    assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: 'AssertionError: expected result to equal 2\n' + tail }, spec).result, 'fails-on-current')
+  }
+  assert.equal(ai.toAiTestResult({ ok: false, exitCode: 1, tail: 'TypeError: data.read is not a function\n at src/product.mjs:2:1\n at tests/generated.test.mjs:1:1' }, spec).result, 'fails-on-current')
+})
+
 test('coverage.dimension_status：applicable_total / covered_total，检查覆盖、AI 补测覆盖、缺口、不适用', () => {
   const triage = { dimensions: { unit: { applicability: 'applicable' }, boundary: { applicability: 'applicable' }, db: { applicability: 'applicable' }, visual: { applicability: 'not-applicable' } } }
   const profile = { steps: [{ id: 'unit', covers: ['unit'] }] }

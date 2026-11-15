@@ -372,6 +372,7 @@ export function prepareTool(step, runDir, vars) {
   }
   if (step.aiTest) {
     writeFileSync(join(tools, 'ai-test-run.mjs'), readFileSync(AI_TEST_SCRIPT))
+    writeFileSync(join(tools, 'ai-test-validator.mjs'), readFileSync(fileURLToPath(new URL('./ai-test-validator.mjs', import.meta.url))))
     // 补测代码原样写入，不做变量替换
     writeFileSync(join(runDir, `${step.id}.json`), JSON.stringify(qaMisattribOff() ? { ...step.aiTest, legacyOrder: true } : step.aiTest))
   }

@@ -1,6 +1,7 @@
 // AI 补写针对性测试：分诊说「涉及」、但现有检查覆盖不到的方面，让 gpt-6-luna 用项目自己的测试框架补写测试。
 // 每个补测都要带一个「植入错误」：测试在当前代码上通过、植入错误后失败，才算有效；否则丢弃。
 // 补测发现的问题在试运行期只记「拿不准，要你看」，不自动提 issue。
+import { AI_TEST_INVALID_ZH, classifyAiTestFailure, readValidationResult } from './ai-test-validator.mjs'
 import { aiUsageToday, addAiUsage } from './db.mjs'
 import { globToRegExp, TEST_HELPER_RE } from './classify.mjs'
 import { toDimensionLabel, stepExercises } from './matrix.mjs'
@@ -78,16 +79,21 @@ export function toValidTests(raw, { profile, gaps, maxTests = MAX_TESTS, uncover
   const out = []
   for (const t of Array.isArray(raw?.tests) ? raw.tests : []) {
     if (out.length >= maxTests) break
+    if (!t || typeof t !== 'object') continue
     const path = String(t.filePath ?? '')
     if (!path || path.includes('..') || path.startsWith('/') || !allowed.some((re) => re.test(path))) continue
     if (typeof t.content !== 'string' || !t.content.trim() || t.content.length > MAX_TEST_CHARS) continue
     const m = t.mutation ?? {}
-    if (!m.file || String(m.file).includes('..') || String(m.file).startsWith('/') || typeof m.find !== 'string' || !m.find || typeof m.replace !== 'string' || m.find === m.replace) continue
+    if (typeof m.file !== 'string' || !m.file || m.file.includes('..') || m.file.startsWith('/') || m.file.includes('\\')) continue
+    const notApplicable = m.status === 'not_applicable' && typeof m.reason === 'string' && m.reason.trim()
+    if (!notApplicable && (typeof m.find !== 'string' || !m.find || typeof m.replace !== 'string' || m.find === m.replace)) continue
     const covers = (Array.isArray(t.covers) ? t.covers : []).filter((k) => gapSet.has(k))
     const target = targetFiles.has(m.file)
     const handoff = handoffIds.includes(t.handoff) ? t.handoff : null
     if (!covers.length && !target && !handoff && t.kind !== 'suspicion') continue
-    out.push({ kind: t.kind === 'suspicion' ? 'suspicion' : 'coverage', purposeZh: String(t.purposeZh ?? '补写的测试').slice(0, 60), covers, filePath: path, content: t.content, mutation: { file: m.file, find: m.find, replace: m.replace }, ...(target ? { targetsUncovered: m.file } : {}), ...(handoff ? { handoff } : {}) })
+    out.push({ kind: t.kind === 'suspicion' ? 'suspicion' : 'coverage', purposeZh: String(t.purposeZh ?? '补写的测试').slice(0, 60), covers, filePath: path, content: t.content,
+      mutation: notApplicable ? { file: m.file, status: 'not_applicable', reason: m.reason.slice(0, 240) } : { file: m.file, find: m.find, replace: m.replace },
+      ...(target ? { targetsUncovered: m.file } : {}), ...(handoff ? { handoff } : {}) })
   }
   return out
 }
@@ -234,112 +240,26 @@ export function toAiGaps({ applicability, profile, results, files = [] }) {
   return (applicability?.applicable ?? []).filter((k) => AI_GAP_DIMENSIONS.includes(k) && !covered.has(k))
 }
 
-// 「测试无效」：补测在当前代码上失败，但失败原因是测试自己没备好前提（缺测试数据 / 文件、导入了不存在的模块或导出），
-// 还没走到断言。这类失败说明不了被测代码有问题 → 按 discarded 处理（invalid: true，显示「测试无效」），不产生 finding。
-// 只要输出里有断言失败（AssertionError / expected … to …）就不算无效：例如 expect(...).toThrow('X') 却收到 ENOENT，仍是 fails-on-current。
-export const AI_TEST_INVALID_ZH = '测试无效'
-// missing-module 也包括测试自己的 vi.mock 工厂少导出了被测代码要用的函数（vitest: No "x" export is defined on the "…" mock，#915 10-15）
-const INVALID_SIGNATURES = [
-  { kind: 'missing-file', re: /\bENOENT\b|no such file or directory/i },
-  { kind: 'missing-module', re: /Cannot find module ['"]|Cannot find package ['"]|Failed to resolve import|Failed to load url|Does the file exist\?|does not provide an export named|No "[^"]+" export is defined on the "[^"]+" mock/ },
-]
-const ASSERTION_FAILURE = /AssertionError|\bexpected\b[^\n]*\bto (be|equal|throw|have|contain|match|deep|strictly|include|satisfy)/i
-// missing-module 还包括：测试从某个模块按名导入了该模块没有的导出（ESM 里拿到 undefined），并在测试文件里直接调用它
-// → TypeError: x is not a function，且报错位置（第一帧）就在这个补测文件里（#1008 10-16：renderAutomationBody 从错的模块导入）。
-// 只看测试代码里 import { … } 的名字；被测代码里抛出的 "is not a function" 不算（可能是真问题）。
-const NOT_A_FUNCTION = /TypeError: ([A-Za-z_$][\w$]*) is not a function/
-export function importedNames(content) {
-  const names = new Set()
-  for (const m of String(content ?? '').matchAll(/import\s+(?!type\b)(?:[A-Za-z_$][\w$]*\s*,\s*)?\{([^}]*)\}\s*from\s*['"][^'"]+['"]/g)) {
-    for (const part of m[1].split(',')) {
-      const p = part.trim().replace(/^type\s+/, '')
-      if (!p || part.trim().startsWith('type ')) continue
-      names.add(p.split(/\s+as\s+/).pop().trim())
-    }
-  }
-  return names
-}
-function missingImportCall(text, { content, filePath } = {}) {
-  const m = text.match(NOT_A_FUNCTION)
-  if (!m || !content || !importedNames(content).has(m[1])) return null
-  const frame = text.slice(m.index).split('\n').slice(1).find((l) => /^\s*❯\s/.test(l))
-  const base = filePath ? String(filePath).split('/').pop() : null
-  if (!frame || !(base ? frame.includes(`${base}:`) : /\.test\.[cm]?[jt]sx?:\d+/.test(frame))) return null
-  return { kind: 'missing-module', line: `${m[0]} (imported by the test; not exported by that module) ${frame.trim()}`.slice(0, 240) }
-}
-// fixture-gap：测试把对象传给它导入的函数 NAME(X, …)，被测代码读 X.K.P 时报 Cannot read properties of undefined (reading 'P')，
-// 而测试代码里根本没出现 K、被测代码也从不给 K 赋值 → undefined 只能来自测试传入的对象缺字段（#1013 10-18：transport(c) 缺 c.budgets）。
-// 需要被测源码（test.source）对照；对不上任何一条都仍算 fails-on-current（产品自己算出 undefined 是真问题）。
-function fixtureGap(text, { content, source } = {}) {
-  const p = text.match(/Cannot read properties of undefined \(reading '(\w+)'\)/)?.[1]
-  if (!p || !content || !source) return null
-  const names = importedNames(content)
-  for (const [, x, k] of source.matchAll(new RegExp(`\\b(\\w+)\\.(\\w+)\\.${p}\\b`, 'g'))) {
-    if (new RegExp(`\\b${k}\\b`).test(content) || new RegExp(`\\b${k}\\s*(=[^=]|:)`).test(source)) continue
-    const fn = [...source.matchAll(new RegExp(`function\\s+(\\w+)\\s*\\(\\s*${x}\\b`, 'g'))].find((m) => names.has(m[1]))
-    if (fn) return { kind: 'fixture-gap', line: `Cannot read properties of undefined (reading '${p}'): ${fn[1]}(${x}) reads ${x}.${k}.${p}, the test never passes ${k}` }
-  }
-  return null
-}
-// fixture-gap（缺方法）：测试把自己拼的对象 X 传给它导入的函数 NAME(X, …)，被测代码调 X.M() 报 TypeError: X.M is not a function，
-// 而测试代码里根本没出现 M、被测代码也从不给 X.M 赋值 → 只能是测试传入的对象少了这个方法（#1121 10-20：collectGlobal(client) 调 client.now()，测试的 client 没给 now）。
-// 需要被测源码（test.source）对照；对不上任何一条都仍算 fails-on-current。
-const NOT_A_METHOD = /TypeError: ([A-Za-z_][\w]*)\.([A-Za-z_][\w]*) is not a function/
-function fixtureMissingMethod(text, { content, source } = {}) {
-  const m = text.match(NOT_A_METHOD)
-  if (!m || !content || !source) return null
-  const [, x, k] = m
-  if (new RegExp(`\\b${k}\\b`).test(content)) return null
-  if (new RegExp(`\\b${x}\\.${k}\\s*=[^=]`).test(source)) return null
-  const names = importedNames(content)
-  const fn = [...source.matchAll(new RegExp(`function\\s+(\\w+)\\s*\\(\\s*${x}\\b`, 'g'))].find((f) => names.has(f[1]))
-  if (!fn) return null
-  return { kind: 'fixture-gap', line: `${m[0]}: ${fn[1]}(${x}) calls ${x}.${k}(), the test's ${x} never defines ${k}`.slice(0, 240) }
-}
-// missing-module 还包括：测试文件里直接调用了一个既没导入、也没在测试里声明的名字 → ReferenceError: x is not defined，
-// 且报错位置（第一帧）就在这个补测文件里（#978 10-19：用了 isMarkupTextCoveredByHigherSection 却只导入了另一个函数）。
-// 报错在被测代码里、或测试里有这个名字的导入 / 声明，都不算（可能是真问题）。
-const NOT_DEFINED = /ReferenceError: ([A-Za-z_$][\w$]*) is not defined/
-function declaredInTest(content, name) {
-  const n = name.replace(/\$/g, '\\$')
-  if (importedNames(content).has(name)) return true
-  if (new RegExp(`import\\s+(?:\\*\\s+as\\s+)?${n}\\b`).test(content)) return true
-  if (new RegExp(`\\b(?:const|let|var|function\\*?|class)\\s+${n}\\b`).test(content)) return true
-  return new RegExp(`\\b(?:const|let|var)\\s*[{\\[][^=;]*\\b${n}\\b[^=;]*[}\\]]\\s*=`).test(content)
-}
-function undeclaredInTest(text, { content, filePath } = {}) {
-  const m = text.match(NOT_DEFINED)
-  if (!m || !content || declaredInTest(content, m[1])) return null
-  const frame = text.slice(m.index).split('\n').slice(1).find((l) => /^\s*❯\s/.test(l))
-  const base = filePath ? String(filePath).split('/').pop() : null
-  if (!frame || !(base ? frame.includes(`${base}:`) : /\.test\.[cm]?[jt]sx?:\d+/.test(frame))) return null
-  return { kind: 'missing-module', line: `${m[0]} (used by the test; never imported or declared in it) ${frame.trim()}`.slice(0, 240) }
-}
-export function toInvalidTest(tail, test = {}) {
-  const text = String(tail ?? '').replace(/\x1b\[[0-9;]*m/g, '')
-  if (!text) return null
-  const gap = fixtureGap(text, test)
-  if (gap) return gap
-  if (ASSERTION_FAILURE.test(text)) return null
-  for (const { kind, re } of INVALID_SIGNATURES) {
-    const line = text.split('\n').find((l) => re.test(l))
-    if (line) return { kind, line: line.trim().slice(0, 240) }
-  }
-  return missingImportCall(text, test) ?? undeclaredInTest(text, test) ?? fixtureMissingMethod(text, test)
-}
+export { AI_TEST_INVALID_ZH, importedNames } from './ai-test-validator.mjs'
+export const toInvalidTest = classifyAiTestFailure
 
 // 补测执行结果 → 判定：kept（当前代码通过且植入错误后失败）/ discarded（植入错误对不上、植入后仍通过、没法跑、测试无效）/
 // fails-on-current（在当前代码上就失败：可能是缺陷，P2、test_backed=false，复现后才可升级）
 export function toAiTestResult(r, test = {}) {
   if (!r) return { result: 'discarded', reason: 'not run (time budget / setup failed)' }
   if (r.timedOut) return { result: 'discarded', reason: 'timed out' }
-  if (r.ok) return { result: 'kept', reason: 'passes on the tested commit and fails with the injected bug' }
+  const validation = readValidationResult(r.tail)
+  if (validation?.status === 'invalid') return { result: 'discarded', invalid: true, invalid_kind: validation.kind, display_zh: AI_TEST_INVALID_ZH,
+    validation, reason: `test invalid (${AI_TEST_INVALID_ZH}): ${validation.kind}: ${validation.reason}` }
+  if (validation?.status === 'blocked') return { result: 'discarded', validation, reason: `could not run: ${validation.reason}` }
+  if (r.ok) return { result: 'kept', ...(validation ? { validation } : {}), reason: validation?.mutation?.status === 'not_applicable'
+    ? `passes on the tested commit; mutation not_applicable: ${validation.mutation.reason}` : 'passes on the tested commit and fails with the injected bug' }
   if (r.unavailable && r.exitCode === 4) return { result: 'discarded', reason: 'mutation check failed (injected bug not caught, or mutation did not match the source)' }
   if (r.unavailable) return { result: 'discarded', reason: `could not run: ${r.unavailableReasonZh ?? `exit ${r.exitCode}`}` }
   const invalid = toInvalidTest(r.tail, test)
   if (invalid) return { result: 'discarded', invalid: true, invalid_kind: invalid.kind, display_zh: AI_TEST_INVALID_ZH,
     reason: `test invalid (${AI_TEST_INVALID_ZH}): ${invalid.kind === 'fixture-gap' ? 'failed' : 'failed before any assertion'} because the test's own precondition is missing (${invalid.kind}: ${invalid.line})` }
-  return { result: 'fails-on-current', reason: 'fails on the tested commit' }
+  return { result: 'fails-on-current', ...(validation ? { validation } : {}), reason: 'fails on the tested commit' }
 }
 
 // ── 分级补测上限（按 PR 类型 + 改动规模）────────────────────────────
