@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { run, setBudget } from '../src/exec.mjs'
+import { runRequests } from '../src/probe-run.mjs'
 
 const root = mkdtempSync(join(tmpdir(), 'argus-deadline-'))
 process.env.ARGUS_ROOT = root
@@ -18,6 +19,20 @@ const waitGone = async (pid) => {
   while (live(pid) && Date.now() < end) await new Promise((r) => setTimeout(r, 20))
   assert.equal(live(pid), false, `process ${pid} survived cleanup`)
 }
+test('probe fetch TimeoutError is timeout, never environment_unavailable', async () => {
+  const result = await runRequests('http://127.0.0.1:1', [{ id: 'hang', path: '/', expect: { status: 200 } }], {
+    fetchImpl: async () => { throw new DOMException('request timed out', 'TimeoutError') },
+  })
+  assert.equal(result.checks[0].status, 'timeout')
+  assert.equal(result.status, 'timeout')
+})
+test('probe only attributes explicit network environment errors to environment', async () => {
+  const request = [{ id: 'network', path: '/', expect: { status: 200 } }]
+  for (const code of ['ENOTFOUND', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH', 'ECONNRESET', 'ECONNREFUSED', 'UNKNOWN']) {
+    const result = await runRequests('http://example.invalid', request, { fetchImpl: async () => { throw Object.assign(new TypeError('fetch failed'), { cause: { code } }) } })
+    assert.equal(result.status, ['ENOTFOUND', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH'].includes(code) ? 'environment_unavailable' : 'fail')
+  }
+})
 for (const ignoreTerm of [false, true]) {
   test(`never-ending child: TERM${ignoreTerm ? '/KILL escalation' : ''} ends within budget + 5s`, async () => {
     const code = `${ignoreTerm ? 'process.on("SIGTERM", () => {});' : ''}console.log(process.pid); setInterval(() => {}, 1000)`
@@ -81,16 +96,19 @@ test('single Node test budget reports timeout before the suite budget expires', 
   assert.match(result.tail, /"status":"timeout","budget_ms":150/)
   assert.ok(result.durationMs < 5150)
 })
-test('executor owner termination cleans its detached child group', async () => {
+for (const immediateExit of [false, true]) {
+test(`executor owner termination cleans its detached child group${immediateExit ? ' with immediate process.exit' : ''}`, async () => {
   const module = new URL('../src/exec.mjs', import.meta.url).href
   const file = join(root, 'owner.mjs')
-  writeFileSync(file, `import {run} from ${JSON.stringify(module)};
+  writeFileSync(file, `import {run,killAllActive} from ${JSON.stringify(module)};
+    ${immediateExit ? "process.once('SIGTERM',()=>{killAllActive();process.exit(143)});" : ''}
     const p = run(process.execPath, ['-e','console.log(process.pid);process.on("SIGTERM",()=>{});setInterval(()=>{},1000)'], {inheritOutput:true,timeoutMs:10000,killGraceMs:100});
     setTimeout(()=>process.kill(process.pid,'SIGTERM'),350);await p;`)
   const result = await run(process.execPath, [file], { timeoutMs: 3000 })
   assert.equal(result.exitCode, 143)
   await waitGone(Number(result.tail.trim()))
 })
+}
 test('shell entry preserves test arguments and bounds an entire hanging suite', async () => {
   const file = join(root, 'hanging.test.mjs')
   writeFileSync(file, `import { test } from 'node:test'; test('never', async () => new Promise(()=>{setInterval(()=>{},1000)}))`)

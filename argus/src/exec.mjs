@@ -192,7 +192,16 @@ export const budgetEndMs = () => budgetEnd
 
 export function killAllActive() {
   stopping = true
-  for (const stop of active) stop()
+  const stops = [...active]
+  for (const stop of stops) stop()
+  // nightly calls process.exit immediately after this synchronous API. Wait here
+  // (at most the configured 2s grace), so independent children can finish TERM
+  // cleanup before the exit hook force-kills remaining groups. A returned Promise
+  // would be ignored by that caller; do not patch process.exit or its handlers.
+  const end = Math.max(Date.now(), ...stops.map((stop) => stop.killAtMs ?? 0))
+  const remaining = end - Date.now()
+  if (remaining > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, remaining)
+  for (const stop of stops) stop.kill()
 }
 
 function killGroup(child, signal = 'SIGTERM') {
@@ -232,6 +241,7 @@ export function run(cmd, args, { cwd, env, timeoutMs = Number(process.env.ARGUS_
     let spawnError = false
     const terminate = () => {
       if (finished || killTimer) return
+      terminate.killAtMs = Date.now() + killGraceMs
       killGroup(child, 'SIGTERM')
       killTimer = setTimeout(() => {
         killGroup(child, 'SIGKILL')

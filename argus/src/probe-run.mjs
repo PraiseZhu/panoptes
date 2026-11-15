@@ -161,10 +161,18 @@ async function send(base, req, ctx) {
   if (req.rawBody != null) { body = String(req.rawBody); if (req.contentType) headers['content-type'] = req.contentType }
   else if (req.body !== undefined) { body = JSON.stringify(req.body); headers['content-type'] = 'application/json' }
   try {
-    const r = await fetch(base + req.path, { method: req.method ?? 'GET', headers, body, signal: ctx.signal ? AbortSignal.any([ctx.signal, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000) })
+    const r = await (ctx.fetchImpl ?? fetch)(base + req.path, { method: req.method ?? 'GET', headers, body, signal: ctx.signal ? AbortSignal.any([ctx.signal, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000) })
     return { status: r.status, headers: r.headers, body: await r.text() }
   } catch (err) {
-    return { status: 0, headers: null, body: 'request unavailable', unavailable: true }
+    const code = err?.cause?.code ?? err?.code
+    // Request deadlines (including Undici header/body/connect deadlines) are timeout
+    // evidence. DNS/routing failures explicitly identify missing network capability.
+    // Resets/refusals after readiness can be a crashing product server; unknown
+    // errors retain the former failure behavior rather than assuming environment.
+    const timedOut = err?.name === 'TimeoutError' || ctx.signal?.aborted
+      || ['UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_CONNECT_TIMEOUT'].includes(code)
+    const unavailable = ['ENOTFOUND', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH'].includes(code)
+    return { status: 0, headers: null, body: 'request failed', errorStatus: timedOut ? 'timeout' : unavailable ? 'unavailable' : 'fail' }
   }
 }
 
@@ -210,13 +218,24 @@ export async function runRequests(base, requests, ctx) {
         else vars[k] = v
       }
     }
-    checks.push(responses.some((r) => r.unavailable)
+    checks.push(responses.some((r) => r.errorStatus === 'timeout')
+      ? { id, name: raw.name, status: 'timeout', reason: 'request timed out' }
+      : responses.some((r) => r.errorStatus === 'fail')
+      ? { id, name: raw.name, status: 'fail', reason: 'request failed' }
+      : responses.some((r) => r.errorStatus === 'unavailable')
       ? { id, name: raw.name, status: 'unavailable', reason: 'request environment unavailable' }
       : problems.length
       ? { id, name: raw.name, status: 'fail', reason: `${problems.join('；')}；响应开头：${String(last.body).slice(0, BODY_SHOWN).replace(/\s+/g, ' ')}` }
       : { id, name: raw.name, status: 'pass' })
   }
-  return { checks, skipped }
+  return { status: probeStatusFor(checks, skipped), checks, skipped }
+}
+
+export function probeStatusFor(checks, skipped = []) {
+  if (checks.some((c) => c.status === 'timeout')) return 'timeout'
+  if (checks.some((c) => c.status === 'fail')) return 'fail'
+  if (checks.some((c) => c.status === 'unavailable') || skipped.length) return 'environment_unavailable'
+  return 'pass'
 }
 
 export const reportPathFor = (specPath) => specPath.replace(/\.json$/, '') + '.report.json'
@@ -275,13 +294,12 @@ async function main() {
       result.reason = spawnFailed ? 'server_spawn_failed' : 'server_not_ready'
       console.log('服务在规定时间内没有就绪')
     } else {
-      const { checks, skipped } = await runRequests(base, spec.requests, { account, hostSecret, signal: controller.signal })
+      const { status, checks, skipped } = await runRequests(base, spec.requests, { account, hostSecret, signal: controller.signal })
       for (const c of checks) {
         console.log(`${c.status === 'pass' ? '✔' : '✖'} ${c.name}`)
         if (c.status !== 'pass') console.log(`  ${c.reason}`)
       }
       for (const s of skipped) console.log(`- ${s.name}（skipped: ${s.reason}）`)
-      const status = checks.some((c) => c.status === 'unavailable') || skipped.length ? 'environment_unavailable' : checks.some((c) => c.status === 'fail') ? 'fail' : 'pass'
       result = { status, checks, skipped, auth: { account: account.status, account_via: account.via ?? null, host_exchange: Boolean(spec.hostExchangeEnv) } }
     }
   } catch {
