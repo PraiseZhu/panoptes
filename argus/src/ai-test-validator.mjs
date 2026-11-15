@@ -130,7 +130,7 @@ export const isAssertionFailure = (text) => ASSERTION_FAILURE.test(text) || /\bE
 export function isolatedPath(root, path) {
   if (typeof path !== 'string' || !path || path.includes('\0') || path.includes('\\') || isAbsolute(path)) return null
   const parts = path.split('/')
-  if (parts.some((p) => !p || p === '..' || p === '.' || /^(?:\.git|\.env.*|\.codex|\.claude|secrets?|credentials?|auth\.json|.*\.(?:pem|key|token\.json))$/i.test(p))) return null
+  if (parts.some((p) => !p || p === '..' || p === '.' || /^(?:\.git|\.env.*|\.codex|\.claude|secrets?|credentials?|auth\.json|tokens?(?:\.json)?|.*\.(?:pem|key|token\.json))$/i.test(p))) return null
   const base = resolve(root)
   const dest = resolve(base, path)
   if (relative(base, dest).startsWith('..')) return null

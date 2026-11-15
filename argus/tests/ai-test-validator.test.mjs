@@ -56,7 +56,7 @@ test('preflight blocks unisolated roots, path traversal, private paths and symli
   const root = fixture(t)
   assert.equal(check(root, good, { isolated: false }).status, 'blocked')
   // These files deliberately do not exist; no private runtime content is accessed.
-  for (const path of ['../auth.json', '/home/prod/source.mjs', '.env', '.codex/auth.json', 'secrets/key.pem', 'nested/../../sum.mjs', 'bad\\path.mjs']) {
+  for (const path of ['../auth.json', '/home/prod/source.mjs', '.env', '.codex/auth.json', 'token.json', 'tokens.json', 'secrets/key.pem', 'nested/../../sum.mjs', 'bad\\path.mjs']) {
     assert.equal(check(root, { ...good, mutation: { ...good.mutation, file: path } }).kind, 'target', path)
     assert.equal(check(root, { ...good, filePath: path }).kind, 'target', path)
   }
