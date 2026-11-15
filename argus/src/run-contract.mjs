@@ -18,7 +18,7 @@ const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 const SHA_RE = /^[a-f0-9]{40}$/
 const HASH_RE = /^[a-f0-9]{64}$/
 // Defense in depth for otherwise valid identifiers and paths; never echo rejected values.
-const SECRET_RE = /(?:gh[pousr]_|github_pat_|sk-(?:proj-|ant-)?|xox[baprs]-|AKIA[A-Z0-9]{16}|eyJ[A-Za-z0-9_-]+\.eyJ|-----BEGIN .*PRIVATE KEY)/i
+const SECRET_RE = /(?:gh[pousr]_|github_pat_|sk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}|xox[baprs]-|AKIA[A-Z0-9]{16}|eyJ[A-Za-z0-9_-]+\.eyJ|-----BEGIN .*PRIVATE KEY)/i
 const PRIVATE_PATH_RE = /(?:^|[/.\-_])(?:auth|credentials?|secrets?|tokens?|prompts?|uploads?|user[-_]?(?:material|content|assets?))(?:[/.\-_]|$)|(?:^|\/)\.env(?:[./]|$)/i
 
 function reject(field, rule) {
@@ -44,7 +44,7 @@ function enumeration(value, choices, field) {
 }
 
 function list(value, field) {
-  if (!Array.isArray(value)) reject(field, 'expected an array')
+  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) reject(field, 'expected an array')
   // Sparse arrays or custom serializers would not round-trip as validated JSON.
   if (Reflect.ownKeys(value).length !== value.length + 1) reject(field, 'expected a dense data array')
   for (let i = 0; i < value.length; i++) {
