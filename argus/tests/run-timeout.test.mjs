@@ -107,7 +107,7 @@ test('shell entry preserves caller reporters and test name filters', async () =>
   const env = { ...process.env }
   delete env.NODE_TEST_CONTEXT
   const result = await run('bash', [resolve('run-tests.sh'), '--test-reporter=dot', '--test-name-pattern=selected', file], { env, timeoutMs: 4000 })
-  assert.equal(result.exitCode, 0)
+  assert.equal(result.exitCode, 0, result.tail)
   assert.ok(result.tail.includes('.'))
   assert.doesNotMatch(result.tail, /filter lost|ERR_INVALID_ARG_VALUE/)
 })
