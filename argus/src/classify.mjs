@@ -33,6 +33,35 @@ export const isTestPath = (path) => TEST_PATH_RE.test(String(path ?? '')) || TES
 // 只改了测试文件（至少一个，且全是测试文件；删掉的测试文件也算测试改动）
 export const isTestsOnly = (files) => (files ?? []).length > 0 && files.every((f) => isTestPath(f.filename))
 
+// 测试辅助文件必须触发测试，但不能当成独立可执行的测试文件。
+export const isRunnableTestPath = (path) => TEST_PATH_RE.test(String(path ?? '')) && !TEST_HELPER_RE.test(String(path ?? ''))
+export function changeFileKind(path) {
+  const p = String(path ?? '').replaceAll('\\', '/')
+  if (TEST_HELPER_RE.test(p) || /(?:^|\/)(?:__fixtures__|fixtures)\//.test(p)) return 'fixture'
+  if (/\.node-test\.[cm]?[jt]s$/.test(p)) return 'node-test'
+  if (isTestPath(p)) return 'test'
+  if (/(?:^|\/)scripts\//.test(p) || /\.(?:sh|bash|ps1)$/.test(p)) return 'script'
+  if (/\.(?:md|mdx|rst|txt)$|(?:^|\/)docs\/|(?:^|\/)(?:LICENSE|LICENCE|COPYING|README|CHANGELOG)(?:\.[^/]*)?$/i.test(p)) return 'docs'
+  if (/(?:persist|migration|indexeddb|(?:^|\/)db\/|postgres|(?:^|\/)storage\/)/i.test(p)) return 'persistence'
+  if (/\.(?:tsx|jsx|vue|css|scss|html)$|(?:^|\/)(?:components|render)\//.test(p)) return 'browser'
+  return /\.(?:[cm]?[jt]sx?|py)$/.test(p) ? 'source' : 'other'
+}
+
+export const changeKinds = (files) => [...new Set((files ?? []).map((f) => changeFileKind(f.filename)))]
+
+// 路径分配规则由测试计划和 coverage 共同使用，避免两边对同一个文件认不同的 step。
+export function stepExercises(step, paths) {
+  if (!step.exercises || !paths?.length) return true
+  return paths.some((p) => matchAny(p, step.exercises))
+}
+export const stepRunsChangedFile = (step, paths) => (paths ?? []).find((p) => matchAny(p, step.runsFiles ?? []) && !matchAny(p, step.excludesFiles ?? []))
+export function requiredStepsForFile(profile, file) {
+  if (file.status === 'removed' || changeFileKind(file.filename) === 'docs') return []
+  const path = file.filename
+  return profile.steps.filter((s) => s.kind !== 'setup' && !matchAny(path, s.excludesFiles ?? []) && (stepRunsChangedFile(s, [path])
+    || ((s.applicability?.changeKinds ?? []).includes(changeFileKind(path)) && stepExercises(s, [path])))).map((s) => s.id)
+}
+
 const DEFAULT_A = ['**/*.md', 'docs/**', 'LICENSE', '**/*.txt']
 // 测试、依赖、CI、脚本、配置即使长得像文档也不能进 A
 const NEVER_A = ['**/package.json', '**/package-lock.json', '**/pyproject.toml', '**/uv.lock', '.github/**', 'scripts/**', '**/*.test.*', 'tests/**']
