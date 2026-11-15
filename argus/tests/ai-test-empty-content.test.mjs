@@ -165,3 +165,34 @@ test('generateTargetedTests: no length retry keeps a single attempt and writes n
   assert.equal(gen.usage?.total_tokens, 321)
   assert.equal(lengthRetryLogs().slice(before).length, 0)
 })
+
+test('generateTargetedTests: gateway errors stay generation failures, never product candidates or implicit retries', async () => {
+  let calls = 0
+  const consumed = []
+  const gen = await generate(async () => {
+    calls++
+    return { ok: false, status: 401, json: async () => ({ error: { message: 'fixture gateway denied' } }) }
+  }, { quota: { check: () => ({ ok: true }), consume: (kind, tokens) => consumed.push([kind, tokens]) } })
+  assert.equal(calls, 1)
+  assert.equal(gen.status, 'error')
+  assert.match(gen.reasonZh, /401/)
+  assert.deepEqual(gen.tests, [])
+  assert.deepEqual(consumed, [['ai-test', 0]], 'preserve existing per-response quota accounting')
+  assert.equal(gen.retried, undefined)
+})
+
+test('generateTargetedTests: empty stop response is retryable, successful length retry returns validated tests', async () => {
+  const empty = await generate(async () => reply({ finish_reason: 'stop', content: ' ', total_tokens: 2 }))
+  assert.equal(empty.status, 'error')
+  assert.equal(empty.retryable, true)
+  const candidate = { kind: 'coverage', purposeZh: 'fixture', covers: ['boundary'], filePath: 'src/a.ai.test.ts', content: 'const a = 1', mutation: { file: 'src/a.ts', find: 'a', replace: 'b' } }
+  let calls = 0
+  const gen = await generate(async () => ++calls === 1
+    ? reply({ finish_reason: 'length', content: '', total_tokens: 10 })
+    : reply({ finish_reason: 'stop', content: JSON.stringify({ tests: [candidate] }), total_tokens: 20 }))
+  assert.equal(calls, 2)
+  assert.equal(gen.retried, true)
+  assert.equal(gen.status, 'ok')
+  assert.equal(gen.tests.length, 1)
+  assert.equal(gen.rejected_by_validation, 0)
+})
