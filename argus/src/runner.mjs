@@ -334,8 +334,8 @@ function watchDesktop(enabled) {
 }
 
 // 被测版本的第一个父提交：有的项目脚本要求显式给出对照基线（例如 Mivo 浏览器旅程的 --base）
-async function toParentSha(src) {
-  const res = await run('git', ['-C', src, 'rev-parse', 'HEAD^'], { env: baseEnv(), timeoutMs: 60_000 })
+async function toParentSha(src, timeoutMs = 60_000) {
+  const res = await run('git', ['-C', src, 'rev-parse', 'HEAD^'], { env: baseEnv(), timeoutMs })
   return res.ok ? String(res.tail).trim().split('\n').pop() : ''
 }
 
@@ -456,7 +456,7 @@ export async function runSteps(profile, src, runDir, { stepIds = null, execution
   const suiteEnd = Math.min(Date.now() + timeoutMs, budgetEndMs() ?? Infinity)
   const env = stepEnv(runDir, profile)
   const needsBase = profile.steps.some((s) => /\$\{(?:BASE_SHA|DIFF_BASE_SHA)\}/.test(JSON.stringify(s)))
-  const parent = needsBase ? await toParentSha(src) : ''
+  const parent = needsBase ? await toParentSha(src, Math.max(1, Math.min(60_000, suiteEnd - Date.now()))) : ''
   // BASE_SHA：被测提交的第一个父提交；DIFF_BASE_SHA：本 PR 改动的起点（nightly 传入的 base_sha：merged → 第一个父提交，
   // open → 与目标分支的 merge-base），没有时退回第一个父提交（对照 / 最新主干轮次）
   const vars = needsBase ? { BASE_SHA: parent, DIFF_BASE_SHA: execution?.diffBase || parent } : {}
@@ -464,11 +464,12 @@ export async function runSteps(profile, src, runDir, { stepIds = null, execution
   for (const step of profile.steps) {
     if (isStopping() || overBudget()) break
     if (stepIds && step.kind !== 'setup' && !stepIds.includes(step.id)) continue
-    const stepEnd = Math.min(suiteEnd, Date.now() + (step.timeoutMs ?? (step.timeoutMin ?? 20) * 60_000))
+    const stepStarted = Date.now()
+    const stepEnd = Math.min(suiteEnd, stepStarted + (step.timeoutMs ?? (step.timeoutMin ?? 20) * 60_000))
     const remainingMs = () => Math.max(1, stepEnd - Date.now())
     const blocked = (status, reason, extra = {}) => ({ ...(execution ?? {}), id: step.id, nameZh: step.nameZh, kind: step.kind,
       cmdText: step.cmd.join(' '), ok: false, status, unavailable: status === 'environment_unavailable', unavailableReasonZh: reason,
-      timedOut: status === 'timeout', exitCode: null, signal: null, durationMs: 0, tail: reason, failures: [], failureDetails: [], failureParseStatus: 'incomplete', ...extra })
+      timedOut: status === 'timeout', exitCode: null, signal: null, endedAt: new Date().toISOString(), durationMs: Date.now() - stepStarted, tail: reason, failures: [], failureDetails: [], failureParseStatus: 'incomplete', ...extra })
     if (Date.now() >= stepEnd) { results.push(blocked('timeout', 'run time budget exhausted')); break }
     if (beforeStep) {
       let timer
@@ -514,7 +515,9 @@ export async function runSteps(profile, src, runDir, { stepIds = null, execution
     try { ck = stepCacheEnabled() ? stepCacheKey({ step, label: execution?.runLabel, vars: stepSubstitutions, src }) : null } catch { ck = null }
     const hit = lookupStepResult(ck)
     if (hit) {
-      results.push(reusedResult(hit, identity))
+      const result = reusedResult(hit, identity)
+      result.status = executionStatus(result)
+      results.push(result)
       log('info', 'step reused', { ...execution, step: step.id, from: hit.source })
       continue
     }

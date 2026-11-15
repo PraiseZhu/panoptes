@@ -101,6 +101,16 @@ test('shell entry preserves test arguments and bounds an entire hanging suite', 
   assert.match(result.tail, /"status":"timeout"/)
   assert.ok(result.durationMs < 5800)
 })
+test('shell entry preserves caller reporters and test name filters', async () => {
+  const file = join(root, 'selected.test.mjs')
+  writeFileSync(file, `import {test} from 'node:test'; test('selected',()=>{}); test('excluded',()=>{throw new Error('filter lost')})`)
+  const env = { ...process.env }
+  delete env.NODE_TEST_CONTEXT
+  const result = await run('bash', [resolve('run-tests.sh'), '--test-reporter=dot', '--test-name-pattern=selected', file], { env, timeoutMs: 4000 })
+  assert.equal(result.exitCode, 0)
+  assert.ok(result.tail.includes('.'))
+  assert.doesNotMatch(result.tail, /filter lost|ERR_INVALID_ARG_VALUE/)
+})
 test('probe timeout cleans server and reports timeout even when server ignores TERM', async () => {
   const spec = join(root, 'probe.json')
   const pidfile = join(root, 'server.pid')

@@ -3,8 +3,6 @@ import { spawn } from 'node:child_process'
 import { createWriteStream, mkdirSync } from 'node:fs'
 import { dirname, resolve as resolvePath } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { spec as SpecReporter } from 'node:test/reporters'
-import { compose } from 'node:stream'
 import { StringDecoder } from 'node:string_decoder'
 
 const TAIL_BYTES = 64 * 1024
@@ -214,6 +212,7 @@ export function run(cmd, args, { cwd, env, timeoutMs = Number(process.env.ARGUS_
     const started = Date.now()
     let out = ''
     let timedOut = false
+    let testTimedOut = false
     let logStream = null
     if (logFile) {
       mkdirSync(dirname(logFile), { recursive: true })
@@ -249,6 +248,7 @@ export function run(cmd, args, { cwd, env, timeoutMs = Number(process.env.ARGUS_
     if (testSupervisor) child.on('message', (message) => {
       if (message?.type !== 'argus:test-timeout') return
       timedOut = true
+      testTimedOut = true
       terminate()
     })
     const parser = createFailureParser()
@@ -285,7 +285,7 @@ export function run(cmd, args, { cwd, env, timeoutMs = Number(process.env.ARGUS_
       const parsed = parser.finish()
       const status = timedOut || parsed.failureDetails.some((f) => f.type === 'test_timeout') ? 'timeout'
         : spawnError || signal || abortSignal?.aborted || parsed.failureDetails.some((f) => f.type === 'runner_error') ? 'runner_error' : ok ? 'pass' : 'product_fail'
-      resolve({ ok, status, exitCode, signal, endedAt, timedOut, ...(timedOut && budgetCut ? { budgetExceeded: true } : {}), durationMs, tail: tailText, ...parsed })
+      resolve({ ok, status, exitCode, signal, endedAt, timedOut, ...(testTimedOut ? { testTimedOut: true } : {}), ...(timedOut && budgetCut ? { budgetExceeded: true } : {}), durationMs, tail: tailText, ...parsed })
     }
     child.on('error', (err) => { spawnError = true; finish(null, `\n进程错误：${err.message}`) })
     child.on('exit', () => killGroup(child, 'SIGKILL'))
@@ -298,15 +298,12 @@ export function run(cmd, args, { cwd, env, timeoutMs = Number(process.env.ARGUS_
 // Node cancels a timed-out test but can leave its handles alive. Report that event
 // immediately over IPC so the suite supervisor can reap the whole process group.
 export default async function* testBudgetReporter(source) {
-  async function* events() {
-    for await (const event of source) {
-      if (event.type === 'test:fail' && event.data?.details?.error?.failureType === 'testTimeoutFailure') {
-        process.send?.({ type: 'argus:test-timeout' })
-      }
-      yield event
+  for await (const event of source) {
+    if (event.type === 'test:fail' && event.data?.details?.error?.failureType === 'testTimeoutFailure') {
+      process.send?.({ type: 'argus:test-timeout' })
     }
+    yield ''
   }
-  yield* compose(events(), new SpecReporter())
 }
 
 // Standalone suite supervisor, also used by run-tests.sh. Arguments remain Node test arguments.
@@ -316,10 +313,16 @@ if (process.argv[1] && resolvePath(process.argv[1]) === fileURLToPath(import.met
   if (![suiteMs, testMs].every((n) => Number.isSafeInteger(n) && n > 0)) throw new Error('test budgets must be positive integer milliseconds')
   for (const sig of ['SIGTERM', 'SIGINT']) process.once(sig, killAllActive)
   const idleFixture = new URL('../tests/bench-env-timeout.test.mjs', import.meta.url).href
-  const result = await run(process.execPath, ['--disable-warning=ExperimentalWarning', '--import', idleFixture, '--test', `--test-timeout=${testMs}`, '--test-reporter', fileURLToPath(import.meta.url), ...process.argv.slice(2)], {
+  const args = process.argv.slice(2)
+  const reporters = args.filter((arg) => /^--test-reporter(?:=|$)/.test(arg)).length
+  const destinations = args.filter((arg) => /^--test-reporter-destination(?:=|$)/.test(arg)).length
+  const output = reporters === 0 ? ['--test-reporter=spec', '--test-reporter-destination=stdout']
+    : reporters === 1 && destinations === 0 ? ['--test-reporter-destination=stdout'] : []
+  const result = await run(process.execPath, ['--disable-warning=ExperimentalWarning', '--import', idleFixture, '--test', `--test-timeout=${testMs}`,
+    '--test-reporter', fileURLToPath(import.meta.url), '--test-reporter-destination=/dev/null', ...output, ...args], {
     timeoutMs: suiteMs, inheritOutput: true, testSupervisor: true,
   })
-  if (result.status === 'timeout') console.error(JSON.stringify({ status: 'timeout', budget_ms: result.durationMs < suiteMs ? testMs : suiteMs }))
+  if (result.status === 'timeout') console.error(JSON.stringify({ status: 'timeout', budget_ms: result.testTimedOut || !result.timedOut ? testMs : suiteMs }))
   process.exitCode = result.status === 'timeout' ? 124 : result.ok ? 0 : result.exitCode || 1
 }
 
