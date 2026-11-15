@@ -3,6 +3,8 @@ import { spawn } from 'node:child_process'
 import { createWriteStream, mkdirSync } from 'node:fs'
 import { dirname, resolve as resolvePath } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { spec as SpecReporter } from 'node:test/reporters'
+import { compose } from 'node:stream'
 import { StringDecoder } from 'node:string_decoder'
 
 const TAIL_BYTES = 64 * 1024
@@ -199,7 +201,7 @@ function killGroup(child, signal = 'SIGTERM') {
   try { process.kill(-child.pid, signal) } catch { /* 已退出 */ }
 }
 
-export function run(cmd, args, { cwd, env, timeoutMs = Number(process.env.ARGUS_SUBPROCESS_TIMEOUT_MS ?? 600_000), killGraceMs = 1000, logFile, input, signal: abortSignal, inheritOutput = false } = {}) {
+export function run(cmd, args, { cwd, env, timeoutMs = Number(process.env.ARGUS_SUBPROCESS_TIMEOUT_MS ?? 600_000), killGraceMs = 1000, logFile, input, signal: abortSignal, inheritOutput = false, testSupervisor = false } = {}) {
   timeoutMs = Math.max(1, Math.floor(Number(timeoutMs)) || 1)
   killGraceMs = Math.min(2000, Math.max(0, Math.floor(Number(killGraceMs)) || 0))
   let budgetCut = false
@@ -220,7 +222,7 @@ export function run(cmd, args, { cwd, env, timeoutMs = Number(process.env.ARGUS_
     }
     let child
     try {
-      child = spawn(cmd, args, { cwd, env, detached: true, stdio: [input == null ? 'ignore' : 'pipe', 'pipe', 'pipe'] })
+      child = spawn(cmd, args, { cwd, env, detached: true, stdio: [input == null ? 'ignore' : 'pipe', 'pipe', 'pipe', ...(testSupervisor ? ['ipc'] : [])] })
     } catch (err) {
       logStream?.end()
       resolve({ ok: false, status: 'runner_error', exitCode: null, signal: null, timedOut: false, durationMs: 0, tail: `启动失败：${err.message}`, failures: [], failureDetails: [], failureParseStatus: 'incomplete' })
@@ -244,6 +246,11 @@ export function run(cmd, args, { cwd, env, timeoutMs = Number(process.env.ARGUS_
     terminate.kill = () => killGroup(child, 'SIGKILL')
     active.add(terminate)
     installSignalCleanup()
+    if (testSupervisor) child.on('message', (message) => {
+      if (message?.type !== 'argus:test-timeout') return
+      timedOut = true
+      terminate()
+    })
     const parser = createFailureParser()
     const onData = (stream, buf) => {
       logStream?.write(buf)
@@ -288,6 +295,20 @@ export function run(cmd, args, { cwd, env, timeoutMs = Number(process.env.ARGUS_
   })
 }
 
+// Node cancels a timed-out test but can leave its handles alive. Report that event
+// immediately over IPC so the suite supervisor can reap the whole process group.
+export default async function* testBudgetReporter(source) {
+  async function* events() {
+    for await (const event of source) {
+      if (event.type === 'test:fail' && event.data?.details?.error?.failureType === 'testTimeoutFailure') {
+        process.send?.({ type: 'argus:test-timeout' })
+      }
+      yield event
+    }
+  }
+  yield* compose(events(), new SpecReporter())
+}
+
 // Standalone suite supervisor, also used by run-tests.sh. Arguments remain Node test arguments.
 if (process.argv[1] && resolvePath(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const suiteMs = Number(process.env.ARGUS_TEST_SUITE_TIMEOUT_MS ?? 600_000)
@@ -295,10 +316,10 @@ if (process.argv[1] && resolvePath(process.argv[1]) === fileURLToPath(import.met
   if (![suiteMs, testMs].every((n) => Number.isSafeInteger(n) && n > 0)) throw new Error('test budgets must be positive integer milliseconds')
   for (const sig of ['SIGTERM', 'SIGINT']) process.once(sig, killAllActive)
   const idleFixture = new URL('../tests/bench-env-timeout.test.mjs', import.meta.url).href
-  const result = await run(process.execPath, ['--disable-warning=ExperimentalWarning', '--import', idleFixture, '--test', `--test-timeout=${testMs}`, ...process.argv.slice(2)], {
-    timeoutMs: suiteMs, inheritOutput: true,
+  const result = await run(process.execPath, ['--disable-warning=ExperimentalWarning', '--import', idleFixture, '--test', `--test-timeout=${testMs}`, '--test-reporter', fileURLToPath(import.meta.url), ...process.argv.slice(2)], {
+    timeoutMs: suiteMs, inheritOutput: true, testSupervisor: true,
   })
-  if (result.status === 'timeout') console.error(JSON.stringify({ status: 'timeout', budget_ms: result.timedOut ? suiteMs : testMs }))
+  if (result.status === 'timeout') console.error(JSON.stringify({ status: 'timeout', budget_ms: result.durationMs < suiteMs ? testMs : suiteMs }))
   process.exitCode = result.status === 'timeout' ? 124 : result.ok ? 0 : result.exitCode || 1
 }
 
