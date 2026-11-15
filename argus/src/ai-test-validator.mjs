@@ -243,6 +243,7 @@ export function validateAiTest(spec, { root, isolated = false, allowedTargets = 
     return deferMutation ? { status: 'valid', mutation: { status: 'pending' }, source } : invalid('mutation', 'mutation must replace exactly one source fragment with a different value')
   }
   const mutatedSyntax = validateSyntax(source.replace(mutation.find, mutation.replace), mutation.file)
+  if (mutatedSyntax.status === 'blocked') return { status: 'valid', mutation: { status: 'not_applicable', reason: mutatedSyntax.reason }, source }
   if (mutatedSyntax.status !== 'valid') return { ...mutatedSyntax, kind: 'mutation', reason: 'mutation cannot be parsed safely' }
   return { status: 'valid', mutation: { status: 'pending' }, source }
 }
