@@ -12,6 +12,19 @@ const { withDimensionStatus, ownTestsNotRun } = await import('../src/nightly.mjs
 const { toAiGaps, fileKind, aiTestTier } = await import('../src/aitests.mjs')
 const { normalizeTestOutcomes } = await import('../src/test-outcomes.mjs')
 const { loadProfile } = await import('../src/config.mjs')
+const { changeFileKind, changeKinds, isRunnableTestPath } = await import('../src/classify.mjs')
+
+test('变更分类稳定区分文档、测试、脚本、夹具、浏览器和持久化', () => {
+  for (const [path, kind] of Object.entries({
+    'docs/guide.md': 'docs', 'src/x.test.ts': 'test', '.github/scripts/tests/x.node-test.mjs': 'node-test',
+    'scripts/check.mjs': 'script', 'scripts/README.md': 'script', 'src/x-fixture.ts': 'fixture',
+    'fixtures/data.json': 'fixture', 'src/Panel.tsx': 'browser', 'src/store/persistIdbStorage.ts': 'persistence',
+    'server/db/projects.ts': 'persistence', 'src/fixtureLoader.ts': 'source',
+  })) assert.equal(changeFileKind(path), kind, path)
+  assert.deepEqual(changeKinds(F('src/x.test.ts', 'src/y.test.ts')), ['test'])
+  assert.equal(isRunnableTestPath('src/x-fixture.ts'), false)
+  assert.equal(isRunnableTestPath('src/x.test.ts'), true)
+})
 
 const F = (...names) => names.map((filename) => ({ filename }))
 const mivo = loadProfile('mivo-canvas-plugin')
