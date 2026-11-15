@@ -199,17 +199,21 @@ export async function runRequests(base, requests, ctx) {
       const res = await send(ctx.base ?? base, req, ctx)
       responses.push(res)
       const exp = n > 0 && req.expectRepeat ? { ...req.expect, ...req.expectRepeat } : (req.expect ?? {})
-      for (const p of toMismatch(exp, res.status, res.body, res.headers)) problems.push(times > 1 ? `第 ${n + 1} 次：${p}` : p)
+      // A missing response cannot prove an assertion failure (status 0 is a placeholder).
+      const mismatches = res.errorStatus === 'fail' ? ['request failed']
+        : res.errorStatus ? [] : toMismatch(exp, res.status, res.body, res.headers)
+      for (const p of mismatches) problems.push(times > 1 ? `第 ${n + 1} 次：${p}` : p)
     }
-    if (times > 1 && raw.sameAs?.length) {
-      const parsed = responses.map((r) => { try { return JSON.parse(r.body) } catch { return null } })
+    const received = responses.filter((r) => !r.errorStatus)
+    if (received.length > 1 && raw.sameAs?.length) {
+      const parsed = received.map((r) => { try { return JSON.parse(r.body) } catch { return null } })
       for (const k of raw.sameAs) {
         const vals = parsed.map((p) => JSON.stringify(getPath(p, k)))
         if (new Set(vals).size !== 1) problems.push(`幂等：字段 ${k} 各次不同（${vals.join(' / ')}）`)
       }
     }
-    const last = responses[responses.length - 1]
-    if (raw.capture && !problems.length) {
+    const last = received[received.length - 1]
+    if (raw.capture && !problems.length && received.length === responses.length) {
       let json = null
       try { json = JSON.parse(responses[0].body) } catch { /* ignore */ }
       for (const [k, path] of Object.entries(raw.capture)) {
@@ -218,22 +222,27 @@ export async function runRequests(base, requests, ctx) {
         else vars[k] = v
       }
     }
-    checks.push(responses.some((r) => r.errorStatus === 'timeout')
-      ? { id, name: raw.name, status: 'timeout', reason: 'request timed out' }
-      : responses.some((r) => r.errorStatus === 'fail')
-      ? { id, name: raw.name, status: 'fail', reason: 'request failed' }
-      : responses.some((r) => r.errorStatus === 'unavailable')
-      ? { id, name: raw.name, status: 'unavailable', reason: 'request environment unavailable' }
-      : problems.length
-      ? { id, name: raw.name, status: 'fail', reason: `${problems.join('；')}；响应开头：${String(last.body).slice(0, BODY_SHOWN).replace(/\s+/g, ' ')}` }
-      : { id, name: raw.name, status: 'pass' })
+    const timedOut = responses.some((r) => r.errorStatus === 'timeout')
+    const unavailable = responses.some((r) => r.errorStatus === 'unavailable')
+    // Confirmed failures outrank incomplete observations: fail > timeout > unavailable > pass.
+    // Keep deadline/environment evidence in the reason even when a failure wins.
+    const reasons = [...problems]
+    if (problems.length && last) reasons.push(`响应开头：${String(last.body).slice(0, BODY_SHOWN).replace(/\s+/g, ' ')}`)
+    if (timedOut) reasons.push('request timed out')
+    if (unavailable) reasons.push('request environment unavailable')
+    let status = 'pass'
+    if (problems.length) status = 'fail'
+    else if (timedOut) status = 'timeout'
+    else if (unavailable) status = 'unavailable'
+    checks.push({ id, name: raw.name, status, ...(reasons.length ? { reason: reasons.join('；') } : {}) })
   }
   return { status: probeStatusFor(checks, skipped), checks, skipped }
 }
 
 export function probeStatusFor(checks, skipped = []) {
-  if (checks.some((c) => c.status === 'timeout')) return 'timeout'
+  // A timeout or skipped check must not erase a failure already observed by another check.
   if (checks.some((c) => c.status === 'fail')) return 'fail'
+  if (checks.some((c) => c.status === 'timeout')) return 'timeout'
   if (checks.some((c) => c.status === 'unavailable') || skipped.length) return 'environment_unavailable'
   return 'pass'
 }

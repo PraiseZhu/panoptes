@@ -26,6 +26,55 @@ test('probe fetch TimeoutError is timeout, never environment_unavailable', async
   assert.equal(result.checks[0].status, 'timeout')
   assert.equal(result.status, 'timeout')
 })
+for (const failure of ['HTTP 500', 'assertion mismatch', 'connection refused']) {
+  test(`probe repeat preserves ${failure} when a later request times out`, async () => {
+    let calls = 0
+    const result = await runRequests('http://example.invalid', [{
+      id: 'repeat', path: '/', repeat: 2, expect: { status: 200, json: { ok: true } },
+    }], {
+      fetchImpl: async () => {
+        if (calls++ > 0) throw new DOMException('request timed out', 'TimeoutError')
+        if (failure === 'connection refused') throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } })
+        return new Response('{"ok":false}', { status: failure === 'HTTP 500' ? 500 : 200 })
+      },
+    })
+    assert.equal(calls, 2)
+    assert.equal(result.checks[0].status, 'fail')
+    assert.equal(result.status, 'fail')
+    assert.match(result.checks[0].reason, failure === 'HTTP 500' ? /500/ : failure === 'assertion mismatch' ? /字段 ok/ : /request failed/)
+    assert.match(result.checks[0].reason, /timed out/)
+  })
+}
+test('probe step preserves a failed check alongside a separate timeout', async () => {
+  for (const paths of [['/fail', '/timeout'], ['/timeout', '/fail']]) {
+    const result = await runRequests('http://example.invalid', paths.map((path) => ({ id: path, path, expect: { status: 200 } })), {
+      fetchImpl: async (url) => {
+        if (url.endsWith('/timeout')) throw new DOMException('request timed out', 'TimeoutError')
+        return new Response('broken', { status: 500 })
+      },
+    })
+    assert.equal(result.status, 'fail')
+    assert.equal(result.checks.find((c) => c.id === '/fail').status, 'fail')
+    assert.match(result.checks.find((c) => c.id === '/fail').reason, /500/)
+    assert.equal(result.checks.find((c) => c.id === '/timeout').status, 'timeout')
+  }
+})
+test('probe timeout does not create assertion, sameAs or capture failures from absent responses', async () => {
+  for (const allTimeout of [false, true]) {
+    let calls = 0
+    const result = await runRequests('http://example.invalid', [{
+      id: 'repeat', path: '/', repeat: 2, expect: { status: 200, json: { id: 'ok' } }, sameAs: ['id'], capture: { saved: 'id' },
+    }], {
+      fetchImpl: async () => {
+        if (calls++ > 0 || allTimeout) throw new DOMException('request timed out', 'TimeoutError')
+        return new Response('{"id":"ok"}', { status: 200 })
+      },
+    })
+    assert.equal(result.status, 'timeout')
+    assert.equal(result.checks[0].status, 'timeout')
+    assert.match(result.checks[0].reason, /timed out/)
+  }
+})
 test('probe only attributes explicit network environment errors to environment', async () => {
   const request = [{ id: 'network', path: '/', expect: { status: 200 } }]
   for (const code of ['ENOTFOUND', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH', 'ECONNRESET', 'ECONNREFUSED', 'UNKNOWN']) {
