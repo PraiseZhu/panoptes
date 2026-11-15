@@ -3,7 +3,9 @@
 # tests create land inside it and are removed on exit, pass or fail (trap). Leftovers of killed runs: scripts/sweep-tmp.sh.
 set -uo pipefail
 RUN_TMP="$(mktemp -d "${TMPDIR:-/tmp}/argus-testrun-XXXXXX")"
-trap 'rm -rf --one-file-system "$RUN_TMP"' EXIT
+trap 'rm -rf -- "$RUN_TMP"' EXIT
 cd "$(dirname "$0")"
 if (( $# )); then set -- "$@"; else set -- tests/*.test.mjs; fi
-TMPDIR="$RUN_TMP" node --disable-warning=ExperimentalWarning --test "$@"
+# ARGUS_TEST_TIMEOUT_MS bounds each Node test; ARGUS_TEST_SUITE_TIMEOUT_MS bounds the
+# complete run. The supervisor kills the process group before removing scratch data.
+TMPDIR="$RUN_TMP" node src/exec.mjs "$@"
