@@ -94,3 +94,24 @@ test('unified per-check decision fails closed on all missing or non-product phas
   assert.equal(decideFinding({ ...args, trialOnly: true }).status, 'pending_verification')
   assert.equal(findingEligibility({ source: 'code-review', status: 'confirmed', decision: { status: 'confirmed' } }).fix_eligible, false)
 })
+
+
+test('finding/issue/fix eligibility shares SHA and replay admission across severities', async () => {
+  const { selectIssueCandidates } = await import('../src/nightly.mjs')
+  const f = { source: 'check', status: 'introduced', check_id: 'unit', severity: 'P1',
+    decision: { status: 'confirmed' }, tested_sha: 'a'.repeat(40), base_sha: 'b'.repeat(40),
+    run_id: 'run', artifact_refs: ['result'], evidence: { tested_sha: 'a'.repeat(40), base_sha: 'b'.repeat(40), first_run: 'fail', rerun: 'fail', base_run: 'pass' } }
+  assert.deepEqual(findingEligibility(f), { finding_eligible: true, issue_eligible: true, fix_eligible: true })
+  for (const severity of ['P0', 'P1', 'P2', 'P3']) {
+    const result = findingEligibility({ ...f, severity })
+    assert.equal(result.finding_eligible, true)
+    assert.equal(result.issue_eligible, ['P0', 'P1'].includes(severity))
+    assert.equal(result.fix_eligible, severity !== 'P3')
+  }
+  const bad = [{ ...f, decision: null }, { ...f, base_sha: null }, { ...f, validation: { status: 'invalid' } },
+    { ...f, failure_type: 'test_timeout' }, { ...f, evidence: { ...f.evidence, pr_runs: ['fail'], base_runs: ['pass'] } },
+    { ...f, evidence: { ...f.evidence, latest_required: true } }]
+  for (const value of bad) assert.equal(findingEligibility(value).finding_eligible, false)
+  const report = { prs: [{ number: 1, author: 'PraiseZhu', findings: [f, ...bad] }] }
+  assert.equal(selectIssueCandidates(report).candidates.length, 1)
+})

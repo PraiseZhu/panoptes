@@ -232,9 +232,17 @@ export function findingEligibility(f) {
   const evidence = f?.evidence
   const bound = [f?.tested_sha, f?.base_sha].every((s) => /^[a-f0-9]{40}$/.test(s ?? ''))
     && typeof f?.run_id === 'string' && f.run_id.length > 0
-    && f?.artifact_refs?.length > 0 && evidence?.first_run === 'fail'
+    && typeof f?.check_id === 'string' && f.check_id.length > 0
+    && Array.isArray(f?.artifact_refs) && f.artifact_refs.length > 0
+    && evidence?.tested_sha === f.tested_sha && evidence?.base_sha === f.base_sha && evidence?.first_run === 'fail'
     && evidence?.rerun === 'fail' && evidence?.base_run === 'pass'
-  const eligible = status === 'confirmed' && bound && f?.source === 'check' && !f.invalid && !f.pending && !f.low_memory
+  const trial = evidence?.pr_runs != null || evidence?.base_runs != null
+  const replayed = !trial || (evidence.pr_runs?.length >= 3 && evidence.base_runs?.length >= 3
+    && evidence.pr_runs.every((s) => s === 'fail') && evidence.base_runs.every((s) => s === 'pass'))
+  const eligible = status === 'confirmed' && bound && replayed
+    && (!evidence?.latest_required || evidence.latest_main_run === 'fail')
+    && !['invalid', 'blocked'].includes(f.validation?.status)
+    && !['test_timeout', 'runner_error'].includes(f.failure_type) && f?.source === 'check' && !f.invalid && !f.pending && !f.low_memory
     && !f.flaky && !f.not_a_pr_finding && !f.pre_existing
     && ['introduced', 'confirmed'].includes(f.status)
   return { finding_eligible: eligible, issue_eligible: eligible && ['P0', 'P1'].includes(f.severity), fix_eligible: eligible && ['P0', 'P1', 'P2'].includes(f.severity) }

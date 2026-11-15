@@ -110,8 +110,8 @@ test('issue 载荷（不联网）：私有仓、qa-auto + cindy-dispatch、指�
 
 test('issue 资格：只有失败检查佐证的 P0/P1 + 作者 PraiseZhu；LLM 审查单独结论永不提；system_health 照提', async () => {
   const { selectIssueCandidates, buildIssuePayloadFor, fingerprintMarker } = await import('../src/nightly.mjs')
-  const chk = (sev, fp) => ({ source: 'check', check_id: 'unit', dimension: 'white-box', severity: sev, status: 'introduced', fingerprint: fp, evidence: {} })
-  const cr = (sev, fp) => ({ source: 'code-review', check_id: 'code-review', dimension: 'white-box', severity: sev, verdict: 'CONFIRMED', fingerprint: fp, evidence: {} })
+  const chk = (sev, fp) => ({ source: 'check', check_id: 'unit', dimension: 'white-box', severity: sev, status: 'introduced', fingerprint: fp, decision: { status: 'confirmed' }, tested_sha: 'a'.repeat(40), base_sha: 'b'.repeat(40), run_id: 'run', artifact_refs: ['result'], evidence: { tested_sha: 'a'.repeat(40), base_sha: 'b'.repeat(40), first_run: 'fail', rerun: 'fail', base_run: 'pass' } })
+  const cr = (sev, fp) => ({ source: 'code-review', check_id: 'code-review', dimension: 'white-box', severity: sev, verdict: 'CONFIRMED', fingerprint: fp, decision: { status: 'confirmed' }, tested_sha: 'a'.repeat(40), base_sha: 'b'.repeat(40), run_id: 'run', artifact_refs: ['result'], evidence: { tested_sha: 'a'.repeat(40), base_sha: 'b'.repeat(40), first_run: 'fail', rerun: 'fail', base_run: 'pass' } })
   const report = {
     date: '2026-10-10', repo: 'xindong/mivo-canvas-plugin', run: { id: 'r' },
     prs: [

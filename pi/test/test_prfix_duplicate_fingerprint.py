@@ -44,6 +44,53 @@ class FingerprintClaim(unittest.TestCase):
     def test_outbound_and_unknown_host_never_expire_automatically(self):
         lease = self.claim(now=100); lib.release_fingerprint(lease, reserve=True)
         with self.assertRaises(lib.FingerprintBusy): self.claim('new', now=999999)
+    def test_dispatch_handoff_only_the_matching_owner_and_nonce_can_adopt(self):
+        lease = self.claim(); nonce = lease['lease']['nonce']
+        lib.release_fingerprint(lease, reserve='dispatch')
+        for owner, token in [('pr-2', nonce), ('pr-1', 'wrong')]:
+            with self.assertRaises(lib.FingerprintBusy): self.claim(owner, handoff_nonce=token)
+        current = self.claim(handoff_nonce=nonce)
+        with self.assertRaises(lib.FingerprintBusy): self.claim('pr-2')
+        lib.release_fingerprint(current)
+
+    def test_unadopted_dispatch_expires_even_when_dispatcher_is_alive(self):
+        lease = self.claim(now=100); lib.release_fingerprint(lease, reserve='dispatch')
+        with self.assertRaises(lib.FingerprintBusy): self.claim('new', now=200)
+        current = self.claim('new', now=4000); lib.release_fingerprint(current)
+
+    def test_failed_outbound_can_only_be_replaced_by_its_owner_and_action(self):
+        lease = self.claim(); lib.release_fingerprint(lease, reserve='action-1')
+        with self.assertRaises(lib.FingerprintBusy): self.claim('pr-2', replaces='action-1')
+        with self.assertRaises(lib.FingerprintBusy): self.claim(replaces='other')
+        current = self.claim(replaces='action-1'); lib.release_fingerprint(current)
+
+    def test_prwatch_reserves_before_launch_and_releases_failed_spawn(self):
+        import prwatch as W
+        from types import SimpleNamespace
+        flag = Path(self.tmp.name) / 'enabled'; flag.touch()
+        root = self.tmp.name + '/out/praise-pr/fingerprints'
+        fp = 'mq1-' + 'a' * 20
+        adopted = []
+        def popen(*args, **kwargs):
+            env = kwargs['env']
+            self.assertEqual(env['PRFIX_CLAIM_TICKET'], '10:' + fp)
+            with self.assertRaises(lib.FingerprintBusy): lib.claim_fingerprint(root, lib.REPO, fp, 'another')
+            held = lib.claim_fingerprint(root, lib.REPO, fp, '10:' + fp, handoff_nonce=env['PRFIX_CLAIM_NONCE'])
+            adopted.append(held)
+        with mock.patch.multiple(W, BASE=self.tmp.name, FIX_FLAG=str(flag), DRY=False), \
+             mock.patch.object(W, 'kick_finished'), mock.patch.object(W, 'sample_peaks'), \
+             mock.patch.object(W, 'proc_table', return_value={}), mock.patch.object(W, 'prfix_runs', return_value=([], [])), \
+             mock.patch.object(W, 'inputs_sig', return_value='sig'), mock.patch.object(W, 'admit_block', return_value=(None, 8000)), \
+             mock.patch.object(W, 'jload', return_value={}), \
+             mock.patch.object(W.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout=json.dumps([dict(qa=10, fp=fp, sev='P1')]))), \
+             mock.patch.object(W.subprocess, 'Popen', side_effect=popen):
+            W.dispatch_fix({})
+            self.assertEqual(len(adopted), 1); lib.release_fingerprint(adopted[0])
+            with mock.patch.object(W.subprocess, 'Popen', side_effect=OSError('spawn failed')):
+                with self.assertRaises(OSError): W.dispatch_fix({})
+            held = lib.claim_fingerprint(root, lib.REPO, fp, 'another')
+            lib.release_fingerprint(held)
+
     def test_wrong_owner_cannot_release(self):
         lease = self.claim(); original = dict(lease['lease']); lease['lease'] = dict(original, nonce='wrong')
         with self.assertRaises(ValueError): lib.release_fingerprint(lease)

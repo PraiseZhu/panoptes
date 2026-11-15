@@ -481,9 +481,22 @@ def dispatch_fix(st):
     msg = f"(top #{top.get('qa')} {top.get('sev')} {top.get('fp')}, {len(pending)} todo, {len(pys)} already fixing, headroom {room} MB)"
     if DRY: qlog(f"DRY: would launch prfix --next {msg}"); return
     os.makedirs(f"{BASE}/out/logs", exist_ok=True)
-    with open(f"{BASE}/out/logs/prwatch-launches.log", "a") as lf:
-        subprocess.Popen([f"{PI_CODE}/bin/run.sh", "prfix", "--qa", str(top["qa"]), "--fp", top["fp"]], stdin=subprocess.DEVNULL, stdout=lf, stderr=subprocess.STDOUT,
-                         start_new_session=True, env=dict(os.environ, PRFIX_DISPATCHED="1"))
+    ticket = f"{top['qa']}:{top['fp']}"
+    try: claim = claim_fingerprint(f"{BASE}/out/praise-pr/fingerprints", REPO, top['fp'], ticket, replaces=top.get('replaces_action'))
+    except FingerprintBusy:
+        st["fix_more"] = True
+        return
+    nonce = claim["lease"]["nonce"]
+    release_fingerprint(claim, reserve="dispatch")
+    try:
+        with open(f"{BASE}/out/logs/prwatch-launches.log", "a") as lf:
+            subprocess.Popen([f"{PI_CODE}/bin/run.sh", "prfix", "--next"], stdin=subprocess.DEVNULL, stdout=lf, stderr=subprocess.STDOUT,
+                             start_new_session=True, env=dict(os.environ, PRFIX_DISPATCHED="1", PRFIX_CLAIM_NONCE=nonce, PRFIX_CLAIM_TICKET=ticket))
+    except BaseException:
+        # The spawn did not happen: only this owner/nonce may remove its lease.
+        held = claim_fingerprint(f"{BASE}/out/praise-pr/fingerprints", REPO, top['fp'], ticket, handoff_nonce=nonce)
+        release_fingerprint(held)
+        raise
     st.pop("fix_wait_since", None); qlog(f"launched prfix --next {msg}")
 
 

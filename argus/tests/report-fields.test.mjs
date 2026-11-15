@@ -409,7 +409,8 @@ test('test_backed：只有失败检查佐证才是 true；每个发现都有 sou
   // issue：P1 但不是 test_backed → 不提
   const report = { date: 'd', repo: 'r', prs: [{ number: 9, author: 'PraiseZhu', findings: [{ source: 'check', test_backed: false, severity: 'P1', fingerprint: 'x' }, { source: 'check', test_backed: true, severity: 'P1', fingerprint: 'y' }] }], system_health: { status: 'ok', qa_tool_failures: [], env_problems: [], llm_errors: [] } }
   const { candidates, skipped } = selectIssueCandidates(report)
-  assert.deepEqual(candidates.map((c) => c.fingerprint), ['y'])
+  assert.deepEqual(candidates.map((c) => c.fingerprint), [], 'test_backed alone cannot admit a legacy finding')
+  assert.match(skipped[1].reason, /evidence admission denied/)
   assert.match(skipped[0].reason, /not test-backed/)
 })
 

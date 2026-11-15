@@ -1016,11 +1016,13 @@ def finding_evidence_error(f, source=None):
     if f.get("source") != "check" or f.get("status") not in ("introduced", "confirmed"): return "not a confirmed product check"
     if (f.get("decision") or {}).get("status") != "confirmed" or f.get("fix_eligible") is not True: return "finding not admitted"
     if any(f.get(k) for k in ("pending", "pending_verification", "invalid", "flaky", "pre_existing", "low_memory", "not_a_pr_finding")): return "non-product finding"
+    if (f.get("validation") or {}).get("status") in ("invalid", "blocked") or f.get("failure_type") in ("test_timeout", "runner_error"): return "non-product finding"
     for k in ("tested_sha", "base_sha"):
         if not re.fullmatch(r"[0-9a-f]{40}", f.get(k) or ""): return "missing " + k
         if source and source.get(k) != f[k]: return "source SHA binding mismatch"
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", f.get("run_id") or ""): return "missing run_id"
-    if not f.get("check_id") or not isinstance(f.get("artifact_refs"), list) or not f["artifact_refs"]: return "missing original check or artifact ref"
+    if not f.get("check_id") or not isinstance(f.get("artifact_refs"), list) or not f["artifact_refs"] or not all(isinstance(x, str) and x for x in f["artifact_refs"]): return "missing original check or artifact ref"
+    if len(set(f["artifact_refs"])) != len(f["artifact_refs"]): return "duplicate artifact refs"
     ev = f.get("evidence") or {}
     if any(ev.get(k) != v for k, v in (("first_run", "fail"), ("rerun", "fail"), ("base_run", "pass"))): return "head/rerun/base evidence incomplete"
     if ev.get("tested_sha") != f["tested_sha"] or ev.get("base_sha") != f["base_sha"]: return "evidence SHA binding mismatch"
@@ -1068,16 +1070,20 @@ def read_finding_evidence(f, source=None):
     heads = [r for r in results if r.get("phase") in ("head", "rerun") and r.get("revision_sha") == f["tested_sha"]]
     bases = [r for r in results if r.get("phase") == "base" and r.get("revision_sha") == f["base_sha"]]
     need = 3 if (f.get("evidence") or {}).get("pr_runs") is not None else 2
-    if len(heads) < need or not any(r.get("phase") == "rerun" for r in heads) or not all(failed(r) for r in heads): raise ValueError("head replay evidence incomplete")
+    if len(heads) < need or not any(r.get("phase") == "rerun" for r in heads) or not any(r.get("phase") == "head" for r in heads) or not all(r.get("status") == "fail" and failed(r) for r in heads): raise ValueError("head replay evidence incomplete")
     if len(bases) < (3 if need == 3 else 1) or not all(passed(r) for r in bases): raise ValueError("base pass evidence incomplete")
+    if (f.get("evidence") or {}).get("latest_required"):
+        latest = [r for r in results if r.get("phase") == "latest" and r.get("revision_sha") == f["evidence"].get("latest_sha")]
+        if not latest or not all(failed(r) for r in latest): raise ValueError("latest failure evidence incomplete")
     return manifest
 
 
 class FingerprintBusy(RuntimeError): pass
 
-def claim_fingerprint(root, repo, fingerprint, owner, *, now=None, stale_after=3600):
+def claim_fingerprint(root, repo, fingerprint, owner, *, now=None, stale_after=3600, handoff_nonce=None, replaces=None):
     """A live flock always wins. An abandoned owner needs both dead PID and age;
-    outbound reservations are never reaped on age alone. Lock files stay in place.
+    Unadopted same-host dispatches expire by age; outbound reservations never do.
+    Lock files stay in place.
     """
     import fcntl, hashlib, socket, uuid
     now = time.time() if now is None else now
@@ -1092,12 +1098,15 @@ def claim_fingerprint(root, repo, fingerprint, owner, *, now=None, stale_after=3
         try:
             with open(path + ".json") as stream: prior = json.load(stream)
         except FileNotFoundError: prior = {}
-        if prior:
+        handed = prior and prior.get("state") == "dispatch" and prior.get("owner") == owner and prior.get("nonce") == handoff_nonce
+        retried = prior and prior.get("state") == "outbound" and prior.get("owner") == owner and replaces and prior.get("action_key") == replaces
+        if prior and not handed and not retried:
             alive = True
             if prior.get("host") == socket.gethostname():
                 try: os.kill(int(prior["pid"]), 0)
                 except ProcessLookupError: alive = False
-            if prior.get("state") == "outbound" or alive or now - prior.get("at", now) < stale_after: raise FingerprintBusy("fingerprint owner still reserved")
+            expired_dispatch = prior.get("host") == socket.gethostname() and prior.get("state") == "dispatch" and now - prior.get("at", now) >= stale_after
+            if prior.get("state") == "outbound" or (not expired_dispatch and (alive or now - prior.get("at", now) < stale_after)): raise FingerprintBusy("fingerprint owner still reserved")
         lease = {"owner": owner, "pid": os.getpid(), "host": socket.gethostname(), "at": now, "nonce": uuid.uuid4().hex, "state": "active"}
         write_atomic(path + ".json", json.dumps(lease))
         return {"lock": lock, "path": path, "lease": lease}
@@ -1111,7 +1120,8 @@ def release_fingerprint(claim, *, reserve=False):
         with open(claim["path"] + ".json") as stream: current = json.load(stream)
         if current.get("nonce") != claim["lease"]["nonce"] or current.get("owner") != claim["lease"]["owner"]: raise ValueError("fingerprint owner mismatch")
         if reserve:
-            current["state"] = "outbound"
+            current["state"] = "dispatch" if reserve == "dispatch" else "outbound"
+            if reserve != "dispatch": current["action_key"] = reserve
             write_atomic(claim["path"] + ".json", json.dumps(current))
         else: os.unlink(claim["path"] + ".json")
     finally:

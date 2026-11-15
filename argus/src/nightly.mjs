@@ -1611,9 +1611,9 @@ export function selectIssueCandidates(report, { authors = ISSUE_AUTHORS } = {}) 
   const skipped = []
   for (const pr of report.prs ?? []) {
     for (const f of (pr.findings ?? []).filter((x) => ['P0', 'P1'].includes(x.severity))) {
-      // 规则按 test_backed（有失败检查佐证）判断，不只看严重度；旧报告没有该字段时按 source === 'check'
-      const why = f.issue_eligible === false || (f.decision && !findingEligibility(f).issue_eligible) ? 'finding evidence admission denied'
-        : !isTestBacked(f) ? `not test-backed (source ${f.source ?? 'unknown'}; e.g. llm-review-only)`
+      // Legacy reports remain readable, but missing admission evidence never authorizes outbound.
+      const why = !isTestBacked(f) ? `not test-backed (source ${f.source ?? 'unknown'}; e.g. llm-review-only)`
+        : f.issue_eligible === false || !findingEligibility(f).issue_eligible ? 'finding evidence admission denied'
         : !authors.includes(pr.author) ? `author ${pr.author} not in ${authors.join(',')}`
           : null
       if (why) skipped.push({ pr: pr.number, fingerprint: f.fingerprint, severity: f.severity, source: f.source, reason: why })
