@@ -215,6 +215,21 @@ test('AI result contract distinguishes invalid, valid and blocked', async () => 
   assert.equal(accepted[0].mutation.reason, 'native dependency')
 })
 
+test('JSX preflight uses host parser evidence tied to exact content, without a sandbox parser dependency', async (t) => {
+  const { validateAiTest } = await import('../src/ai-test-validator.mjs')
+  const scratch = join(here, '../../_tmp')
+  mkdirSync(scratch, { recursive: true })
+  const root = mkdtempSync(join(scratch, 'ai-jsx-contract-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  writeFileSync(join(root, 'sum.mjs'), 'export const sum = (xs) => xs.reduce((a, b) => a + b, 0)\n')
+  const spec = { ...good, filePath: 'sum.argus.test.tsx', content: testBody + 'const view = <div />', mutation: { file: 'sum.mjs', find: ', 0)', replace: ', 1)' } }
+  const [step] = toAiTestSteps([spec], profile)
+  assert.equal(validateAiTest(step.aiTest, { root, isolated: true }).status, 'valid')
+  const [broken] = toAiTestSteps([{ ...spec, content: testBody + 'const view = <div>' }], profile)
+  assert.equal(validateAiTest(broken.aiTest, { root, isolated: true }).kind, 'parse')
+  assert.equal(validateAiTest({ ...step.aiTest, content: step.aiTest.content + '\nchanged' }, { root, isolated: true }).status, 'blocked', 'stale parse evidence must not validate different code')
+})
+
 test('nightly counters include invalid in discarded and never create findings for invalid or blocked tests', async (t) => {
   const { runAiTests } = await import('../src/nightly.mjs')
   const { MIRRORS_DIR } = await import('../src/paths.mjs')

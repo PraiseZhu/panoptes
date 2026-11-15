@@ -3,6 +3,7 @@ import { lstatSync, readFileSync, realpathSync } from 'node:fs'
 import { dirname, extname, isAbsolute, relative, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { stripTypeScriptTypes } from 'node:module'
+import { createHash } from 'node:crypto'
 
 // 「测试无效」：补测在当前代码上失败，但失败原因是测试自己没备好前提（缺测试数据 / 文件、导入了不存在的模块或导出），
 // 还没走到断言。这类失败说明不了被测代码有问题 → 按 discarded 处理（invalid: true，显示「测试无效」），不产生 finding。
@@ -146,14 +147,27 @@ export function isolatedPath(root, path) {
 }
 
 // Parse only, without executing code or loading a target project's configuration.
-export function validateSyntax(content, filePath) {
+// The host already depends on TypeScript. Carry its parse result for JSX into the
+// copied executor, without loading project modules or copying a parser into the sandbox.
+export function toSyntaxEvidence(content, filePath, ts) {
+  const parsed = ts.createSourceFile(filePath, content, ts.ScriptTarget.Latest, true, filePath.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.JSX)
+  return { parser: 'typescript', sha256: createHash('sha256').update(content).digest('hex'), status: parsed.parseDiagnostics.length ? 'invalid' : 'valid' }
+}
+
+export function validateSyntax(content, filePath, { evidence = null } = {}) {
   let code = content
   const ext = extname(filePath)
   if (/^\.[cm]?ts$/.test(ext)) {
     try { code = stripTypeScriptTypes(content, { mode: 'transform' }) }
     catch { return invalid('parse', 'generated TypeScript does not parse') }
   }
-  if (/^\.[jt]sx$/.test(ext)) return { status: 'blocked', kind: 'parse', reason: 'JSX syntax requires the isolated project parser' }
+  if (/^\.[jt]sx$/.test(ext)) {
+    if (evidence?.parser === 'typescript' && evidence.sha256 === createHash('sha256').update(content).digest('hex')) {
+      if (evidence.status === 'valid') return { status: 'valid' }
+      if (evidence.status === 'invalid') return invalid('parse', 'generated JSX does not parse')
+    }
+    return { status: 'blocked', kind: 'parse', reason: 'JSX syntax requires host parser evidence for this content' }
+  }
   const parsed = spawnSync(process.execPath, ['--check', `--input-type=${/\.[cm]?(?:js|ts)$/.test(ext) && ext !== '.cjs' && ext !== '.cts' ? 'module' : 'commonjs'}`], {
     input: code, encoding: 'utf8', timeout: 5000, env: {},
   })
@@ -200,7 +214,7 @@ export function validateAiTest(spec, { root, isolated = false, allowedTargets = 
   }
   const sideEffects = validateSideEffects(spec.content)
   if (sideEffects.status !== 'valid') return sideEffects
-  const syntax = validateSyntax(spec.content, spec.filePath)
+  const syntax = validateSyntax(spec.content, spec.filePath, { evidence: spec.syntaxValidation })
   if (syntax.status !== 'valid') return syntax
   let source
   try { source = readFileSync(target, 'utf8') } catch { return invalid('target', 'mutation target does not exist') }

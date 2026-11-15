@@ -1,7 +1,8 @@
 // AI 补写针对性测试：分诊说「涉及」、但现有检查覆盖不到的方面，让 gpt-6-luna 用项目自己的测试框架补写测试。
 // 每个补测都要带一个「植入错误」：测试在当前代码上通过、植入错误后失败，才算有效；否则丢弃。
 // 补测发现的问题在试运行期只记「拿不准，要你看」，不自动提 issue。
-import { AI_TEST_INVALID_ZH, classifyAiTestFailure, readValidationResult } from './ai-test-validator.mjs'
+import ts from 'typescript'
+import { AI_TEST_INVALID_ZH, classifyAiTestFailure, readValidationResult, toSyntaxEvidence } from './ai-test-validator.mjs'
 import { aiUsageToday, addAiUsage } from './db.mjs'
 import { globToRegExp, TEST_HELPER_RE } from './classify.mjs'
 import { toDimensionLabel, stepExercises } from './matrix.mjs'
@@ -110,7 +111,9 @@ export function toAiTestSteps(tests, profile, { offset = 0 } = {}) {
     unavailableExitCodes: [2, 4],
     timeoutMin: 10,
     cmd: ['node', '${RUN}/tools/ai-test-run.mjs', `\${RUN}/ai-test-${i + 1}.json`],
-    aiTest: { ...t, runCmd: profile.aiTests.run, runFileStrip: profile.aiTests.runFileStrip ?? '' },
+    aiTest: { ...t, runCmd: profile.aiTests.run, runFileStrip: profile.aiTests.runFileStrip ?? '',
+      ...(/\.[jt]sx$/.test(t.filePath) ? { syntaxValidation: toSyntaxEvidence(t.content, t.filePath, ts) } : {}),
+    },
   } })
 }
 
