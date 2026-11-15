@@ -65,7 +65,7 @@ test('preflight blocks unisolated roots, path traversal, private paths and symli
   assert.equal(check(root, { ...good, filePath: 'outside/new.test.mjs' }).kind, 'target')
 })
 
-test('network, token, external paths and child process requests never execute', (t) => {
+test('static preflight rejects common network, token, external path and child process spellings', (t) => {
   const root = fixture(t)
   for (const prefix of ["fetch('https://example.invalid')", "import http from 'node:http'", "import { exec } from 'child_process'", 'const key = process.env.API_KEY', 'const key = process["env"].API_KEY', "const x = '/Users/prod/private'", "import '/home/prod/source.mjs'"]) {
     const spec = { ...good, content: prefix + '\n' + content }
@@ -88,9 +88,9 @@ test('all invalid runtime signatures and assertion counterexamples', () => {
     ['Does the file exist?', 'missing-module'],
     ["does not provide an export named 'missing'", 'missing-module'],
     ['No "now" export is defined on the "clock" mock', 'missing-module'],
-    ['TypeError [ERR_INVALID_ARG_TYPE]: argument must be an array', 'wrong-arguments'],
-    ['TypeError [ERR_INVALID_ARG_VALUE]: bad value', 'wrong-arguments'],
-    ['TypeError [ERR_MISSING_ARGS]: argument is required', 'wrong-arguments'],
+    ['TypeError [ERR_INVALID_ARG_TYPE]: argument must be an array\n at readFileSync (node:fs:1:1)\n at sum.argus.test.mjs:5:1', 'wrong-arguments'],
+    ['TypeError [ERR_INVALID_ARG_VALUE]: bad value\n at sum.argus.test.mjs:5:1', 'wrong-arguments'],
+    ['TypeError [ERR_MISSING_ARGS]: argument is required\n ❯ sum.argus.test.mjs:5:1', 'wrong-arguments'],
     ['ReferenceError: fixture is not defined\n at sum.argus.test.mjs:5:1', 'initialization'],
     ['TypeError: fixture.read is not a function\n at sum.argus.test.mjs:5:1', 'initialization'],
     ['TypeError [Error]: fixture.read is not a function\n at sum.argus.test.mjs:5:1', 'initialization'],
@@ -100,6 +100,25 @@ test('all invalid runtime signatures and assertion counterexamples', () => {
     assert.equal(classifyAiTestFailure('AssertionError: expected result to equal 1\n' + tail, good), null, tail)
   }
   assert.equal(classifyAiTestFailure('TypeError: value.read is not a function\n at product.mjs:5:1\n at sum.argus.test.mjs:5:1', good), null)
+  for (const code of ['ERR_INVALID_ARG_TYPE', 'ERR_INVALID_ARG_VALUE', 'ERR_MISSING_ARGS']) {
+    const error = `TypeError [${code}]: bad argument`
+    assert.equal(classifyAiTestFailure(error, good), null, 'an unknown error origin must remain a product candidate')
+    for (const frame of [' at sum (file:///checkout/sum.mjs:5:1)', ' ❯ sum.mjs:5:1']) {
+      assert.equal(classifyAiTestFailure(`${error}\n at readFileSync (node:fs:1:1)\n${frame}\n at sum.argus.test.mjs:5:1`, good), null, 'a later test caller must not override the product frame')
+    }
+  }
+})
+
+test('invalid Node API arguments originating in product code remain failure candidates', async (t) => {
+  const { toAiTestResult } = await import('../src/aitests.mjs')
+  const root = fixture(t)
+  writeFileSync(join(root, 'sum.mjs'), "import { readFileSync } from 'node:fs'\nexport function sum(xs) { return readFileSync(undefined) }\n")
+  const spec = { ...good, mutation: { file: 'sum.mjs', find: 'readFileSync(undefined)', replace: '0' } }
+  const result = run(root, spec)
+  assert.equal(result.status, 1, result.stdout + result.stderr)
+  assert.equal(result.validation.status, 'valid')
+  assert.equal(result.validation.product_candidate, true)
+  assert.equal(toAiTestResult({ ok: false, exitCode: result.status, tail: result.stdout }, spec).result, 'fails-on-current')
 })
 
 test('missing fixture method is discarded; genuine assertion failure stays a candidate', (t) => {
@@ -129,6 +148,19 @@ test('controlled mutation must be caught by an assertion, restores source and re
   const broken = check(root, { ...good, mutation: { ...good.mutation, replace: ', ) } broken' } })
   assert.equal(broken.status, 'invalid')
   assert.equal(broken.kind, 'mutation')
+})
+
+test('custom Error assertions catch mutations without a recognized assertion message', (t) => {
+  const root = fixture(t)
+  const spec = { ...good, content: content.replace('assert.equal(sum([]), 0)', "{ if (sum([]) !== 0) throw new Error('sum mismatch') }") }
+  const result = run(root, spec)
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  assert.deepEqual(result.validation, { status: 'valid', mutation: { status: 'caught' } })
+  assert.equal(readFileSync(join(root, 'sum.mjs'), 'utf8'), source)
+  assert.equal(existsSync(join(root, good.filePath)), false)
+  const invalid = run(root, { ...spec, content: content.replace('assert.equal(sum([]), 0)', '{ if (sum([]) !== 0) missingFixture() }') })
+  assert.equal(invalid.status, 4, invalid.stdout + invalid.stderr)
+  assert.equal(invalid.validation.kind, 'mutation', 'test-owned errors during mutation still invalidate the test')
 })
 
 test('mutation not_applicable records a reason; infrastructure failure is blocked', (t) => {

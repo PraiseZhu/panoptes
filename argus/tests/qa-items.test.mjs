@@ -447,7 +447,7 @@ test('AI 补测步骤编号可接着上一轮编；每次调用的测试数上�
 test('AI pre-assertion argument and initialization failures are invalid; assertion failures remain candidates', () => {
   const spec = { filePath: 'tests/generated.test.mjs', content: 'const fixture = {}; fixture.read(); missingImport()' }
   for (const tail of [
-    'TypeError [ERR_INVALID_ARG_TYPE]: expected an array',
+    'TypeError [ERR_INVALID_ARG_TYPE]: expected an array\n at readFileSync (node:fs:1:1)\n at tests/generated.test.mjs:1:1',
     'TypeError: fixture.read is not a function\n at tests/generated.test.mjs:1:1',
     'ReferenceError: missingImport is not defined\n at tests/generated.test.mjs:1:1',
   ]) {

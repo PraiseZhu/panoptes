@@ -98,7 +98,15 @@ export function classifyAiTestFailure(tail, test = {}) {
   }
   const known = missingImportCall(text, test) ?? undeclaredInTest(text, test) ?? fixtureMissingMethod(text, test)
   if (known) return known
-  if (/\b(?:ERR_INVALID_ARG_TYPE|ERR_INVALID_ARG_VALUE|ERR_MISSING_ARGS)\b/.test(text)) return { kind: 'wrong-arguments', line: 'generated test supplied invalid arguments' }
+  const argumentError = text.match(/\b(?:ERR_INVALID_ARG_TYPE|ERR_INVALID_ARG_VALUE|ERR_MISSING_ARGS)\b/)
+  if (argumentError) {
+    // Node API frames are internal; the first caller identifies who supplied the bad argument.
+    const frame = text.slice(argumentError.index + argumentError[0].length).split('\n')
+      .find((l) => /^\s*(?:❯|at)\s/.test(l) && !/\bnode:/.test(l))
+    const path = test.filePath?.replaceAll('\\', '/')
+    return frame && path && (frame.includes(`${path}:`) || frame.includes(`/${path.split('/').pop()}:`))
+      ? { kind: 'wrong-arguments', line: `generated test supplied invalid arguments: ${frame.trim()}`.slice(0, 240) } : null
+  }
   // Only the first frame identifies the origin; a product exception also has a test caller.
   const error = text.match(/(?:ReferenceError|TypeError|SyntaxError):[^\n]*/)
   const missing = error?.[0].match(NOT_DEFINED)
@@ -123,7 +131,6 @@ export function readValidationResult(tail) {
 }
 
 const invalid = (kind, reason) => ({ status: 'invalid', kind, reason })
-export const isAssertionFailure = (text) => ASSERTION_FAILURE.test(text) || /\bERR_ASSERTION\b/.test(text)
 
 // Check lexical containment before touching disk, then reject every symlink component.
 // This also protects paths that do not exist yet (the generated test).
@@ -176,7 +183,8 @@ export function validateSyntax(content, filePath, { evidence = null } = {}) {
 }
 
 export function validateSideEffects(content) {
-  // Static preflight is an accident detector. Execution still requires the runner sandbox.
+  // Best-effort static matching of common side effects, not an isolation boundary.
+  // Real isolation depends on the runner sandbox, which currently does not isolate network access.
   if (/\b(?:fetch|WebSocket|XMLHttpRequest|eval|Function)\s*\(|\bimport\s*\(\s*[^'"\s]|\bprocess\s*(?:\?\.)?\s*(?:\.\s*env|\[\s*['"]env['"])/.test(content)
     || /(?:from\s*|import\s*\(|require\s*\(|import\s*)['"](?:node:)?(?:https?|https?2|net|tls|dns|dgram|child_process|cluster|worker_threads|vm)['"]/.test(content)
     || /['"](?:https?:\/\/|file:\/\/|\/(?:Users|home|workspace|tmp|var|etc)\/|~\/)/.test(content)) {
@@ -261,4 +269,3 @@ export function validateAiTest(spec, { root, isolated = false, allowedTargets = 
   if (mutatedSyntax.status !== 'valid') return { ...mutatedSyntax, kind: 'mutation', reason: 'mutation cannot be parsed safely' }
   return { status: 'valid', mutation: { status: 'pending' }, source }
 }
-

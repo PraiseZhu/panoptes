@@ -5,7 +5,7 @@
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, readdirSync, rmdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { classifyAiTestFailure, isAssertionFailure, validateAiTest, VALIDATION_PREFIX } from './ai-test-validator.mjs'
+import { classifyAiTestFailure, validateAiTest, VALIDATION_PREFIX } from './ai-test-validator.mjs'
 
 const OUTPUT_TAIL = 60
 
@@ -84,8 +84,8 @@ function main() {
       return
     }
     const mutationInvalid = classifyAiTestFailure(mutated.out, { ...spec, source: original })
-    if (mutated.code === 0 || mutationInvalid || !isAssertionFailure(mutated.out)) {
-      console.log('植入错误后测试仍然通过或未产生可靠断言，说明它没测到东西，已丢弃')
+    if (mutated.code === 0 || mutationInvalid) {
+      console.log('植入错误后测试仍然通过或测试自身无效，已丢弃')
       emit({ status: 'invalid', kind: 'mutation', reason: 'controlled mutation was not caught by an assertion' })
       process.exitCode = 4
       return
