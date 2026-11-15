@@ -1813,14 +1813,6 @@
           "fixture"
         ]
       },
-      "runsFiles": [
-        "src/**/*.test.ts",
-        "src/**/*.test.tsx",
-        "src/**/*.spec.ts",
-        "src/**/*.spec.tsx",
-        "server/**/*.test.ts",
-        "shared/**/*.test.ts"
-      ],
       "excludesFiles": [
         "**/*.bench.test.ts"
       ],

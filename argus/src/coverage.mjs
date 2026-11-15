@@ -386,7 +386,6 @@ export function coverageGate({ coverage, added, thresholds = COVERAGE_THRESHOLDS
   const gated = Object.fromEntries(GATED_METRICS.map((k) => [k, thresholds[k]]))
   const reference = Object.fromEntries(BASELINE_METRICS.map((k) => [k, thresholds[k]]))
   const gate = { step: stepId, provider: 'v8 (vitest --coverage)', thresholds_source: COVERAGE_SOURCE, thresholds: gated, gated_metrics: [...GATED_METRICS], baseline: null, values: null, results: null, status: 'unavailable', pass: null, new_code: null, new_code_method: NEW_CODE_METHOD, reason: null, blocking: false, level: 'info' }
-  gate.mapping = coverageMapping({ added: diffError ? null : added, results: [{ id: stepId, coverage }] })
   if (!coverage || coverage.status !== 'ok') { gate.reason = coverage?.reason ?? 'unit step did not run with coverage'; return gate }
   const nc = diffError || !coverage.files ? null : newCodeCoverage(added, mergeCoverageFiles(coverage.evidence, coverage.files))
   gate.new_code = nc ?? { pct: null, reason: diffError ?? 'per-line coverage unavailable' }

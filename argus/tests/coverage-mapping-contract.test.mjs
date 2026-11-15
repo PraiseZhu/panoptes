@@ -128,7 +128,7 @@ test('readCoverageDir carries compact range and shard evidence without changing 
   assert.equal(report.status, 'ok')
   assert.deepEqual(report.files['src/a.ts'], { lines: [2], covered: [2] })
   assert.equal(report.evidence['src/a.ts'].sources.length, 2)
-  assert.equal(coverageGate({ added, coverage: report }).mapping.files[0].functions.status, 'pass')
+  assert.equal(coverageMapping({ added, results: [{ id: 'unit', coverage: report }] }).files[0].functions.status, 'pass')
 })
 
 test('readCoverageDir preserves incomplete shard failure as unavailable even with a readable summary', () => {
