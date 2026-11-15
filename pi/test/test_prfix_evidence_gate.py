@@ -40,6 +40,24 @@ class EvidenceGate(unittest.TestCase):
     def test_complete_contract(self):
         self.assertEqual(lib.read_finding_evidence(self.finding)['schema'], 'qa.evidence/v2')
 
+    def test_named_base_pass_uses_verified_cases_even_if_the_step_failed(self):
+        root = Path(self.tmp.name)
+        path = root / 'base-result.json'
+        result = json.loads(path.read_text())
+        result.update(status='fail', exit_code=1, failure_keys=[hashlib.sha256(b'unit::old').hexdigest()])
+        manifest_path = root / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        def save():
+            raw = json.dumps(result).encode(); path.write_bytes(raw)
+            next(a for a in manifest['artifacts'] if a['id'] == 'base-result')['sha256'] = hashlib.sha256(raw).hexdigest()
+            next(s for s in manifest['steps'] if s['phase'] == 'base')['status'] = 'fail'
+            manifest_path.write_text(json.dumps(manifest))
+        save()
+        self.assertEqual(lib.read_finding_evidence(self.finding)['schema'], 'qa.evidence/v2')
+        result['passed_cases'] = []; save()
+        with self.assertRaisesRegex(ValueError, 'base pass evidence incomplete'):
+            lib.read_finding_evidence(self.finding)
+
     def test_missing_and_non_product_evidence(self):
         for field in ('tested_sha', 'base_sha', 'run_id', 'check_id', 'artifact_refs'):
             with self.subTest(field=field):

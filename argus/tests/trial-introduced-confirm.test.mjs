@@ -148,7 +148,7 @@ const benchStep = (failLabels) => ({
 const profileOf = (failLabels) => ({ sandbox: false, steps: [installStep, benchStep(failLabels)] })
 
 function fixture(number) {
-  const sourceFile = number === 5204 ? 'src/persist/value.mjs' : 'src/persist/persistFlush.ts'
+  const sourceFile = [5204, 5205, 5206].includes(number) ? 'src/persist/value.mjs' : 'src/persist/persistFlush.ts'
   const repo = `fixture/pr${number}`
   const src = join(root, `source-${number}`)
   mkdirSync(src)
@@ -156,6 +156,7 @@ function fixture(number) {
   git('init', '-q', '-b', 'main')
   mkdirSync(join(src, 'src/persist'), { recursive: true })
   writeFileSync(join(src, sourceFile), 'export const v = 1\n')
+  if (number === 5206) writeFileSync(join(src, 'regression.test.mjs'), "import { test } from 'node:test'; import assert from 'node:assert/strict'; import { v } from './src/persist/value.mjs'; test('regression', () => assert.equal(v, 1)); test('old failure', () => assert.fail('pre-existing'));\n")
   git('add', '.'); git('commit', '-qm', 'base')
   const baseSha = git('rev-parse', 'HEAD')
   writeFileSync(join(src, sourceFile), 'export const v = 2\n'); git('commit', '-qam', `code (#${number})`)
@@ -271,4 +272,46 @@ test('processPr: independent cov round contributes actual V8 changed-line eviden
   assert.equal(file.lines.changed[0].status, 'pass')
   assert.deepEqual(file.lines.changed[0].covered_by, ['node-test'])
   assert.equal(out.findings.length, 0, 'coverage run is never a product failure')
+})
+
+
+test('processPr: named regression remains admitted when base has an unrelated old failure', async () => {
+  const profile = { sandbox: false, steps: [installStep,
+    { id: 'unit', nameZh: 'named checks', kind: 'product', covers: ['unit'], cache: false,
+      cmd: [process.execPath, '--test', '--test-reporter=spec', '--test-reporter=${NODE_TEST_REPORTER}',
+        '--test-reporter-destination=stdout', '--test-reporter-destination=${TEST_REPORT}', 'regression.test.mjs'],
+      testReport: { format: 'node-events', path: '${RUN}/reports/unit.jsonl' } }] }
+  const { out } = await runPr({ number: 5206, profile })
+  const finding = out.findings.find((f) => f.test === 'regression')
+  assert.ok(finding, JSON.stringify({ checks: out.failed_checks, pending: out.pending_verification }))
+  assert.equal(finding.decision.status, 'confirmed')
+  assert.equal(finding.evidence.base_run, 'pass')
+  assert.deepEqual([finding.finding_eligible, finding.issue_eligible, finding.fix_eligible], [true, true, true])
+  assert.ok(!out.findings.some((f) => f.test === 'old failure'))
+  assert.ok(!out.pending_verification.some((f) => f.test === 'regression'))
+  const file = join(finding.evidence_root, 'mixed-base-finding.json')
+  writeFileSync(file, JSON.stringify(finding))
+  const consumer = fileURLToPath(new URL('../../pi/bin', import.meta.url))
+  execFileSync('python3', ['-c', `import sys,json,pathlib
+sys.path.insert(0,sys.argv[1]);import lib
+f=json.load(open(sys.argv[2]));m=lib.read_finding_evidence(f)
+results=[json.load(open(pathlib.Path(f['evidence_root'])/a['path'])) for a in m['artifacts']]
+base=next(r for r in results if r['phase']=='base' and r['check_id']=='unit')
+assert base['status']=='fail' and base['passed_cases']
+`, consumer, file])
+})
+
+test('processPr: unavailable cov round preserves valid head coverage for the same step', async () => {
+  const profile = { sandbox: false, steps: [installStep,
+    { id: 'cov-trigger', nameZh: 'coverage trigger', kind: 'product', cmd: ['true'], coverage: { kind: 'istanbul' }, exercises: ['other/**'] },
+    { id: 'node-test', nameZh: 'head-only source import', kind: 'product',
+      cmd: [process.execPath, '-e', 'if (!process.cwd().includes("-cov-")) await import("./src/persist/value.mjs")'],
+      exercises: ['src/**'], covers: ['unit'], coverage: { kind: 'v8', labels: ['h1', 'cov'] } }] }
+  const { out } = await runPr({ number: 5205, profile })
+  const file = out.coverage.changed_source.files.find((f) => f.file === 'src/persist/value.mjs')
+  assert.ok(file, JSON.stringify(out.coverage.changed_source))
+  assert.deepEqual(file.loaded_by, ['node-test'])
+  assert.equal(file.lines.changed[0].status, 'pass')
+  assert.deepEqual(file.lines.changed[0].covered_by, ['node-test'])
+  assert.equal(out.findings.length, 0)
 })

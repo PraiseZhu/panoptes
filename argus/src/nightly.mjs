@@ -26,7 +26,7 @@ import { repoReaderFor, verifyReviewFinding, verifyCacheKey, lookupVerification,
 import { ALL_DIRS, CACHE_DIR, EVIDENCE_DIR, REPORTS_DIR, CODE_DIR, LOGS_DIR } from './paths.mjs'
 import { log, redact, sleep, tail, toShanghaiDay, toShanghaiIso, waitWithinBudget } from './util.mjs'
 import { setBudget, overBudget } from './exec.mjs'
-import { coverageGate, coverageMapping, parseAddedLines, mergeCoverageFiles, COVERAGE_THRESHOLDS, statedCoverageTarget, evaluateStatedTarget } from './coverage.mjs'
+import { coverageGate, coverageMapping, coverageRunnerState, parseAddedLines, mergeCoverageFiles, COVERAGE_THRESHOLDS, statedCoverageTarget, evaluateStatedTarget } from './coverage.mjs'
 import { recentGiveUps } from './catchup.mjs'
 import { prTestDimensions } from './pr-tests.mjs'
 import { generateTargetedTests, toAiTestSteps, toAiGaps, toUncoveredTargets, toAiTestResult, aiTestCaps, aiTestTier, degradeForQuota, toSourceHead } from './aitests.mjs'
@@ -487,11 +487,16 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   if (lowMem) { out.outcome = lowMem.outcome; out.outcome_reason = lowMem.reasonZh; health.env_problems.push({ pr: number, message: lowMem.message }) }
   // Coverage runs only contribute measured coverage, never product check outcomes.
   out.coverage = toCoverage({ profile, triage, results: first, files })
-  // Keep coverage-round status and step provenance intact. Replace only a head
-  // row with no measurement; V8 head measurements remain available too.
-  const covResults = Array.isArray(cov) ? cov : []
+  // Prefer usable coverage-round measurements, retaining head evidence when the
+  // coverage round could not measure that step. Keep status and provenance intact.
+  const measuredResults = new Map(first.map((r) => [r.id, r]))
+  for (const result of Array.isArray(cov) ? cov : []) {
+    const prior = measuredResults.get(result.id)
+    const measured = (r) => coverageRunnerState(r, stepById[result.id]).status === 'ok'
+    if (measured(result) || !prior || !measured(prior)) measuredResults.set(result.id, result)
+  }
   out.coverage.changed_source = coverageMapping({ added: parseAddedLines(prDiff.text),
-    results: [...first.filter((r) => !covResults.some((c) => c.id === r.id)), ...covResults], profile })
+    results: [...measuredResults.values()], profile })
 
   // 计划要跑却没有结果的步骤（安装失败后中止、时间预算用完等）也列进 skipped_steps
   const ranIds = new Set(first.map((r) => r.id))
@@ -536,7 +541,18 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
     // runner_error 且产品步骤一步没开始（不是 roundtrip、缺的不是被测 / diff 里的模块）才标 test_script_failure（test-script-failures.mjs）
     const scriptFailure = !misattribOff && isScriptFailure({ type, status, result: r, test, changedFiles: files.map((f) => f.filename) })
     if (scriptFailure) why = TEST_SCRIPT_WHY
-    const compareOn = (results) => { const x = results?.find((y) => y.id === stepId); return x ? (x.unavailable ? 'unavailable' : x.timedOut ? 'timeout' : x.ok ? 'pass' : (named ? (x.failures?.includes(test) ? 'fail' : 'not-failing') : 'fail')) : 'not-run' }
+    const compareOn = (results) => {
+      const x = results?.find((y) => y.id === stepId)
+      if (!x) return 'not-run'
+      if (x.unavailable) return 'unavailable'
+      if (x.timedOut) return 'timeout'
+      if (x.ok) return 'pass'
+      // A named target can pass while an unrelated case keeps the step red.
+      // Reuse the same executed-case comparison that admitted the decision.
+      if (named) return compareKey(key, results, first) === 'absent' ? 'pass'
+        : x.failures?.includes(test) ? 'fail' : 'not-failing'
+      return 'fail'
+    }
     let baseComparison
     if (status === 'flaky') {
       baseComparison = flakyBaseComparison({ baseSha, baseRun: compareOn(base) })
