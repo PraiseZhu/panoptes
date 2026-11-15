@@ -62,6 +62,27 @@ class EvidenceGate(unittest.TestCase):
         root = Path(self.tmp.name); (root / 'alias.json').symlink_to(root / 'manifest.json')
         with self.assertRaises(ValueError): lib.read_finding_evidence(dict(self.finding, evidence_manifest='alias.json'))
 
+    def test_cli_missing_evidence_exits_nonzero_without_outbound(self):
+        import prfix
+        for field in ('tested_sha', 'base_sha', 'run_id', 'check_id', 'artifact_refs'):
+            f = dict(self.finding); f.pop(field)
+            row = dict(state='todo', key='1:fp', c=dict(finding=f, qa=1, fp='fp'))
+            ctx = dict(links={}, gate_warn=None)
+            with mock.patch.object(prfix, 'scrub_env'), mock.patch.object(prfix, 'raise_oom_score'), \
+                 mock.patch.object(prfix.lib, 'gh_skip', return_value=False), \
+                 mock.patch.object(prfix, 'gather', return_value=ctx), \
+                 mock.patch.object(prfix, 'evaluate_all', return_value=[row]), \
+                 mock.patch.object(prfix, 'evaluate', return_value=row), \
+                 mock.patch.object(prfix, 'bookkeeping', return_value=ctx), \
+                 mock.patch.object(prfix, 'prwatch_dispatching', return_value=False), \
+                 mock.patch.object(prfix, 'write_manual_orders'), \
+                 mock.patch.object(prfix, 'write_atomic'), \
+                 mock.patch.object(prfix, 'prio', return_value=0), \
+                 mock.patch.object(prfix, 'pi') as model, mock.patch.object(prfix, 'git') as git, \
+                 mock.patch.object(prfix, 'record_actions') as actions:
+                self.assertNotEqual(prfix.main(['--next']), 0)
+                model.assert_not_called(); git.assert_not_called(); actions.assert_not_called()
+
     def test_prfix_rejects_before_any_model_git_or_outbound(self):
         import prfix
         import argparse

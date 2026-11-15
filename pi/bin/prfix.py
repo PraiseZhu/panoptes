@@ -2008,7 +2008,10 @@ def run_ticket(A, ctx, vs):
             return finish({"status": "idle", "reason": "prwatch 在派单（兜底 cron 不另起修复）", "pending_after": None}, 0, A)
         if not A.dry_run: ctx = bookkeeping(ctx, vs, now, d); vs = sorted((evaluate(w["c"], ctx, now) for w in vs), key=prio)
         v = next_ticket(vs)
-        if not v: return finish({"status": "idle", "pending_after": 0}, 0, A)
+        if not v:
+            rejected = [lib.finding_evidence_error(w["c"].get("finding"), w["c"].get("source_report")) for w in vs if w["state"] == "todo"]
+            if rejected: return finish({"status": "failed", "kind": "deterministic", "error": "finding evidence rejected: " + str(rejected[0])}, 1, A)
+            return finish({"status": "idle", "pending_after": 0}, 0, A)
     if mem_gb() < MIN_MEM_GB:
         return finish({"status": "busy", "reason": f"MemAvailable {mem_gb():.1f}G < {MIN_MEM_GB}G", "ticket": v["key"]}, BUSY, A)
     qa_lk = None; tk_lk = None; fp_claim = None; tk = {}; out = {}
