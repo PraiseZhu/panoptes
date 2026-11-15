@@ -28,10 +28,11 @@ function main() {
   const spec = JSON.parse(readFileSync(process.argv[2], 'utf8'))
   const file = join(process.cwd(), spec.filePath)
   if (existsSync(file)) { console.log(`补测文件和已有文件重名：${spec.filePath}`); process.exit(2) }
-  const validation = validateAiTest(spec, { root: process.cwd(), isolated: true })
+  const validation = validateAiTest(spec, { root: process.cwd(), isolated: true, deferMutation: spec.legacyOrder === true })
   const emit = (result) => console.log(VALIDATION_PREFIX + JSON.stringify(result))
   const { source: original, ...summary } = validation
   if (validation.status !== 'valid') {
+    if (validation.kind === 'mutation') console.log('植入错误对不上源码或无法安全变异，这个补测无法证明有效，已丢弃')
     emit(summary)
     process.exitCode = validation.status === 'invalid' ? 4 : 2
     return
@@ -58,6 +59,16 @@ function main() {
     if (validation.mutation.status === 'not_applicable') {
       emit(summary)
       return
+    }
+    // qa-misattrib-off retains the old mutation ordering; isolation and import checks always apply.
+    if (spec.legacyOrder) {
+      const checked = validateAiTest(spec, { root: process.cwd(), isolated: true })
+      if (checked.status !== 'valid') {
+        const { source, ...result } = checked
+        emit(result)
+        process.exitCode = checked.status === 'invalid' ? 4 : 2
+        return
+      }
     }
     const target = join(process.cwd(), spec.mutation.file)
     let mutated

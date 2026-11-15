@@ -1,7 +1,7 @@
 // AI 补测：只补分诊说涉及但没被覆盖的方面；输出严格校验；执行器靠「植入错误」证明测试有效；补测确认的问题不自动提 issue
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { spawnSync, execFileSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
@@ -193,7 +193,7 @@ test('prepareTool copies the shared validator: the copied executor runs without 
   assert.match(missing.stderr, /ERR_MODULE_NOT_FOUND/)
 })
 
-test('AI result contract distinguishes invalid, valid and blocked without changing candidate counts', async () => {
+test('AI result contract distinguishes invalid, valid and blocked', async () => {
   const { toAiTestResult } = await import('../src/aitests.mjs')
   const { VALIDATION_PREFIX } = await import('../src/ai-test-validator.mjs')
   const row = (validation, extra = {}) => toAiTestResult({ ok: false, unavailable: true, exitCode: 4, tail: VALIDATION_PREFIX + JSON.stringify(validation), ...extra })
@@ -213,4 +213,52 @@ test('AI result contract distinguishes invalid, valid and blocked without changi
   assert.match(noMutation.reason, /not_applicable: native dependency/)
   const accepted = toValidTests({ tests: [{ ...good, mutation: { file: 'sum.mjs', status: 'not_applicable', reason: 'native dependency' } }] }, { profile, gaps: ['boundary'] })
   assert.equal(accepted[0].mutation.reason, 'native dependency')
+})
+
+test('nightly counters include invalid in discarded and never create findings for invalid or blocked tests', async (t) => {
+  const { runAiTests } = await import('../src/nightly.mjs')
+  const { MIRRORS_DIR } = await import('../src/paths.mjs')
+  const scratch = join(here, '../../_tmp')
+  mkdirSync(scratch, { recursive: true })
+  const dir = mkdtempSync(join(scratch, 'ai-count-contract-'))
+  const repo = 'fixture/ai-validator-counts'
+  const mirror = join(MIRRORS_DIR, 'fixture__ai-validator-counts.git')
+  t.after(() => { rmSync(dir, { recursive: true, force: true }); rmSync(mirror, { recursive: true, force: true }) })
+  const git = (...args) => execFileSync('git', ['-C', dir, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', ...args], { encoding: 'utf8' }).trim()
+  git('init', '-q', '-b', 'main')
+  writeFileSync(join(dir, 'sum.mjs'), 'export const sum = (xs) => xs.reduce((a, b) => a + b, 0)\n')
+  git('add', 'sum.mjs'); git('commit', '-qm', 'fixture')
+  const sha = git('rev-parse', 'HEAD')
+  mkdirSync(MIRRORS_DIR, { recursive: true })
+  execFileSync('git', ['clone', '-q', '--bare', dir, mirror])
+  const generated = [
+    { ...good, filePath: 'valid.argus.test.mjs', content: testBody, mutation: { file: 'sum.mjs', find: ', 0)', replace: ', 1)' } },
+    { ...good, filePath: 'invalid.argus.test.mjs', content: testBody.replace("'./sum.mjs'", "'./missing.mjs'"), mutation: { file: 'sum.mjs', find: ', 0)', replace: ', 1)' } },
+  ]
+  const run = async (tests, runCmd, jobId) => {
+    const out = { triage: { status: 'ok', applicable: ['boundary'] }, checks: [], findings: [], pending_verification: [] }
+    const health = { llm_errors: [] }
+    await runAiTests({ out, repo, pr: { title: 'fixture', body: '' }, files: [{ filename: 'tests/a.test.mjs', status: 'modified', additions: 1, deletions: 0 }],
+      profile: { ...profile, sandbox: false, steps: [], aiTests: { ...profile.aiTests, run: runCmd } }, riskClass: 'B', sha,
+      common: { repo, jobId }, db: null, secrets: { ARGUS_LLM_BASE_URL: 'http://fixture.invalid', ARGUS_LLM_API_KEY: 'fixture-only' }, health, number: 1, results: [],
+      quota: { check: () => ({ ok: true, used: 0, cap: 20 }), consume: () => {} },
+      llm: { fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ tests }) } }] }) }) },
+    })
+    return out
+  }
+  const result = await run(generated, [process.execPath, '--test', '{file}'], 'ai-validator-counts')
+  assert.equal(result.ai_tests.generated, 2)
+  assert.equal(result.ai_tests.kept, 1)
+  assert.equal(result.ai_tests.invalid, 1)
+  assert.equal(result.ai_tests.discarded, 1)
+  assert.equal(result.ai_tests.fails_on_current, 0)
+  assert.equal(result.checks.filter((c) => c.ai_invalid).length, 1)
+  assert.deepEqual(result.findings, [])
+  assert.deepEqual(result.pending_verification, [])
+  const blocked = await run([generated[0]], ['missing-fixture-test-command', '{file}'], 'ai-validator-blocked')
+  assert.equal(blocked.ai_tests.generated, 1)
+  assert.equal(blocked.ai_tests.discarded, 1)
+  assert.equal(blocked.ai_tests.invalid, 0)
+  assert.equal(blocked.ai_tests.tests[0].validation.status, 'blocked')
+  assert.deepEqual(blocked.pending_verification, [])
 })

@@ -86,7 +86,7 @@ function undeclaredInTest(text, { content, filePath } = {}) {
   return { kind: 'missing-module', line: `${m[0]} (used by the test; never imported or declared in it) ${frame.trim()}`.slice(0, 240) }
 }
 export function classifyAiTestFailure(tail, test = {}) {
-  const text = String(tail ?? '').replace(/\x1b\[[0-9;]*m/g, '')
+  const text = String(tail ?? '').replace(/\x1b\[[0-9;]*m/g, '').replace(/\b(ReferenceError|TypeError|SyntaxError) \[Error\]:/g, '$1:')
   if (!text) return null
   const gap = fixtureGap(text, test)
   if (gap) return gap
@@ -187,7 +187,7 @@ function localImport(root, fromFile, path) {
   return null
 }
 
-export function validateAiTest(spec, { root, isolated = false, allowedTargets = null } = {}) {
+export function validateAiTest(spec, { root, isolated = false, allowedTargets = null, deferMutation = false } = {}) {
   if (!isolated || !root) return { status: 'blocked', kind: 'isolation', reason: 'an isolated checkout is required before preflight' }
   const file = isolatedPath(root, spec?.filePath)
   const target = isolatedPath(root, spec?.mutation?.file)
@@ -195,6 +195,9 @@ export function validateAiTest(spec, { root, isolated = false, allowedTargets = 
   if (allowedTargets && !allowedTargets.includes(spec.mutation.file)) return invalid('target', 'mutation is outside the supplied target set')
   if (typeof spec.content !== 'string' || !spec.content.trim()) return invalid('parse', 'generated test is empty')
   if (spec.content.length > 20_000) return invalid('parse', 'generated test exceeds the content limit')
+  if (!Array.isArray(spec.runCmd) || !spec.runCmd.length || spec.runCmd.some((a) => typeof a !== 'string') || !spec.runCmd[0]) {
+    return { status: 'blocked', kind: 'execution', reason: 'isolated test command must be a nonempty argument array' }
+  }
   const sideEffects = validateSideEffects(spec.content)
   if (sideEffects.status !== 'valid') return sideEffects
   const syntax = validateSyntax(spec.content, spec.filePath)
@@ -212,6 +215,7 @@ export function validateAiTest(spec, { root, isolated = false, allowedTargets = 
     }
   }
   for (const ref of references) {
+    if (/^type\b/.test(ref.clause.trim())) continue
     if (!ref.path.startsWith('.')) continue // package exports are validated by the isolated test framework
     const local = localImport(root, spec.filePath, ref.path)
     if (!local) return invalid('missing-module', 'a generated test import cannot be resolved inside the checkout')
@@ -230,11 +234,14 @@ export function validateAiTest(spec, { root, isolated = false, allowedTargets = 
     if (typeof mutation.reason !== 'string' || !mutation.reason.trim()) return invalid('mutation', 'not_applicable mutation requires a reason')
     return { status: 'valid', mutation: { status: 'not_applicable', reason: mutation.reason.slice(0, 240) }, source }
   }
-  if (typeof mutation.find !== 'string' || !mutation.find || typeof mutation.replace !== 'string' || mutation.find === mutation.replace || source.split(mutation.find).length !== 2) {
+  if (typeof mutation.find !== 'string' || !mutation.find || typeof mutation.replace !== 'string' || mutation.find === mutation.replace) {
     return invalid('mutation', 'mutation must replace exactly one source fragment with a different value')
   }
   const replacement = validateSideEffects(mutation.replace)
   if (replacement.status !== 'valid') return invalid('mutation', 'mutation introduces an unsafe side effect')
+  if (source.split(mutation.find).length !== 2) {
+    return deferMutation ? { status: 'valid', mutation: { status: 'pending' }, source } : invalid('mutation', 'mutation must replace exactly one source fragment with a different value')
+  }
   const mutatedSyntax = validateSyntax(source.replace(mutation.find, mutation.replace), mutation.file)
   if (mutatedSyntax.status !== 'valid') return { ...mutatedSyntax, kind: 'mutation', reason: 'mutation cannot be parsed safely' }
   return { status: 'valid', mutation: { status: 'pending' }, source }

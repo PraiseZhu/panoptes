@@ -93,6 +93,7 @@ test('all invalid runtime signatures and assertion counterexamples', () => {
     ['TypeError [ERR_MISSING_ARGS]: argument is required', 'wrong-arguments'],
     ['ReferenceError: fixture is not defined\n at sum.argus.test.mjs:5:1', 'initialization'],
     ['TypeError: fixture.read is not a function\n at sum.argus.test.mjs:5:1', 'initialization'],
+    ['TypeError [Error]: fixture.read is not a function\n at sum.argus.test.mjs:5:1', 'initialization'],
   ]
   for (const [tail, kind] of cases) {
     assert.equal(classifyAiTestFailure(tail, { ...good, content: good.content + '\nfixture.read()' })?.kind, kind, tail)
