@@ -487,13 +487,22 @@ export async function processPr({ repo, project, number, discovery, secrets, db,
   if (lowMem) { out.outcome = lowMem.outcome; out.outcome_reason = lowMem.reasonZh; health.env_problems.push({ pr: number, message: lowMem.message }) }
   // Coverage runs only contribute measured coverage, never product check outcomes.
   out.coverage = toCoverage({ profile, triage, results: first, files })
-  // Prefer usable coverage-round measurements, retaining head evidence when the
-  // coverage round could not measure that step. Keep status and provenance intact.
+  // Prefer cov measurements per file. A usable cov report may omit a file
+  // measured by h1, so keep that file's evidence and original source metadata.
   const measuredResults = new Map(first.map((r) => [r.id, r]))
+  const measured = (r) => coverageRunnerState(r, stepById[r.id]).status === 'ok'
+  const measuredFile = (f) => f && f.load_status !== 'unloaded' && !f.failures?.length
+    && [f.lines, f.spans, f.branches, f.functions].some((rows) => rows?.length)
   for (const result of Array.isArray(cov) ? cov : []) {
     const prior = measuredResults.get(result.id)
-    const measured = (r) => coverageRunnerState(r, stepById[result.id]).status === 'ok'
-    if (measured(result) || !prior || !measured(prior)) measuredResults.set(result.id, result)
+    if (measured(result) && prior && measured(prior)) {
+      const files = mergeCoverageFiles(prior.coverage.evidence, prior.coverage.files)
+      const covFiles = mergeCoverageFiles(result.coverage.evidence, result.coverage.files)
+      for (const [file, evidence] of Object.entries(covFiles)) {
+        if (measuredFile(evidence) || !measuredFile(files[file])) files[file] = evidence
+      }
+      measuredResults.set(result.id, { ...result, coverage: { ...result.coverage, files, evidence: files } })
+    } else if (measured(result) || !prior || !measured(prior)) measuredResults.set(result.id, result)
   }
   out.coverage.changed_source = coverageMapping({ added: parseAddedLines(prDiff.text),
     results: [...measuredResults.values()], profile })

@@ -148,7 +148,7 @@ const benchStep = (failLabels) => ({
 const profileOf = (failLabels) => ({ sandbox: false, steps: [installStep, benchStep(failLabels)] })
 
 function fixture(number) {
-  const sourceFile = [5204, 5205, 5206].includes(number) ? 'src/persist/value.mjs' : 'src/persist/persistFlush.ts'
+  const sourceFile = [5204, 5205, 5206, 5207].includes(number) ? 'src/persist/value.mjs' : 'src/persist/persistFlush.ts'
   const repo = `fixture/pr${number}`
   const src = join(root, `source-${number}`)
   mkdirSync(src)
@@ -156,10 +156,13 @@ function fixture(number) {
   git('init', '-q', '-b', 'main')
   mkdirSync(join(src, 'src/persist'), { recursive: true })
   writeFileSync(join(src, sourceFile), 'export const v = 1\n')
+  if (number === 5207) writeFileSync(join(src, 'src/persist/other.mjs'), 'export const other = 1\n')
   if (number === 5206) writeFileSync(join(src, 'regression.test.mjs'), "import { test } from 'node:test'; import assert from 'node:assert/strict'; import { v } from './src/persist/value.mjs'; test('regression', () => assert.equal(v, 1)); test('old failure', () => assert.fail('pre-existing'));\n")
   git('add', '.'); git('commit', '-qm', 'base')
   const baseSha = git('rev-parse', 'HEAD')
-  writeFileSync(join(src, sourceFile), 'export const v = 2\n'); git('commit', '-qam', `code (#${number})`)
+  writeFileSync(join(src, sourceFile), 'export const v = 2\n')
+  if (number === 5207) writeFileSync(join(src, 'src/persist/other.mjs'), 'export const other = 2\n')
+  git('commit', '-qam', `code (#${number})`)
   const mergeSha = git('rev-parse', 'HEAD')
   mkdirSync(MIRRORS_DIR, { recursive: true })
   execFileSync('git', ['clone', '-q', '--bare', src, join(MIRRORS_DIR, `fixture__pr${number}.git`)])
@@ -169,7 +172,7 @@ function fixture(number) {
     merged_at: new Date().toISOString(), merge_commit_sha: mergeSha, state: 'closed',
   }
   const stateFile = join(root, `github-fixture-${number}.json`)
-  writeFileSync(stateFile, JSON.stringify({ pr, baseSha, files: [{ filename: sourceFile, additions: 1, deletions: 1 }], calls: [] }))
+  writeFileSync(stateFile, JSON.stringify({ pr, baseSha, files: [{ filename: sourceFile, additions: 1, deletions: 1 }, ...(number === 5207 ? [{ filename: 'src/persist/other.mjs', additions: 1, deletions: 1 }] : [])], calls: [] }))
   return { repo, stateFile }
 }
 
@@ -313,5 +316,26 @@ test('processPr: unavailable cov round preserves valid head coverage for the sam
   assert.deepEqual(file.loaded_by, ['node-test'])
   assert.equal(file.lines.changed[0].status, 'pass')
   assert.deepEqual(file.lines.changed[0].covered_by, ['node-test'])
+  assert.equal(out.findings.length, 0)
+})
+
+
+test('processPr: cov measuring another file preserves head target evidence and both step origins', async () => {
+  const profile = { sandbox: false, steps: [installStep,
+    { id: 'cov-trigger', nameZh: 'coverage trigger', kind: 'product', cmd: ['true'], coverage: { kind: 'istanbul' }, exercises: ['other/**'] },
+    { id: 'node-test', nameZh: 'different sources per round', kind: 'product',
+      cmd: [process.execPath, '-e', 'await import(process.cwd().includes("-cov-") ? "./src/persist/other.mjs" : "./src/persist/value.mjs")'],
+      exercises: ['src/**'], covers: ['unit'], coverage: { kind: 'v8', labels: ['h1', 'cov'] } }] }
+  const { out } = await runPr({ number: 5207, profile })
+  for (const path of ['src/persist/value.mjs', 'src/persist/other.mjs']) {
+    const file = out.coverage.changed_source.files.find((f) => f.file === path)
+    assert.ok(file, JSON.stringify(out.coverage.changed_source))
+    assert.deepEqual(file.loaded_by, ['node-test'], path)
+    assert.equal(file.lines.changed[0].status, 'pass', path)
+    assert.deepEqual(file.lines.changed[0].covered_by, ['node-test'], path)
+    assert.deepEqual(file.measurement_gaps, [], path)
+    assert.ok(file.sources.every((s) => s.step === 'node-test'), path)
+  }
+  assert.equal(out.coverage.changed_source.sources.find((s) => s.step === 'node-test').status, 'ok')
   assert.equal(out.findings.length, 0)
 })
