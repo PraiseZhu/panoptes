@@ -4,6 +4,32 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { registerHooks } from 'node:module'
+
+// npm test preloads this fixture in each worker. Only the worker assigned this
+// file registers its tests; other bench fixtures receive deterministic idle load.
+export function installIdleFixture(hooks, snapshots = [{ loadavg: [0, 0, 0], cores: 8, mem_available_gb: 12 }]) {
+  const previous = { ...hooks }
+  let index = 0
+  hooks.sample = () => snapshots[Math.min(index, snapshots.length - 1)]
+  hooks.wait = async () => { index++ }
+  return () => Object.assign(hooks, previous)
+}
+
+if (process.argv[1] !== fileURLToPath(import.meta.url)) {
+  // Transform only the default test load sample when nightly is eventually
+  // imported. Importing nightly here would freeze ARGUS_ROOT before fixtures set it.
+  const nightlyUrl = new URL('../src/nightly.mjs', import.meta.url).href
+  registerHooks({ load(url, context, nextLoad) {
+    const loaded = nextLoad(url, context)
+    if (url !== nightlyUrl) return loaded
+    const source = Buffer.isBuffer(loaded.source) ? loaded.source.toString() : String(loaded.source)
+    const marker = 'export const idleHooks = { sample: machineLoad, wait: sleep }'
+    if (!source.includes(marker)) throw new Error('nightly idle fixture seam changed')
+    return { ...loaded, source: source.replace(marker, 'export const idleHooks = { sample: () => ({ loadavg: [0, 0, 0], cores: 8, mem_available_gb: 12 }), wait: async () => {} }') }
+  } })
+} else {
 
 const root = mkdtempSync(join(tmpdir(), 'argus-bench-'))
 process.env.ARGUS_ROOT = root
@@ -71,5 +97,19 @@ test('runSteps：试运行检查（trialOnly）的结果带机器负载 machine�
   const profile = { steps: [{ id: 'unit', kind: 'product', cmd: [process.execPath, '-e', '0'] }, { id: 'bench', kind: 'product', trialOnly: true, cmd: [process.execPath, '-e', '0'] }] }
   const [unit, bench] = await runSteps(profile, src, runDir, {})
   assert.equal(unit.machine, undefined)
-  assert.equal(bench.machine.loadavg.length, 3); assert.ok(bench.machine.cores > 0); assert.equal(typeof bench.machine.mem_available_gb, 'number')
+  assert.equal(bench.machine.loadavg.length, 3); assert.ok(bench.machine.cores > 0)
+  assert.ok(bench.machine.mem_available_gb === null || Number.isFinite(bench.machine.mem_available_gb), 'memory is nullable when the host cannot report it')
 })
+test('fake idle fixture advances busy/load snapshots without real sleep', async () => {
+  const hooks = {}
+  const restore = installIdleFixture(hooks, [
+    { loadavg: [99, 99, 99], cores: 8, mem_available_gb: 12 },
+    { loadavg: [0, 0, 0], cores: 8, mem_available_gb: 12 },
+  ])
+  const started = Date.now()
+  const result = await waitForIdle({ sample: hooks.sample, wait: hooks.wait })
+  assert.equal(result.idle, true)
+  assert.ok(Date.now() - started < 1000)
+  restore()
+})
+}

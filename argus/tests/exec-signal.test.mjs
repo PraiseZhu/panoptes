@@ -21,7 +21,17 @@ test('run: child killed by external SIGTERM records signal', async () => {
   assert.equal(r.signal, 'SIGTERM')
   assert.equal(r.timedOut, false)
   assert.equal(r.ok, false)
+  assert.equal(r.status, 'runner_error')
   assert.ok(r.endedAt)
   await new Promise((res) => setTimeout(res, 50))
   assert.match(readFileSync(logFile, 'utf8'), /\[exit null SIGTERM \d+ms\]/)
+})
+
+test('run: spawn failure returns runner_error and complete result fields', async () => {
+  const r = await run('/nonexistent/argus-command', [])
+  assert.equal(r.status, 'runner_error')
+  assert.equal(r.ok, false)
+  assert.equal(r.exitCode, null)
+  assert.equal(r.signal, null)
+  assert.equal(r.failureParseStatus, 'not_detected')
 })

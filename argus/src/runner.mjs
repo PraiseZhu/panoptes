@@ -2,7 +2,8 @@
 import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync, readlinkSync, statSync, lstatSync, realpathSync, cpSync } from 'node:fs'
 import { join, dirname, basename, resolve, relative, isAbsolute } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
-import { run, isStopping, overBudget } from './exec.mjs'
+import { run, isStopping, overBudget, budgetEndMs } from './exec.mjs'
+import { checkEnvironment, executionStatus } from './environment-contract.mjs'
 import { RUNS_DIR, MIRRORS_DIR, NPM_CACHE_DIR, UV_CACHE_DIR, UV_PYTHON_DIR, CACHE_DIR, CODE_DIR } from './paths.mjs'
 import { log, toPlainZh, waitWithinBudget } from './util.mjs'
 import { machineLoad } from './memory.mjs'
@@ -451,7 +452,8 @@ function readProbeReport(specPath) {
 }
 
 // beforeStep(step)：每步开跑前等它返回的 promise（nightly 用来让 afterCoverage 的步骤等覆盖率轮次的单测分片跑完）
-export async function runSteps(profile, src, runDir, { stepIds = null, execution = null, beforeStep = null } = {}) {
+export async function runSteps(profile, src, runDir, { stepIds = null, execution = null, beforeStep = null, timeoutMs = 60 * 60_000 } = {}) {
+  const suiteEnd = Math.min(Date.now() + timeoutMs, budgetEndMs() ?? Infinity)
   const env = stepEnv(runDir, profile)
   const needsBase = profile.steps.some((s) => /\$\{(?:BASE_SHA|DIFF_BASE_SHA)\}/.test(JSON.stringify(s)))
   const parent = needsBase ? await toParentSha(src) : ''
@@ -462,7 +464,23 @@ export async function runSteps(profile, src, runDir, { stepIds = null, execution
   for (const step of profile.steps) {
     if (isStopping() || overBudget()) break
     if (stepIds && step.kind !== 'setup' && !stepIds.includes(step.id)) continue
-    if (beforeStep) await beforeStep(step)
+    const stepEnd = Math.min(suiteEnd, Date.now() + (step.timeoutMs ?? (step.timeoutMin ?? 20) * 60_000))
+    const remainingMs = () => Math.max(1, stepEnd - Date.now())
+    const blocked = (status, reason, extra = {}) => ({ ...(execution ?? {}), id: step.id, nameZh: step.nameZh, kind: step.kind,
+      cmdText: step.cmd.join(' '), ok: false, status, unavailable: status === 'environment_unavailable', unavailableReasonZh: reason,
+      timedOut: status === 'timeout', exitCode: null, signal: null, durationMs: 0, tail: reason, failures: [], failureDetails: [], failureParseStatus: 'incomplete', ...extra })
+    if (Date.now() >= stepEnd) { results.push(blocked('timeout', 'run time budget exhausted')); break }
+    if (beforeStep) {
+      let timer
+      try {
+        await Promise.race([Promise.resolve().then(() => beforeStep(step)), new Promise((_, reject) => {
+          timer = setTimeout(() => reject(Object.assign(new Error('beforeStep time budget exhausted'), { timedOut: true })), remainingMs())
+        })])
+      } catch (error) {
+        results.push(blocked(error.timedOut ? 'timeout' : 'runner_error', error.timedOut ? 'beforeStep time budget exhausted' : 'beforeStep failed'))
+        break
+      } finally { clearTimeout(timer) }
+    }
     const stepVarsForReport = prepareTestReport(step, runDir)
     const stepSubstitutions = { ...vars, ...stepVarsForReport }
     const identity = { ...(execution ?? {}), commandTemplate: [...step.cmd], covers: [...(step.covers ?? [])], aiGenerated: Boolean(step.aiGenerated) }
@@ -475,8 +493,20 @@ export async function runSteps(profile, src, runDir, { stepIds = null, execution
     const bin = resolveStepBinary(step)
     const unmet = toUnmetRequirement(step, src) ?? bin.unmet
     if (unmet) {
-      results.push({ ...identity, id: step.id, nameZh: step.nameZh, kind: step.kind, cmdText: step.cmd.join(' '), ok: false, unavailable: true, unavailableReasonZh: unmet, exitCode: null, timedOut: false, durationMs: 0, tail: '', failures: [] })
+      results.push({ ...identity, ...blocked('environment_unavailable', unmet) })
       log('info', 'step unavailable', { ...execution, step: step.id, reason: unmet })
+      continue
+    }
+    const required = [...(profile.environmentRequirements ?? []), ...(step.environmentRequirements ?? [])]
+    if (required.length) {
+      const environment = await checkEnvironment({ required, cwd: src, timeoutMs: remainingMs() })
+      if (environment.status !== 'available') {
+        results.push(blocked('environment_unavailable', 'required environment capability unavailable', { environment }))
+        continue
+      }
+    }
+    if (sandboxMode(profile) === 'missing') {
+      results.push(blocked('environment_unavailable', 'sandbox unavailable'))
       continue
     }
     // 相关输入（tree 哈希 + lockfile）和上次通过时完全一样 → 复用那次的结果（reused + 来源），不重跑
@@ -510,21 +540,30 @@ export async function runSteps(profile, src, runDir, { stepIds = null, execution
     const sp = step.shard ? shardPlan(step) : null
     let perfRun = null
     const res = sp && sp.shards > 1
-      ? await runSharded({ step, plan: sp, cmd, covDir, reportFile: stepVarsForReport.TEST_REPORT ?? null, runDir, src, profile, ro: bin.ro, env: { ...stepEnvBase, ...stepVars }, logFile, tmpBase: stepTmp })
+      ? await runSharded({ step, plan: sp, cmd, covDir, reportFile: stepVarsForReport.TEST_REPORT ?? null, runDir, src, profile, ro: bin.ro, env: { ...stepEnvBase, ...stepVars }, logFile, tmpBase: stepTmp, deadlineMs: stepEnd })
       : step.perfRetry
         ? (perfRun = await runPerfWithRetry({ ...step.perfRetry, reportFile: stepVarsForReport.TEST_REPORT ?? null,
-          runOnce: (tag) => run(argv[0], argv.slice(1), { cwd: src, env: { ...stepEnvBase, ...stepVars }, timeoutMs: (step.timeoutMin ?? 20) * 60_000, logFile: tag ? sideFile(logFile, tag) : logFile }) })).res
-        : await run(argv[0], argv.slice(1), { cwd: src, env: { ...stepEnvBase, ...stepVars }, timeoutMs: (step.timeoutMin ?? 20) * 60_000, logFile })
+          runOnce: (tag) => Date.now() >= stepEnd ? Promise.resolve(blocked('timeout', 'step time budget exhausted')) : run(argv[0], argv.slice(1), { cwd: src, env: { ...stepEnvBase, ...stepVars }, timeoutMs: remainingMs(), logFile: tag ? sideFile(logFile, tag) : logFile }) })).res
+        : Date.now() >= stepEnd ? blocked('timeout', 'step time budget exhausted') : await run(argv[0], argv.slice(1), { cwd: src, env: { ...stepEnvBase, ...stepVars }, timeoutMs: remainingMs(), logFile })
     if (sp && !res.shards) res.shards = { count: 1, reason: sp.reason }
     const disturbed = await watch.stop()
     if (disturbed) log('error', 'step disturbed desktop', { step: step.id })
     const result = { ...identity, id: step.id, nameZh: step.nameZh, kind: step.kind, cmdText: step.cmd.join(' '), ok: res.ok, exitCode: res.exitCode, signal: res.signal ?? null, endedAt: res.endedAt ?? null, timedOut: res.timedOut, durationMs: res.durationMs, tail: res.tail, failures: res.ok ? [] : res.failures, failureDetails: res.ok ? [] : res.failureDetails, failureParseStatus: res.failureParseStatus, ...(res.shards ? { shards: res.shards } : {}) }
+    result.status = executionStatus(res)
     if (step.trialOnly) result.machine = machineLoad()
     if (perfRun) result.perf = perfRun.perf   // 第一次读数 + 重跑读数 + verdict（pass / pass-after-retry / fail）
     toStepOutcome(step, result, runDir)
     Object.assign(result, readTestReport(step, result, src, runDir, stepVarsForReport, execution))
     if (disturbed) result.disturbedDesktop = true
-    if (step.probe) { const pr = readProbeReport(join(runDir, `probe-${step.id}.json`)); if (pr) result.probeReport = pr }
+    if (step.probe) {
+      const pr = readProbeReport(join(runDir, `probe-${step.id}.json`))
+      if (pr) {
+        result.probeReport = pr
+        if (pr.status === 'timeout') { result.timedOut = true; result.status = 'timeout'; result.ok = false }
+        if (pr.status === 'environment_unavailable') { result.unavailable = true; result.status = 'environment_unavailable'; result.ok = false }
+        if (pr.status === 'runner_error') { result.runnerError = true; result.status = 'runner_error'; result.ok = false }
+      }
+    }
     if (covDir) result.coverage = res.timedOut ? { status: 'unavailable', reason: 'unit step timed out' } : withV8Coverage(step.coverage.kind === 'v8' ? null : readCoverageDir(covDir, src), v8Dir, src)
     try { storeStepResult(ck, result, { job: execution?.jobId ?? null, label: execution?.runLabel ?? null, sha: execution?.checkedOutSha ?? execution?.requestedSha ?? null, run_dir: basename(runDir) }) } catch (err) { log('warn', 'step cache store failed', { step: step.id, error: err.message }) }
     results.push(result)
@@ -544,7 +583,7 @@ export function shardTmpDir(tmpBase, i) {
   return dir
 }
 
-export async function runSharded({ step, plan, cmd, covDir, reportFile, runDir, src, profile, ro = [], env, logFile, tmpBase = null }) {
+export async function runSharded({ step, plan, cmd, covDir, reportFile, runDir, src, profile, ro = [], env, logFile, tmpBase = null, deadlineMs = Date.now() + (step.timeoutMs ?? (step.timeoutMin ?? 20) * 60_000) }) {
   const n = plan.shards
   const release = reserveShards(n * (plan.per_shard_gb ?? 1.5))
   const t0 = Date.now()
@@ -561,7 +600,7 @@ export async function runSharded({ step, plan, cmd, covDir, reportFile, runDir, 
       const tmp = shardTmpDir(tmpBase ?? env.TMPDIR, i)
       const argv = sandboxed(c, runDir, profile, ro)
       const shardLog = logFile.replace(/\.log$/, '') + `.shard-${i}.log`
-      jobs.push(run(argv[0], argv.slice(1), { cwd: src, env: { ...env, TMPDIR: tmp }, timeoutMs: (step.timeoutMin ?? 20) * 60_000, logFile: shardLog })
+      jobs.push(run(argv[0], argv.slice(1), { cwd: src, env: { ...env, TMPDIR: tmp }, timeoutMs: Math.max(1, deadlineMs - Date.now()), logFile: shardLog })
         .then((r) => ({ i, r, shardReport, shardCov, shardLog })))
     }
     const done = await Promise.all(jobs)
@@ -592,7 +631,7 @@ export async function runSharded({ step, plan, cmd, covDir, reportFile, runDir, 
       : (statuses.some((x) => x === 'incomplete') ? 'incomplete' : statuses.every((x) => x === 'complete') ? 'complete' : statuses[0])
     const exitCode = failed.length ? (failed.find((r) => r.exitCode != null && r.exitCode !== 0)?.exitCode ?? null) : 0
     return {
-      ok: failed.length === 0, exitCode, signal: failed.find((r) => r.signal)?.signal ?? null, endedAt: rs.map((r) => r.endedAt).filter(Boolean).sort().at(-1) ?? null, timedOut: rs.some((r) => r.timedOut), durationMs: Date.now() - t0,
+      ok: failed.length === 0, status: rs.some((r) => r.timedOut) ? 'timeout' : failed.some((r) => r.status === 'runner_error') ? 'runner_error' : failed.length ? 'product_fail' : 'pass', exitCode, signal: failed.find((r) => r.signal)?.signal ?? null, endedAt: rs.map((r) => r.endedAt).filter(Boolean).sort().at(-1) ?? null, timedOut: rs.some((r) => r.timedOut), durationMs: Date.now() - t0,
       tail: (failed.length ? failed : rs.slice(-1)).map((r) => r.tail ?? '').join('\n').slice(-20000),
       failures: [...new Set(failed.flatMap((r) => r.failures ?? []))].sort(),
       failureDetails: failed.flatMap((r) => r.failureDetails ?? []),
@@ -638,7 +677,7 @@ function toUnavailableReason(step, result, runDir) {
 // 步骤约定的「没跑成」退出码（例如浏览器或服务起不来）不算失败也不算通过；报告文件里的失败项覆盖从输出认出的用例名
 export function toStepOutcome(step, result, runDir) {
   if (!result.ok && !result.timedOut && (step.unavailableExitCodes ?? []).includes(result.exitCode)) {
-    Object.assign(result, { unavailable: true, unavailableReasonZh: toUnavailableReason(step, result, runDir), failures: [], failureDetails: [], failureParseStatus: 'incomplete' })
+    Object.assign(result, { status: 'environment_unavailable', unavailable: true, unavailableReasonZh: toUnavailableReason(step, result, runDir), failures: [], failureDetails: [], failureParseStatus: 'incomplete' })
     return result
   }
   if (step.failureReport && !result.ok) {
@@ -646,6 +685,8 @@ export function toStepOutcome(step, result, runDir) {
   } else if (!result.ok && expectsTestReporter(step) && result.failureParseStatus !== 'complete') {
     result.failureParseStatus = 'incomplete'
   }
+  if (result.failureDetails?.some((f) => f.type === 'runner_error')) result.runnerError = true
+  result.status = executionStatus(result)
   return result
 }
 
@@ -722,7 +763,13 @@ export async function executeOnSha({ repo, jobId, label, sha, profile, stepIds, 
   async function runCheckout() {
     const src = await checkout(mirror, sha, runDir, { repo, lfs: Boolean(profile.lfs), mode: profile.checkoutMode ?? 'worktree' })
     const checkedOutSha = await verifyCheckoutSha(src, sha)
-    await sandboxSelfCheck(runDir, profile)
+    try { await sandboxSelfCheck(runDir, profile) } catch (error) {
+      if (!String(error.message).startsWith(SANDBOX_SELFCHECK_ZH)) throw error
+      return profile.steps.filter((s) => !stepIds || s.kind === 'setup' || stepIds.includes(s.id)).map((s) => ({
+        id: s.id, kind: s.kind, nameZh: s.nameZh, ok: false, status: 'environment_unavailable', unavailable: true,
+        unavailableReasonZh: SANDBOX_SELFCHECK_ZH, exitCode: null, signal: null, timedOut: false, durationMs: 0, tail: '', failures: [], failureDetails: [], failureParseStatus: 'incomplete',
+      }))
+    }
     return await runSteps(profile, src, runDir, { stepIds, beforeStep, execution: { jobId, runLabel: label, requestedSha: sha, checkedOutSha, diffBase } })
   }
 }

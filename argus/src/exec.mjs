@@ -8,6 +8,25 @@ import { StringDecoder } from 'node:string_decoder'
 const TAIL_BYTES = 64 * 1024
 const MAX_FAILURES = 1000
 const active = new Set()
+const signalHandlers = new Map()
+let shutdownSignal = null
+
+function installSignalCleanup() {
+  for (const signal of ['SIGTERM', 'SIGINT']) {
+    // Applications such as nightly already own their shutdown protocol.
+    if (process.listenerCount(signal) || signalHandlers.has(signal)) continue
+    const handler = () => { shutdownSignal = signal; killAllActive() }
+    signalHandlers.set(signal, handler)
+    process.once(signal, handler)
+  }
+}
+function releaseSignalCleanup() {
+  if (active.size) return
+  for (const [signal, handler] of signalHandlers) process.removeListener(signal, handler)
+  signalHandlers.clear()
+  if (shutdownSignal) setImmediate(() => process.exit(shutdownSignal === 'SIGINT' ? 130 : 143))
+}
+process.once('exit', () => { for (const stop of active) stop.kill() })
 
 // 从测试输出里认出具体失败用例（vitest / pytest / node:test），用于用例级对比
 const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g
@@ -180,7 +199,7 @@ function killGroup(child, signal = 'SIGTERM') {
   try { process.kill(-child.pid, signal) } catch { /* 已退出 */ }
 }
 
-export function run(cmd, args, { cwd, env, timeoutMs = 10 * 60_000, killGraceMs = 1000, logFile, input, signal: abortSignal, inheritOutput = false } = {}) {
+export function run(cmd, args, { cwd, env, timeoutMs = Number(process.env.ARGUS_SUBPROCESS_TIMEOUT_MS ?? 600_000), killGraceMs = 1000, logFile, input, signal: abortSignal, inheritOutput = false } = {}) {
   timeoutMs = Math.max(1, Math.floor(Number(timeoutMs)) || 1)
   killGraceMs = Math.min(2000, Math.max(0, Math.floor(Number(killGraceMs)) || 0))
   let budgetCut = false
@@ -215,12 +234,16 @@ export function run(cmd, args, { cwd, env, timeoutMs = 10 * 60_000, killGraceMs 
       killGroup(child, 'SIGTERM')
       killTimer = setTimeout(() => {
         killGroup(child, 'SIGKILL')
-        // A descendant may retain inherited pipes after the leader exits.
-        child.stdout.destroy(); child.stderr.destroy()
-        finish(child.exitCode, '', child.signalCode)
+        // Allow exit/close to report the actual signal before the final pipe fallback.
+        killTimer = setTimeout(() => {
+          child.stdout.destroy(); child.stderr.destroy()
+          finish(child.exitCode, '', child.signalCode)
+        }, 200)
       }, killGraceMs)
     }
+    terminate.kill = () => killGroup(child, 'SIGKILL')
     active.add(terminate)
+    installSignalCleanup()
     const parser = createFailureParser()
     const onData = (stream, buf) => {
       logStream?.write(buf)
@@ -244,6 +267,7 @@ export function run(cmd, args, { cwd, env, timeoutMs = 10 * 60_000, killGraceMs 
       clearTimeout(killTimer)
       abortSignal?.removeEventListener('abort', terminate)
       active.delete(terminate)
+      releaseSignalCleanup()
       // 进程组里可能还挂着孙进程（dev server、watcher），统一回收
       killGroup(child, 'SIGKILL')
       const durationMs = Date.now() - started
@@ -251,7 +275,10 @@ export function run(cmd, args, { cwd, env, timeoutMs = 10 * 60_000, killGraceMs 
       logStream?.end(`\n[exit ${exitCode}${signal ? ` ${signal}` : ''}${timedOut ? ' timeout' : ''} ${durationMs}ms]\n`)
       const tailText = (out.length > TAIL_BYTES ? out.slice(out.length - TAIL_BYTES) : out) + extra
       const ok = exitCode === 0 && !timedOut && !abortSignal?.aborted
-      resolve({ ok, status: timedOut ? 'timeout' : spawnError || signal || abortSignal?.aborted ? 'runner_error' : ok ? 'pass' : 'product_fail', exitCode, signal, endedAt, timedOut, ...(timedOut && budgetCut ? { budgetExceeded: true } : {}), durationMs, tail: tailText, ...parser.finish() })
+      const parsed = parser.finish()
+      const status = timedOut || parsed.failureDetails.some((f) => f.type === 'test_timeout') ? 'timeout'
+        : spawnError || signal || abortSignal?.aborted || parsed.failureDetails.some((f) => f.type === 'runner_error') ? 'runner_error' : ok ? 'pass' : 'product_fail'
+      resolve({ ok, status, exitCode, signal, endedAt, timedOut, ...(timedOut && budgetCut ? { budgetExceeded: true } : {}), durationMs, tail: tailText, ...parsed })
     }
     child.on('error', (err) => { spawnError = true; finish(null, `\n进程错误：${err.message}`) })
     child.on('exit', () => killGroup(child, 'SIGKILL'))
@@ -267,11 +294,12 @@ if (process.argv[1] && resolvePath(process.argv[1]) === fileURLToPath(import.met
   const testMs = Number(process.env.ARGUS_TEST_TIMEOUT_MS ?? 120_000)
   if (![suiteMs, testMs].every((n) => Number.isSafeInteger(n) && n > 0)) throw new Error('test budgets must be positive integer milliseconds')
   for (const sig of ['SIGTERM', 'SIGINT']) process.once(sig, killAllActive)
-  const result = await run(process.execPath, ['--disable-warning=ExperimentalWarning', '--test', `--test-timeout=${testMs}`, ...process.argv.slice(2)], {
+  const idleFixture = new URL('../tests/bench-env-timeout.test.mjs', import.meta.url).href
+  const result = await run(process.execPath, ['--disable-warning=ExperimentalWarning', '--import', idleFixture, '--test', `--test-timeout=${testMs}`, ...process.argv.slice(2)], {
     timeoutMs: suiteMs, inheritOutput: true,
   })
-  if (result.timedOut) console.error(JSON.stringify({ status: 'timeout', budget_ms: suiteMs }))
-  process.exitCode = result.timedOut ? 124 : result.ok ? 0 : result.exitCode || 1
+  if (result.status === 'timeout') console.error(JSON.stringify({ status: 'timeout', budget_ms: result.timedOut ? suiteMs : testMs }))
+  process.exitCode = result.status === 'timeout' ? 124 : result.ok ? 0 : result.exitCode || 1
 }
 
 // 读 JSON 输出的便捷封装
