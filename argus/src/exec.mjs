@@ -319,7 +319,7 @@ if (process.argv[1] && resolvePath(process.argv[1]) === fileURLToPath(import.met
   const output = reporters === 0 ? ['--test-reporter=spec', '--test-reporter-destination=stdout']
     : reporters === 1 && destinations === 0 ? ['--test-reporter-destination=stdout'] : []
   const result = await run(process.execPath, ['--disable-warning=ExperimentalWarning', '--import', idleFixture, '--test', `--test-timeout=${testMs}`,
-    '--test-reporter', fileURLToPath(import.meta.url), '--test-reporter-destination=/dev/null', ...output, ...args], {
+    '--test-reporter', fileURLToPath(import.meta.url), '--test-reporter-destination=stdout', ...output, ...args], {
     timeoutMs: suiteMs, inheritOutput: true, testSupervisor: true,
   })
   if (result.status === 'timeout') console.error(JSON.stringify({ status: 'timeout', budget_ms: result.testTimedOut || !result.timedOut ? testMs : suiteMs }))
