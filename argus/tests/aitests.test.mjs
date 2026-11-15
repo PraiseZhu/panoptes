@@ -196,7 +196,7 @@ test('prepareTool copies the shared validator: the copied executor runs without 
 test('AI result contract distinguishes invalid, valid and blocked', async () => {
   const { toAiTestResult } = await import('../src/aitests.mjs')
   const { VALIDATION_PREFIX } = await import('../src/ai-test-validator.mjs')
-  const row = (validation, extra = {}) => toAiTestResult({ ok: false, unavailable: true, exitCode: 4, tail: VALIDATION_PREFIX + JSON.stringify(validation), ...extra })
+  const row = (validation, extra = {}) => toAiTestResult({ ok: false, status: 'environment_unavailable', unavailable: true, exitCode: 4, tail: VALIDATION_PREFIX + JSON.stringify(validation), ...extra })
   const invalid = row({ status: 'invalid', kind: 'wrong-arguments', reason: 'bad fixture' })
   assert.equal(invalid.invalid, true)
   assert.equal(invalid.invalid_kind, 'wrong-arguments')
@@ -204,15 +204,39 @@ test('AI result contract distinguishes invalid, valid and blocked', async () => 
   const blocked = row({ status: 'blocked', kind: 'execution', reason: 'runner unavailable' }, { exitCode: 2 })
   assert.equal(blocked.result, 'discarded')
   assert.equal(blocked.invalid, undefined)
-  const valid = row({ status: 'valid', mutation: { status: 'caught' } }, { ok: true, unavailable: false, exitCode: 0 })
+  const valid = row({ status: 'valid', mutation: { status: 'caught' } }, { status: 'pass', ok: true, unavailable: false, exitCode: 0 })
   assert.equal(valid.result, 'kept')
-  const candidate = row({ status: 'valid', product_candidate: true }, { exitCode: 1, unavailable: false })
+  const candidate = row({ status: 'valid', product_candidate: true }, { status: 'product_fail', exitCode: 1, unavailable: false })
   assert.equal(candidate.result, 'fails-on-current')
   assert.equal(candidate.invalid, undefined)
-  const noMutation = row({ status: 'valid', mutation: { status: 'not_applicable', reason: 'native dependency cannot be mutated safely' } }, { ok: true, unavailable: false, exitCode: 0 })
+  const noMutation = row({ status: 'valid', mutation: { status: 'not_applicable', reason: 'native dependency cannot be mutated safely' } }, { status: 'pass', ok: true, unavailable: false, exitCode: 0 })
   assert.match(noMutation.reason, /not_applicable: native dependency/)
   const accepted = toValidTests({ tests: [{ ...good, mutation: { file: 'sum.mjs', status: 'not_applicable', reason: 'native dependency' } }] }, { profile, gaps: ['boundary'] })
   assert.equal(accepted[0].mutation.reason, 'native dependency')
+})
+
+test('AI results discard execution failures from the shared runner without invalidating the test', async (t) => {
+  const { run } = await import('../src/exec.mjs')
+  const { toAiTestResult } = await import('../src/aitests.mjs')
+  const scratch = join(here, '../../_tmp')
+  mkdirSync(scratch, { recursive: true })
+  const dir = mkdtempSync(join(scratch, 'ai-exec-contract-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const missing = await run(join(dir, 'missing-runner'), [], { cwd: dir })
+  assert.equal(missing.status, 'runner_error')
+  assert.equal(missing.timedOut, false)
+  assert.equal(toAiTestResult(missing).result, 'discarded')
+  const file = join(dir, 'timeout.test.mjs')
+  writeFileSync(file, "import { test } from 'node:test'; test('slow', { timeout: 20 }, async () => { await new Promise(r => setTimeout(r, 200)) })")
+  const { NODE_TEST_CONTEXT, ...env } = process.env
+  const timeout = await run(process.execPath, ['--test', file], { cwd: dir, env, timeoutMs: 10_000 })
+  assert.equal(timeout.status, 'timeout', timeout.tail)
+  assert.equal(timeout.timedOut, false, 'the test timed out before the process deadline')
+  assert.equal(toAiTestResult(timeout).result, 'discarded')
+  for (const result of [missing, timeout, { status: 'environment_unavailable', ok: false }]) {
+    assert.equal(toAiTestResult(result).invalid, undefined)
+    assert.equal(toAiTestResult(result).result, 'discarded')
+  }
 })
 
 test('JSX preflight uses host parser evidence tied to exact content, without a sandbox parser dependency', async (t) => {

@@ -250,11 +250,12 @@ export const toInvalidTest = classifyAiTestFailure
 // fails-on-current（在当前代码上就失败：可能是缺陷，P2、test_backed=false，复现后才可升级）
 export function toAiTestResult(r, test = {}) {
   if (!r) return { result: 'discarded', reason: 'not run (time budget / setup failed)' }
-  if (r.timedOut) return { result: 'discarded', reason: 'timed out' }
   const validation = readValidationResult(r.tail)
   if (validation?.status === 'invalid') return { result: 'discarded', invalid: true, invalid_kind: validation.kind, display_zh: AI_TEST_INVALID_ZH,
     validation, reason: `test invalid (${AI_TEST_INVALID_ZH}): ${validation.kind}: ${validation.reason}` }
   if (validation?.status === 'blocked') return { result: 'discarded', validation, reason: `could not run: ${validation.reason}` }
+  if (r.timedOut || r.status === 'timeout') return { result: 'discarded', reason: 'timed out' }
+  if (r.status === 'runner_error' || r.status === 'environment_unavailable') return { result: 'discarded', reason: `could not run: ${r.unavailableReasonZh ?? r.status}` }
   if (r.ok) return { result: 'kept', ...(validation ? { validation } : {}), reason: validation?.mutation?.status === 'not_applicable'
     ? `passes on the tested commit; mutation not_applicable: ${validation.mutation.reason}` : 'passes on the tested commit and fails with the injected bug' }
   if (r.unavailable && r.exitCode === 4) return { result: 'discarded', reason: 'mutation check failed (injected bug not caught, or mutation did not match the source)' }
