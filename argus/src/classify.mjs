@@ -49,6 +49,19 @@ export function changeFileKind(path) {
 
 export const changeKinds = (files) => [...new Set((files ?? []).map((f) => changeFileKind(f.filename)))]
 
+// 路径分配规则由测试计划和 coverage 共同使用，避免两边对同一个文件认不同的 step。
+export function stepExercises(step, paths) {
+  if (!step.exercises || !paths?.length) return true
+  return paths.some((p) => matchAny(p, step.exercises))
+}
+export const stepRunsChangedFile = (step, paths) => (paths ?? []).find((p) => matchAny(p, step.runsFiles ?? []) && !matchAny(p, step.excludesFiles ?? []))
+export function requiredStepsForFile(profile, file) {
+  if (file.status === 'removed' || changeFileKind(file.filename) === 'docs') return []
+  const path = file.filename
+  return profile.steps.filter((s) => s.kind !== 'setup' && !matchAny(path, s.excludesFiles ?? []) && (stepRunsChangedFile(s, [path])
+    || ((s.applicability?.changeKinds ?? []).includes(changeFileKind(path)) && stepExercises(s, [path])))).map((s) => s.id)
+}
+
 const DEFAULT_A = ['**/*.md', 'docs/**', 'LICENSE', '**/*.txt']
 // 测试、依赖、CI、脚本、配置即使长得像文档也不能进 A
 const NEVER_A = ['**/package.json', '**/package-lock.json', '**/pyproject.toml', '**/uv.lock', '.github/**', 'scripts/**', '**/*.test.*', 'tests/**']

@@ -2,7 +2,7 @@
 // （逐行），再与 PR diff 的新增行求交，得到「新代码覆盖率」。数字照常写进报告当信息（和参考线 90 比出 pass / fail）。
 // 统一分级（Praise 2026-10-23）：覆盖率低于参考线本身不是问题，不出 finding；只有 PR 正文或 docs/pr/<N>/qa.md 自己写明了
 // 覆盖率目标却没达到，才按「自己定的验收没达成」记一条 P2（statedCoverageTarget + evaluateStatedTarget）。
-import { TEST_HELPER_RE, isTestPath } from './classify.mjs'
+import { TEST_HELPER_RE, isTestPath, requiredStepsForFile } from './classify.mjs'
 import { readFileSync, existsSync, statSync, rmSync, readdirSync } from 'node:fs'
 import { join, relative, isAbsolute, resolve, sep, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -76,7 +76,7 @@ export function compactCoverageEvidence(final, srcRoot) {
 }
 
 // 同一输入同时用于 unit、node-test 和 browser；covers/exercises 仅证明分配，不能证明源码被加载。
-export function coverageRunnerState(result) {
+export function coverageRunnerState(result, step = null) {
   const c = result?.coverage
   const status = result?.status
   if (result?.timedOut || result?.timed_out || status === 'timeout') return { status: 'unavailable', reason: 'coverage-runner-timeout' }
@@ -86,7 +86,13 @@ export function coverageRunnerState(result) {
   if (['not_measurable', 'not_evaluated', 'not-evaluated'].includes(c?.status)) return { status: c.status.replaceAll('-', '_'), reason: 'coverage-not-collected' }
   if (c && c.status !== 'ok') return { status: 'unavailable', reason: 'coverage-report-unavailable' }
   if (Object.values(c?.evidence ?? c?.files ?? {}).some((f) => f.failures?.length)) return { status: 'unavailable', reason: 'coverage-shards-incomplete' }
-  if (c?.files != null || c?.evidence != null) return { status: 'ok', reason: null }
+  const maps = [c?.files, c?.evidence].filter((f) => f != null)
+  if (maps.length) {
+    if (maps.some((f) => Object.keys(f).length)) return { status: 'ok', reason: null }
+    if (c.unmeasurable?.length) return { status: 'not_measurable', reason: 'source-not-measurable' }
+    return { status: 'unavailable', reason: 'coverage-not-produced' }
+  }
+  if (step?.coveragePolicy?.status === 'not_measurable') return { status: 'not_measurable', reason: 'step-coverage-not-measurable' }
   return { status: 'not_evaluated', reason: 'coverage-not-collected' }
 }
 
@@ -96,9 +102,12 @@ const metricEvidence = (total, covered, reason = null, emptyStatus = 'not_evalua
   ...(reason ? { reason } : {}),
 })
 
-export function coverageMapping({ added, results = [] }) {
-  const sources = results.map((r) => ({ step: r.id, provider: r.coverage?.kind ?? (r.coverage ? 'istanbul' : null), ...coverageRunnerState(r) }))
-  const measured = results.filter((r) => coverageRunnerState(r).status === 'ok').map((r) => ({ ...r,
+export function coverageMapping({ added, results = [], profile = null }) {
+  const assigned = new Map(Object.keys(added ?? {}).map((file) => [file, profile ? requiredStepsForFile(profile, { filename: file }) : results.map((r) => r.id)]))
+  const steps = new Map((profile?.steps ?? []).map((s) => [s.id, s]))
+  const runs = [...results, ...[...new Set([...assigned.values()].flat())].filter((id) => !results.some((r) => r.id === id)).map((id) => ({ id }))]
+  const sources = runs.map((r) => ({ step: r.id, provider: r.coverage?.kind ?? (r.coverage ? 'istanbul' : null), ...coverageRunnerState(r, steps.get(r.id)) }))
+  const measured = runs.filter((r) => coverageRunnerState(r, steps.get(r.id)).status === 'ok').map((r) => ({ ...r,
     measuredFiles: mergeCoverageFiles(r.coverage.evidence, r.coverage.files) }))
   const files = []
   for (const [file, rows] of Object.entries(added ?? {})) {
@@ -108,9 +117,12 @@ export function coverageMapping({ added, results = [] }) {
       return fc && fc.load_status !== 'unloaded' ? [{ step: r.id, fc }] : []
     })
     const unmeasurable = measured.some((r) => r.coverage.unmeasurable?.some((f) => f.file === file))
-    const missingStatus = unmeasurable ? 'not_measurable' : !measured.length ? (sources.some((r) => r.status === 'unavailable') ? 'unavailable'
-      : sources.some((r) => r.status === 'not_measurable') ? 'not_measurable' : 'not_evaluated')
-      : PLAIN_JS_RE.test(file) ? 'not_measurable' : 'fail'
+    const fileSources = sources.filter((s) => assigned.get(file).includes(s.step))
+    const gaps = fileSources.filter((s) => s.status !== 'ok')
+    const gap = ['unavailable', 'not_measurable', 'not_evaluated'].map((status) => gaps.find((s) => s.status === status)).find(Boolean)
+    const missingStatus = unmeasurable ? 'not_measurable' : gap?.status ?? (PLAIN_JS_RE.test(file) ? 'not_measurable' : fileSources.length ? 'fail' : 'not_evaluated')
+    const missingReason = unmeasurable ? 'source-not-measurable' : gap?.reason ?? (missingStatus === 'not_measurable' ? 'source-coverage-not-collected'
+      : fileSources.length ? 'assigned-steps-did-not-load-source' : 'no-coverage-step-assigned')
     const lines = []
     for (const row of rows) {
       const measuredBy = [], coveredBy = []
@@ -123,7 +135,7 @@ export function coverageMapping({ added, results = [] }) {
       }
       if (!measuredBy.length && !looksLikeCode(row.text)) continue
       lines.push({ line: row.line, status: measuredBy.length ? (coveredBy.length ? 'pass' : 'fail') : loaded.length ? 'not_evaluated' : missingStatus,
-        measured_by: [...new Set(measuredBy)], covered_by: [...new Set(coveredBy)] })
+        measured_by: [...new Set(measuredBy)], covered_by: [...new Set(coveredBy)], ...(!loaded.length ? { reason: missingReason } : {}) })
     }
     const changedMetric = (name) => {
       const ranges = new Map()
@@ -138,13 +150,14 @@ export function coverageMapping({ added, results = [] }) {
       }
       const items = [...ranges.values()].map((r) => ({ ...r, measured_by: [...new Set(r.measured_by)], covered_by: [...new Set(r.covered_by)] }))
       return { ...metricEvidence(items.length, items.filter((r) => r.covered_by.length).length,
-        items.length ? null : 'changed-ranges-not-measured', loaded.length ? 'not_evaluated' : missingStatus === 'fail' ? 'not_evaluated' : missingStatus), ranges: items }
+        items.length ? null : loaded.length ? 'changed-ranges-not-measured' : missingReason, loaded.length ? 'not_evaluated' : missingStatus === 'fail' ? 'not_evaluated' : missingStatus), ranges: items }
     }
     const evaluated = lines.filter((r) => ['pass', 'fail'].includes(r.status))
-    files.push({ file, load_status: loaded.length ? 'loaded' : missingStatus === 'not_measurable' || !measured.length ? 'unknown' : 'unloaded',
+    files.push({ file, load_status: loaded.length ? 'loaded' : missingStatus === 'fail' ? 'unloaded' : 'unknown',
       loaded_by: [...new Set(loaded.map((r) => r.step))],
+      measurement_gaps: gaps,
       sources: loaded.flatMap(({ step, fc }) => (fc.sources?.length ? fc.sources : [{ provider: fc.source ?? 'istanbul' }]).map((s) => ({ ...s, step }))),
-      lines: { ...metricEvidence(evaluated.length, evaluated.filter((r) => r.status === 'pass').length, null,
+      lines: { ...metricEvidence(evaluated.length, evaluated.filter((r) => r.status === 'pass').length, loaded.length ? null : missingReason,
         lines.length ? lines.find((r) => r.status !== 'not_evaluated')?.status ?? 'not_evaluated' : 'not_evaluated'), changed: lines },
       branches: changedMetric('branches'), functions: changedMetric('functions') })
   }

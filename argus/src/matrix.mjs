@@ -1,6 +1,7 @@
 // 适用性矩阵：ming-qa 的 29 个维度（4 执行层 / 10 用例类型 / 10 风险 / 5 判定依据）。
 // 三件事分开：Jev 判断「涉及 / 拿不准」；「不适用」只来自 profile 明文；「测到没有」由代码按步骤的 covers 和真实结果计算。
-import { classifyChange, globToRegExp, highRiskFiles, isTestPath, isTestsOnly, isRunnableTestPath, changeFileKind } from './classify.mjs'
+import { classifyChange, globToRegExp, highRiskFiles, isTestPath, isTestsOnly, isRunnableTestPath, changeFileKind, stepExercises, stepRunsChangedFile, requiredStepsForFile } from './classify.mjs'
+export { stepExercises, stepRunsChangedFile, requiredStepsForFile } from './classify.mjs'
 import { coverageMapping, parseAddedLines } from './coverage.mjs'
 import { toReadableTitle } from './util.mjs'
 
@@ -116,22 +117,6 @@ export function toTriage({ profile, files, jev, handoff = null }) {
     ...(handoff?.present ? { context: { risks: handoff.risks, boundaries: handoff.boundaries } } : {}) }
 }
 
-const matchesAny = (path, globs) => globs.some((g) => globToRegExp(g).test(path))
-// 步骤实际测的路径（step.exercises）：没写 = 整个仓；改动文件列表拿不到时也按碰到算（保守）
-export function stepExercises(step, paths) {
-  if (!step.exercises || !paths?.length) return true
-  return paths.some((p) => matchesAny(p, step.exercises))
-}
-// 改动里有这一步自己执行的测试文件（step.runsFiles）：这一步必须跑
-export const stepRunsChangedFile = (step, paths) => (paths ?? []).find((p) => matchesAny(p, step.runsFiles ?? []) && !matchesAny(p, step.excludesFiles ?? []))
-
-export function requiredStepsForFile(profile, file) {
-  if (file.status === 'removed' || changeFileKind(file.filename) === 'docs') return []
-  const path = file.filename
-  return profile.steps.filter((s) => s.kind !== 'setup' && !matchesAny(path, s.excludesFiles ?? []) && (stepRunsChangedFile(s, [path])
-    || ((s.applicability?.changeKinds ?? []).includes(changeFileKind(path)) && stepExercises(s, [path])))).map((s) => s.id)
-}
-
 // 执行证据与分配分开：covers、被计划执行、报告里的 skipped 都不能证明测试实际运行。
 export function toTestAssignment({ profile, files = [], results = [] }) {
   const assignments = files.filter((f) => f.status !== 'removed').map((f) => {
@@ -199,7 +184,7 @@ export function toCoverage({ profile, triage, results, knownOnlyStepIds = [], fi
   const ran = (results ?? []).filter((r) => r.kind !== 'setup' && available(r))
   return {
     test_assignment: toTestAssignment({ profile, files, results }),
-    changed_source: coverageMapping({ added: Object.assign({}, ...files.filter((f) => f.status !== 'removed' && f.patch).map((f) => parseAddedLines(`+++ b/${f.filename}\n${f.patch}`))), results: results ?? [] }),
+    changed_source: coverageMapping({ added: Object.assign({}, ...files.filter((f) => f.status !== 'removed' && f.patch).map((f) => parseAddedLines(`+++ b/${f.filename}\n${f.patch}`))), results: results ?? [], profile }),
     applicable: applicable.map((r) => r.key),
     covered: covered.map((r) => r.key),
     missed: applicable.filter((r) => !coveredBy(r.key).length).map((r) => r.key),

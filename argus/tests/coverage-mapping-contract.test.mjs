@@ -6,6 +6,10 @@ import { join } from 'node:path'
 import { compactCoverageEvidence, coverageMapping, coverageRunnerState, coverageGate, readCoverageDir, newCodeCoverage, isCoverageSource } from '../src/coverage.mjs'
 import { mergeCoverageFinal, mergeCoverageShards, coverageSummaryOf } from '../src/shard.mjs'
 
+process.env.ARGUS_ROOT ??= mkdtempSync(join(tmpdir(), 'coverage-mapping-runner-'))
+const { withV8Coverage } = await import('../src/runner.mjs')
+const { toCoverage } = await import('../src/matrix.mjs')
+
 const added = { 'src/a.ts': [{ line: 2, text: 'return x ? yes() : no()' }] }
 const loc = (start, end = start) => ({ start: { line: start, column: 0 }, end: { line: end, column: 10 } })
 const final = (hits = 1, all = false) => ({ '/repo/src/a.ts': {
@@ -44,7 +48,7 @@ test('loaded but unexecuted source is measurable; Istanbul all placeholders are 
 
 test('plain JS/subprocess without reports is not_measurable, not a 0% product failure', () => {
   const js = { 'scripts/child.mjs': [{ line: 2, text: 'work()' }] }
-  const out = coverageMapping({ added: js, results: [{ id: 'unit', coverage: { status: 'ok', files: {} } }] })
+  const out = coverageMapping({ added: js, results: [{ id: 'unit', coverage: { status: 'ok', files: { 'src/other.ts': { lines: [1], covered: [1] } } } }] })
   assert.equal(out.files[0].lines.status, 'not_measurable')
   assert.equal(out.files[0].lines.pct, null)
   assert.equal(out.finding_eligible, false)
@@ -66,6 +70,70 @@ test('runner failure with stale files is unavailable and never coverage fail', (
   assert.equal(gate.status, 'unavailable')
   assert.equal(gate.pass, null)
   assert.equal(gate.values, null)
+})
+
+test('real withV8Coverage empty or absent directory is unavailable, not 0% changed TS coverage', () => {
+  for (const exists of [false, true]) {
+    const root = mkdtempSync(join(tmpdir(), 'coverage-empty-v8-'))
+    const dir = join(root, 'v8')
+    if (exists) mkdirSync(dir)
+    const coverage = withV8Coverage(null, dir, root)
+    assert.deepEqual(coverage, { status: 'ok', kind: 'v8', total: null, files: {} })
+    const state = coverageRunnerState({ id: 'node-test', coverage })
+    assert.deepEqual(state, { status: 'unavailable', reason: 'coverage-not-produced' })
+    const mapping = coverageMapping({ added, results: [{ id: 'node-test', coverage }] })
+    assert.equal(mapping.files[0].load_status, 'unknown')
+    assert.equal(mapping.files[0].lines.status, 'unavailable')
+    assert.equal(mapping.files[0].lines.reason, 'coverage-not-produced')
+    assert.equal(mapping.files[0].lines.pct, null)
+    assert.equal(mapping.files[0].lines.covered, null)
+  }
+  assert.equal(coverageRunnerState({ coverage: { status: 'ok', evidence: {} } }).status, 'unavailable')
+  assert.equal(coverageRunnerState({ coverage: { status: 'ok', files: {}, evidence: compactCoverageEvidence(final(), '/repo') } }).status, 'ok')
+})
+
+test('only assigned steps determine whether absent source coverage is a gap or measured zero', () => {
+  const changed = { 'src/Panel.tsx': [{ line: 2, text: 'return <Panel />' }] }
+  const other = { id: 'other', ok: true, coverage: { status: 'ok', files: { 'other/a.ts': { lines: [1], covered: [1] } } } }
+  const browser = { id: 'browser', kind: 'product', exercises: ['src/**'], applicability: { changeKinds: ['browser'] }, coveragePolicy: { status: 'not_measurable' } }
+  const otherStep = { id: 'other', kind: 'product', exercises: ['other/**'], applicability: { changeKinds: ['browser'] }, coveragePolicy: { status: 'collect' } }
+  for (const [flags, expected, reason] of [
+    [{ ok: true }, 'not_measurable', 'step-coverage-not-measurable'],
+    [{ unavailable: true }, 'unavailable', 'coverage-runner-unavailable'],
+    [{ status: 'skipped' }, 'not_evaluated', 'coverage-step-not-run'],
+  ]) {
+    const row = coverageMapping({ added: changed, profile: { steps: [browser, otherStep] }, results: [other, { id: 'browser', ...flags }] }).files[0]
+    assert.equal(row.lines.status, expected)
+    assert.equal(row.lines.reason, reason)
+    assert.equal(row.lines.pct, null)
+    assert.equal(row.lines.covered, null)
+    assert.equal(row.load_status, 'unknown')
+    assert.deepEqual(row.measurement_gaps.map((s) => s.step), ['browser'])
+  }
+  const notRun = coverageMapping({ added: changed, profile: { steps: [browser, otherStep] }, results: [other] }).files[0]
+  assert.equal(notRun.lines.status, 'not_measurable', 'even an absent browser result retains the assigned step policy')
+  const measurable = { ...browser, coveragePolicy: { status: 'collect' } }
+  const row = coverageMapping({ added: changed, profile: { steps: [measurable, otherStep] }, results: [other, { ...other, id: 'browser' }] }).files[0]
+  assert.equal(row.load_status, 'unloaded')
+  assert.equal(row.lines.status, 'fail')
+  assert.equal(row.lines.pct, 0)
+  assert.equal(row.lines.reason, 'assigned-steps-did-not-load-source')
+  assert.deepEqual(row.measurement_gaps, [])
+  const throughMatrix = toCoverage({ profile: { steps: [browser, otherStep] }, triage: { rows: [] },
+    files: [{ filename: 'src/Panel.tsx', patch: '@@ -1 +2 @@\n-old()\n+return <Panel />' }],
+    results: [other, { id: 'browser', ok: true }] }).changed_source.files[0]
+  assert.equal(throughMatrix.lines.status, 'not_measurable', 'matrix must pass profile assignment into the mapping')
+})
+
+test('an assigned unmeasurable layer prevents unrelated measured layers from implying 0% source coverage', () => {
+  const profile = { steps: [
+    { id: 'unit', kind: 'product', exercises: ['src/**'], applicability: { changeKinds: ['browser'] }, coveragePolicy: { status: 'collect' } },
+    { id: 'browser', kind: 'product', exercises: ['src/**'], applicability: { changeKinds: ['browser'] }, coveragePolicy: { status: 'not_measurable' } },
+  ] }
+  const mapping = coverageMapping({ added: { 'src/Panel.tsx': [{ line: 2, text: 'return <Panel />' }] }, profile,
+    results: [{ id: 'unit', coverage: { status: 'ok', files: { 'src/other.ts': { lines: [1], covered: [1] } } } }, { id: 'browser', ok: true }] })
+  assert.equal(mapping.files[0].lines.status, 'not_measurable')
+  assert.equal(mapping.files[0].lines.pct, null)
 })
 
 test('runner failure on one layer does not erase valid line evidence from another layer', () => {
