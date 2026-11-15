@@ -90,7 +90,25 @@
       "exercises": [
         "server/**",
         "shared/**"
-      ]
+      ],
+      "skipPolicy": {
+        "triage": "not_evaluated",
+        "notApplicable": "not_applicable",
+        "capabilityUnavailable": "unavailable",
+        "notRun": "not_evaluated"
+      },
+      "applicability": {
+        "changeKinds": [
+          "source",
+          "persistence",
+          "test",
+          "fixture"
+        ]
+      },
+      "coveragePolicy": {
+        "status": "not_measurable",
+        "reason": "step does not produce source coverage data"
+      }
     },
     {
       "id": "api-probe",
@@ -1453,7 +1471,23 @@
       "exercises": [
         "server/**",
         "shared/**"
-      ]
+      ],
+      "skipPolicy": {
+        "triage": "not_evaluated",
+        "notApplicable": "not_applicable",
+        "capabilityUnavailable": "unavailable",
+        "notRun": "not_evaluated"
+      },
+      "applicability": {
+        "changeKinds": [
+          "source",
+          "persistence"
+        ]
+      },
+      "coveragePolicy": {
+        "status": "not_measurable",
+        "reason": "step does not produce source coverage data"
+      }
     },
     {
       "id": "e2e-browser",
@@ -1503,7 +1537,23 @@
         "server/**",
         "cindyplugin/**",
         "scripts/e2e/**"
-      ]
+      ],
+      "skipPolicy": {
+        "triage": "not_evaluated",
+        "notApplicable": "not_applicable",
+        "capabilityUnavailable": "unavailable",
+        "notRun": "not_evaluated"
+      },
+      "applicability": {
+        "changeKinds": [
+          "browser",
+          "persistence"
+        ]
+      },
+      "coveragePolicy": {
+        "status": "not_measurable",
+        "reason": "step does not produce source coverage data"
+      }
     },
     {
       "id": "e2e-legacy-migration",
@@ -1539,7 +1589,22 @@
         "src/**",
         "shared/**",
         "cindyplugin/**"
-      ]
+      ],
+      "skipPolicy": {
+        "triage": "not_evaluated",
+        "notApplicable": "not_applicable",
+        "capabilityUnavailable": "unavailable",
+        "notRun": "not_evaluated"
+      },
+      "applicability": {
+        "changeKinds": [
+          "persistence"
+        ]
+      },
+      "coveragePolicy": {
+        "status": "not_measurable",
+        "reason": "step does not produce source coverage data"
+      }
     },
     {
       "id": "typecheck",
@@ -1553,7 +1618,20 @@
       "timeoutMin": 30,
       "covers": [
         "regression"
-      ]
+      ],
+      "skipPolicy": {
+        "triage": "not_evaluated",
+        "notApplicable": "not_applicable",
+        "capabilityUnavailable": "unavailable",
+        "notRun": "not_evaluated"
+      },
+      "applicability": {
+        "changeKinds": []
+      },
+      "coveragePolicy": {
+        "status": "not_measurable",
+        "reason": "step does not produce source coverage data"
+      }
     },
     {
       "id": "plugin",
@@ -1567,7 +1645,20 @@
       "covers": [
         "compatibility",
         "regression"
-      ]
+      ],
+      "skipPolicy": {
+        "triage": "not_evaluated",
+        "notApplicable": "not_applicable",
+        "capabilityUnavailable": "unavailable",
+        "notRun": "not_evaluated"
+      },
+      "applicability": {
+        "changeKinds": []
+      },
+      "coveragePolicy": {
+        "status": "not_measurable",
+        "reason": "step does not produce source coverage data"
+      }
     },
     {
       "id": "web-build",
@@ -1589,7 +1680,20 @@
           "file": "index.html",
           "reasonZh": "no web entry (index.html) in this revision: the web build was retired and the target CI no longer runs npm run build"
         }
-      ]
+      ],
+      "skipPolicy": {
+        "triage": "not_evaluated",
+        "notApplicable": "not_applicable",
+        "capabilityUnavailable": "unavailable",
+        "notRun": "not_evaluated"
+      },
+      "applicability": {
+        "changeKinds": []
+      },
+      "coveragePolicy": {
+        "status": "not_measurable",
+        "reason": "step does not produce source coverage data"
+      }
     },
     {
       "id": "host-locale",
@@ -1610,7 +1714,20 @@
           "file": "cindyplugin/check-host-locale.mjs",
           "reasonZh": "this revision has no cindyplugin/check-host-locale.mjs (the target CI did not run this scan yet)"
         }
-      ]
+      ],
+      "skipPolicy": {
+        "triage": "not_evaluated",
+        "notApplicable": "not_applicable",
+        "capabilityUnavailable": "unavailable",
+        "notRun": "not_evaluated"
+      },
+      "applicability": {
+        "changeKinds": []
+      },
+      "coveragePolicy": {
+        "status": "not_measurable",
+        "reason": "step does not produce source coverage data"
+      }
     },
     {
       "id": "vendor-split",
@@ -1631,7 +1748,20 @@
           "file": "cindyplugin/check-vendor-split.mjs",
           "reasonZh": "this revision has no cindyplugin/check-vendor-split.mjs (the target CI did not run this scan yet)"
         }
-      ]
+      ],
+      "skipPolicy": {
+        "triage": "not_evaluated",
+        "notApplicable": "not_applicable",
+        "capabilityUnavailable": "unavailable",
+        "notRun": "not_evaluated"
+      },
+      "applicability": {
+        "changeKinds": []
+      },
+      "coveragePolicy": {
+        "status": "not_measurable",
+        "reason": "step does not produce source coverage data"
+      }
     },
     {
       "id": "unit",
@@ -1661,11 +1791,43 @@
         "dir": "${RUN}/coverage/unit",
         "labels": [
           "cov"
-        ]
+        ],
+        "kind": "vitest"
       },
       "shard": {
         "max": 2,
         "perShardGb": 1.2
+      },
+      "skipPolicy": {
+        "triage": "not_evaluated",
+        "notApplicable": "not_applicable",
+        "capabilityUnavailable": "unavailable",
+        "notRun": "not_evaluated"
+      },
+      "applicability": {
+        "changeKinds": [
+          "source",
+          "browser",
+          "persistence",
+          "test",
+          "fixture"
+        ]
+      },
+      "runsFiles": [
+        "src/**/*.test.ts",
+        "src/**/*.test.tsx",
+        "src/**/*.spec.ts",
+        "src/**/*.spec.tsx",
+        "server/**/*.test.ts",
+        "shared/**/*.test.ts"
+      ],
+      "excludesFiles": [
+        "**/*.bench.test.ts"
+      ],
+      "coveragePolicy": {
+        "status": "collect",
+        "onRunnerFailure": "unavailable",
+        "onMissingPlainJs": "not_measurable"
       }
     },
     {
@@ -1710,7 +1872,20 @@
         "**/*.bench.test.ts",
         "vitest.bench.config.ts"
       ],
-      "afterCoverage": true
+      "afterCoverage": true,
+      "skipPolicy": {
+        "triage": "not_evaluated",
+        "notApplicable": "not_applicable",
+        "capabilityUnavailable": "unavailable",
+        "notRun": "not_evaluated"
+      },
+      "applicability": {
+        "changeKinds": []
+      },
+      "coveragePolicy": {
+        "status": "not_measurable",
+        "reason": "step does not produce source coverage data"
+      }
     },
     {
       "id": "node-test",
@@ -1750,6 +1925,24 @@
         "labels": [
           "cov"
         ]
+      },
+      "skipPolicy": {
+        "triage": "not_evaluated",
+        "notApplicable": "not_applicable",
+        "capabilityUnavailable": "unavailable",
+        "notRun": "not_evaluated"
+      },
+      "applicability": {
+        "changeKinds": [
+          "node-test",
+          "script",
+          "fixture"
+        ]
+      },
+      "coveragePolicy": {
+        "status": "collect",
+        "onRunnerFailure": "unavailable",
+        "onMissingPlainJs": "not_measurable"
       }
     },
     {
@@ -1797,7 +1990,24 @@
         "format": "junit-xml",
         "path": "${RUN}/reports/pytest.xml"
       },
-      "noteZh": "对齐 ci.yml 里逐个 python3 跑的 test_*.py（都是 unittest，pytest 能收）；用 pytest 是为了拿 junit 报告"
+      "noteZh": "对齐 ci.yml 里逐个 python3 跑的 test_*.py（都是 unittest，pytest 能收）；用 pytest 是为了拿 junit 报告",
+      "skipPolicy": {
+        "triage": "not_evaluated",
+        "notApplicable": "not_applicable",
+        "capabilityUnavailable": "unavailable",
+        "notRun": "not_evaluated"
+      },
+      "applicability": {
+        "changeKinds": [
+          "test",
+          "script",
+          "fixture"
+        ]
+      },
+      "coveragePolicy": {
+        "status": "not_measurable",
+        "reason": "step does not produce source coverage data"
+      }
     },
     {
       "id": "lint",
@@ -1808,7 +2018,20 @@
         "run",
         "lint"
       ],
-      "timeoutMin": 20
+      "timeoutMin": 20,
+      "skipPolicy": {
+        "triage": "not_evaluated",
+        "notApplicable": "not_applicable",
+        "capabilityUnavailable": "unavailable",
+        "notRun": "not_evaluated"
+      },
+      "applicability": {
+        "changeKinds": []
+      },
+      "coveragePolicy": {
+        "status": "not_measurable",
+        "reason": "step does not produce source coverage data"
+      }
     },
     {
       "id": "logging",
@@ -1826,6 +2049,20 @@
         "labels": [
           "cov"
         ]
+      },
+      "skipPolicy": {
+        "triage": "not_evaluated",
+        "notApplicable": "not_applicable",
+        "capabilityUnavailable": "unavailable",
+        "notRun": "not_evaluated"
+      },
+      "applicability": {
+        "changeKinds": []
+      },
+      "coveragePolicy": {
+        "status": "collect",
+        "onRunnerFailure": "unavailable",
+        "onMissingPlainJs": "not_measurable"
       }
     },
     {
@@ -1837,7 +2074,20 @@
         "run",
         "verify:i18n"
       ],
-      "timeoutMin": 10
+      "timeoutMin": 10,
+      "skipPolicy": {
+        "triage": "not_evaluated",
+        "notApplicable": "not_applicable",
+        "capabilityUnavailable": "unavailable",
+        "notRun": "not_evaluated"
+      },
+      "applicability": {
+        "changeKinds": []
+      },
+      "coveragePolicy": {
+        "status": "not_measurable",
+        "reason": "step does not produce source coverage data"
+      }
     },
     {
       "id": "cycles",
@@ -1847,7 +2097,20 @@
         "node",
         "scripts/ci/cycle-guard.mjs"
       ],
-      "timeoutMin": 10
+      "timeoutMin": 10,
+      "skipPolicy": {
+        "triage": "not_evaluated",
+        "notApplicable": "not_applicable",
+        "capabilityUnavailable": "unavailable",
+        "notRun": "not_evaluated"
+      },
+      "applicability": {
+        "changeKinds": []
+      },
+      "coveragePolicy": {
+        "status": "not_measurable",
+        "reason": "step does not produce source coverage data"
+      }
     },
     {
       "id": "structure",
@@ -1857,7 +2120,20 @@
         "node",
         "scripts/ci/structure-guard.mjs"
       ],
-      "timeoutMin": 10
+      "timeoutMin": 10,
+      "skipPolicy": {
+        "triage": "not_evaluated",
+        "notApplicable": "not_applicable",
+        "capabilityUnavailable": "unavailable",
+        "notRun": "not_evaluated"
+      },
+      "applicability": {
+        "changeKinds": []
+      },
+      "coveragePolicy": {
+        "status": "not_measurable",
+        "reason": "step does not produce source coverage data"
+      }
     },
     {
       "id": "design",
@@ -1873,7 +2149,20 @@
         "MIVO_LITERAL_RATCHET_ENFORCE": "1"
       },
       "timeoutMin": 10,
-      "noteZh": "对齐 ci.yml design-verification：MIVO_GUARD_BASE_SHA = 本 PR 的 base，裸颜色/圆角棘轮阻断（ENFORCE=1）"
+      "noteZh": "对齐 ci.yml design-verification：MIVO_GUARD_BASE_SHA = 本 PR 的 base，裸颜色/圆角棘轮阻断（ENFORCE=1）",
+      "skipPolicy": {
+        "triage": "not_evaluated",
+        "notApplicable": "not_applicable",
+        "capabilityUnavailable": "unavailable",
+        "notRun": "not_evaluated"
+      },
+      "applicability": {
+        "changeKinds": []
+      },
+      "coveragePolicy": {
+        "status": "not_measurable",
+        "reason": "step does not produce source coverage data"
+      }
     },
     {
       "id": "internal-literals",
@@ -1883,7 +2172,20 @@
         "node",
         "scripts/ci/check-internal-literals.mjs"
       ],
-      "timeoutMin": 10
+      "timeoutMin": 10,
+      "skipPolicy": {
+        "triage": "not_evaluated",
+        "notApplicable": "not_applicable",
+        "capabilityUnavailable": "unavailable",
+        "notRun": "not_evaluated"
+      },
+      "applicability": {
+        "changeKinds": []
+      },
+      "coveragePolicy": {
+        "status": "not_measurable",
+        "reason": "step does not produce source coverage data"
+      }
     },
     {
       "id": "endpoint-literals",
@@ -1893,7 +2195,20 @@
         "node",
         "scripts/ci/check-endpoint-literals.mjs"
       ],
-      "timeoutMin": 10
+      "timeoutMin": 10,
+      "skipPolicy": {
+        "triage": "not_evaluated",
+        "notApplicable": "not_applicable",
+        "capabilityUnavailable": "unavailable",
+        "notRun": "not_evaluated"
+      },
+      "applicability": {
+        "changeKinds": []
+      },
+      "coveragePolicy": {
+        "status": "not_measurable",
+        "reason": "step does not produce source coverage data"
+      }
     },
     {
       "id": "secret-scan",
@@ -1924,7 +2239,20 @@
         "${DIFF_BASE_SHA}"
       ],
       "timeoutMin": 10,
-      "noteZh": "对齐 ci.yml gitleaks job（同一 .gitleaks.toml、--redact=100）；只扫本 PR 的提交范围 base..tested。泄露进了提交历史，后续提交修不掉，所以不做「最新主干」复查"
+      "noteZh": "对齐 ci.yml gitleaks job（同一 .gitleaks.toml、--redact=100）；只扫本 PR 的提交范围 base..tested。泄露进了提交历史，后续提交修不掉，所以不做「最新主干」复查",
+      "skipPolicy": {
+        "triage": "not_evaluated",
+        "notApplicable": "not_applicable",
+        "capabilityUnavailable": "unavailable",
+        "notRun": "not_evaluated"
+      },
+      "applicability": {
+        "changeKinds": []
+      },
+      "coveragePolicy": {
+        "status": "not_measurable",
+        "reason": "step does not produce source coverage data"
+      }
     }
   ],
   "notApplicable": {
@@ -2051,10 +2379,57 @@
             "format": "checks",
             "path": "${RUN}/playwright-smoke/report.json"
           },
-          "timeoutMin": 15
+          "timeoutMin": 15,
+          "skipPolicy": {
+            "triage": "not_evaluated",
+            "notApplicable": "not_applicable",
+            "capabilityUnavailable": "unavailable",
+            "notRun": "not_evaluated"
+          },
+          "applicability": {
+            "changeKinds": [
+              "browser"
+            ]
+          },
+          "coveragePolicy": {
+            "status": "not_measurable",
+            "reason": "step does not produce source coverage data"
+          }
         }
       ],
       "checkoutMode": "clone"
+    }
+  },
+  "testCapabilities": {
+    "unit": {
+      "steps": [
+        "unit"
+      ],
+      "status": "configured"
+    },
+    "node-test": {
+      "steps": [
+        "node-test"
+      ],
+      "status": "configured"
+    },
+    "browser": {
+      "steps": [
+        "e2e-browser",
+        "e2e-legacy-migration"
+      ],
+      "status": "configured",
+      "coverage_status": "not_measurable"
+    },
+    "windows": {
+      "steps": [],
+      "status": "unavailable",
+      "reason": "no Windows runner in this profile; external run evidence required"
+    },
+    "pg": {
+      "steps": [],
+      "status": "unavailable",
+      "reason": "no isolated PostgreSQL test step in this profile; external run evidence required"
     }
   }
 }

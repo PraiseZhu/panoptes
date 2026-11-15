@@ -2,7 +2,7 @@
 // （逐行），再与 PR diff 的新增行求交，得到「新代码覆盖率」。数字照常写进报告当信息（和参考线 90 比出 pass / fail）。
 // 统一分级（Praise 2026-10-23）：覆盖率低于参考线本身不是问题，不出 finding；只有 PR 正文或 docs/pr/<N>/qa.md 自己写明了
 // 覆盖率目标却没达到，才按「自己定的验收没达成」记一条 P2（statedCoverageTarget + evaluateStatedTarget）。
-import { TEST_HELPER_RE } from './classify.mjs'
+import { TEST_HELPER_RE, isTestPath } from './classify.mjs'
 import { readFileSync, existsSync, statSync, rmSync, readdirSync } from 'node:fs'
 import { join, relative, isAbsolute, resolve, sep, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -54,6 +54,103 @@ export function compactFinal(final, srcRoot) {
   return files
 }
 
+// 独立于旧 files 形状的补充证据；旧报告和旧消费者无需补默认值。
+export function compactCoverageEvidence(final, srcRoot) {
+  const files = compactFinal(final, srcRoot)
+  for (const [path, fc] of Object.entries(final ?? {})) {
+    const rel = (isAbsolute(fc?.path ?? path) ? relative(resolve(srcRoot), fc?.path ?? path) : fc?.path ?? path).replaceAll('\\', '/')
+    if (!files[rel]) continue
+    const ranges = (map, counts, branch) => Object.entries(map ?? {}).flatMap(([id, item]) => {
+      const locations = branch ? item.locations ?? [] : [item.loc ?? item.decl]
+      return locations.flatMap((loc, arm) => Number.isInteger(loc?.start?.line) ? [{
+        start: loc.start.line, end: loc.end?.line ?? loc.start.line,
+        key: `${loc.start.line}:${loc.start.column ?? 0}-${loc.end?.line ?? loc.start.line}:${loc.end?.column ?? 0}${branch ? `:${arm}` : ''}`,
+        covered: (branch ? counts?.[id]?.[arm] : counts?.[id]) > 0,
+      }] : [])
+    })
+    files[rel] = { ...files[rel], load_status: fc.load_status ?? (fc.all === true ? 'unloaded' : 'loaded'),
+      branches: ranges(fc.branchMap, fc.b, true), functions: ranges(fc.fnMap, fc.f, false),
+      sources: fc.coverage_sources ?? [], failures: fc.coverage_failures ?? [] }
+  }
+  return files
+}
+
+// 同一输入同时用于 unit、node-test 和 browser；covers/exercises 仅证明分配，不能证明源码被加载。
+export function coverageRunnerState(result) {
+  const c = result?.coverage
+  const status = result?.status
+  if (result?.timedOut || result?.timed_out || status === 'timeout') return { status: 'unavailable', reason: 'coverage-runner-timeout' }
+  if (result?.unavailable || result?.runner_error || result?.runnerError || result?.environment_unavailable
+    || ['unavailable', 'runner_error', 'environment_unavailable'].includes(status)) return { status: 'unavailable', reason: 'coverage-runner-unavailable' }
+  if (result?.skipped || ['skipped', 'not_applicable', 'not-applicable'].includes(status)) return { status: 'not_evaluated', reason: 'coverage-step-not-run' }
+  if (['not_measurable', 'not_evaluated', 'not-evaluated'].includes(c?.status)) return { status: c.status.replaceAll('-', '_'), reason: 'coverage-not-collected' }
+  if (c && c.status !== 'ok') return { status: 'unavailable', reason: 'coverage-report-unavailable' }
+  if (Object.values(c?.evidence ?? c?.files ?? {}).some((f) => f.failures?.length)) return { status: 'unavailable', reason: 'coverage-shards-incomplete' }
+  if (c?.files != null || c?.evidence != null) return { status: 'ok', reason: null }
+  return { status: 'not_evaluated', reason: 'coverage-not-collected' }
+}
+
+const metricEvidence = (total, covered, reason = null, emptyStatus = 'not_evaluated') => ({
+  status: total ? (total === covered ? 'pass' : 'fail') : emptyStatus,
+  total, covered: total ? covered : null, pct: total ? Math.round(covered / total * 10000) / 100 : null,
+  ...(reason ? { reason } : {}),
+})
+
+export function coverageMapping({ added, results = [] }) {
+  const sources = results.map((r) => ({ step: r.id, provider: r.coverage?.kind ?? (r.coverage ? 'istanbul' : null), ...coverageRunnerState(r) }))
+  const measured = results.filter((r) => coverageRunnerState(r).status === 'ok').map((r) => ({ ...r,
+    measuredFiles: mergeCoverageFiles(r.coverage.evidence, r.coverage.files) }))
+  const files = []
+  for (const [file, rows] of Object.entries(added ?? {})) {
+    if (!isCoverageSource(file)) continue
+    const loaded = measured.flatMap((r) => {
+      const fc = r.measuredFiles[file]
+      return fc && fc.load_status !== 'unloaded' ? [{ step: r.id, fc }] : []
+    })
+    const unmeasurable = measured.some((r) => r.coverage.unmeasurable?.some((f) => f.file === file))
+    const missingStatus = unmeasurable ? 'not_measurable' : !measured.length ? (sources.some((r) => r.status === 'unavailable') ? 'unavailable'
+      : sources.some((r) => r.status === 'not_measurable') ? 'not_measurable' : 'not_evaluated')
+      : PLAIN_JS_RE.test(file) ? 'not_measurable' : 'fail'
+    const lines = []
+    for (const row of rows) {
+      const measuredBy = [], coveredBy = []
+      for (const { step, fc } of loaded) {
+        const span = (fc.spans ?? []).filter(([a, b]) => a <= row.line && row.line <= b).sort((a, b) => (a[1] - a[0]) - (b[1] - b[0]))[0]
+        if ((fc.lines ?? []).includes(row.line) || (looksLikeCode(row.text) && span)) {
+          measuredBy.push(step)
+          if ((fc.covered ?? []).includes(row.line) || (!(fc.lines ?? []).includes(row.line) && span?.[2])) coveredBy.push(step)
+        }
+      }
+      if (!measuredBy.length && !looksLikeCode(row.text)) continue
+      lines.push({ line: row.line, status: measuredBy.length ? (coveredBy.length ? 'pass' : 'fail') : loaded.length ? 'not_evaluated' : missingStatus,
+        measured_by: [...new Set(measuredBy)], covered_by: [...new Set(coveredBy)] })
+    }
+    const changedMetric = (name) => {
+      const ranges = new Map()
+      for (const { step, fc } of loaded) for (const range of fc[name] ?? []) {
+        if (!rows.some((r) => r.line >= range.start && r.line <= range.end && looksLikeCode(r.text))) continue
+        const key = range.key ?? `${range.start}-${range.end}`
+        const cur = ranges.get(key) ?? { ...range, measured_by: [], covered_by: [] }
+        cur.covered ||= range.covered
+        cur.measured_by.push(step)
+        if (range.covered) cur.covered_by.push(step)
+        ranges.set(key, cur)
+      }
+      const items = [...ranges.values()].map((r) => ({ ...r, measured_by: [...new Set(r.measured_by)], covered_by: [...new Set(r.covered_by)] }))
+      return { ...metricEvidence(items.length, items.filter((r) => r.covered_by.length).length,
+        items.length ? null : 'changed-ranges-not-measured', loaded.length ? 'not_evaluated' : missingStatus === 'fail' ? 'not_evaluated' : missingStatus), ranges: items }
+    }
+    const evaluated = lines.filter((r) => ['pass', 'fail'].includes(r.status))
+    files.push({ file, load_status: loaded.length ? 'loaded' : missingStatus === 'not_measurable' || !measured.length ? 'unknown' : 'unloaded',
+      loaded_by: [...new Set(loaded.map((r) => r.step))],
+      sources: loaded.flatMap(({ step, fc }) => (fc.sources?.length ? fc.sources : [{ provider: fc.source ?? 'istanbul' }]).map((s) => ({ ...s, step }))),
+      lines: { ...metricEvidence(evaluated.length, evaluated.filter((r) => r.status === 'pass').length, null,
+        lines.length ? lines.find((r) => r.status !== 'not_evaluated')?.status ?? 'not_evaluated' : 'not_evaluated'), changed: lines },
+      branches: changedMetric('branches'), functions: changedMetric('functions') })
+  }
+  return { schema: 'coverage.mapping/v1', sources, files, blocking: false, finding_eligible: false }
+}
+
 // 读 vitest 输出目录；单测失败或没产出报告 → unavailable（不是不达标）
 export function readCoverageDir(dir, srcRoot, { maxBytes = 256 * 1024 * 1024 } = {}) {
   const summaryFile = join(dir, 'coverage-summary.json')
@@ -62,7 +159,15 @@ export function readCoverageDir(dir, srcRoot, { maxBytes = 256 * 1024 * 1024 } =
   try {
     const total = JSON.parse(readFileSync(summaryFile, 'utf8')).total ?? {}
     const out = { status: 'ok', total: { lines: pct(total.lines), branches: pct(total.branches), functions: pct(total.functions), statements: pct(total.statements) }, files: null }
-    if (existsSync(finalFile) && statSync(finalFile).size <= maxBytes) out.files = compactFinal(JSON.parse(readFileSync(finalFile, 'utf8')), srcRoot)
+    if (existsSync(finalFile) && statSync(finalFile).size <= maxBytes) {
+      const final = JSON.parse(readFileSync(finalFile, 'utf8'))
+      out.files = compactFinal(final, srcRoot)
+      out.evidence = compactCoverageEvidence(final, srcRoot)
+      if (Object.values(out.evidence).some((f) => f.failures?.length)) {
+        out.status = 'unavailable'
+        out.reason = 'coverage shard data incomplete'
+      }
+    }
     // 原始逐行报告可能很大，压缩后删除，证据目录里只留 summary
     rmSync(finalFile, { force: true })
     return out
@@ -90,7 +195,7 @@ export function parseAddedLines(diff) {
 
 const SOURCE_RE = /\.(?:[cm]?[jt]sx?)$/
 const NOT_SOURCE_RE = /(?:^|\/)(?:node_modules|dist|coverage|_tmp|__mocks__|__fixtures__|fixtures|test|tests|__tests__)\/|\.(?:test|spec|bench|d)\.[cm]?[jt]sx?$|(?:^|\/)(?:vite|vitest|eslint|playwright)\.[^/]*config\.[cm]?[jt]s$|\.config\.[cm]?[jt]s$/
-export const isCoverageSource = (file) => SOURCE_RE.test(file) && !NOT_SOURCE_RE.test(file) && !TEST_HELPER_RE.test(file)
+export const isCoverageSource = (file) => SOURCE_RE.test(file) && !NOT_SOURCE_RE.test(file) && !isTestPath(file) && !TEST_HELPER_RE.test(file)
 // 未被测试加载的文件没有可执行行信息：按「像代码的新增行」保守计为未覆盖
 const looksLikeCode = (t) => { const s = t.trim(); return Boolean(s) && !/^(?:\/\/|\/\*|\*|\*\/)/.test(s) && !/^(?:import\b|export\s+(?:type|interface)\b|type\s|interface\s|[{}()[\];,]+$)/.test(s) }
 
@@ -105,7 +210,7 @@ export function newCodeCoverage(added, files) {
   for (const [file, rows] of Object.entries(added ?? {})) {
     if (!isCoverageSource(file)) continue
     const fc = files?.[file]
-    if (fc) {
+    if (fc && fc.load_status !== 'unloaded') {
       const exec = new Set(fc.lines), cov = new Set(fc.covered)
       // 不是语句起始行、但落在多行语句或分支范围里的像代码的改动行 → 按包住它的最内层范围是否执行过计
       const inner = (l) => (fc.spans ?? []).filter(([a, b]) => a <= l && l <= b).sort((x, y) => (x[1] - x[0]) - (y[1] - y[0]))[0]
@@ -117,21 +222,21 @@ export function newCodeCoverage(added, files) {
       const c = e.filter((r) => cov.has(r.line))
       if (!e.length) continue
       executable += e.length; covered += c.length
-      perFile.push({ file, executable: e.length, covered: c.length, uncovered_lines: e.filter((r) => !cov.has(r.line)).map((r) => r.line).slice(0, 50), ...(fc.source ? { source: fc.source } : {}) })
+      perFile.push({ file, status: c.length === e.length ? 'pass' : 'fail', load_status: fc.load_status ?? 'loaded', executable: e.length, covered: c.length, uncovered_lines: e.filter((r) => !cov.has(r.line)).map((r) => r.line).slice(0, 50), ...(fc.source ? { source: fc.source } : {}) })
     } else {
       const e = rows.filter((r) => looksLikeCode(r.text))
       if (!e.length) continue
       if (PLAIN_JS_RE.test(file)) {
         notMeasurable.push(file)
-        perFile.push({ file, executable: e.length, covered: null, not_measurable: true, reason: 'not loaded by vitest and no V8 data from node --test / subprocess runs' })
+        perFile.push({ file, status: 'not_measurable', load_status: 'unknown', executable: e.length, covered: null, not_measurable: true, reason: 'not loaded by vitest and no V8 data from node --test / subprocess runs' })
         continue
       }
       executable += e.length
       unloaded.push(file)
-      perFile.push({ file, executable: e.length, covered: 0, not_loaded_by_tests: true, uncovered_lines: e.map((r) => r.line).slice(0, 50) })
+      perFile.push({ file, status: 'fail', load_status: 'unloaded', executable: e.length, covered: 0, not_loaded_by_tests: true, uncovered_lines: e.map((r) => r.line).slice(0, 50) })
     }
   }
-  return { pct: executable ? Math.round((covered / executable) * 10000) / 100 : null, executable_lines: executable, covered_lines: covered, unloaded_files: unloaded, not_measurable_files: notMeasurable, files: perFile }
+  return { status: executable ? (covered === executable ? 'pass' : 'fail') : notMeasurable.length ? 'not_measurable' : 'not_evaluated', pct: executable ? Math.round((covered / executable) * 10000) / 100 : null, executable_lines: executable, covered_lines: covered, unloaded_files: unloaded, not_measurable_files: notMeasurable, files: perFile }
 }
 
 // ── NODE_V8_COVERAGE 原始数据（node --test、子进程）→ 与 compactFinal 同形的 { file: { lines, covered } } ──
@@ -163,17 +268,20 @@ function sameFileByName(abs, sc, srcRoot, index) {
   const len = Math.max(0, ...(sc.functions ?? []).flatMap((fn) => fn.ranges ?? []).map((r) => r.endOffset))
   try { return readFileSync(join(srcRoot, hits[0]), 'utf8').length === len ? hits[0] : null } catch { return null }
 }
-export function readV8Dir(dir, srcRoot, { index = null, maxBytes = 512 * 1024 * 1024 } = {}) {
-  if (!dir || !existsSync(dir)) return {}
+export function readV8Dir(dir, srcRoot, { index = null, maxBytes = 512 * 1024 * 1024, diagnostics = [] } = {}) {
+  if (!dir || !existsSync(dir)) { diagnostics.push({ status: 'unavailable', reason: 'coverage-directory-missing' }); return {} }
   const idx = index ?? repoFileIndex(srcRoot)
   const byFile = new Map()
   let bytes = 0
-  for (const name of readdirSync(dir).filter((n) => n.endsWith('.json'))) {
+  const names = readdirSync(dir).filter((n) => n.endsWith('.json')).sort()
+  if (!names.length) diagnostics.push({ status: 'unavailable', reason: 'coverage-not-produced' })
+  for (const name of names) {
     const f = join(dir, name)
     bytes += statSync(f).size
-    if (bytes > maxBytes) break
+    if (bytes > maxBytes) { diagnostics.push({ status: 'unavailable', reason: 'coverage-byte-budget-exceeded' }); break }
     let doc
-    try { doc = JSON.parse(readFileSync(f, 'utf8')) } catch { continue }
+    try { doc = JSON.parse(readFileSync(f, 'utf8')) } catch { diagnostics.push({ status: 'unavailable', reason: 'coverage-report-unreadable' }); continue }
+    if (!Array.isArray(doc?.result)) { diagnostics.push({ status: 'unavailable', reason: 'coverage-report-invalid' }); continue }
     for (const sc of doc.result ?? []) {
       if (!String(sc.url).startsWith('file://')) continue
       let abs
@@ -189,14 +297,17 @@ export function readV8Dir(dir, srcRoot, { index = null, maxBytes = 512 * 1024 * 
     let src
     try { src = readFileSync(join(srcRoot, rel), 'utf8') } catch { continue }
     const hit = new Uint8Array(src.length)
+    let validRuns = 0
     for (const fns of runs) {
       // 脚本长度和仓里源文件不一致（转译过的 TS、被改过的副本）：偏移对不上，这次运行的数据不认
       if (Math.max(0, ...fns.flatMap((fn) => fn.ranges ?? []).map((r) => r.endOffset)) !== src.length) continue
+      validRuns++
       const cnt = new Int32Array(src.length).fill(-1)
       const ranges = fns.flatMap((fn) => fn.ranges ?? []).sort((a, b) => (b.endOffset - b.startOffset) - (a.endOffset - a.startOffset))
       for (const r of ranges) cnt.fill(r.count, Math.max(0, r.startOffset), Math.min(r.endOffset, src.length))
       for (let i = 0; i < src.length; i++) if (cnt[i] > 0) hit[i] = 1
     }
+    if (!validRuns) { diagnostics.push({ file: rel, status: 'not_measurable', reason: 'source-length-mismatch' }); continue }
     const lines = [], cov = []
     let off = 0
     src.split('\n').forEach((text, i) => {
@@ -213,18 +324,49 @@ export function readV8Dir(dir, srcRoot, { index = null, maxBytes = 512 * 1024 * 
   return files
 }
 
+export function readV8Report(dir, srcRoot, options = {}) {
+  const diagnostics = []
+  let files = {}
+  try { files = readV8Dir(dir, srcRoot, { ...options, diagnostics }) }
+  catch { diagnostics.push({ status: 'unavailable', reason: 'coverage-report-unreadable' }) }
+  const failures = diagnostics.filter((d) => d.status === 'unavailable')
+  const sources = [{ provider: 'v8', ...(options.stepId ? { step: options.stepId } : {}) }]
+  const evidence = Object.fromEntries(Object.entries(files).map(([file, fc]) => [file, { ...fc, load_status: 'loaded', sources }]))
+  return { status: failures.length ? 'unavailable' : 'ok', kind: 'v8', total: null, files, evidence,
+    failures, unmeasurable: diagnostics.filter((d) => d.status === 'not_measurable'),
+    ...(failures.length ? { reason: failures[0].reason } : {}) }
+}
+
 // 主报告（vitest istanbul）里没有的文件，用 V8 数据补上；主报告里有的文件，子进程跑到的行也算覆盖（只认主报告的可执行行）
 export function mergeCoverageFiles(primary, ...extras) {
   const out = { ...(primary ?? {}) }
   for (const ex of extras) for (const [f, fc] of Object.entries(ex ?? {})) {
     if (primary?.[f]) {
       const exec = new Set(primary[f].lines)
-      out[f] = { ...out[f], covered: [...new Set([...out[f].covered, ...fc.covered.filter((l) => exec.has(l))])].sort((a, b) => a - b) }
+      out[f] = { ...out[f], ...mergeFileEvidence(out[f], fc), covered: [...new Set([...out[f].covered, ...fc.covered.filter((l) => exec.has(l))])].sort((a, b) => a - b) }
       continue
     }
     const cur = out[f]
-    out[f] = cur ? { lines: [...new Set([...cur.lines, ...fc.lines])].sort((a, b) => a - b), covered: [...new Set([...cur.covered, ...fc.covered])].sort((a, b) => a - b), source: 'v8' } : fc
+    out[f] = cur ? { ...cur, ...mergeFileEvidence(cur, fc), lines: [...new Set([...cur.lines, ...fc.lines])].sort((a, b) => a - b), covered: [...new Set([...cur.covered, ...fc.covered])].sort((a, b) => a - b), source: cur.source ?? fc.source ?? 'v8' } : fc
   }
+  return out
+}
+
+function mergeFileEvidence(a, b) {
+  const out = {}
+  for (const key of ['sources', 'failures', 'spans']) {
+    if (a[key] || b[key]) out[key] = [...new Map([...(a[key] ?? []), ...(b[key] ?? [])].map((v) => [JSON.stringify(v), v])).values()]
+  }
+  for (const key of ['branches', 'functions']) {
+    if (!a[key] && !b[key]) continue
+    const ranges = new Map()
+    for (const r of [...(a[key] ?? []), ...(b[key] ?? [])]) {
+      const k = r.key ?? `${r.start}-${r.end}`
+      ranges.set(k, { ...r, covered: r.covered || ranges.get(k)?.covered || false })
+    }
+    out[key] = [...ranges.values()]
+  }
+  if (a.load_status || b.load_status) out.load_status = [a.load_status, b.load_status].includes('loaded') || a.source === 'v8' || b.source === 'v8' ? 'loaded' : a.load_status ?? b.load_status
   return out
 }
 
@@ -244,10 +386,11 @@ export function coverageGate({ coverage, added, thresholds = COVERAGE_THRESHOLDS
   const gated = Object.fromEntries(GATED_METRICS.map((k) => [k, thresholds[k]]))
   const reference = Object.fromEntries(BASELINE_METRICS.map((k) => [k, thresholds[k]]))
   const gate = { step: stepId, provider: 'v8 (vitest --coverage)', thresholds_source: COVERAGE_SOURCE, thresholds: gated, gated_metrics: [...GATED_METRICS], baseline: null, values: null, results: null, status: 'unavailable', pass: null, new_code: null, new_code_method: NEW_CODE_METHOD, reason: null, blocking: false, level: 'info' }
+  gate.mapping = coverageMapping({ added: diffError ? null : added, results: [{ id: stepId, coverage }] })
   if (!coverage || coverage.status !== 'ok') { gate.reason = coverage?.reason ?? 'unit step did not run with coverage'; return gate }
-  const nc = diffError || !coverage.files ? null : newCodeCoverage(added, coverage.files)
+  const nc = diffError || !coverage.files ? null : newCodeCoverage(added, mergeCoverageFiles(coverage.evidence, coverage.files))
   gate.new_code = nc ?? { pct: null, reason: diffError ?? 'per-line coverage unavailable' }
-  gate.values = { lines: coverage.total.lines, branches: coverage.total.branches, functions: coverage.total.functions, new_code: nc?.pct ?? null }
+  gate.values = { lines: coverage.total?.lines ?? null, branches: coverage.total?.branches ?? null, functions: coverage.total?.functions ?? null, new_code: nc?.pct ?? null }
   gate.baseline = { role: 'trend-only (recorded, never gated, never a finding)', lines: gate.values.lines, branches: gate.values.branches, functions: gate.values.functions, reference }
   gate.results = Object.fromEntries([
     ...BASELINE_METRICS.map((k) => [k, 'baseline']),

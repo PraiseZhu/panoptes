@@ -69,12 +69,19 @@ function mergeCounters(target, tMap, src, sMap, mapName, cntName, isBranch = fal
     } else target[cntName][tid] = (target[cntName][tid] ?? 0) + (src[cntName][id] ?? 0)
   }
 }
-export function mergeCoverageFinal(finals) {
+export function mergeCoverageFinal(finals, { sources = [] } = {}) {
   const out = {}
-  for (const f of finals.filter(Boolean)) {
+  for (const [i, f] of finals.entries()) {
+    if (!f) continue
     for (const [file, fc] of Object.entries(f)) {
-      if (!out[file]) { out[file] = structuredClone(fc); continue }
+      const source = sources[i] ?? { shard: i + 1, provider: 'istanbul' }
+      const provenance = fc.coverage_sources?.length ? fc.coverage_sources : [source]
+      if (!out[file]) { out[file] = { ...structuredClone(fc), coverage_sources: structuredClone(provenance) }; continue }
       const t = out[file]
+      t.coverage_sources = [...new Map([...t.coverage_sources, ...provenance].map((s) => [JSON.stringify(s), structuredClone(s)])).values()]
+      // Istanbul all:true 是插桩占位，任何一片真实加载后就不再是 unloaded。
+      if ('all' in t || 'all' in fc) t.all = t.all === true && fc.all === true
+      t.coverage_failures = [...(t.coverage_failures ?? []), ...(fc.coverage_failures ?? [])]
       t.statementMap ??= {}; t.s ??= {}; t.fnMap ??= {}; t.f ??= {}; t.branchMap ??= {}; t.b ??= {}
       mergeCounters(t, t.statementMap, fc, fc.statementMap ?? {}, 'statementMap', 's')
       mergeCounters(t, t.fnMap, fc, fc.fnMap ?? {}, 'fnMap', 'f')
@@ -82,6 +89,17 @@ export function mergeCoverageFinal(finals) {
     }
   }
   return out
+}
+
+// 供证据契约消费者使用：缺片保留可用数据，同时明确整份结果 unavailable。
+export function mergeCoverageShards(shards) {
+  const sources = shards.map((s, i) => ({ shard: s?.shard ?? i + 1, ...(s?.step ? { step: s.step } : {}), provider: s?.provider ?? 'istanbul' }))
+  const failures = shards.flatMap((s, i) => !s?.final || (s.status && s.status !== 'ok')
+    ? [{ ...sources[i], reason: s?.reason ?? 'coverage-shard-missing', load_status: 'unknown' }] : [])
+  const files = mergeCoverageFinal(shards.map((s) => s?.status && s.status !== 'ok' ? null : s?.final), { sources })
+  if (failures.length) for (const fc of Object.values(files)) fc.coverage_failures = [...(fc.coverage_failures ?? []), ...failures]
+  return { status: failures.length || !shards.length ? 'unavailable' : 'ok', files, sources, failures,
+    ...(failures.length || !shards.length ? { reason: 'coverage-shards-incomplete' } : {}) }
 }
 
 // coverage-summary.json 的 total（istanbul 口径：行 = 语句起始行，同一行取最大命中数）
