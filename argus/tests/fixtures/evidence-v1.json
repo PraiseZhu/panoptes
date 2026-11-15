@@ -1,0 +1,5 @@
+{
+  "schema_version": "1.0",
+  "run": { "id": "legacy-run" },
+  "prs": [{ "number": 1, "verdict": "clean", "findings": [] }]
+}

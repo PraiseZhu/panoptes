@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { execFileSync, spawnSync } from 'node:child_process'
 
 process.env.ARGUS_ROOT ??= mkdtempSync(join(tmpdir(), 'argus-cov8-'))
-const { newCodeCoverage, readV8Dir, mapToRepo, mergeCoverageFiles, coverageGate } = await import('../src/coverage.mjs')
+const { newCodeCoverage, readV8Dir, readV8Report, coverageMapping, mapToRepo, mergeCoverageFiles, coverageGate } = await import('../src/coverage.mjs')
 const { withV8Coverage } = await import('../src/runner.mjs')
 
 const SRC = `export function used(x) {
@@ -118,7 +118,51 @@ test('child V8 data whose script length differs from the repo file (transpiled /
   const url = pathToFileURL(join(root, 'src/x.ts')).href
   writeFileSync(join(v8, 'c.json'), JSON.stringify({ result: [{ url, functions: [{ ranges: [{ startOffset: 0, endOffset: src.length - 10, count: 1 }] }] }] }))
   const got = readV8Dir(v8, root, { index: ['src/x.ts'] })
+  assert.equal(got['src/x.ts'], undefined, 'invalid offsets must not create a loaded 0%-covered file')
+  const report = readV8Report(v8, root, { index: ['src/x.ts'] })
+  assert.deepEqual(report.unmeasurable, [{ file: 'src/x.ts', status: 'not_measurable', reason: 'source-length-mismatch' }])
+  const mapping = coverageMapping({ added: { 'src/x.ts': [{ line: 2, text: 'return 1' }] }, results: [{ id: 'node-test', coverage: report }] })
+  assert.equal(mapping.files[0].lines.status, 'not_measurable')
+  assert.equal(mapping.files[0].load_status, 'unknown')
   const merged = mergeCoverageFiles({ 'src/x.ts': { lines: [2, 5], covered: [] } }, got)
-  const assert = (await import('node:assert/strict')).default
   assert.deepEqual(merged['src/x.ts'].covered, [])
+})
+
+test('V8 report classification: missing, malformed, invalid and byte-limited reports are unavailable', () => {
+  const root = repo(), cov = join(root, '.v8-broken')
+  assert.equal(readV8Report(cov, root).status, 'unavailable')
+  mkdirSync(cov)
+  assert.equal(readV8Report(cov, root).reason, 'coverage-not-produced')
+  writeFileSync(join(cov, 'coverage.json'), '{broken')
+  assert.equal(readV8Report(cov, root).reason, 'coverage-report-unreadable')
+  writeFileSync(join(cov, 'coverage.json'), '{}')
+  assert.equal(readV8Report(cov, root).reason, 'coverage-report-invalid')
+  assert.equal(readV8Report(cov, root, { maxBytes: 1 }).reason, 'coverage-byte-budget-exceeded')
+})
+
+test('real node subprocess report maps changed JS lines to the originating step', () => {
+  const root = repo(), cov = join(root, '.v8-step')
+  assert.equal(runNode(join(root, 'scripts/ops/lib/a.mjs'), cov).status, 0)
+  const report = readV8Report(cov, root, { stepId: 'node-test' })
+  assert.equal(report.status, 'ok')
+  const changed = { 'scripts/ops/lib/a.mjs': [{ line: 2, text: 'return x + 1' }, { line: 5, text: 'const y = x * 2' }] }
+  const mapping = coverageMapping({ added: changed, results: [{ id: 'node-test', coverage: report }] })
+  assert.deepEqual(mapping.files[0].lines.changed.map((r) => r.status), ['pass', 'fail'])
+  assert.deepEqual(mapping.files[0].sources, [{ provider: 'v8', step: 'node-test' }])
+  assert.equal(mapping.files[0].functions.status, 'not_evaluated', 'raw line data does not claim function coverage')
+})
+
+test('merging compact evidence keeps sources, loading state, ranges and failure reasons', () => {
+  const primary = { 'src/a.ts': { lines: [2], covered: [], spans: [[1, 3, false]], load_status: 'unloaded',
+    sources: [{ step: 'unit', shard: 1 }], branches: [{ key: 'b', start: 2, end: 2, covered: false }], failures: [{ reason: 'partial-shard' }] } }
+  const child = { 'src/a.ts': { lines: [2, 3], covered: [2, 3], source: 'v8', sources: [{ step: 'node-test' }],
+    branches: [{ key: 'b', start: 2, end: 2, covered: true }] } }
+  const merged = mergeCoverageFiles(primary, child)['src/a.ts']
+  assert.deepEqual(merged.lines, [2], 'primary executable statement scope is preserved')
+  assert.deepEqual(merged.covered, [2])
+  assert.equal(merged.load_status, 'loaded')
+  assert.deepEqual(merged.sources, [{ step: 'unit', shard: 1 }, { step: 'node-test' }])
+  assert.equal(merged.branches[0].covered, true)
+  assert.deepEqual(merged.failures, [{ reason: 'partial-shard' }])
+  assert.deepEqual(primary['src/a.ts'].covered, [], 'inputs remain unchanged')
 })

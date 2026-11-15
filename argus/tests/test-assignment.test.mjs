@@ -7,11 +7,24 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 process.env.ARGUS_ROOT ??= mkdtempSync(join(tmpdir(), 'argus-assign-'))
-const { toStepPlan, toCoverage, stepExercises } = await import('../src/matrix.mjs')
+const { toStepPlan, toCoverage, stepExercises, toTestAssignment, requiredStepsForFile } = await import('../src/matrix.mjs')
 const { withDimensionStatus, ownTestsNotRun } = await import('../src/nightly.mjs')
 const { toAiGaps, fileKind, aiTestTier } = await import('../src/aitests.mjs')
 const { normalizeTestOutcomes } = await import('../src/test-outcomes.mjs')
 const { loadProfile } = await import('../src/config.mjs')
+const { changeFileKind, changeKinds, isRunnableTestPath } = await import('../src/classify.mjs')
+
+test('变更分类稳定区分文档、测试、脚本、夹具、浏览器和持久化', () => {
+  for (const [path, kind] of Object.entries({
+    'docs/guide.md': 'docs', 'src/x.test.ts': 'test', '.github/scripts/tests/x.node-test.mjs': 'node-test',
+    'scripts/check.mjs': 'script', 'scripts/README.md': 'script', 'src/x-fixture.ts': 'fixture',
+    'fixtures/data.json': 'fixture', 'src/Panel.tsx': 'browser', 'src/store/persistIdbStorage.ts': 'persistence',
+    'server/db/projects.ts': 'persistence', 'src/fixtureLoader.ts': 'source',
+  })) assert.equal(changeFileKind(path), kind, path)
+  assert.deepEqual(changeKinds(F('src/x.test.ts', 'src/y.test.ts')), ['test'])
+  assert.equal(isRunnableTestPath('src/x-fixture.ts'), false)
+  assert.equal(isRunnableTestPath('src/x.test.ts'), true)
+})
 
 const F = (...names) => names.map((filename) => ({ filename }))
 const mivo = loadProfile('mivo-canvas-plugin')
@@ -86,4 +99,76 @@ test('fileKind：scripts/ci/** 归 CI，ghost.json 归配置；版本号 PR 不�
   const t = aiTestTier({ files: [{ filename: 'cindyplugin/ghost.json', additions: 1, deletions: 1 }, { filename: 'public/changelog.json', additions: 5, deletions: 0 }], riskClass: 'C', env: {} })
   assert.equal(t.tier.type, 'docs'); assert.equal(t.tier.tier, 'none')
   assert.equal(aiTestTier({ files: [{ filename: 'scripts/ci/structure-guard.mjs', additions: 80, deletions: 4 }], riskClass: 'B', env: {} }).tier.type, 'ci')
+})
+
+test('test-only 强制命中实际 runner，fixture 触发测试但不要求作为独立用例执行', () => {
+  const files = F('src/a.test.ts', '.github/scripts/tests/a.node-test.mjs', 'src/a-fixture.ts')
+  const plan = toStepPlan({ profile: mivo, riskClass: 'B', triage: unrelated, files })
+  assert.ok(plan.stepIds.includes('unit'))
+  assert.ok(plan.stepIds.includes('node-test'))
+  assert.deepEqual(requiredStepsForFile(mivo, files[1]), ['node-test'])
+  const out = toTestAssignment({ profile: mivo, files, results: [{ id: 'unit', ok: true,
+    testOutcomes: [{ caseId: 'src/a.test.ts > a', status: 'passed' }] }] })
+  assert.deepEqual(out.own_tests_not_run, ['.github/scripts/tests/a.node-test.mjs'])
+  assert.equal(out.files[2].kind, 'fixture')
+  assert.equal(out.files[0].status, 'executed')
+})
+
+test('own-tests-not-run 要依据具体用例；runner 成功、空报告、skipped 用例不等于测试被执行', () => {
+  const files = F('src/a.test.ts')
+  for (const testOutcomes of [[], [{ caseId: 'src/a.test.ts > a', status: 'skipped' }], [{ caseId: 'src/b.test.ts > a', status: 'passed' }]]) {
+    const out = toTestAssignment({ profile: mivo, files, results: [{ id: 'unit', ok: true, testOutcomes }] })
+    assert.deepEqual(out.own_tests_not_run, ['src/a.test.ts'])
+    assert.equal(out.files[0].status, 'own-tests-not-run')
+  }
+  const failed = toTestAssignment({ profile: mivo, files, results: [{ id: 'unit', ok: false, testOutcomes: [{ caseId: 'src/a.test.ts > a', status: 'failed' }] }] })
+  assert.equal(failed.files[0].status, 'executed', '失败的用例也确实执行过')
+  assert.deepEqual(toTestAssignment({ profile: mivo, files: [{ filename: 'src/a.test.ts', status: 'removed' }] }).files, [])
+})
+
+test('script、browser、persistence 必须分配对应 profile step，docs-only 不伪造产品测试要求', () => {
+  for (const [filename, id] of [['.github/scripts/guard.mjs', 'node-test'], ['src/Panel.tsx', 'e2e-browser'], ['src/store/persistIdbStorage.ts', 'e2e-legacy-migration']]) {
+    const plan = toStepPlan({ profile: mivo, riskClass: 'B', triage: unrelated, files: F(filename) })
+    assert.ok(plan.stepIds.includes(id), filename)
+    assert.ok(plan.assignments[0].required_steps.includes(id), filename)
+  }
+  const docs = toStepPlan({ profile: mivo, riskClass: 'A', triage: unrelated, files: F('docs/guide.md') })
+  assert.deepEqual(docs.assignments[0].required_steps, [])
+  assert.equal(docs.skipped.find((s) => s.id === 'e2e-browser').reason, 'docs-only')
+})
+
+test('browser unavailable 显式记录缺失能力，不算 executed 或维度已覆盖', () => {
+  const profile = { steps: [{ id: 'browser', optional: true, kind: 'product', covers: ['ui'],
+    applicability: { changeKinds: ['browser'] }, exercises: ['src/**'] }], testCapabilities: mivo.testCapabilities }
+  for (const flags of [{ unavailable: true }, { status: 'environment_unavailable' }, { status: 'skipped' }]) {
+    const out = toCoverage({ profile, files: F('src/Panel.tsx'), triage: { rows: [{ key: 'ui', verdict: 'applicable' }] },
+      results: [{ id: 'browser', ok: true, ...flags, reason: 'Chromium unavailable' }] })
+    assert.deepEqual(out.covered, [])
+    assert.deepEqual(out.test_assignment.files[0].executed_steps, [])
+    assert.equal(out.test_assignment.files[0].status, 'unavailable')
+    assert.equal(out.test_assignment.files[0].skipped_steps[0].reason, 'Chromium unavailable')
+    assert.equal(out.test_assignment.capabilities.windows.status, 'unavailable')
+    assert.equal(out.test_assignment.capabilities.pg.status, 'unavailable')
+  }
+})
+
+test('toCoverage derives changed-line evidence from patch and real reports, not covers metadata', () => {
+  const profile = { steps: [{ id: 'unit', covers: ['unit'] }] }
+  const files = [{ filename: 'src/a.ts', patch: '@@ -1 +1 @@\n-old()\n+newCode()' }]
+  const results = [{ id: 'unit', ok: true, coverage: { status: 'ok', files: { 'src/a.ts': { lines: [1], covered: [1] } } } }]
+  const out = toCoverage({ profile, files, results, triage: { rows: [{ key: 'unit', verdict: 'applicable' }] } })
+  assert.deepEqual(out.changed_source.files[0].lines.changed[0].covered_by, ['unit'])
+  const noCoverage = toCoverage({ profile, files, results: [{ id: 'unit', ok: true }], triage: { rows: [] } })
+  assert.equal(noCoverage.changed_source.files[0].lines.status, 'not_evaluated')
+})
+
+test('profile evidence fields do not alter target repo commands', () => {
+  for (const step of mivo.steps.filter((s) => s.kind !== 'setup')) {
+    assert.ok(step.skipPolicy, step.id)
+    assert.ok(step.applicability, step.id)
+    assert.ok(step.coveragePolicy, step.id)
+  }
+  assert.deepEqual(step('unit').cmd.slice(0, 3), ['npm', 'run', 'test:unit'])
+  assert.equal(step('e2e-browser').coverage, undefined, '没有浏览器源码 coverage 的命令不强加 vitest 插桩')
+  assert.equal(step('e2e-browser').coveragePolicy.status, 'not_measurable')
 })

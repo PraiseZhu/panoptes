@@ -1,0 +1,190 @@
+import test, { after } from 'node:test'
+import assert from 'node:assert/strict'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+import { run, setBudget } from '../src/exec.mjs'
+import { runRequests } from '../src/probe-run.mjs'
+
+const root = mkdtempSync(join(tmpdir(), 'argus-deadline-'))
+process.env.ARGUS_ROOT = root
+after(() => { setBudget(null); rmSync(root, { recursive: true, force: true }) })
+const live = (pid) => {
+  // Linux containers can retain zombies until init reaps them; they cannot run.
+  try { if (/^\d+ \(.*\) Z /.test(readFileSync(`/proc/${pid}/stat`, 'utf8'))) return false } catch {}
+  try { process.kill(pid, 0); return true } catch { return false }
+}
+const waitGone = async (pid) => {
+  const end = Date.now() + 1500
+  while (live(pid) && Date.now() < end) await new Promise((r) => setTimeout(r, 20))
+  assert.equal(live(pid), false, `process ${pid} survived cleanup`)
+}
+test('probe fetch TimeoutError is timeout, never environment_unavailable', async () => {
+  const result = await runRequests('http://127.0.0.1:1', [{ id: 'hang', path: '/', expect: { status: 200 } }], {
+    fetchImpl: async () => { throw new DOMException('request timed out', 'TimeoutError') },
+  })
+  assert.equal(result.checks[0].status, 'timeout')
+  assert.equal(result.status, 'timeout')
+})
+for (const failure of ['HTTP 500', 'assertion mismatch', 'connection refused']) {
+  test(`probe repeat preserves ${failure} when a later request times out`, async () => {
+    let calls = 0
+    const result = await runRequests('http://example.invalid', [{
+      id: 'repeat', path: '/', repeat: 2, expect: { status: 200, json: { ok: true } },
+    }], {
+      fetchImpl: async () => {
+        if (calls++ > 0) throw new DOMException('request timed out', 'TimeoutError')
+        if (failure === 'connection refused') throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } })
+        return new Response('{"ok":false}', { status: failure === 'HTTP 500' ? 500 : 200 })
+      },
+    })
+    assert.equal(calls, 2)
+    assert.equal(result.checks[0].status, 'fail')
+    assert.equal(result.status, 'fail')
+    assert.match(result.checks[0].reason, failure === 'HTTP 500' ? /500/ : failure === 'assertion mismatch' ? /字段 ok/ : /request failed/)
+    assert.match(result.checks[0].reason, /timed out/)
+  })
+}
+test('probe step preserves a failed check alongside a separate timeout', async () => {
+  for (const paths of [['/fail', '/timeout'], ['/timeout', '/fail']]) {
+    const result = await runRequests('http://example.invalid', paths.map((path) => ({ id: path, path, expect: { status: 200 } })), {
+      fetchImpl: async (url) => {
+        if (url.endsWith('/timeout')) throw new DOMException('request timed out', 'TimeoutError')
+        return new Response('broken', { status: 500 })
+      },
+    })
+    assert.equal(result.status, 'fail')
+    assert.equal(result.checks.find((c) => c.id === '/fail').status, 'fail')
+    assert.match(result.checks.find((c) => c.id === '/fail').reason, /500/)
+    assert.equal(result.checks.find((c) => c.id === '/timeout').status, 'timeout')
+  }
+})
+test('probe timeout does not create assertion, sameAs or capture failures from absent responses', async () => {
+  for (const allTimeout of [false, true]) {
+    let calls = 0
+    const result = await runRequests('http://example.invalid', [{
+      id: 'repeat', path: '/', repeat: 2, expect: { status: 200, json: { id: 'ok' } }, sameAs: ['id'], capture: { saved: 'id' },
+    }], {
+      fetchImpl: async () => {
+        if (calls++ > 0 || allTimeout) throw new DOMException('request timed out', 'TimeoutError')
+        return new Response('{"id":"ok"}', { status: 200 })
+      },
+    })
+    assert.equal(result.status, 'timeout')
+    assert.equal(result.checks[0].status, 'timeout')
+    assert.match(result.checks[0].reason, /timed out/)
+  }
+})
+test('probe only attributes explicit network environment errors to environment', async () => {
+  const request = [{ id: 'network', path: '/', expect: { status: 200 } }]
+  for (const code of ['ENOTFOUND', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH', 'ECONNRESET', 'ECONNREFUSED', 'UNKNOWN']) {
+    const result = await runRequests('http://example.invalid', request, { fetchImpl: async () => { throw Object.assign(new TypeError('fetch failed'), { cause: { code } }) } })
+    assert.equal(result.status, ['ENOTFOUND', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH'].includes(code) ? 'environment_unavailable' : 'fail')
+  }
+})
+for (const ignoreTerm of [false, true]) {
+  test(`never-ending child: TERM${ignoreTerm ? '/KILL escalation' : ''} ends within budget + 5s`, async () => {
+    const code = `${ignoreTerm ? 'process.on("SIGTERM", () => {});' : ''}console.log(process.pid); setInterval(() => {}, 1000)`
+    const result = await run(process.execPath, ['-e', code], { timeoutMs: 350, killGraceMs: 100 })
+    assert.equal(result.status, 'timeout')
+    assert.equal(result.ok, false)
+    assert.equal(result.timedOut, true)
+    assert.ok(result.durationMs < 5350)
+    assert.equal(result.signal, ignoreTerm ? 'SIGKILL' : 'SIGTERM')
+    await waitGone(Number(result.tail.trim()))
+  })
+}
+test('timeout reaps grandchildren even when server parent handles TERM by exiting', async () => {
+  const code = `const { spawn } = require('node:child_process'); const c = spawn(process.execPath, ['-e', 'process.on("SIGTERM",()=>{});setInterval(()=>{},1000)'], {stdio:'ignore'}); console.log(c.pid); setInterval(()=>{},1000)`
+  const result = await run(process.execPath, ['-e', code], { timeoutMs: 400, killGraceMs: 100 })
+  assert.equal(result.status, 'timeout')
+  await waitGone(Number(result.tail.trim()))
+})
+test('leader exiting successfully still reaps descendants holding output pipes', async () => {
+  const code = `const { spawn } = require('node:child_process'); const c = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {stdio:['ignore',1,2]}); console.log(c.pid); c.unref()`
+  const result = await run(process.execPath, ['-e', code], { timeoutMs: 1000 })
+  assert.equal(result.status, 'pass')
+  await waitGone(Number(result.tail.trim()))
+})
+test('expired run budget does not spawn a child; remaining budget bounds child timeout', async () => {
+  const sentinel = join(root, 'should-not-exist')
+  try {
+    setBudget(Date.now() - 1)
+    const result = await run(process.execPath, ['-e', `require('fs').writeFileSync(${JSON.stringify(sentinel)},'bad')`])
+    assert.equal(result.status, 'timeout'); assert.equal(result.budgetExceeded, true)
+    assert.equal(existsSync(sentinel), false)
+    setBudget(Date.now() + 100)
+    const bounded = await run(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { timeoutMs: 10_000, killGraceMs: 100 })
+    assert.equal(bounded.status, 'timeout'); assert.equal(bounded.budgetExceeded, true)
+    assert.ok(bounded.durationMs < 5100)
+  } finally { setBudget(null) }
+})
+test('runSteps bounds beforeStep, execution, total run and environment preconditions', async () => {
+  const { newRunDir, runSteps, cleanupRun } = await import('../src/runner.mjs')
+  const dir = newRunDir(287, 'deadlines')
+  const src = join(dir, 'src'); mkdirSync(src)
+  const step = { id: 'never', kind: 'product', cmd: [process.execPath, '-e', 'setInterval(()=>{},1000)'], timeoutMs: 100 }
+  try {
+    const [blocked] = await runSteps({ sandbox: false, steps: [step] }, src, dir, { beforeStep: () => new Promise(() => {}) })
+    assert.equal(blocked.status, 'timeout')
+    const [timed] = await runSteps({ sandbox: false, steps: [step] }, src, dir)
+    assert.equal(timed.status, 'timeout')
+    const [suite] = await runSteps({ sandbox: false, steps: [{ ...step, timeoutMs: 10_000 }] }, src, dir, { timeoutMs: 100 })
+    assert.equal(suite.status, 'timeout'); assert.ok(suite.durationMs < 5100)
+    const [missing] = await runSteps({ sandbox: false, steps: [{ ...step, binary: { names: ['argus-missing-287'], var: 'MISSING' } }] }, src, dir)
+    assert.equal(missing.status, 'environment_unavailable'); assert.equal(missing.ok, false)
+  } finally { await cleanupRun(null, dir) }
+})
+test('single Node test budget reports timeout before the suite budget expires', async () => {
+  const file = join(root, 'single-hang.test.mjs')
+  writeFileSync(file, `import { test } from 'node:test'; test('never', async () => new Promise(()=>{setInterval(()=>{},1000)}))`)
+  const env = { ...process.env, ARGUS_TEST_SUITE_TIMEOUT_MS: '4000', ARGUS_TEST_TIMEOUT_MS: '150' }
+  delete env.NODE_TEST_CONTEXT
+  const result = await run('bash', [resolve('run-tests.sh'), file], { env, timeoutMs: 7000 })
+  assert.equal(result.exitCode, 124)
+  assert.match(result.tail, /"status":"timeout","budget_ms":150/)
+  assert.ok(result.durationMs < 5150)
+})
+for (const immediateExit of [false, true]) {
+test(`executor owner termination cleans its detached child group${immediateExit ? ' with immediate process.exit' : ''}`, async () => {
+  const module = new URL('../src/exec.mjs', import.meta.url).href
+  const file = join(root, 'owner.mjs')
+  writeFileSync(file, `import {run,killAllActive} from ${JSON.stringify(module)};
+    ${immediateExit ? "process.once('SIGTERM',()=>{killAllActive();process.exit(143)});" : ''}
+    const p = run(process.execPath, ['-e','console.log(process.pid);process.on("SIGTERM",()=>{});setInterval(()=>{},1000)'], {inheritOutput:true,timeoutMs:10000,killGraceMs:100});
+    setTimeout(()=>process.kill(process.pid,'SIGTERM'),350);await p;`)
+  const result = await run(process.execPath, [file], { timeoutMs: 3000 })
+  assert.equal(result.exitCode, 143)
+  await waitGone(Number(result.tail.trim()))
+})
+}
+test('shell entry preserves test arguments and bounds an entire hanging suite', async () => {
+  const file = join(root, 'hanging.test.mjs')
+  writeFileSync(file, `import { test } from 'node:test'; test('never', async () => new Promise(()=>{setInterval(()=>{},1000)}))`)
+  const env = { ...process.env, ARGUS_TEST_SUITE_TIMEOUT_MS: '800', ARGUS_TEST_TIMEOUT_MS: '10000' }
+  delete env.NODE_TEST_CONTEXT
+  const result = await run('bash', [resolve('run-tests.sh'), file], { cwd: resolve('.'), env, timeoutMs: 7000 })
+  assert.equal(result.exitCode, 124)
+  assert.match(result.tail, /"status":"timeout"/)
+  assert.ok(result.durationMs < 5800)
+})
+test('shell entry preserves caller reporters and test name filters', async () => {
+  const file = join(root, 'selected.test.mjs')
+  writeFileSync(file, `import {test} from 'node:test'; test('selected',()=>{}); test('excluded',()=>{throw new Error('filter lost')})`)
+  const env = { ...process.env }
+  delete env.NODE_TEST_CONTEXT
+  const result = await run('bash', [resolve('run-tests.sh'), '--test-reporter=dot', '--test-name-pattern=selected', file], { env, timeoutMs: 4000 })
+  assert.equal(result.exitCode, 0, result.tail)
+  assert.ok(result.tail.includes('.'))
+  assert.doesNotMatch(result.tail, /filter lost|ERR_INVALID_ARG_VALUE/)
+})
+test('probe timeout cleans server and reports timeout even when server ignores TERM', async () => {
+  const spec = join(root, 'probe.json')
+  const pidfile = join(root, 'server.pid')
+  writeFileSync(spec, JSON.stringify({ timeoutMs: 600, portEnv: 'PORT', ready: { timeoutSec: 30 }, requests: [],
+    start: [process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(pidfile)},String(process.pid));process.on('SIGTERM',()=>{});setInterval(()=>{},1000)`] }))
+  const result = await run(process.execPath, [resolve('src/probe-run.mjs'), spec], { timeoutMs: 6000 })
+  assert.equal(result.exitCode, 124)
+  assert.equal(JSON.parse(readFileSync(join(root, 'probe.report.json'), 'utf8')).status, 'timeout')
+  await waitGone(Number(readFileSync(pidfile, 'utf8')))
+})

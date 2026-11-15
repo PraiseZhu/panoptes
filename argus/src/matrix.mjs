@@ -1,6 +1,8 @@
 // 适用性矩阵：ming-qa 的 29 个维度（4 执行层 / 10 用例类型 / 10 风险 / 5 判定依据）。
 // 三件事分开：Jev 判断「涉及 / 拿不准」；「不适用」只来自 profile 明文；「测到没有」由代码按步骤的 covers 和真实结果计算。
-import { classifyChange, globToRegExp, highRiskFiles, isTestPath, isTestsOnly } from './classify.mjs'
+import { classifyChange, globToRegExp, highRiskFiles, isTestPath, isTestsOnly, isRunnableTestPath, changeFileKind, stepExercises, stepRunsChangedFile, requiredStepsForFile } from './classify.mjs'
+export { stepExercises, stepRunsChangedFile, requiredStepsForFile } from './classify.mjs'
+import { coverageMapping, parseAddedLines } from './coverage.mjs'
 import { toReadableTitle } from './util.mjs'
 
 const q = (what) => `Could this code change plausibly affect ${what}? Answer yes only if the changed files, title or description clearly touch it.`
@@ -115,14 +117,25 @@ export function toTriage({ profile, files, jev, handoff = null }) {
     ...(handoff?.present ? { context: { risks: handoff.risks, boundaries: handoff.boundaries } } : {}) }
 }
 
-const matchesAny = (path, globs) => globs.some((g) => globToRegExp(g).test(path))
-// 步骤实际测的路径（step.exercises）：没写 = 整个仓；改动文件列表拿不到时也按碰到算（保守）
-export function stepExercises(step, paths) {
-  if (!step.exercises || !paths?.length) return true
-  return paths.some((p) => matchesAny(p, step.exercises))
+// 执行证据与分配分开：covers、被计划执行、报告里的 skipped 都不能证明测试实际运行。
+export function toTestAssignment({ profile, files = [], results = [] }) {
+  const assignments = files.filter((f) => f.status !== 'removed').map((f) => {
+    const required = requiredStepsForFile(profile, f)
+    const ownTest = isRunnableTestPath(f.filename)
+    const ranOwn = (r) => (r.testOutcomes ?? []).some((t) => String(t.caseId).split(' > ')[0] === f.filename && ['passed', 'failed'].includes(t.status))
+    const relevant = results.filter((r) => required.includes(r.id) || (ownTest && ranOwn(r)))
+    const usable = (r) => !r.unavailable && !r.timedOut && !r.timed_out
+      && !['unavailable', 'skipped', 'timeout', 'runner_error', 'environment_unavailable'].includes(r.status)
+      && !r.runner_error && !r.runnerError && !r.environment_unavailable
+    const executed = relevant.filter((r) => usable(r) && (ownTest ? ranOwn(r) : r.ok === true || r.exitCode != null)).map((r) => r.id)
+    const status = executed.length ? 'executed' : ownTest ? 'own-tests-not-run' : relevant.some((r) => !usable(r)) ? 'unavailable' : required.length ? 'not_run' : 'not_applicable'
+    return { file: f.filename, kind: changeFileKind(f.filename), required_steps: required,
+      executed_steps: [...new Set(executed)], status,
+      skipped_steps: relevant.filter((r) => !usable(r)).map((r) => ({ step: r.id, status: r.status ?? 'unavailable', reason: r.unavailableReason ?? r.reason ?? 'step-unavailable' })) }
+  })
+  return { files: assignments, own_tests_not_run: assignments.filter((a) => a.status === 'own-tests-not-run').map((a) => a.file),
+    capabilities: profile.testCapabilities ?? {} }
 }
-// 改动里有这一步自己执行的测试文件（step.runsFiles）：这一步必须跑
-export const stepRunsChangedFile = (step, paths) => (paths ?? []).find((p) => matchesAny(p, step.runsFiles ?? []))
 
 // 选步骤：基线（非 optional）步骤 B/C 级都跑；可选步骤在改动含它执行的测试文件、C 级且高风险文件落在它测的路径（exercises）里、
 // 分诊没做、或覆盖的维度里有「涉及 / 拿不准」时才跑
@@ -134,12 +147,16 @@ export function toStepPlan({ profile, riskClass, triage, files = [], forceStepId
   const paths = files.map((f) => f.filename)
   const cHits = highRiskFiles(files, profile)
   const commentOnly = classifyChange(files, profile).changeKind === 'comment-only'
+  const required = new Set(files.flatMap((f) => requiredStepsForFile(profile, f)))
+  const docsOnly = files.length > 0 && files.every((f) => changeFileKind(f.filename) === 'docs')
   const run = []
   const skipped = []
   for (const s of profile.steps) {
     if (s.kind === 'setup' || !s.optional) { run.push(s.id); continue }
     if (stepRunsChangedFile(s, paths)) { run.push(s.id); continue }
     if (forced.has(s.id)) { run.push(s.id); continue }
+    if (required.has(s.id)) { run.push(s.id); continue }
+    if (docsOnly) { skipped.push({ id: s.id, nameZh: s.nameZh, reason: 'docs-only', reasonZh: '只改说明文档，不分配可选产品测试' }); continue }
     if (commentOnly && (s.covers ?? []).includes('performance')) { skipped.push({ id: s.id, nameZh: s.nameZh, reasonZh: '只改了注释，不跑性能基准' }); continue }
     if (riskClass === 'C' && stepExercises(s, cHits)) { run.push(s.id); continue }
     if (!triage || triage.status !== 'ok') { run.push(s.id); continue }
@@ -147,7 +164,7 @@ export function toStepPlan({ profile, riskClass, triage, files = [], forceStepId
     if (wanted.length) run.push(s.id)
     else skipped.push({ id: s.id, nameZh: s.nameZh, reasonZh: `这次改动看起来不涉及${(s.covers ?? []).map(toDimensionLabel).join('、') || '它覆盖的方面'}` })
   }
-  return { stepIds: run, skipped }
+  return { stepIds: run, skipped, assignments: files.map((f) => ({ file: f.filename, kind: changeFileKind(f.filename), required_steps: requiredStepsForFile(profile, f) })) }
 }
 
 // 覆盖：某维度被判「涉及」，且有一步 covers 含它、该步真实跑过且没有这个 PR 带来的新失败，才算测到。
@@ -158,12 +175,16 @@ export function toCoverage({ profile, triage, results, knownOnlyStepIds = [], fi
   const knownOnly = new Set(knownOnlyStepIds)
   const aiSteps = new Set(profile.steps.filter((s) => s.aiGenerated).map((s) => s.id))
   // AI 补测只有通过当前代码和植入错误验证后才有效；合并前也失败不能替代有效性验证。
-  const okSteps = new Set((results ?? []).filter((r) => r.kind !== 'setup' && !r.unavailable && !r.timedOut && r.testOutcomeStatus !== 'incomplete' && (r.ok || (knownOnly.has(r.id) && !aiSteps.has(r.id)))).map((r) => r.id))
+  const available = (r) => !r.unavailable && !r.timedOut && !r.timed_out && !r.runnerError && !r.runner_error && !r.environment_unavailable
+    && !['unavailable', 'skipped', 'timeout', 'runner_error', 'environment_unavailable'].includes(r.status)
+  const okSteps = new Set((results ?? []).filter((r) => r.kind !== 'setup' && available(r) && r.testOutcomeStatus !== 'incomplete' && (r.ok || (knownOnly.has(r.id) && !aiSteps.has(r.id)))).map((r) => r.id))
   const coveredBy = (key) => profile.steps.filter((s) => okSteps.has(s.id) && (s.covers ?? []).includes(key) && stepExercises(s, paths)).map((s) => s.id)
   const applicable = (triage?.rows ?? []).filter((r) => r.verdict === 'applicable')
   const covered = applicable.filter((r) => coveredBy(r.key).length > 0)
-  const ran = (results ?? []).filter((r) => r.kind !== 'setup' && !r.unavailable)
+  const ran = (results ?? []).filter((r) => r.kind !== 'setup' && available(r))
   return {
+    test_assignment: toTestAssignment({ profile, files, results }),
+    changed_source: coverageMapping({ added: Object.assign({}, ...files.filter((f) => f.status !== 'removed' && f.patch).map((f) => parseAddedLines(`+++ b/${f.filename}\n${f.patch}`))), results: results ?? [], profile }),
     applicable: applicable.map((r) => r.key),
     covered: covered.map((r) => r.key),
     missed: applicable.filter((r) => !coveredBy(r.key).length).map((r) => r.key),

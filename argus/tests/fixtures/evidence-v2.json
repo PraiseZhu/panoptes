@@ -1,0 +1,34 @@
+{
+  "schema": "qa.evidence/v2",
+  "run_id": "run-20261115-1",
+  "tested_sha": "1111111111111111111111111111111111111111",
+  "base_sha": "2222222222222222222222222222222222222222",
+  "status": "failed",
+  "artifact_refs": ["head-result", "base-result"],
+  "artifacts": [
+    { "id": "head-result", "path": "runs/run-20261115-1/head/result.json", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "kind": "test-result" },
+    { "id": "base-result", "path": "runs/run-20261115-1/base/result.json", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "kind": "test-result" }
+  ],
+  "steps": [
+    {
+      "id": "unit-head", "run_id": "run-20261115-1",
+      "tested_sha": "1111111111111111111111111111111111111111", "base_sha": "2222222222222222222222222222222222222222",
+      "status": "fail", "phase": "head", "revision_sha": "1111111111111111111111111111111111111111",
+      "artifact_refs": ["head-result"], "exit_code": 1, "signal": null, "duration_ms": 10
+    },
+    {
+      "id": "unit-base", "run_id": "run-20261115-1",
+      "tested_sha": "1111111111111111111111111111111111111111", "base_sha": "2222222222222222222222222222222222222222",
+      "status": "pass", "phase": "base", "revision_sha": "2222222222222222222222222222222222222222",
+      "artifact_refs": ["base-result"], "exit_code": 0
+    }
+  ],
+  "findings": [
+    {
+      "id": "finding-1", "check_id": "unit-head", "run_id": "run-20261115-1",
+      "tested_sha": "1111111111111111111111111111111111111111", "base_sha": "2222222222222222222222222222222222222222",
+      "fingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "status": "pending_verification", "severity": null, "artifact_refs": ["head-result", "base-result"]
+    }
+  ]
+}
