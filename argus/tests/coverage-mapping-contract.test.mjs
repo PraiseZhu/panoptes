@@ -9,6 +9,7 @@ import { mergeCoverageFinal, mergeCoverageShards, coverageSummaryOf } from '../s
 process.env.ARGUS_ROOT ??= mkdtempSync(join(tmpdir(), 'coverage-mapping-runner-'))
 const { withV8Coverage } = await import('../src/runner.mjs')
 const { toCoverage } = await import('../src/matrix.mjs')
+const { loadProfile } = await import('../src/config.mjs')
 
 const added = { 'src/a.ts': [{ line: 2, text: 'return x ? yes() : no()' }] }
 const loc = (start, end = start) => ({ start: { line: start, column: 0 }, end: { line: end, column: 10 } })
@@ -134,6 +135,26 @@ test('an assigned unmeasurable layer prevents unrelated measured layers from imp
     results: [{ id: 'unit', coverage: { status: 'ok', files: { 'src/other.ts': { lines: [1], covered: [1] } } } }, { id: 'browser', ok: true }] })
   assert.equal(mapping.files[0].lines.status, 'not_measurable')
   assert.equal(mapping.files[0].lines.pct, null)
+})
+
+test('real Mivo profile retains measured unit coverage while reporting the browser measurement gap', () => {
+  const profile = loadProfile('mivo-canvas-plugin')
+  const changed = { 'src/Panel.tsx': [{ line: 2, text: 'return <Panel />' }] }
+  const unit = { id: 'unit', ok: true, coverage: { status: 'ok', files: { 'src/Panel.tsx': { lines: [2], covered: [2] } } } }
+  const browser = { id: 'e2e-browser', ok: true }
+  assert.equal(profile.steps.find((s) => s.id === browser.id).coveragePolicy.status, 'not_measurable')
+  const row = coverageMapping({ added: changed, profile, results: [unit, browser] }).files[0]
+  assert.equal(row.load_status, 'loaded')
+  assert.deepEqual(row.loaded_by, ['unit'])
+  assert.equal(row.lines.status, 'pass')
+  assert.equal(row.lines.pct, 100)
+  assert.equal(row.lines.total, 1)
+  assert.equal(row.lines.covered, 1)
+  assert.deepEqual(row.lines.changed[0].covered_by, ['unit'])
+  assert.deepEqual(row.measurement_gaps.find((s) => s.step === browser.id), {
+    step: 'e2e-browser', provider: null, status: 'not_measurable', reason: 'step-coverage-not-measurable',
+  })
+  assert.ok(row.measurement_gaps.length, 'measured line coverage does not imply complete evidence across assigned steps')
 })
 
 test('runner failure on one layer does not erase valid line evidence from another layer', () => {
