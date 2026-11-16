@@ -27,7 +27,7 @@ CRON_JOB = re.compile(r"\$R (\w+)")
 CRON_DIRECT = re.compile(r"pi/bin/(\w+)\.py >>(\S+)")
 DIRECT_STALE_MIN = 15   # direct lines run every 1-5 min
 PROC_LOCK = re.compile(r"^\d+: \w+ +\w+ +\w+ +(\d+) ([0-9a-f]+:[0-9a-f]+:\d+) ", re.M)
-SECTIONS = ("runs", "identity", "quota", "files", "locks")
+SECTIONS = ("runs", "identity", "quota", "files", "locks", "standards")
 
 
 def item(section, name, state, at=None, path=None, detail=""):
@@ -120,7 +120,9 @@ def lock_state(path, proc_locks):
 def procs(needle):
     """[(pid, cmdline)] of processes whose argv[0] or argv[1] ends with needle (the script itself, not a command naming it)"""
     out = []
-    for p in (x for x in os.listdir("/proc") if x.isdigit()):
+    try: proc_entries = (x for x in os.listdir("/proc") if x.isdigit())
+    except OSError: return None
+    for p in proc_entries:
         try: argv = open(f"/proc/{p}/cmdline", "rb").read().decode(errors="replace").split("\0")
         except OSError: continue
         if any(a.endswith(needle) for a in argv[:2]): out.append((int(p), " ".join(argv).strip()[:160]))
@@ -138,15 +140,19 @@ def lock_items(argus, cindy_lock):
         out.append(item("locks", name, st, path=p, detail=f"持有进程 pid {pid}" if pid else ""))
     for name, needle in (("run-nightly", "run-nightly.sh"), ("e2e batch", "batch-run.sh")):
         ps = procs(needle)
-        out.append(item("locks", name, "running" if ps else "none", detail="；".join(f"pid {p} {c}" for p, c in ps) or "无进程"))
+        out.append(item("locks", name, "unknown" if ps is None else "running" if ps else "none",
+                        detail="/proc 读不到" if ps is None else "；".join(f"pid {p} {c}" for p, c in ps) or "无进程"))
     return out
 
 
 def collect(now=None, state=BASE, qa=QA, fleet=FLEET, argus=None, gh=GH, cindy_lock=CINDY_LOCK, cron_file=None):
     now = now or now_cst()
+    import qa_standard
+    status = qa_standard.inspect(state, qa, now=now)
     items = (run_items(now, cron_file or f"{PI_CODE}/cron/pi-line.cron", state, qa) + identity_items(gh, state) + quota_items(state)
-             + file_items(now, state, qa, fleet) + lock_items(argus or os.environ.get("PI_ARGUS_ROOT") or f"{qa}/argus-root", cindy_lock))
-    return {"generated_at": iso(now), "generator": "pi/bin/fleet_status.py", "items": items}
+             + file_items(now, state, qa, fleet) + lock_items(argus or os.environ.get("PI_ARGUS_ROOT") or f"{qa}/argus-root", cindy_lock)
+             + [item("standards", "standard", "fail" if status["errors"] else "ok", detail=json.dumps(status, ensure_ascii=False))])
+    return {"generated_at": iso(now), "generator": "pi/bin/fleet_status.py", "items": items, "qa_standard": status}
 
 
 def render(doc):

@@ -20,6 +20,12 @@ tmp = tempfile.mkdtemp()
 try:
     code, state = f"{tmp}/pi", f"{tmp}/state"; os.makedirs(f"{code}/bin"); logs = f"{state}/out/logs"
     shutil.copy(f"{R}/pi/bin/run.sh", f"{code}/bin/run.sh"); open(f"{code}/bin/lib.py", "w").write("")
+    shutil.copy(f"{R}/pi/bin/qa_standard.py", f"{code}/bin/qa_standard.py")
+    shutil.copytree(f"{R}/pi/conf", f"{code}/conf")
+    clean_git = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    subprocess.run(["git", "init", "-q", tmp], env=clean_git, check=True)
+    subprocess.run(["git", "-C", tmp, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                    "-c", "core.hooksPath=/dev/null", "commit", "--allow-empty", "-qm", "fixture"], env=clean_git, check=True)
     mark = f"{tmp}/called"
     open(f"{code}/bin/boxhealth.py", "w").write(f"import sys\nopen({mark!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n")
     env = {"PATH": "/usr/bin:/bin", "HOME": tmp, "PI_STATE": state, "PI_FLEET_MODE": "test", "PI_TEST_MEM_AVAIL_MB": "8000",

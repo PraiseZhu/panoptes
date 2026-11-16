@@ -79,6 +79,10 @@ for f in "$CODE/bin/lib.py" "$CODE/bin/$JOB.py" $(for m in $deps; do [ -f "$CODE
     echo "syntax-error: $(basename "$f"): $(echo "$err" | tail -1)"; echo "=== $(date '+%F %T %Z') end $JOB rc=3"; exit 3
   fi
 done
+export PI_QA_JOB="$JOB"
+if [ "$JOB" = opsfix ] && [ "${1:-}" = retest ]; then export PI_QA_JOB=opsfix_retest; fi
+FLEET_RUN="$(python3 "$CODE/bin/qa_standard.py" start --state "$BASE" --job "$PI_QA_JOB")" || exit 3
 python3 "$CODE/bin/$JOB.py" "$@"; rc=$?
+python3 "$CODE/bin/qa_standard.py" finish --state "$BASE" --file "$FLEET_RUN" --rc "$rc" || rc=3
 echo "=== $(date '+%F %T %Z') end $JOB rc=$rc"
 exit $rc

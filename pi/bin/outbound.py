@@ -394,6 +394,8 @@ def h_issue(a):
         hits = gh(["issue", "list", "-R", repo, "--state", "all", "--search", f"{fp} in:body", "--json", "number"])
         return "done" if hits else "pending"
     def validate():
+        from qa_standard import require_product_evidence
+        require_product_evidence(a)
         if not repo: raise RuntimeError(f"no handoff repo for {a.get('route_author')}")
         check_repo("handoff", repo)
         v = gh(["repo", "view", repo, "--json", "nameWithOwner,hasIssuesEnabled,viewerPermission"])
@@ -427,8 +429,16 @@ def h_ready(a):
         # 10-29 ready_guard：同一 head 上 review-pr 已失败，或有人转回过草稿（不在 Pi 台账里）→ 不转（执行时再查一次）
         why = RG.block_reason(gh, REPO, n, p.get("statusCheckRollup") or [], jload(LEDGER, {}))
         return f"stale:{why}" if why else "pending"
-    def validate(): return f"#{n} " + json.dumps(gh(["pr", "view", str(n), "-R", REPO, "--json", "isDraft,state,statusCheckRollup"])["isDraft"] and "draft" or "ready")
-    def do(): return gh(["pr", "ready", str(n), "-R", REPO], js=False).strip()
+    def evidence():
+        from qa_standard import require_product_evidence
+        # Older queued Ready actions may lack the original QA/fingerprint.
+        require_product_evidence(dict(a, type="gh.pr.ready"))
+    def validate():
+        evidence()
+        return f"#{n} " + json.dumps(gh(["pr", "view", str(n), "-R", REPO, "--json", "isDraft,state,statusCheckRollup"])["isDraft"] and "draft" or "ready")
+    def do():
+        evidence()  # Re-read policy/artifacts immediately before changing Draft state.
+        return gh(["pr", "ready", str(n), "-R", REPO], js=False).strip()
     return f"gh pr ready #{n}", state, validate, do
 def h_fixpr(a):
     patch, must = a.get("patch"), a.get("body_must_contain", "")
@@ -443,12 +453,16 @@ def h_fixpr(a):
             if n: return f"superseded:open fix PR #{n} already carries {fp}"
         return "pending"
     def validate():
+        from qa_standard import require_product_evidence
+        require_product_evidence(a)
         why = fixpr_gate_reason(a)                                                  # (1) gate
         if why: raise RuntimeError(f"gated: {why}")
         if not (patch and os.path.exists(patch)): raise RuntimeError("patch missing")
         v = gh(["repo", "view", REPO, "--json", "viewerPermission,defaultBranchRef"])
         return f"patch {os.path.getsize(patch)}B, perm={v['viewerPermission']}, base={fixpr_base_ref(a)} (default {v['defaultBranchRef']['name']}), docs={a.get('docs_dir_predicted') or '-'}"
     def do():
+        from qa_standard import require_product_evidence
+        require_product_evidence(a)
         why = fixpr_gate_reason(a)                                                  # (1) gate, re-read right before pushing
         if why: raise RuntimeError(f"refused: gated ({why})")
         bref = fixpr_base_ref(a)
@@ -967,6 +981,9 @@ def main():
         if why:
             print(f"# outbound resend {resend}: {why}"); return 0
         days = {os.path.basename(hits[0][0])[:10]}
+    if not o.dry_run:
+        from qa_standard import audit_outbound
+        audit_outbound(BASE)
     rows = []; fails = 0; unsupported = 0; merged_run = 0; changes = {}; relays = []; notices = []
     def persist():   # 10-23: every job, right after each change; merge into the file as it is now (keeps manual edits)
         if o.dry_run: return

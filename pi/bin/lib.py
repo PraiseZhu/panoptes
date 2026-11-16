@@ -897,6 +897,8 @@ def pi(tier, cwd, prompt, session, timeout=600, write=False, web=False, skills=T
     skills=False: pi without skill discovery (bin/pi-noskills.sh; 10-24: ~/.pi/agent/settings.json loads ~/.claude/skills, 36 KB of
     Claude Code skills in every coding step's system prompt). nice=True: the agent and the tests it runs at nice 10 (merge tests first)."""
     env = model_env({"PI_TASK_DIR": f"{BASE}/out/tasks", "PI_NOTIFY_OFF": "1", "PI_TASK_OWNER": "pi-line-cron"})   # never os.environ as is
+    from qa_standard import prompt_context
+    prompt = prompt_context(session) + "\n\n---\n\n" + prompt
     if not skills: env["PI_BIN"] = f"{PI_CODE}/bin/pi-noskills.sh"
     try: os.makedirs(f"{BASE}/out/tasks", exist_ok=True)      # the sandbox binds it writable only when it exists
     except OSError: pass

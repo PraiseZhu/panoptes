@@ -76,7 +76,8 @@ def main(argv=None):
     # 2 turn-ready
     L += ["", "## 转 ready 判定（只看草稿；review-pr 忽略；ready PR 不碰）"]
     for p in [p for p in prs if p["state"] == "OPEN"]:
-        if not re.search(r"QA[:：]\s*#\d+", p.get("body") or ""): continue
+        qa = re.search(r"QA[:：]\s*#(\d+)", p.get("body") or "")
+        if not qa: continue
         if not p["isDraft"]: L.append(f"- #{p['number']} 已 ready → 不碰"); continue
         try: cs = gh(["pr", "checks", str(p["number"]), "-R", REPO, "--json", "name,bucket"])
         except RuntimeError as e:
@@ -87,8 +88,13 @@ def main(argv=None):
         why = RG.block_reason(gh, REPO, p["number"], allcs, jload(f"{BASE}/out/outbound/ledger.json", {})) if cs and not bad else None
         if why: L.append(f"- #{p['number']} 草稿，检查全绿但不转 ready：{why}"); continue
         if cs and not bad:
+            from qa_standard import ready_fingerprint
+            fp = ready_fingerprint(p.get("body"))
+            if not fp:
+                L.append(f"- #{p['number']} 来源指纹未识别；由 outbound 按执行时的 mode 复验证据（legacy/shadow 不拦）")
             L.append(f"- #{p['number']} 草稿，{len(cs)} 项检查全绿 → 将 gh pr ready")
             acts.append({"key": f"ready:{p['number']}", "type": "gh.pr.ready", "pr": p["number"], "head": p["headRefOid"],
+                         "qa": int(qa[1]), "fingerprint": fp,
                          "cmd": f"gh pr ready {p['number']} --repo {REPO}", "dedupe": "gh pr view isDraft==true at exec time"})
         else: L.append(f"- #{p['number']} 草稿，未全绿：{', '.join(bad[:6]) or '无检查'}")
     # 3 cleanup (list only)

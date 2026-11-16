@@ -716,6 +716,14 @@ def outbound_health_check(now, probs):
             todo=PN.ask_session(f"Pi 线外发有 {len(stuck)} 条一直失败（例 {stuck[0]}：{e}），看 out/outbound/ledger.json 和 outbound 日志查原因"))
 
 
+def qa_standard_check(now, probs):
+    import qa_standard
+    status = qa_standard.inspect(BASE, QA, now=now)
+    for key, reason in status["errors"].items():
+        probs["qa-standard:" + key] = PN.item("action", "QA 舰队标准检查未通过", reason,
+            "新标准的运行证据不完整或已漂移。", todo="查看 fleet_status 与 stdcheck；保留当前 mode，补齐证据后再切换")
+
+
 def main():
     if mode() != "pi": return 0
     import fcntl
@@ -728,7 +736,7 @@ def main():
                lambda: backup_check(now, probs), lambda: backup_rules_check(now, probs), lambda: panoptes_check(now, probs, st),
                lambda: infra_check(now, probs), lambda: prfix_check(now, probs, st), lambda: vigil_check(now, probs, st),
                lambda: outbound_health_check(now, probs), lambda: janitor_check(now, probs), lambda: gh_ratelimit_check(now, probs),
-               lambda: pmnudge_gh_check(now, probs), lambda: slot_wait_check(now, probs), lambda: retest_no_target_check(now, probs)):
+               lambda: pmnudge_gh_check(now, probs), lambda: slot_wait_check(now, probs), lambda: retest_no_target_check(now, probs), lambda: qa_standard_check(now, probs)):
         try: fn()
         except Exception as e: probs[f"watchdog:{getattr(fn, '__name__', 'check')}"] = PN.item("action", "「看门狗」自己出错了",
             "专门盯各个自动化有没有停摆的看门狗，自己的一项检查出错了。", "那一项坏了也不会有人告诉你。",

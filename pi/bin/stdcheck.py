@@ -49,9 +49,9 @@ ATTEMPTS = 3; RETRY_SLEEP_S = 20; ALERT_STREAK = 2
 TASKS = {  # job: (Beijing slots, judge this many minutes after the slot)
     "pmnudge": ([(h, 5) for h in range(9, 23)], 20), "daily": ([(7, 35)], 85), "ledger": ([(23, 40)], 20)}
 PANOPTES_AUTHOR = app_author(); AUTHOR_SINCE = dt.datetime(2026, 11, 5, 12, 0, tzinfo=CST)   # 11-05 #245: older PRs not judged
-CHECKS = ("qa_start", "panoptes_prs", "panoptes_author", "fix_prs", "tasks", "review_pr")
-OWNER = {"qa_start": "Mivo QA 运维", "panoptes_prs": "Praise", "panoptes_author": "Praise", "fix_prs": "Praise PR", "tasks": "Pi 线运维", "review_pr": "Jasper"}
-DEADLINE_H = {"qa_start": 4, "panoptes_prs": 24, "panoptes_author": 24, "fix_prs": 4, "tasks": 4, "review_pr": 2}
+CHECKS = ("qa_start", "panoptes_prs", "panoptes_author", "fix_prs", "tasks", "review_pr", "fleet_standard")
+OWNER = {"qa_start": "Mivo QA 运维", "panoptes_prs": "Praise", "panoptes_author": "Praise", "fix_prs": "Praise PR", "tasks": "Pi 线运维", "review_pr": "Jasper", "fleet_standard": "Grokbot 运维"}
+DEADLINE_H = {"qa_start": 4, "panoptes_prs": 24, "panoptes_author": 24, "fix_prs": 4, "tasks": 4, "review_pr": 2, "fleet_standard": 2}
 TZ_ABBR = {"CST": 8, "UTC": 0, "GMT": 0, "PST": -8, "PDT": -7, "JST": 9}
 MW_LINE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) (\w+) (.*)$")
 MW_LAUNCH = re.compile(r"launched priority run pid \d+ for PR #(\d+)(?:.*?try (\d+)/\d+)?")
@@ -327,6 +327,12 @@ def check_review_pr(now):
     return bad
 
 
+def check_fleet_standard(now):
+    """Check policy/brief/run metadata. This is read-only and intentionally fails closed."""
+    import qa_standard
+    return qa_standard.inspect(BASE, QA, now=now)["errors"]
+
+
 # ---------------- retries, gaps, alerts, escalations, pass rate ----------------
 def run_check(name, fn, now, **kw):
     """-> (breaches, None) or (None, error) after ATTEMPTS tries; a rate limit is not retried (it would be refused again)"""
@@ -402,7 +408,7 @@ def update_alerts(st, results, errors, now):
         failed = results[c] is None or bool(results[c])
         streak[c] = streak.get(c, 0) + 1 if failed else 0
         f = f"{OUT}/alerts/{c}.json"
-        if streak[c] >= ALERT_STREAK:
+        if streak[c] >= (1 if c == "fleet_standard" else ALERT_STREAK):
             prev = jload(f, {})
             save_json(f, {"check": c, "consecutive_failures": streak[c], "since": prev.get("since") or iso(now), "last": iso(now),
                           "error": errors.get(c), "breaches": results[c] or {}, "owner": OWNER.get(c, "Pi 线运维"), "for_brief": brief_day(now)})
@@ -438,7 +444,7 @@ def run(now=None):
     now = now or now_cst()
     st = jload(f"{OUT}/state.json", {})
     fns = {"qa_start": (check_qa_start, {}), "panoptes_prs": (check_panoptes_prs, {}), "panoptes_author": (check_panoptes_author, {}), "fix_prs": (check_fix_prs, {}),
-           "tasks": (check_tasks, {"retry": retry_task(st, now)}), "review_pr": (check_review_pr, {})}
+           "tasks": (check_tasks, {"retry": retry_task(st, now)}), "review_pr": (check_review_pr, {}), "fleet_standard": (check_fleet_standard, {})}
     results, errors = {}, {}
     for c in CHECKS:
         fn, kw = fns[c]; results[c], err = run_check(c, fn, now, **kw)
@@ -451,7 +457,8 @@ def run(now=None):
     escalate(sync_gaps(results, now), now)
     update_alerts(st, results, errors, now)
     record_passrate(results, now, {"first_run_fail": frf})
-    st.update(last_run=iso(now), errors=errors, crash_streak=0, metrics={"first_run_fail": frf})
+    import qa_standard
+    st.update(last_run=iso(now), errors=errors, results=results, qa_standard=qa_standard.inspect(BASE, QA, now=now), crash_streak=0, metrics={"first_run_fail": frf})
     if os.path.exists(f"{OUT}/alerts/stdcheck.json") and not DRY: os.unlink(f"{OUT}/alerts/stdcheck.json"); log("stdcheck: crash alert recovered")
     save_json(f"{OUT}/state.json", st)
     return results
