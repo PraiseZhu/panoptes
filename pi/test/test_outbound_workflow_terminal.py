@@ -33,6 +33,9 @@ class Main(unittest.TestCase):
     tearDown, main, ledger, report = B.T.tearDown, B.T.main, B.T.ledger, B.T.report   # B.T's sandbox, not its tests
     def setUp(self):
         B.T.setUp(self)
+        import qa_standard
+        standard_source = mock.patch.object(qa_standard, "source_sha", return_value="a" * 40)
+        standard_source.start(); self.addCleanup(standard_source.stop)
         for job in ("pm", "ops", "handoff", "daily"): os.remove(f"{self.tmp}/out/{job}/{B.DAY}.actions.json")
         os.makedirs(f"{self.tmp}/out/praise-pr")
         acts = [{"key": FIX, "type": "gh.pr.create(draft)", "qa": 2022, "at": B.NOW.isoformat()},

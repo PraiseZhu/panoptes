@@ -9,7 +9,7 @@ HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, os.path.jo
 import watchdog  # noqa: E402
 
 OTHER = ["job_checks", "mergewatch_check", "merge_sla_check", "merge_report_check", "backup_check", "backup_rules_check",
-         "panoptes_check", "infra_check", "prfix_check", "outbound_health_check", "janitor_check"]
+         "panoptes_check", "infra_check", "prfix_check", "outbound_health_check", "janitor_check", "qa_standard_check"]
 
 
 class T(unittest.TestCase):

@@ -56,7 +56,9 @@ def prompt_context(session, lane=None):
 
 
 def source_sha():
-    return subprocess.check_output(['git', '-C', str(CODE.parent), 'rev-parse', 'HEAD'], text=True, timeout=10).strip()
+    sha = subprocess.check_output(['git', '-C', str(CODE.parent), 'rev-parse', 'HEAD'], text=True, timeout=10).strip()
+    if not re.fullmatch(r'[a-f0-9]{40}', sha): raise ValueError('source_sha_invalid')
+    return sha
 
 
 def binding():

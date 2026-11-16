@@ -96,7 +96,7 @@ export function transitionStandard(standard, to, evidence = {}) {
 }
 export function rollbackPlan(previousSourceSha) {
   if (!SHA.test(previousSourceSha)) throw Error('full previous source SHA required')
-  return { source_sha: previousSourceSha, mode: 'rollback', deploy_via: 'opsdeploy', preserve: ['v2 manifests', 'shadow receipts', 'cutover records'], delete: [] }
+  return { source_sha: previousSourceSha, mode: 'rollback', deploy_via: 'authorized operator restoration' , preserve: ['v2 manifests', 'shadow receipts', 'cutover records'], delete: [] }
 }
 export function preflight({ fleet, standard, root = ROOT, sourceSha, runtimeSha, inventory } = {}) {
   const errors = [...validateFleet(fleet, { root }), ...validateStandard(standard)]

@@ -49,13 +49,13 @@ class T(unittest.TestCase):
         open(f"{self.qa}/argus-root/nightly.lock", "w").close()
         try: doc = self.collect(now=self.now)
         finally: lk.close()
-        self.assertIn(self.by(doc, "locks", "catch-up.lock")["state"], ("held", "unknown"))
+        self.assertEqual(self.by(doc, "locks", "catch-up.lock")["state"], "held" if os.path.exists("/proc/locks") else "unknown")
         if self.by(doc, "locks", "catch-up.lock")["state"] == "held":
             self.assertIn(f"pid {os.getpid()}", self.by(doc, "locks", "catch-up.lock")["detail"])
         else:
             self.assertIn("/proc/locks", self.by(doc, "locks", "catch-up.lock")["detail"])
         self.assertEqual(self.by(doc, "locks", "nightly.lock")["state"], "free" if os.path.exists("/proc/locks") else "unknown")
-        self.assertIn(self.by(doc, "locks", "ensure-cindy.v2.lock")["state"], ("missing", "unknown"))
+        self.assertEqual(self.by(doc, "locks", "ensure-cindy.v2.lock")["state"], "missing" if os.path.exists("/proc/locks") else "unknown")
         self.assertFalse(os.path.exists(f"{self.t}/ensure-cindy.v2.lock"))     # read-only: a missing lock is not created
 
     def test_runs_identity_quota_and_files(self):

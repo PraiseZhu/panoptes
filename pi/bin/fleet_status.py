@@ -121,7 +121,7 @@ def procs(needle):
     """[(pid, cmdline)] of processes whose argv[0] or argv[1] ends with needle (the script itself, not a command naming it)"""
     out = []
     try: proc_entries = (x for x in os.listdir("/proc") if x.isdigit())
-    except OSError: return out
+    except OSError: return None
     for p in proc_entries:
         try: argv = open(f"/proc/{p}/cmdline", "rb").read().decode(errors="replace").split("\0")
         except OSError: continue
@@ -140,7 +140,8 @@ def lock_items(argus, cindy_lock):
         out.append(item("locks", name, st, path=p, detail=f"持有进程 pid {pid}" if pid else ""))
     for name, needle in (("run-nightly", "run-nightly.sh"), ("e2e batch", "batch-run.sh")):
         ps = procs(needle)
-        out.append(item("locks", name, "running" if ps else "none", detail="；".join(f"pid {p} {c}" for p, c in ps) or "无进程"))
+        out.append(item("locks", name, "unknown" if ps is None else "running" if ps else "none",
+                        detail="/proc 读不到" if ps is None else "；".join(f"pid {p} {c}" for p, c in ps) or "无进程"))
     return out
 
 
