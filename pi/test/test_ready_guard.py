@@ -162,6 +162,48 @@ class ReadyEvidence(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'evidence_missing'): handler[3]()
         self.calls.assert_not_called()
 
+    def prretro_actions(self, body):
+        import prretro
+        draft = dict(pr(n=99), state='OPEN', isDraft=True, mergedAt=None, body=body)
+        def gh(args, js=True):
+            if args[:2] == ['pr', 'list']: return [draft]
+            if args[:2] == ['pr', 'checks']: return [{'name': 'verify', 'bucket': 'pass'}]
+            if args[0] == 'api' and '/timeline' in args[1]: return [] if js else '[]'
+            raise AssertionError(args)
+        writer, recorder = mock.Mock(), mock.Mock()
+        with mock.patch.multiple(prretro, gh=gh, findings=lambda: [], note_index=lambda: {},
+                                 git=lambda *a, **k: (0, ''), DRY=False, BASE=str(self.root), QA=str(self.root),
+                                 write_atomic=writer, record_actions=recorder):
+            prretro.main(['prretro.py'])
+        return recorder.call_args.args[2], writer.call_args.args[1]
+
+    def test_prretro_generated_ready_obeys_evidence_gate_in_each_mode(self):
+        body = 'QA: #7\nFingerprint: ' + self.finding['fingerprint'] + '\n'
+        for mode in ('strict', 'canary', 'shadow', 'legacy'):
+            with self.subTest(mode=mode):
+                policy = json.loads(self.Q.paths()[1].read_text()); policy['mode'] = mode
+                self.Q.write_json(self.Q.paths()[1], policy)
+                actions, _ = self.prretro_actions(body)
+                self.assertEqual(len(actions), 1)
+                action = actions[0]
+                self.assertEqual((action.get('qa'), action.get('fingerprint')), (7, self.finding['fingerprint']))
+                self.Q.write_json(self.root / 'PR-7.json', {'prs': [self.source]})
+                self.calls.return_value = 'ready'; self.calls.reset_mock()
+                self.assertEqual(outbound.h_ready(action)[3](), 'ready')
+                self.assertEqual(self.calls.call_args.args[0][:3], ['pr', 'ready', '99'])
+                self.Q.write_json(self.root / 'PR-7.json', {'prs': []})
+                self.calls.reset_mock()
+                if mode in ('strict', 'canary'):
+                    with self.assertRaisesRegex(ValueError, 'evidence_missing'): outbound.h_ready(action)[3]()
+                    self.calls.assert_not_called()
+                else:
+                    self.assertEqual(outbound.h_ready(action)[3](), 'ready')
+
+    def test_prretro_missing_fingerprint_records_reason_without_ready_action(self):
+        actions, report = self.prretro_actions('QA: #7\n')
+        self.assertEqual(actions, [])
+        self.assertIn('缺少 QA/Fingerprint', report)
+
 if __name__ == "__main__":
     try: unittest.main(verbosity=1)
     finally: shutil.rmtree(TMP, ignore_errors=True)
