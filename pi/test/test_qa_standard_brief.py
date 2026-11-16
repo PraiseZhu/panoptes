@@ -101,6 +101,19 @@ class Contracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'rollback'): Q.require_product_evidence(action)
         self.assertTrue((self.root / 'evidence/manifest.json').exists())
 
+    def test_cloud_brief_is_returned_and_missing_brief_prevents_claim(self):
+        import contextlib
+        import io
+        import grokline
+        out = io.StringIO()
+        with mock.patch.object(grokline, 'check', return_value={'status': 'ok'}), contextlib.redirect_stdout(out):
+            self.assertEqual(grokline.main(['--check']), 0)
+        self.assertIn('lane=repair', json.loads(out.getvalue())['qa_standard_brief'])
+        Q.paths()[2].unlink()
+        with mock.patch.object(grokline, 'claim') as claim, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(grokline.main(['--claim', '--pct', '1']), 1)
+            claim.assert_not_called()
+
     def test_outbound_audit_creates_directory_before_locking(self):
         state = self.root / 'fresh-state'
         Q.audit_outbound(state)

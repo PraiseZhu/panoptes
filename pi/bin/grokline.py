@@ -413,6 +413,11 @@ def main(argv=None):
     ap.add_argument("--skip", action="append", default=[], help="QA:FP held back pending a ruling (repeatable; --claim and gate --dry-run)")
     ap.add_argument("--pct", type=float); ap.add_argument("--pr", type=int); ap.add_argument("--why", default="Grok 放弃")
     A = ap.parse_args(argv)
+    from qa_standard import prompt_context
+    try: standard_brief = prompt_context("grokline", lane="repair")
+    except (OSError, ValueError):
+        print(json.dumps({"status": "error", "error": "QA standard brief unavailable; do not start a cloud task"}))
+        return 1
     real = sys.stdout; sys.stdout = sys.stderr       # helper logs never corrupt the JSON line
     try:
         bad_skip = [k for k in A.skip if not SKIP_RE.match(k)]
@@ -438,9 +443,7 @@ def main(argv=None):
         else: r = check()
     finally:
         sys.stdout = real
-    from qa_standard import prompt_context
-    try: r["qa_standard_brief"] = prompt_context("grokline", lane="repair")
-    except (OSError, ValueError): r = {"status": "error", "error": "QA standard brief unavailable; do not start a cloud task"}
+    r["qa_standard_brief"] = standard_brief
     print(json.dumps(r, ensure_ascii=False, default=str))
     return 0 if r.get("status") not in ("error",) else 1
 
