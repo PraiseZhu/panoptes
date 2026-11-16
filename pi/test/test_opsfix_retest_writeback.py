@@ -70,6 +70,22 @@ class Entries(unittest.TestCase):
         r = [dict(fix_pr=5, original_pr=4, fingerprint="mq1-x", source="code-review", result="blocked", reason="本轮模型调用已达上限 12", evidence="e", at="t")]
         self.assertEqual(R.report_entries(r, 5, {})[0]["outcome"], "blocked")
 
+    def test_report_entries_preserve_related_regression_detail(self):
+        r = [dict(fix_pr=8, original_pr=7, fingerprint="mq1-regression", source="check", result="fail",
+                  reason="related regression", evidence="e", at="t", detail={"exact_replay": True, "rows": [
+                      {"check": "related", "original": "pass", "fix": "fail", "verdict": "fail"}]})]
+        entry = R.report_entries(r, 8, {})[0]
+        self.assertTrue(entry["detail"]["regression"])
+        self.assertEqual(entry["detail"]["rows"][0]["check"], "related")
+
+    def test_inconclusive_is_written_and_retried(self):
+        r = [dict(fix_pr=6, original_pr=4, fingerprint="mq1-x", source="check", result="inconclusive",
+                  reason="原失败未复现", evidence="e", at="t")]
+        entry = R.report_entries(r, 6, {})[0]
+        self.assertEqual((entry["result"], entry["outcome"]), ("inconclusive", "inconclusive"))
+        st, done, retry = R.settle({}, {6: r}, {6: "h"}, "t")
+        self.assertEqual((done, retry), ([], [6]))
+
     def test_later_pass_replaces_blocked(self):
         doc = {"prs": [{"number": 7, "retest": [{"fingerprint": "mq1-x", "original_pr": 6, "result": "blocked"}]}]}
         R.apply_report(doc, 7, [{"fingerprint": "mq1-x", "original_pr": 6, "result": "pass"}])
@@ -91,13 +107,26 @@ class Alert(unittest.TestCase):
         R.write_no_target_alert([], STAMP + dt.timedelta(hours=80), path=p); self.assertFalse(os.path.exists(p))
         probs = {}; watchdog.retest_no_target_check(None, probs, path=p); self.assertEqual(probs, {})
 
+    def test_exact_replay_alert_has_own_notice_and_clears_on_pass(self):
+        p = os.path.join(self.d, "a.json")
+        fp = "mq1-alert"
+        fail = [dict(fix_pr=8, original_pr=7, fingerprint=fp, source="check", result="fail",
+                     reason="still fails", detail={"exact_replay": True})]
+        R.write_retest_alert(fail, STAMP, path=p)
+        probs = {}; watchdog.retest_no_target_check(None, probs, path=p)
+        self.assertIn("retest:exact-replay", probs)
+        self.assertEqual(probs["retest:exact-replay"]["title"], "修复 PR exact replay 未通过")
+        passed = [dict(fail[0], result="pass")]
+        R.write_retest_alert(passed, STAMP + dt.timedelta(minutes=1), path=p)
+        self.assertFalse(os.path.exists(p))
+
 
 class RunWriteBack(unittest.TestCase):
     """run(--execute) with every runner / gh / lock mocked: blocked + no-target land in the fix PR's report."""
     def setUp(self):
         self.d = tempfile.mkdtemp(prefix="retest-run-test-"); d = self.d
         self.saved = {k: getattr(R, k) for k in ("RPT", "BASE", "STATE", "QA_LOCK", "WORK", "NO_TARGET_ALERT", "merged_since", "mem_mb",
-                      "take_lock", "run_review", "ledger_path", "record_unmatched", "now_cst", "log")}
+                      "take_lock", "run_review", "run_exact_replay", "ledger_path", "record_unmatched", "now_cst", "log")}
         R.RPT = f"{d}/rpt"; R.BASE = d; R.STATE = f"{d}/state.json"; R.QA_LOCK = f"{d}/lock"; R.WORK = f"{d}/wt"
         R.NO_TARGET_ALERT = f"{d}/alert.json"; os.makedirs(R.RPT)
         rep = lambda n, **x: json.dump({"prs": [dict(number=n, **x)]}, open(f"{R.RPT}/PR-{n}.json", "w"))
@@ -126,6 +155,76 @@ class RunWriteBack(unittest.TestCase):
         self.assertEqual([(x["result"], x["method"], x["original_pr"]) for x in rt], [("blocked", "no-target", 1490)])
         st = json.load(open(R.STATE)); self.assertIn("1742", st["done"]); self.assertEqual(st["done"]["1725"]["gave_up_after"], 3)
         self.assertIn("1742<-1490", json.load(open(R.NO_TARGET_ALERT))["items"])
+
+    def test_exact_replay_failure_states_write_alert_and_stay_unfixed(self):
+        cases = (("fail", 1600, 1550), ("blocked", 1601, 1551), ("inconclusive", 1602, 1552))
+        sources = []
+        for i, (status, fix_n, orig_n) in enumerate(cases):
+            fp = f"mq1-exact-{status}"
+            json.dump({"prs": [{"number": orig_n, "tested_sha": "a" * 40,
+                                 "findings": [{"source": "check", "severity": "P1", "fingerprint": fp}],
+                                 "failed_checks": [{"fingerprint": fp, "check_id": "unit", "test": "src/a.test.ts"}]}]},
+                      open(f"{R.RPT}/PR-{orig_n}.json", "w"))
+            json.dump({"prs": [{"number": fix_n}]}, open(f"{R.RPT}/PR-{fix_n}.json", "w"))
+            sources.append({"number": fix_n, "body": f"QA: #{orig_n}", "title": "fix",
+                            "mergedAt": f"2026-11-04T{13 + i:02d}:00:00Z", "headRefOid": str(7 + i) * 40})
+        ledger = f"{self.d}/ledger.json"
+        json.dump({"rows": [{"key": f"row-{orig_n}", "pr": orig_n, "fingerprint": f"mq1-exact-{status}",
+                              "status": "fix_merged_pending_retest", "fix_pr": fix_n,
+                              "handoff_issue": {"repo": "owner/repo", "issue": orig_n}}
+                             for status, fix_n, orig_n in cases]}, open(ledger, "w"))
+        R.ledger_path = lambda rejected=None: ledger
+        old_merged = R.merged_since
+        try:
+            R.merged_since = lambda lo: sources
+            R.run_exact_replay = lambda fix, *args: (next(s for s, n, _ in cases if n == fix["number"]),
+                                                     "exact replay fixture", {"exact_replay": True})
+            a = types.SimpleNamespace(pr=None, day=None, since=None, execute=True, max_model=12, wait_lock=1, keep=True, no_handoff=True)
+            import io, contextlib
+            with contextlib.redirect_stdout(io.StringIO()): R.run(a)
+        finally:
+            R.merged_since = old_merged
+        alert = json.load(open(R.NO_TARGET_ALERT))
+        led = json.load(open(ledger))
+        for status, fix_n, orig_n in cases:
+            fp = f"mq1-exact-{status}"
+            report = json.load(open(f"{R.RPT}/PR-{fix_n}.json"))["prs"][0]
+            self.assertEqual(report["retest"][0]["result"], status)
+            self.assertNotEqual(report["retest"][0].get("outcome"), "fixed")
+            item = alert["items"][f"{fix_n}<-{orig_n}:{fp}"]
+            self.assertEqual((item["kind"], item["result"]), ("exact-replay", status))
+            row = next(row for row in led["rows"] if row["pr"] == orig_n)
+            self.assertNotEqual(row["status"], "fixed")
+            self.assertFalse(row.get("retest_confirmed"))
+        self.assertFalse(any(a["type"] == "gh.issue.close" for a in R.handoff_actions(led)))
+        probs = {}
+        watchdog.retest_no_target_check(None, probs, path=R.NO_TARGET_ALERT)
+        self.assertIn("retest:exact-replay", probs)
+
+    def test_run_exact_replay_uses_secret_filtered_runner(self):
+        fp = "mq1-secret-filter"
+        secret = "should-not-appear"
+        json.dump({"prs": [{"number": 1650, "tested_sha": "a" * 40,
+                             "failed_checks": [{"fingerprint": fp, "check_id": "unit", "test": None,
+                                                 "evidence": {"command": "printf '%s\\n' \"$PI_EXACT_REPLAY_API_KEY\"; exit 1"}}]}]},
+                  open(f"{R.RPT}/PR-1650.json", "w"))
+        old_worktree, old_drop = R.worktree, R.drop_worktree
+        R.worktree = lambda sha: self.d
+        R.drop_worktree = lambda path: None
+        os.environ["PI_EXACT_REPLAY_API_KEY"] = secret
+        try:
+            status, _, evidence = R.run_exact_replay(
+                {"number": 1651, "headRefOid": "b" * 40}, 1650,
+                {"fingerprint": fp, "source": "check", "evidence": {"tested_sha": "a" * 40}},
+                f"{self.d}/evidence",
+            )
+        finally:
+            os.environ.pop("PI_EXACT_REPLAY_API_KEY", None)
+            R.worktree, R.drop_worktree = old_worktree, old_drop
+        self.assertEqual(status, "blocked")
+        tails = [run["tail"] for side in evidence["runs"].values() for run in side.values()]
+        self.assertTrue(tails)
+        self.assertTrue(all(secret not in tail for tail in tails))
 
 
 class PmExtraCount(unittest.TestCase):

@@ -549,10 +549,18 @@ def retest_no_target_check(now, probs, path=None):
     except Exception: return
     rows = list((a.get("items") or {}).values())
     if not rows: return
-    desc = "；".join(f"#{x.get('fix_pr')} ← #{x.get('original_pr')}：{str(x.get('why'))[:120]}" for x in rows[-6:])
-    probs["retest:no-target"] = PN.item("action", "修复 PR 复测找不到可复测目标", desc,
-        "这些修复 PR 没有原用例复测证据，台账会一直停在「修复已合并，待复测」。",
-        todo=PN.ask_session(f"opsfix retest 找不到复测目标：{desc[:200]}，看原报告 pending_verification / failed_checks，决定手动复测还是在修复 PR 正文补指纹"))
+    replay = [x for x in rows if x.get("kind") == "exact-replay"]
+    no_target = [x for x in rows if x.get("kind") != "exact-replay"]
+    if no_target:
+        desc = "；".join(f"#{x.get('fix_pr')} ← #{x.get('original_pr')}：{str(x.get('why'))[:120]}" for x in no_target[-6:])
+        probs["retest:no-target"] = PN.item("action", "修复 PR 复测找不到可复测目标", desc,
+            "这些修复 PR 没有原用例复测证据，台账会一直停在「修复已合并，待复测」。",
+            todo=PN.ask_session(f"opsfix retest 找不到复测目标：{desc[:200]}，看原报告 pending_verification / failed_checks，决定手动复测还是在修复 PR 正文补指纹"))
+    if replay:
+        desc = "；".join(f"#{x.get('fix_pr')} ← #{x.get('original_pr')}：{str(x.get('why'))[:120]}（{x.get('result')}）" for x in replay[-6:])
+        probs["retest:exact-replay"] = PN.item("action", "修复 PR exact replay 未通过", desc,
+            "这些修复 PR 的原始失败用例复测仍失败、受阻或无法确定，台账保持未结案。",
+            todo=PN.ask_session(f"opsfix exact replay 未通过：{desc[:200]}，检查 replay 证据和目标代码，不要把结果标为 fixed"))
 
 
 SLOT_WAIT_DIR = f"{QA}/argus-root/slot-wait-alerts"

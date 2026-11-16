@@ -16,6 +16,10 @@ import argparse, json, os, re, shlex, subprocess, sys, datetime as dt
 CST = dt.timezone(dt.timedelta(hours=8))
 VITEST = ["node", "scripts/run-vitest.mjs"]
 TEST_FILE = re.compile(r"\.(test|spec)\.[cm]?[jt]sx?$")
+# Tests and offline fixtures use readable 40-character sentinels (``o``/``f``);
+# production callers still pass git's lowercase hexadecimal SHA.  Length is
+# the invariant needed to prevent abbreviated or empty replay bindings here.
+SHA = re.compile(r"^[0-9A-Za-z]{40}$")
 
 def cases_from_report(pr_report, fingerprints=None):
     """Original failing cases from a reports/merged PR entry: failed_checks[] (optionally only the given fingerprints).
@@ -54,12 +58,35 @@ def classify(rc, out=""):
     if rc == 0: return "pass"
     if re.search(r"(^| )FAIL |Tests?\s+\d+\s+failed|✗|AssertionError", out or "", re.M): return "fail"
     if re.search(r"No test files found|Cannot find module|ENOENT", out or ""): return "error"
-    return "fail"
+    return "error"
 
 def verdict(orig, fix):
     if fix == "pass" and orig == "fail": return "fail->pass"
     if fix == "pass" and orig == "pass": return "not-reproduced"
     if fix == "fail": return "still-fails"
+    return "inconclusive"
+
+def status_for(rows):
+    """Map the per-side replay evidence to the standard write-back states.
+
+    ``pass`` means every original failing case failed on the original SHA and
+    passed on the fix SHA.  ``fail`` means the fix still fails (or regresses a
+    related test).  A missing/errored execution is ``blocked`` because the
+    replay did not produce comparable evidence; a reproduced-free case is
+    ``inconclusive`` and must not be counted as a successful fix.
+    """
+    cases = [r for r in rows if r["check"] != "related"]
+    related = next((r for r in rows if r["check"] == "related"), None)
+    if not cases:
+        return "blocked"
+    if any(r["original"] == "error" for r in cases):
+        return "blocked"
+    if any(r["fix"] == "error" for r in cases) or (related and (related["original"] == "error" or related["fix"] == "error")):
+        return "blocked"
+    if any(r["verdict"] == "still-fails" for r in cases) or (related and related["verdict"] == "fail"):
+        return "fail"
+    if all(r["verdict"] == "fail->pass" for r in cases) and (not related or related["verdict"] != "fail"):
+        return "pass"
     return "inconclusive"
 
 def default_sh(argv, cwd, timeout=1800):
@@ -71,6 +98,10 @@ def default_sh(argv, cwd, timeout=1800):
 
 def run(orig_sha, fix_sha, cases, changed, worktree, sh=default_sh, drop=None):
     """worktree(sha) -> dir; sh(argv, cwd) -> (rc, output); drop(dir) cleans up. Returns the evidence dict."""
+    if not SHA.fullmatch(str(orig_sha or "")) or not SHA.fullmatch(str(fix_sha or "")):
+        return {"kind": "fix-retest-evidence", "result": "blocked", "status": "blocked",
+                "original_sha": orig_sha, "fix_sha": fix_sha, "cases": cases or [], "changed": changed or [],
+                "rows": [], "runs": {}, "reason": "replay requires full 40-character commit SHAs"}
     cmds = case_cmds(cases); rel = related_cmd(changed)
     runs = {}
     for side, sha in (("original", orig_sha), ("fix", fix_sha)):
@@ -84,15 +115,17 @@ def run(orig_sha, fix_sha, cases, changed, worktree, sh=default_sh, drop=None):
     rows = []
     for label, _ in cmds + ([rel] if rel else []):
         o, f = runs["original"][label]["result"], runs["fix"][label]["result"]
-        rows.append({"check": label, "original": o, "fix": f, "verdict": verdict(o, f) if label != "related" else ("pass" if f == "pass" else "fail")})
+        if label == "related":
+            related_verdict = "fail" if o == "pass" and f == "fail" else ("existing-failure" if o == "fail" and f == "fail" else "pass")
+            rows.append({"check": label, "original": o, "fix": f, "verdict": related_verdict})
+        else:
+            rows.append({"check": label, "original": o, "fix": f, "verdict": verdict(o, f)})
     case_rows = [r for r in rows if r["check"] != "related"]
     rel_row = next((r for r in rows if r["check"] == "related"), None)
-    if not case_rows: overall = "blocked"
-    elif all(r["verdict"] == "fail->pass" for r in case_rows) and (not rel_row or rel_row["fix"] == "pass"): overall = "pass"
-    elif any(r["verdict"] == "still-fails" for r in case_rows) or (rel_row and rel_row["fix"] == "fail"): overall = "fail"
-    else: overall = "inconclusive"
+    overall = status_for(rows)
     return {"kind": "fix-retest-evidence", "at": dt.datetime.now(CST).isoformat(timespec="seconds"), "original_sha": orig_sha, "fix_sha": fix_sha,
-            "cases": cases, "changed": changed, "rows": rows, "result": overall, "runs": runs}
+            "cases": cases, "changed": changed, "rows": rows, "result": overall, "status": overall,
+            "exact_replay": True, "runs": runs}
 
 def summary(ev):
     L = [f"# 原用例复测证据（{ev['original_sha'][:10]} → {ev['fix_sha'][:10]}）：{ev['result']}", "",
