@@ -147,13 +147,15 @@ export PANOPTES_TRIGGER="$TRIGGER"
 # 11-16 (#303) drain switch ${PI_STATE:-$QA_HOME/pi}/panoptes-drain (= pi/bin/lib.py drain_file(), also read by pi/bin/run.sh): while
 # it exists no QA run starts. Checked once, here, before any gate, lock, fleet manifest or report: one "[drain] … 排空中，跳过" line,
 # exit 0. A run that started before the switch opened (also one queued with --wait-lock) is a running job and goes on, as on main.
-# A child of a catch-up that was already running (PANOPTES_RUN_NIGHTLY from the parent, no --catch-up) exits 76 instead, like the
-# memory gate: argus catch-up then stops at once without spending one of the PR's 3 attempts.
+# A child of a catch-up that was already running exits 76 instead, like the memory gate: argus catch-up then stops at once without
+# spending one of the PR's 3 attempts. Child = no --catch-up and the parent's markers (argus runNightlyFor sets
+# PANOPTES_CATCH_UP_CHILD=1; the parent run-nightly.sh exports PANOPTES_RUN_NIGHTLY), whatever --trigger it carries: mergewatch
+# starts catch-up with --trigger event and the children inherit it.
 DRAIN_FILE="${PI_STATE:-$QA_HOME/pi}/panoptes-drain"
 drain_skip() {
   [[ -e "$DRAIN_FILE" ]] || return 0
   local rc=0
-  [[ -z "$CATCH_UP" && -n "${PANOPTES_RUN_NIGHTLY:-}" && "$TRIGGER" == catch-up ]] && rc=76
+  [[ -z "$CATCH_UP" && ( -n "${PANOPTES_CATCH_UP_CHILD:-}" || -n "${PANOPTES_RUN_NIGHTLY:-}" ) ]] && rc=76
   printf '[drain] %s trigger=%s: 排空中，跳过（%s），exit %s\n' "$(TZ=Asia/Shanghai date +%Y-%m-%dT%H:%M:%S+08:00)" "$TRIGGER" "$DRAIN_FILE" "$rc"
   ctl "run-nightly drained" "\"exitCode\":$rc"
   exit "$rc"

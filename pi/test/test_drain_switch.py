@@ -8,7 +8,7 @@
 Without the file nothing changes. Shell-level runs use a copy of run.sh with fake jobs, and run-nightly.sh with a temp QA_HOME
 (Linux only: GNU date / flock, like test_catchup_hourly_gate)."""
 for _k in [k for k in __import__("os").environ if k.startswith("GIT_")]: del __import__("os").environ[_k]
-import fcntl, os, re, shutil, subprocess, sys, tempfile, time, unittest
+import fcntl, json, os, re, shutil, subprocess, sys, tempfile, time, unittest
 HERE = os.path.dirname(os.path.abspath(__file__)); BIN = os.path.join(os.path.dirname(HERE), "bin"); R = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, BIN); sys.path.insert(0, HERE)
 import isolation  # noqa: E402
@@ -116,7 +116,7 @@ class RunNightly(unittest.TestCase):
         # as test_catchup_hourly_gate: dummy secrets + a fake nvm so the script gets as far as the locks
         open(f"{self.d}/s.env", "w").write("GITHUB_TOKEN=x\nQA_LLM_BASE_URL=http://127.0.0.1:9\nQA_LLM_API_KEY=x\n")
         os.makedirs(f"{self.d}/nvm"); open(f"{self.d}/nvm/nvm.sh", "w").write("nvm() { :; }\n")
-        self.env = {k: v for k, v in os.environ.items() if k not in ("PANOPTES_CATCHUP_GATE", "PANOPTES_RUN_NIGHTLY")}
+        self.env = {k: v for k, v in os.environ.items() if k not in ("PANOPTES_CATCHUP_GATE", "PANOPTES_RUN_NIGHTLY", "PANOPTES_CATCH_UP_CHILD")}
         self.env.update({"QA_HOME": self.d, "PI_STATE": f"{self.d}/pi", "PANOPTES_BOOTSTRAP": "0", "PANOPTES_TMP_SWEEP": "0",
                          "PANOPTES_SEVERITY_PIN_CHECK": "0", "QA_SECRETS_FILE": f"{self.d}/s.env", "PANOPTES_NVM_DIR": f"{self.d}/nvm",
                          "PANOPTES_FAKE_BJ_HOUR": "14"})
@@ -153,11 +153,47 @@ class RunNightly(unittest.TestCase):
         self.assertIn('"msg":"run-nightly drained"', read(f"{self.d}/argus-root/logs/control.log"))
         self.assertFalse(os.path.exists(f"{self.d}/argus-root/qa-fleet-run-manifest.json"))
 
-    def test_child_of_running_catch_up_exits_76(self):
+    def test_child_of_running_catch_up_exits_76_whatever_its_trigger(self):
+        # mergewatch starts catch-up with --trigger event (pi/bin/mergewatch.py), so its children carry trigger=event: the child
+        # markers decide, not the trigger. Without them (a run of its own) the same command exits 0.
         open(self.drain, "w").close()
-        r = self.rn("--pr", "7", "--trigger", "catch-up", "--wait-lock", "5", env={"PANOPTES_RUN_NIGHTLY": f"{R}/run-nightly.sh"})
-        self.assertEqual(r.returncode, 76, r.stderr); self.assertIn("exit 76", self.drained(r)[0])
+        child = {"PANOPTES_CATCH_UP_CHILD": "1", "PANOPTES_RUN_NIGHTLY": f"{R}/run-nightly.sh"}
+        for trig in ("catch-up", "event", "manual"):
+            for env in (child, {"PANOPTES_CATCH_UP_CHILD": "1"}, {"PANOPTES_RUN_NIGHTLY": f"{R}/run-nightly.sh"}):
+                r = self.rn("--pr", "7", "--trigger", trig, "--wait-lock", "5", env=env)
+                self.assertEqual(r.returncode, 76, (trig, env, r.stderr)); self.assertIn("exit 76", self.drained(r)[0])
+            r = self.rn("--pr", "7", "--trigger", trig, "--wait-lock", "5")
+            self.assertEqual(r.returncode, 0, (trig, r.stderr)); self.assertIn("exit 0", self.drained(r)[0])
 
+    def test_event_catch_up_round_stops_without_spending_an_attempt(self):
+        # end to end: the real argus catchUp() + runNightlyFor(trigger 'event') -> the real run-nightly.sh child under the drain
+        # switch -> exit 76 -> catch-up stops at once ('memory-skip'), the PR's attempt counter stays 0 and nothing is given up
+        open(self.drain, "w").close()
+        rd = f"{self.d}/reports"; os.makedirs(f"{rd}/merged")
+        js = f"""
+import * as cu from {json.dumps(f"{R}/argus/src/catchup.mjs")}
+import {{ readFileSync }} from 'node:fs'
+const PRS = [{{ number: 3, merged_at: '2026-10-10T03:00:00Z', merge_sha: 'c'.repeat(40), day: '2026-10-10' }},
+             {{ number: 2, merged_at: '2026-10-10T01:00:00Z', merge_sha: 'b'.repeat(40), day: '2026-10-10' }}]
+const ran = []
+const opt = {{ repo: 'o/r', now: new Date('2026-10-11T02:00:00Z'), reportsDir: {json.dumps(rd)}, list: () => PRS, active: () => new Set(),
+              mainOnly: false, maxBacklog: Infinity,
+              runOne: (p) => {{ ran.push(p.number); return cu.runNightlyFor(p, {{ waitLock: 5, reportsDir: {json.dumps(rd)}, trigger: 'event', log: 'ignore' }}) }} }}
+let r
+for (let i = 0; i < 4; i++) r = cu.catchUp(opt)
+const st = JSON.parse(readFileSync({json.dumps(rd + "/catch-up/state.json")}, 'utf8')).prs
+console.log(JSON.stringify({{ stopped: r.stopped, exit: (r.runs || [])[0]?.exit_code ?? null, ran, gave_up: (r.system_health?.gave_up || []).length, st }}))
+"""
+        open(f"{self.d}/cu.mjs", "w").write(js)
+        env = {**self.env, "PANOPTES_RUN_NIGHTLY": f"{R}/run-nightly.sh", "ARGUS_REPORTS_DIR": rd}
+        out = subprocess.run(["node", f"{self.d}/cu.mjs"], env=env, capture_output=True, text=True, timeout=120)
+        self.assertEqual(out.returncode, 0, out.stderr[-2000:])
+        res = json.loads(out.stdout.strip().splitlines()[-1])
+        self.assertEqual((res["stopped"], res["exit"], res["gave_up"]), ("memory-skip", 76, 0), res)
+        first = res["ran"][0]
+        self.assertEqual(res["ran"], [first] * 4, res)   # one child per round: the round stops at its first gap, no other PR is tried
+        self.assertEqual(list(res["st"]), [str(first)], res)
+        self.assertEqual(res["st"][str(first)]["attempts"], 0, res); self.assertNotIn("gave_up_at", res["st"][str(first)])
 
 if __name__ == "__main__":
     unittest.main()
