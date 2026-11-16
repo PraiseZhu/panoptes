@@ -105,7 +105,7 @@ class RunWriteBack(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp(prefix="retest-run-test-"); d = self.d
         self.saved = {k: getattr(R, k) for k in ("RPT", "BASE", "STATE", "QA_LOCK", "WORK", "NO_TARGET_ALERT", "merged_since", "mem_mb",
-                      "take_lock", "run_review", "ledger_path", "record_unmatched", "now_cst", "log")}
+                      "take_lock", "run_review", "run_exact_replay", "ledger_path", "record_unmatched", "now_cst", "log")}
         R.RPT = f"{d}/rpt"; R.BASE = d; R.STATE = f"{d}/state.json"; R.QA_LOCK = f"{d}/lock"; R.WORK = f"{d}/wt"
         R.NO_TARGET_ALERT = f"{d}/alert.json"; os.makedirs(R.RPT)
         rep = lambda n, **x: json.dump({"prs": [dict(number=n, **x)]}, open(f"{R.RPT}/PR-{n}.json", "w"))
@@ -134,6 +134,40 @@ class RunWriteBack(unittest.TestCase):
         self.assertEqual([(x["result"], x["method"], x["original_pr"]) for x in rt], [("blocked", "no-target", 1490)])
         st = json.load(open(R.STATE)); self.assertIn("1742", st["done"]); self.assertEqual(st["done"]["1725"]["gave_up_after"], 3)
         self.assertIn("1742<-1490", json.load(open(R.NO_TARGET_ALERT))["items"])
+
+    def test_exact_replay_failure_states_write_alert_and_stay_unfixed(self):
+        cases = (("fail", 1600, 1550), ("blocked", 1601, 1551), ("inconclusive", 1602, 1552))
+        sources = []
+        for i, (status, fix_n, orig_n) in enumerate(cases):
+            fp = f"mq1-exact-{status}"
+            json.dump({"prs": [{"number": orig_n, "tested_sha": "a" * 40,
+                                 "findings": [{"source": "check", "severity": "P1", "fingerprint": fp}],
+                                 "failed_checks": [{"fingerprint": fp, "check_id": "unit", "test": "src/a.test.ts"}]}]},
+                      open(f"{R.RPT}/PR-{orig_n}.json", "w"))
+            json.dump({"prs": [{"number": fix_n}]}, open(f"{R.RPT}/PR-{fix_n}.json", "w"))
+            sources.append({"number": fix_n, "body": f"QA: #{orig_n}", "title": "fix",
+                            "mergedAt": f"2026-11-04T{13 + i:02d}:00:00Z", "headRefOid": str(7 + i) * 40})
+        old_merged = R.merged_since
+        try:
+            R.merged_since = lambda lo: sources
+            R.run_exact_replay = lambda fix, *args: (next(s for s, n, _ in cases if n == fix["number"]),
+                                                     "exact replay fixture", {"exact_replay": True})
+            a = types.SimpleNamespace(pr=None, day=None, since=None, execute=True, max_model=12, wait_lock=1, keep=True, no_handoff=True)
+            import io, contextlib
+            with contextlib.redirect_stdout(io.StringIO()): R.run(a)
+        finally:
+            R.merged_since = old_merged
+        alert = json.load(open(R.NO_TARGET_ALERT))
+        for status, fix_n, orig_n in cases:
+            fp = f"mq1-exact-{status}"
+            report = json.load(open(f"{R.RPT}/PR-{fix_n}.json"))["prs"][0]
+            self.assertEqual(report["retest"][0]["result"], status)
+            self.assertNotEqual(report["retest"][0].get("outcome"), "fixed")
+            item = alert["items"][f"{fix_n}<-{orig_n}:{fp}"]
+            self.assertEqual((item["kind"], item["result"]), ("exact-replay", status))
+        probs = {}
+        watchdog.retest_no_target_check(None, probs, path=R.NO_TARGET_ALERT)
+        self.assertIn("retest:no-target", probs)  # existing watchdog reader sees the shared alert record
 
 
 class PmExtraCount(unittest.TestCase):

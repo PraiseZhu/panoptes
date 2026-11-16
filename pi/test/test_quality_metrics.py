@@ -45,6 +45,23 @@ class Metrics(unittest.TestCase):
         self.assertEqual(out["counts"]["unknown_denominator"], 1)
         self.assertIn("base_sha", out["unknown_findings"][0]["missing"])
 
+    def test_same_fingerprint_across_runs_and_history_is_one_finding(self):
+        fp = "mq1-history"
+        docs = []
+        for path, pr, run_id in (("run-1.json", 10, "qa-run-1"),
+                                 ("history-1.json", 10, "qa-run-2"),
+                                 ("run-2.json", 11, "qa-run-3")):
+            f = finding(fp)
+            f["run_id"] = run_id
+            docs.append((path, {"prs": [{"number": pr, "findings": [f], "retest": [
+                {"fingerprint": fp, "original_pr": pr, "method": "check", "result": "pass",
+                 "at": run_id, "detail": {"exact_replay": True}}
+            ]}]}))
+        out = qm.compute_metrics(docs)
+        self.assertEqual(out["counts"]["finding_records"], 3)
+        self.assertEqual(out["counts"]["unique_findings"], 1)
+        self.assertEqual(out["counts"]["duplicate_records"], 2)
+
     def test_missing_environment_is_unknown(self):
         doc = {"prs": [{"number": 9, "findings": [{"fingerprint": "mq1-no-env", "tested_sha": SHA_A,
                                                         "base_sha": SHA_B, "run_id": "r", "artifact_refs": ["a"]}],

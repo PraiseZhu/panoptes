@@ -182,6 +182,45 @@ def write_no_target_alert(results, stamp, path=None):
         if v["last"] == st["updated"]: log(f"ALERT retest: #{v['fix_pr']} ← #{v['original_pr']} {v['why']} -> {path}（watchdog retest:no-target）")
     return st
 
+def replay_alert(results, stamp, path=None, prev=None):
+    """Merge exact-replay failures into the watchdog alert state.
+
+    The existing alert file is deliberately shared with the no-target check so
+    watchdog can surface one durable record for every unresolved replay. Only
+    exact ``check`` replays are included; model-review budget blocks keep their
+    existing retry semantics without being reported as replay failures.
+    """
+    path = path or NO_TARGET_ALERT
+    st = no_target_alert(results, stamp, prev=prev) or {"items": {}}
+    items = st.setdefault("items", {})
+    for r in results:
+        if r.get("source") != "check" or r.get("result") not in ("fail", "blocked", "inconclusive"):
+            continue
+        fp = r.get("fingerprint") or "unknown"
+        key = f"{r['fix_pr']}<-{r['original_pr']}:{fp}"
+        old = items.get(key) or {}
+        items[key] = {"fix_pr": r["fix_pr"], "original_pr": r["original_pr"], "fingerprint": r.get("fingerprint"),
+                      "kind": "exact-replay", "result": r["result"], "why": r.get("reason"),
+                      "since": old.get("since") or stamp.isoformat(timespec="seconds"), "last": stamp.isoformat(timespec="seconds")}
+    items = {k: v for k, v in items.items() if (parse_at(v.get("last")) or stamp) >= stamp - NO_TARGET_KEEP}
+    return {"items": items, "updated": stamp.isoformat(timespec="seconds")} if items else None
+
+def write_retest_alert(results, stamp, path=None):
+    """Write no-target and exact-replay alerts, preserving 72-hour recovery state."""
+    path = path or NO_TARGET_ALERT
+    try: prev = json.load(open(path))
+    except Exception: prev = None
+    st = replay_alert(results, stamp, path=path, prev=prev)
+    if st is None:
+        if os.path.exists(path): os.remove(path)
+        return None
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    write_atomic(path, json.dumps(st, ensure_ascii=False, indent=1))
+    for v in st["items"].values():
+        if v["last"] == st["updated"]:
+            log(f"ALERT retest: #{v['fix_pr']} ← #{v['original_pr']} {v['why']} -> {path}（watchdog retest:{v.get('kind', 'no-target')}）")
+    return st
+
 def report_entries(results, n, done=None):
     """Write-back entries for reports/merged/PR-<n>.json prs[0].retest[]. 11-05: blocked (incl. given up after
     MAX_ATTEMPTS, and no-target) is written too — before, only pass/fail were, so #1725/#1710 left no trace in the report.
@@ -674,7 +713,7 @@ def run(a):
         by_fix = {}
         for r in results: by_fix.setdefault(r["fix_pr"], []).append(r)
         _, done_now, retry_now = settle(state, by_fix, {p["number"]: p.get("headRefOid") for p, _ in P}, stamp.isoformat(timespec="seconds"))
-        write_no_target_alert(results, stamp)
+        write_retest_alert(results, stamp)
         # write-back (pass / fail / blocked / gave_up)
         for n in sorted({r["fix_pr"] for r in results}):
             ents = report_entries(results, n, state.get("done"))
