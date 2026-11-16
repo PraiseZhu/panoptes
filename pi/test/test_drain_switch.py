@@ -3,7 +3,7 @@
   * pi/bin/run.sh exits 0 with one "排空中，跳过" line for every job outside lib.DRAIN_EXEMPT (deploy / watch / box care run on);
   * run-nightly.sh starts no QA run: nightly, event, manual and --catch-up exit 0 with one "[drain] … 排空中，跳过" line before any
     lock or fleet manifest; a child of a catch-up that was already running exits 76 (argus catch-up stops, no attempt spent);
-    a run that queued for the QA slot before the switch opened exits 0 right after it gets the slot;
+    a run that started (or queued for the slot) before the switch opened goes on, as on main;
   * watchdog alerts once it has been open > 2 h.
 Without the file nothing changes. Shell-level runs use a copy of run.sh with fake jobs, and run-nightly.sh with a temp QA_HOME
 (Linux only: GNU date / flock, like test_catchup_hourly_gate)."""
@@ -40,6 +40,14 @@ class Contract(unittest.TestCase):
         d = tempfile.mkdtemp(); p = f"{d}/panoptes-drain"
         self.assertIsNone(lib.drain_since(p))
         open(p, "w").close(); os.utime(p, (1000, 1000)); self.assertEqual(lib.drain_since(p), 1000)
+
+    def test_checked_once_before_the_fleet_manifest(self):
+        # one check, before qa_standard start / the shared manifest pointer: a run that started (or queued for the slot) before the
+        # switch opened is a running job and goes on exactly as on main, so a drain never leaves a pointer to a run that did not test
+        sh = read(f"{R}/run-nightly.sh")
+        calls = [l for l in sh.splitlines() if re.match(r"^\s*(if .*; then .*)?drain_skip\b(?!\(\))", l)]
+        self.assertEqual(calls, ["drain_skip"])
+        self.assertLess(sh.index("\ndrain_skip\n"), sh.index("qa_standard.py\" start"))
 
 
 class Watchdog(unittest.TestCase):
@@ -149,26 +157,6 @@ class RunNightly(unittest.TestCase):
         open(self.drain, "w").close()
         r = self.rn("--pr", "7", "--trigger", "catch-up", "--wait-lock", "5", env={"PANOPTES_RUN_NIGHTLY": f"{R}/run-nightly.sh"})
         self.assertEqual(r.returncode, 76, r.stderr); self.assertIn("exit 76", self.drained(r)[0])
-
-    def test_run_queued_before_the_switch_stops_after_the_slot(self):
-        lk = self.hold("nightly.lock")
-        ptr = f"{self.d}/argus-root/qa-fleet-run-manifest.json"
-        prev = '{"schema": "qa.fleet.run/v1", "run_id": "last-real-run"}'
-        with open(ptr, "w") as f: f.write(prev + "\n")   # the pointer of the last run that really tested
-        err = open(f"{self.d}/stderr", "w"); self.addCleanup(err.close)
-        p = subprocess.Popen([f"{R}/run-nightly.sh", "--trigger", "manual", "--pr", "7", "--wait-lock", "90"], env=self.env,
-                             stdout=subprocess.PIPE, stderr=err, text=True)
-        self.addCleanup(lambda: p.poll() is None and p.kill())
-        for _ in range(120):
-            if "waiting up to" in read(f"{self.d}/stderr") or p.poll() is not None: break
-            time.sleep(0.5)
-        self.assertIsNone(p.poll(), read(f"{self.d}/stderr")[-2000:])
-        self.assertNotIn("last-real-run", read(ptr))   # while it waits the pointer names the queued run (as on main)
-        open(self.drain, "w").close(); lk.close()   # the switch opens while it waits; then the running job ends
-        out, _ = p.communicate(timeout=100)
-        self.assertEqual(p.returncode, 0, read(f"{self.d}/stderr")[-2000:])
-        self.assertEqual(len([l for l in out.splitlines() if l.startswith("[drain]")]), 1, out)
-        self.assertEqual(read(ptr).strip(), prev)   # nothing was tested: the pointer is back on the last real run
 
 
 if __name__ == "__main__":

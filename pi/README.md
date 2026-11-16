@@ -63,7 +63,7 @@ bot 建的、用完就扔的东西只放在 `/workspace/pi-work/`（`bin/workroo
 - 开关（值不变，只换了位置）：`/workspace/fleet-mode`；`$PI_STATE/outbound-enabled`；`$PI_STATE/outbound-disabled-types`；`$PI_STATE/takeover/<作业>`。切换用 `bin/switch.sh pi|grok [--with-outbound] [--dry-run]`。
 - **排空开关**（11-16，#303）：`$PI_STATE/panoptes-drain`（机器上是 `/workspace/mivo-qa/pi/panoptes-drain`）。`touch` 打开，`rm` 关闭。打开期间：
   - `bin/run.sh` 只放行部署、看门狗和机器维护作业（名单是 `lib.DRAIN_EXEMPT`：opsdeploy、opsenv、watchdog、boxhealth、boxcheck、cindy、janitor、memguard、credcheck、stdcheck），其余作业在作业日志里记一行「排空中，跳过」后退出 0。
-  - `run-nightly.sh` 不启动任何测试（nightly、合并即测、手动、补测），输出一行 `[drain] … 排空中，跳过` 后退出 0。正在跑的补测派出的下一个子任务退出 76，补测马上停下、不扣这个 PR 的重试次数。排队等槽位的测试拿到槽位后也会退出。
+  - `run-nightly.sh` 不启动任何测试（nightly、合并即测、手动、补测），输出一行 `[drain] … 排空中，跳过` 后退出 0。正在跑的补测派出的下一个子任务退出 76，补测马上停下、不扣这个 PR 的重试次数。开关打开前已经启动的测试（包括正在排队等槽位的）照常跑完。
   - 已经在跑的作业不受影响，跑完为止。开关开着超过 2 小时，看门狗告警一次。用法见 `docs/ops/qa-fleet-rollout.md`「立即部署」。
 - **部署状态**（11-16，#303）：每次部署成功后，`bin/deploy_status.py` 在被部署的提交上写一条 commit status（context `panoptes/deployed`，描述是主机名和北京时间），用 Praise QA App 的令牌。不登录机器也能查当前部署版本：`python3 pi/bin/deploy_status.py show`。拿不到 App 令牌或 GitHub 请求失败时部署照常，`out/ops/env-<日>.md` 记一行「部署状态未发布：<原因码>」。
 

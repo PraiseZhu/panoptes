@@ -145,10 +145,10 @@ case "$TRIGGER" in event|catch-up|manual) ;; *) echo "--trigger must be event, c
 export PANOPTES_TRIGGER="$TRIGGER"
 
 # 11-16 (#303) drain switch ${PI_STATE:-$QA_HOME/pi}/panoptes-drain (= pi/bin/lib.py drain_file(), also read by pi/bin/run.sh): while
-# it exists no QA run starts. Checked here, before any gate, lock, fleet manifest or report, and again right after the QA slot is
-# taken (a run queued with --wait-lock before the switch opened must not grab the slot the deploy is waiting for). One "[drain] …
-# 排空中，跳过" line, exit 0. A child of a catch-up that was already running (PANOPTES_RUN_NIGHTLY from the parent, no --catch-up)
-# exits 76 instead, like the memory gate: argus catch-up then stops at once without spending one of the PR's 3 attempts.
+# it exists no QA run starts. Checked once, here, before any gate, lock, fleet manifest or report: one "[drain] … 排空中，跳过" line,
+# exit 0. A run that started before the switch opened (also one queued with --wait-lock) is a running job and goes on, as on main.
+# A child of a catch-up that was already running (PANOPTES_RUN_NIGHTLY from the parent, no --catch-up) exits 76 instead, like the
+# memory gate: argus catch-up then stops at once without spending one of the PR's 3 attempts.
 DRAIN_FILE="${PI_STATE:-$QA_HOME/pi}/panoptes-drain"
 drain_skip() {
   [[ -e "$DRAIN_FILE" ]] || return 0
@@ -211,19 +211,9 @@ FLEET_RUN="$(python3 "$PANOPTES_DIR/pi/bin/qa_standard.py" start --state "${PI_S
 export PANOPTES_FLEET_MANIFEST="$FLEET_RUN"
 # Catch-up is an orchestrator with no report of its own. Only its QA children
 # may replace the latest report pointer; an empty/locked tick keeps it intact.
-PREV_MANIFEST=""
 if [[ -z "$CATCH_UP" ]]; then
-  # #303: remember the previous pointer; a run the drain switch stops after its slot wait (drain_restore_manifest) puts it back
-  [[ -f "$ARGUS_ROOT/qa-fleet-run-manifest.json" ]] && PREV_MANIFEST="$(cat "$ARGUS_ROOT/qa-fleet-run-manifest.json")"
   cp "$FLEET_RUN" "$ARGUS_ROOT/qa-fleet-run-manifest.json"
 fi
-# #303: called only on the drain exit after the slot wait (nothing was tested): the pointer goes back to the last real run,
-# unless another run has replaced it meanwhile
-drain_restore_manifest() {
-  [[ -n "$PREV_MANIFEST" ]] && cmp -s "$FLEET_RUN" "$ARGUS_ROOT/qa-fleet-run-manifest.json" \
-    && printf '%s\n' "$PREV_MANIFEST" >"$ARGUS_ROOT/qa-fleet-run-manifest.json"
-  return 0
-}
 
 
 # /tmp sweep: leftover argus-* dirs older than 24 h, owned by us, not held by a live process (scripts/sweep-tmp.sh).
@@ -402,7 +392,6 @@ elif [[ -n "$WAIT_LOCK" ]]; then
 else
   slot_acquire_normal 9 "" || { echo "another run is active (use --wait-lock to queue)" >&2; exit 75; }
 fi
-if [[ -e "$DRAIN_FILE" ]]; then slot_release_priority; drain_restore_manifest; drain_skip; fi   # #303: the switch may have opened while this run waited
 # 11-04 P0 (PR-1789 catch-up 401): the App token from the gh_app_env call above was resolved before the slot wait (up to
 # --wait-lock 4h); installation tokens live 1 h, so a run that queued longer started node with an expired GH_TOKEN. Re-resolve it
 # now that the slot is held (ghtoken.py hands out the cached token while > 10 min is left, else mints). Same no-PAT-fallback rule.
