@@ -11,6 +11,7 @@ Checks (all from files already on disk, plus one `gh pr list` every 30 min):
   * backup: last grokbot-box sync pushed (or nothing to push) within 3 h; a refused push because the box looks rolled back;
     the FAIL lines of the 备份管家 rules (grokbot-box/check.sh at :40 -> check.log, which nobody read before 10-24)
   * panoptes deployed = origin/main (opsenv deploys; alert if still behind after 3 h)
+  * drain switch $PI_STATE/panoptes-drain open > 2 h (11-16 #303: while open nothing but deploy / watch / box-care jobs starts)
   * infrafix tickets: stuck in running > 2 h, waiting for Praise > 12 h, PR action not executed > 2 h, merged not deployed > 6 h
   * outbound: when outbound itself is failing, the alert bypasses it (same sender script, own dedupe key)
   * 修 PR bot (10-24; nothing watched it): a run stuck > 90 min; a fix-PR action not executed after 2 h; a ticket waiting for
@@ -724,6 +725,22 @@ def qa_standard_check(now, probs):
             "新标准的运行证据不完整或已漂移。", todo="查看 fleet_status 与 stdcheck；保留当前 mode，补齐证据后再切换")
 
 
+DRAIN_ALERT_S = 2 * 3600
+
+
+def drain_check(now, probs, path=None, t=None):
+    """11-16 (#303): the drain switch (lib.drain_file()) open > 2 h -> one drain:open item. While it is open run.sh / run-nightly.sh
+    start nothing but deploy / watch / box-care jobs, so a switch someone forgot to close stops every test and PR job."""
+    path = path or drain_file(); since = drain_since(path)
+    if since is None: return
+    h = ((t or time.time()) - since) / 3600
+    if h * 3600 <= DRAIN_ALERT_S: return
+    probs["drain:open"] = PN.item("action", "排空开关开着超过 2 小时",
+        f"排空开关 {path} 已经开了 {h:.1f} 小时。开着时除了部署、看门狗和机器维护，所有作业（合并即测、补测、修 PR、日报等）都不启动。",
+        "测试和自动化一直停着，新合并的 PR 没人测。",
+        todo=PN.ask_session(f"排空开关 {path} 开了 {h:.1f} 小时：按 docs/ops/qa-fleet-rollout.md「立即部署」看部署是否已完成，完成了就删掉开关，没完成就查卡在哪一步"))
+
+
 def main():
     if mode() != "pi": return 0
     import fcntl
@@ -736,7 +753,8 @@ def main():
                lambda: backup_check(now, probs), lambda: backup_rules_check(now, probs), lambda: panoptes_check(now, probs, st),
                lambda: infra_check(now, probs), lambda: prfix_check(now, probs, st), lambda: vigil_check(now, probs, st),
                lambda: outbound_health_check(now, probs), lambda: janitor_check(now, probs), lambda: gh_ratelimit_check(now, probs),
-               lambda: pmnudge_gh_check(now, probs), lambda: slot_wait_check(now, probs), lambda: retest_no_target_check(now, probs), lambda: qa_standard_check(now, probs)):
+               lambda: pmnudge_gh_check(now, probs), lambda: slot_wait_check(now, probs), lambda: retest_no_target_check(now, probs), lambda: qa_standard_check(now, probs),
+               lambda: drain_check(now, probs)):
         try: fn()
         except Exception as e: probs[f"watchdog:{getattr(fn, '__name__', 'check')}"] = PN.item("action", "「看门狗」自己出错了",
             "专门盯各个自动化有没有停摆的看门狗，自己的一项检查出错了。", "那一项坏了也不会有人告诉你。",

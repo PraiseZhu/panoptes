@@ -789,6 +789,16 @@ def write_atomic(path, text):
 # ---------------- Pi line common ----------------
 MODE_FILE = "/workspace/fleet-mode"
 OUTBOUND_FLAG = f"{BASE}/outbound-enabled"
+# 11-16 (#303) drain switch $PI_STATE/panoptes-drain (touch = open, rm = close): while it exists pi/bin/run.sh starts no job outside
+# DRAIN_EXEMPT and run-nightly.sh starts no QA run (one "排空中，跳过" line, exit 0), so a deploy can wait for the running jobs and
+# take both panoptes locks. run.sh and run-nightly.sh test the same path (shell copies; test_drain_switch checks they agree).
+# watchdog alerts when it stays open > 2 h. Procedure: docs/ops/qa-fleet-rollout.md「立即部署」.
+DRAIN_EXEMPT = ("opsdeploy", "opsenv", "watchdog", "boxhealth", "boxcheck", "cindy", "janitor", "memguard", "credcheck", "stdcheck")
+def drain_file(): return f"{PI_STATE}/panoptes-drain"
+def drain_since(path=None):
+    """epoch the drain switch was opened (the file's mtime), or None while it is closed"""
+    try: return os.path.getmtime(path or drain_file())
+    except OSError: return None
 
 def mode():
     """fleet mode; PI_FLEET_MODE env overrides the file (for simulation/tests only, never writes the file)."""

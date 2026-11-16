@@ -13,6 +13,13 @@ LOGDIR=$BASE/out/logs; mkdir -p "$LOGDIR"
 LOG=$LOGDIR/$JOB-$(date -d "${PI_TEST_NOW:-now}" +%F).log   # PI_TEST_NOW: tests only (the catch-up gate below reads the same day)
 # optional Beijing-hour gate: run.sh JOB @HH  (cron fires hourly; DST-proof)
 if [[ "${1:-}" == @* ]]; then [[ ",${1#@}," == *",$(date +%H),"* ]] || exit 0; shift; fi
+# 11-16 (#303) drain switch $BASE/panoptes-drain (= lib.drain_file(); DRAIN_EXEMPT = lib.DRAIN_EXEMPT, test_drain_switch keeps them
+# equal): while it exists every job except the deploy / watch / box-care ones exits 0 here with one "排空中，跳过" line (no lock,
+# no memory wait, no model), so a deploy can wait for the running jobs. Procedure: docs/ops/qa-fleet-rollout.md「立即部署」.
+DRAIN_EXEMPT=" opsdeploy opsenv watchdog boxhealth boxcheck cindy janitor memguard credcheck stdcheck "
+if [ -e "$BASE/panoptes-drain" ] && [[ "$DRAIN_EXEMPT" != *" $JOB "* ]]; then
+  echo "=== $(date '+%F %T %Z') skip $JOB: 排空中，跳过（$BASE/panoptes-drain）" >>"$LOG"; exit 0
+fi
 # 11-10 boxhealth catch-up (cron :47 "boxhealth catchup"): the platform pauses the VM and cron loses minutes (06:17/07:17 never
 # started). Run only if today's boxhealth log has no "start boxhealth" in this Beijing hour; otherwise log one skip line and exit.
 # PI_TEST_NOW (tests only) fakes the time; date and hour come from one call so midnight cannot split them.

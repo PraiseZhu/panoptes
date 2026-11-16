@@ -32,10 +32,37 @@ Pi model calls prepend the lane brief in `lib.pi`. `grokline` returns `qa_standa
 
 The existing `opsdeploy` fast-forwards main; it does not check out an earlier SHA. The rollback plan names the previous complete source SHA for an operator authorized to restore the runtime. Keep product actions disabled in rollback until that restoration is verified. This PR neither performs that restoration nor claims a fast-forward is an exact-SHA rollback.
 
+## 立即部署
+
+正常情况下不用做任何事：`opsdeploy` 每 10 分钟检查一次，main 有新提交、CI 全绿、两把 panoptes 锁空闲时自己快进部署。只有必须马上部署、又有测试一直占着锁时，才按下面的顺序做。不要为了抢部署时机停掉正在跑的测试。
+
+1. **先查当前部署版本。** 任何能读本仓的 gh 登录都能查，不用登录主机：
+
+   ```sh
+   python3 pi/bin/deploy_status.py show            # 当前部署：<sha>（部署于 <主机> <时间> CST）；落后 main 最新 N 个提交
+   gh api repos/PraiseZhu/panoptes/commits/<目标 sha>/statuses --jq '.[] | select(.context == "panoptes/deployed")'
+   ```
+
+   已经是目标版本（或更新）就停手，后面几步都不做。查不到部署状态时，看主机 `out/ops/env-<日>.md` 里最近的「部署」和「部署状态」两行。
+2. **打开排空开关**（主机上，有当次部署授权的人做）：`touch /workspace/mivo-qa/pi/panoptes-drain`。之后新作业不再启动：`pi/bin/run.sh` 只放行 opsdeploy、opsenv、watchdog 和机器维护作业，`run-nightly.sh` 不启动任何测试（都记一行「排空中，跳过」后退出 0）。已经在跑的作业继续跑完。
+3. **等两把 panoptes 锁释放**（部署时 `opsenv.deploy()` 要拿的就是这两把）：
+
+   ```sh
+   until flock -n /workspace/mivo-qa/argus-root/catch-up.lock true && flock -n /workspace/mivo-qa/argus-root/nightly.lock true; do sleep 60; done
+   ```
+
+4. **运行 opsdeploy**：`/workspace/panoptes/pi/bin/run.sh opsdeploy`（排空开关不拦它；不手动跑也会在 10 分钟内自己跑）。成功时 `/workspace/mivo-qa/pi/out/ops/env-<日>.md` 多出「- 部署: <旧> → <新>」和「- 部署状态已发布：panoptes/deployed @ <新>」两行。
+5. **关闭排空开关**：`rm -f /workspace/mivo-qa/pi/panoptes-drain`。开关开着超过 2 小时，看门狗会告警。
+6. **核对部署状态**：再跑一次第 1 步的命令，确认当前部署就是目标版本。
+
+排空期间被跳过的东西：合并即测（mergewatch）启动的测试直接退出，mergewatch 会按原有退避重试，最多 3 次；没测上的已合并 PR 在关掉开关后由每小时的补测（catch-up）补上。按北京时间定点跑的作业（日报、交接等）错过的那一轮不会补跑，所以开关要尽快关。
+
+部署状态发布失败不影响部署本身，env 文件里记「- 部署状态未发布：<原因码>」：`no_credential`（主机上拿不到 Praise QA App 令牌）、`no_installation`、`no_statuses_permission`（App 没有 Commit statuses 写权限）、`http_<状态码>`、`network_error`、`bad_sha`、`error_<异常名>`。原因码里不含令牌和返回正文。
+
 ## Exact source restoration (authorized operator only)
 
-Run this procedure on the authorized host after stopping new scheduler admissions,
-draining active jobs and pausing `opsdeploy`/`opsenv` auto-update. Keep outbound
+Run this procedure on the authorized host after stopping new scheduler admissions
+(the drain switch, see「立即部署」step 2), draining active jobs and pausing `opsdeploy`/`opsenv` auto-update. Keep outbound
 product actions disabled and the active standard in `rollback` throughout. Record
 who paused the jobs and when. Do not resume them until the checks below pass.
 This is an operator procedure; none of these host writes run in CI or this PR.

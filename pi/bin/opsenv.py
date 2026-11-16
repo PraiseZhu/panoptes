@@ -73,6 +73,10 @@ def deploy(L):
         for f in held: f.close()
     if rc: L.append(f"- 部署: ff-only 失败 {o[-120:]}"); return f"panoptes ff-only failed: {o[-120:]}"
     L.append(f"- 部署: {head[:7]} → {tgt[:7]}（ff-only，CI 全部成功，锁空闲）"); log("deployed panoptes", head[:7], "->", tgt[:7])
+    # 11-16 (#303): commit status panoptes/deployed on tgt, so the lead sees the deployed version without the box. Never fails the deploy.
+    try:
+        import deploy_status; deploy_status.after_deploy(tgt, L)
+    except Exception as e: L.append(f"- 部署状态未发布：error_{e.__class__.__name__}")
     return None
 FIX_ENV = "测试环境自检报：{x}。看 /workspace/mivo-qa/pi/out/ops/env-*.md，没有测试在跑时跑 /workspace/panoptes/scripts/bootstrap-box.sh 补齐，再跑一次 opsenv 确认"
 def env_item(x):

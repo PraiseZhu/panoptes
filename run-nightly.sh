@@ -144,6 +144,22 @@ set -- ${ARGS[@]+"${ARGS[@]}"}
 case "$TRIGGER" in event|catch-up|manual) ;; *) echo "--trigger must be event, catch-up or manual (got '$TRIGGER')" >&2; exit 1 ;; esac
 export PANOPTES_TRIGGER="$TRIGGER"
 
+# 11-16 (#303) drain switch ${PI_STATE:-$QA_HOME/pi}/panoptes-drain (= pi/bin/lib.py drain_file(), also read by pi/bin/run.sh): while
+# it exists no QA run starts. Checked here, before any gate, lock, fleet manifest or report, and again right after the QA slot is
+# taken (a run queued with --wait-lock before the switch opened must not grab the slot the deploy is waiting for). One "[drain] …
+# 排空中，跳过" line, exit 0. A child of a catch-up that was already running (PANOPTES_RUN_NIGHTLY from the parent, no --catch-up)
+# exits 76 instead, like the memory gate: argus catch-up then stops at once without spending one of the PR's 3 attempts.
+DRAIN_FILE="${PI_STATE:-$QA_HOME/pi}/panoptes-drain"
+drain_skip() {
+  [[ -e "$DRAIN_FILE" ]] || return 0
+  local rc=0
+  [[ -z "$CATCH_UP" && -n "${PANOPTES_RUN_NIGHTLY:-}" && "$TRIGGER" == catch-up ]] && rc=76
+  printf '[drain] %s trigger=%s: 排空中，跳过（%s），exit %s\n' "$(TZ=Asia/Shanghai date +%Y-%m-%dT%H:%M:%S+08:00)" "$TRIGGER" "$DRAIN_FILE" "$rc"
+  ctl "run-nightly drained" "\"exitCode\":$rc"
+  exit "$rc"
+}
+drain_skip
+
 # Beijing even-hour gate for the hourly catch-up cron (scripts/catch-up.cron: "7 * * * *" + PANOPTES_CATCHUP_GATE=even).
 # Debian cron 3.0pl1 has no per-file time zone and the platform switches the box zone, so the hour is decided here, like pi run.sh @HH:
 # only --catch-up with PANOPTES_CATCHUP_GATE=even is gated (mergewatch / outage replay / manual runs are not).
@@ -376,6 +392,7 @@ elif [[ -n "$WAIT_LOCK" ]]; then
 else
   slot_acquire_normal 9 "" || { echo "another run is active (use --wait-lock to queue)" >&2; exit 75; }
 fi
+if [[ -e "$DRAIN_FILE" ]]; then slot_release_priority; drain_skip; fi   # #303: the switch may have opened while this run waited
 # 11-04 P0 (PR-1789 catch-up 401): the App token from the gh_app_env call above was resolved before the slot wait (up to
 # --wait-lock 4h); installation tokens live 1 h, so a run that queued longer started node with an expired GH_TOKEN. Re-resolve it
 # now that the slot is held (ghtoken.py hands out the cached token while > 10 min is left, else mints). Same no-PAT-fallback rule.
