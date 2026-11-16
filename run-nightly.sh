@@ -89,6 +89,8 @@ ctl() { printf '{"t":"%s","level":"%s","msg":"%s","pid":%d,%s}\n' "$(date -u +%Y
 LAUNCH_ARGS="$(printf '%s ' "$@" | sed 's/[\\"]/\\&/g')"
 ctl "run-nightly launch" "\"args\":\"${LAUNCH_ARGS% }\""
 EXTRA_EXIT_CLEANUP=":"
+# Called by the EXIT trap.
+# shellcheck disable=SC2329
 fleet_finish() {
   if [[ -n "${FLEET_RUN:-}" && "${FLEET_FINISHED:-0}" != 1 ]]; then
     python3 "$PANOPTES_DIR/pi/bin/qa_standard.py" finish --state "${PI_STATE:-$QA_HOME/pi}" --file "$FLEET_RUN" --rc "$1" || true
@@ -338,7 +340,7 @@ if [[ -n "$CATCH_UP" ]]; then
   flock -n 8 || { printf '[catch-up] %s trigger=%s: catch-up.lock held by another catch-up; skipped\n' "$(TZ=Asia/Shanghai date +%Y-%m-%dT%H:%M:%S+08:00)" "${TRIGGER:-catch-up}"; exit 0; }
   cd "$PANOPTES_DIR/argus"
   export PANOPTES_RUN_NIGHTLY="$PANOPTES_DIR/run-nightly.sh"
-  ctl "run-nightly exec catch-up (exec replaces the shell: no exit line follows)" "\"exitCode\":null"
+  ctl "run-nightly catch-up started" "\"exitCode\":null"
   rc=0
   node --disable-warning=ExperimentalWarning src/cli.mjs catch-up --wait-lock "${WAIT_LOCK:-14400}" --trigger "$TRIGGER" ${CU_ARGS[@]+"${CU_ARGS[@]}"} || rc=$?
   exit "$rc"
