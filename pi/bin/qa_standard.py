@@ -115,7 +115,8 @@ def inspect(state, qa=None, now=None):
     for p in (Path(state) / 'out/qa-fleet/runs').glob('fleet-*.json'):
         try:
             doc = json.loads(p.read_text())
-            if doc.get('schema') == 'qa.fleet.run/v1' and doc.get('lane') in LANES: runs.append(doc)
+            if not isinstance(doc, dict) or doc.get('schema') != 'qa.fleet.run/v1' or doc.get('lane') not in LANES: raise ValueError('receipt_invalid')
+            runs.append(doc)
         except (OSError, ValueError): result['errors']['receipt'] = 'receipt_unreadable'
     for lane in LANES:
         rows = sorted((r for r in runs if r['lane'] == lane), key=lambda r: r.get('started_at', ''))
@@ -139,6 +140,7 @@ def inspect(state, qa=None, now=None):
         if result['mode'] == 'strict' and tail >= 2: result['errors']['fail:' + lane] = 'strict_lane_failed_twice'
     try:
         manifest = json.loads(manifest_path(state, qa).read_text())
+        if not isinstance(manifest, dict) or manifest.get('schema') != 'qa.fleet.run/v1': raise ValueError('manifest_invalid')
         result['qa_run'] = manifest.get('run_id')
         for key in ('source_sha', 'standard_version', 'manifest_hash', 'mode'):
             if manifest.get(key) != result.get(key): result['errors']['qa:' + key] = 'qa_run_drift'
@@ -158,6 +160,7 @@ def inspect(state, qa=None, now=None):
     audit = Path(state) / 'out/qa-fleet/outbound.json'
     try:
         a = json.loads(audit.read_text())
+        if not isinstance(a, dict): raise ValueError('audit_invalid')
         if any(a.get(k) != result.get(k) for k in ('source_sha', 'standard_version', 'manifest_hash', 'mode')): raise ValueError('outbound_drift')
         count = a.get('missing_evidence_outbound')
         if type(count) is not int or count < 0: raise ValueError('outbound_count_missing')

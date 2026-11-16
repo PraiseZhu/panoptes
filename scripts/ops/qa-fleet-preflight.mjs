@@ -57,7 +57,7 @@ export function validateStandard(standard) {
   const min = standard?.evidence_minimum
   if (min?.finding_status !== 'confirmed' || !['run_id', 'tested_sha', 'base_sha', 'artifact_refs'].every(k => min?.required?.includes(k)) ||
       !['pending', 'environment_unavailable', 'runner_error', 'invalid'].every(k => min?.forbidden_outbound_statuses?.includes(k))) errors.push(issue('evidence_minimum_invalid'))
-  if (standard?.rollout?.shadow_days < 7 || standard?.rollout?.canary_runs_per_lane < 1) errors.push(issue('rollout_invalid'))
+  if (!Number.isInteger(standard?.rollout?.shadow_days) || standard.rollout.shadow_days < 7 || !Number.isInteger(standard?.rollout?.canary_runs_per_lane) || standard.rollout.canary_runs_per_lane < 1) errors.push(issue('rollout_invalid'))
   return errors
 }
 export function canTransition(from, to, evidence = {}) {

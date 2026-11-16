@@ -16,6 +16,7 @@ export function shadow() {
 const inventory = () => ({ dependencies: { git: true, node24: true, python3: true, bubblewrap: true }, tasks: Object.values(fleet.lanes).flatMap(l => l.entries), permissions: Object.fromEntries(REQUIRED_LANES.map(l => [l, Object.fromEntries(fleet.lanes[l].permissions.map(p => [p, true]))])) })
 test('schema and actual cron wiring pass; secrets and missing lane/entry fail', () => {
   assert.deepEqual(validateFleet(fleet), []); assert.deepEqual(validateStandard(standard), [])
+  assert.ok(validateStandard({ ...standard, rollout: undefined }).some(e => e.code === 'rollout_invalid'))
   const x = structuredClone(fleet); delete x.lanes.qa
   assert.ok(validateFleet(x).some(e => e.code === 'lane_missing'))
   x.lanes.qa = { ...fleet.lanes.qa, entry: '../wrong' }; assert.ok(validateFleet(x).some(e => e.code === 'lane_entry_missing'))

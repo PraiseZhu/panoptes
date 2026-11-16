@@ -101,6 +101,12 @@ class Contracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'rollback'): Q.require_product_evidence(action)
         self.assertTrue((self.root / 'evidence/manifest.json').exists())
 
+    def test_corrupt_receipts_are_visible_instead_of_crashing_status(self):
+        Q.write_json(self.root / 'out/qa-fleet/runs/fleet-corrupt.json', [])
+        self.assertIn('receipt', Q.inspect(self.root)['errors'])
+        Q.write_json(self.root / 'manifest.json', [])
+        self.assertIn('qa:manifest', Q.inspect(self.root)['errors'])
+
     def test_cloud_brief_is_returned_and_missing_brief_prevents_claim(self):
         import contextlib
         import io
