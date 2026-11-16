@@ -465,23 +465,29 @@ export async function runSteps(profile, src, runDir, { stepIds = null, execution
   for (const step of profile.steps) {
     if (isStopping() || overBudget()) break
     if (stepIds && step.kind !== 'setup' && !stepIds.includes(step.id)) continue
-    const stepStarted = Date.now()
-    const stepEnd = Math.min(suiteEnd, stepStarted + (step.timeoutMs ?? (step.timeoutMin ?? 20) * 60_000))
+    const stepBudgetMs = step.timeoutMs ?? (step.timeoutMin ?? 20) * 60_000
+    let stepStarted = Date.now()
+    let stepEnd = Math.min(suiteEnd, stepStarted + stepBudgetMs)
     const remainingMs = () => Math.max(1, stepEnd - Date.now())
     const blocked = (status, reason, extra = {}) => ({ ...(execution ?? {}), id: step.id, nameZh: step.nameZh, kind: step.kind,
       cmdText: step.cmd.join(' '), ok: false, status, unavailable: status === 'environment_unavailable', unavailableReasonZh: reason,
       timedOut: status === 'timeout', exitCode: null, signal: null, endedAt: new Date().toISOString(), durationMs: Date.now() - stepStarted, tail: reason, failures: [], failureDetails: [], failureParseStatus: 'incomplete', ...extra })
     if (Date.now() >= stepEnd) { results.push(blocked('timeout', 'run time budget exhausted')); break }
     if (beforeStep) {
+      // 等的是另一轮（覆盖率轮次），不是这一步自己的运行时间：afterCoverage 的步骤按整轮预算等，等完再给它自己的预算
+      // —— 否则 bench 还没跑一行命令，就被一个十几分钟的覆盖率轮次耗光 15 min 预算、判成 "check timed out"
+      const waitEnd = step.afterCoverage ? suiteEnd : stepEnd
       let timer
       try {
         await Promise.race([Promise.resolve().then(() => beforeStep(step)), new Promise((_, reject) => {
-          timer = setTimeout(() => reject(Object.assign(new Error('beforeStep time budget exhausted'), { timedOut: true })), remainingMs())
+          timer = setTimeout(() => reject(Object.assign(new Error('beforeStep time budget exhausted'), { timedOut: true })), Math.max(1, waitEnd - Date.now()))
         })])
       } catch (error) {
         results.push(blocked(error.timedOut ? 'timeout' : 'runner_error', error.timedOut ? 'beforeStep time budget exhausted' : 'beforeStep failed'))
         break
       } finally { clearTimeout(timer) }
+      stepStarted = Date.now()
+      stepEnd = Math.min(suiteEnd, stepStarted + stepBudgetMs)
     }
     const stepVarsForReport = prepareTestReport(step, runDir)
     const stepSubstitutions = { ...vars, ...stepVarsForReport }
