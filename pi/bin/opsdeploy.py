@@ -21,10 +21,11 @@ def main():
     if mode() != "pi": return 0
     L = []; err = opsenv.deploy(L)
     if L: log(L[-1])
-    if L and "→" in L[-1]:
+    dep = next((i for i, l in enumerate(L) if l.startswith("- 部署: ") and "→" in l), None)
+    if dep is not None:   # the deploy line and what follows it (11-16 #303: the deploy status line)
         f = f"{BASE}/out/ops/env-{today()}.md"
         os.makedirs(os.path.dirname(f), exist_ok=True)
-        with open(f, "a") as fh: fh.write(f"\n## {now_cst().strftime('%H:%M')} 部署（opsdeploy，每 10 分钟）\n{L[-1]}\n")
+        with open(f, "a") as fh: fh.write(f"\n## {now_cst().strftime('%H:%M')} 部署（opsdeploy，每 10 分钟）\n" + "\n".join(L[dep:]) + "\n")
     if err: log("deploy:", err)
     ok, why = sync_allowed(err)
     if not ok:   # 10-30：checkout 落后时以旧仓库为准同步，把线上 pi-auto 从 discount 回滚成 v4.1-flash
