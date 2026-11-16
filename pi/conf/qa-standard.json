@@ -1,0 +1,17 @@
+{
+  "schema": "qa.standard/v1",
+  "version": "qa-standard/v1",
+  "mode": "shadow",
+  "allowed_modes": ["legacy", "shadow", "canary", "strict", "rollback"],
+  "evidence_minimum": {
+    "finding_status": "confirmed",
+    "required": ["run_id", "tested_sha", "base_sha", "artifact_refs"],
+    "forbidden_outbound_statuses": ["pending", "environment_unavailable", "runner_error", "invalid"]
+  },
+  "rollout": {
+    "shadow_days": 7,
+    "canary_runs_per_lane": 1,
+    "strict_requires": ["shadow_p0_p1_explained", "canary_receipts", "rollback_verified"],
+    "rollback_mode": "rollback"
+  }
+}

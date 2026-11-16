@@ -438,6 +438,9 @@ def main(argv=None):
         else: r = check()
     finally:
         sys.stdout = real
+    from qa_standard import prompt_context
+    try: r["qa_standard_brief"] = prompt_context("grokline", lane="repair")
+    except (OSError, ValueError): r = {"status": "error", "error": "QA standard brief unavailable; do not start a cloud task"}
     print(json.dumps(r, ensure_ascii=False, default=str))
     return 0 if r.get("status") not in ("error",) else 1
 

@@ -1,0 +1,205 @@
+"""Fleet policy metadata and model briefs. No credentials, network or deployment writes."""
+import datetime as dt
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import uuid
+
+CODE = Path(__file__).resolve().parents[1]
+MODES = ('legacy', 'shadow', 'canary', 'strict', 'rollback')
+LANES = ('qa', 'repair', 'retest', 'ops', 'outbound')
+
+
+def paths():
+    return (Path(os.environ.get('PI_QA_FLEET_FILE') or CODE / 'conf/qa-fleet.json'),
+            Path(os.environ.get('PI_QA_STANDARD_FILE') or CODE / 'conf/qa-standard.json'),
+            Path(os.environ.get('PI_QA_STANDARD_BRIEF') or CODE / 'conf/qa-standard-brief.md'))
+
+
+def configs():
+    fp, sp, bp = paths()
+    fleet, standard = json.loads(fp.read_text()), json.loads(sp.read_text())
+    if fleet.get('schema') != 'qa.fleet/v1' or standard.get('schema') != 'qa.standard/v1': raise ValueError('standard_schema')
+    if not standard.get('version') or fleet.get('standard_version') != standard['version']: raise ValueError('policy_drift')
+    if standard.get('mode') not in MODES: raise ValueError('mode_invalid')
+    if set(fleet.get('lanes', {})) != set(LANES): raise ValueError('lanes_missing')
+    raw = bp.read_text()
+    if not re.search(r'^Version: `' + re.escape(standard['version']) + r'`\.', raw, re.M): raise ValueError('brief_version_drift')
+    if len(raw.splitlines()) > 60: raise ValueError('brief_too_long')
+    sections = dict(re.findall(r'^## (\w+)\n(.*?)(?=^## |\Z)', raw, re.M | re.S))
+    if any(not sections.get(lane, '').strip() for lane in LANES): raise ValueError('brief_lane_missing')
+    return fleet, standard, sections
+
+
+def lane_for(job):
+    fleet, _, _ = configs()
+    for lane, spec in fleet['lanes'].items():
+        if job in spec['jobs']: return lane
+    return 'ops'  # free dispatch tasks inherit the operational rules
+
+
+def prompt_context(session, lane=None):
+    # Read per call: a long-lived process must see a mode/version change.
+    fleet, standard, sections = configs()
+    if lane is None:
+        rules = [('opsfix-retest-', 'retest'), ('pi-line-prfix-', 'repair'), ('pi-line-infrafix-', 'ops')]
+        lane = next((v for prefix, v in rules if session.startswith(prefix)), None)
+        if lane is None: lane = lane_for(os.environ.get('PI_QA_JOB') or session.split('-')[0])
+    if lane not in LANES: raise ValueError('lane_unknown')
+    return (f"[qa-standard version={standard['version']} mode={standard['mode']} lane={lane}]\n"
+            f"{sections[lane].strip()}\n"
+            "Mode rules: shadow compares decisions without enabling new outbound; canary uses confirmed evidence only; "
+            "strict requires complete confirmed evidence; rollback preserves all evidence and disables new product actions.")
+
+
+def source_sha():
+    return subprocess.check_output(['git', '-C', str(CODE.parent), 'rev-parse', 'HEAD'], text=True, timeout=10).strip()
+
+
+def binding():
+    fleet, standard, _ = configs()
+    fp, sp, _ = paths()
+    return {'source_sha': source_sha(), 'standard_version': standard['version'], 'mode': standard['mode'],
+            'manifest_hash': hashlib.sha256(fp.read_bytes() + b'\0' + sp.read_bytes()).hexdigest()}
+
+
+def write_json(path, value):
+    path = Path(path); path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
+    tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n'); tmp.replace(path)
+
+
+def record_start(state, job, trigger):
+    meta = binding(); run_id = 'fleet-' + uuid.uuid4().hex
+    doc = {'schema': 'qa.fleet.run/v1', **meta, 'runtime_sha': meta['source_sha'], 'run_id': run_id,
+           'lane': lane_for(job), 'job': job, 'trigger': trigger, 'status': 'running',
+           'started_at': dt.datetime.now(dt.timezone.utc).isoformat()}
+    path = Path(state) / 'out/qa-fleet/runs' / (run_id + '.json')
+    write_json(path, doc)
+    return path
+
+
+def record_finish(file, rc, report=None):
+    path = Path(file); doc = json.loads(path.read_text()); doc.update(exit_code=rc, status='pass' if rc == 0 else 'fail',
+                 finished_at=dt.datetime.now(dt.timezone.utc).isoformat())
+    # A successful scheduler exit is not a complete QA report. Missing evidence stays unknown.
+    if report and Path(report).is_file():
+        raw = Path(report).read_bytes(); rpt = json.loads(raw)
+        doc['report'] = {'path': str(Path(report).resolve()), 'sha256': hashlib.sha256(raw).hexdigest()}
+        doc['all_discovered_tested'] = (rpt.get('system_health') or {}).get('all_discovered_tested')
+        doc['report_run_id'] = (rpt.get('run') or {}).get('id')
+    write_json(path, doc)
+    return doc
+
+
+def manifest_path(state=None, qa=None):
+    return Path(os.environ.get('PI_QA_FLEET_MANIFEST') or Path(qa or os.environ.get('QA_HOME', '/workspace/mivo-qa')) / 'argus-root/qa-fleet-run-manifest.json')
+
+
+def inspect(state, qa=None):
+    """Fail-visible status; neither an absent run nor a missing count is treated as success."""
+    result = {'mode': None, 'standard_version': None, 'lanes': {}, 'errors': {}, 'all_discovered_tested': None,
+              'missing_evidence_outbound': None}
+    try:
+        fleet, standard, _ = configs(); result.update(mode=standard['mode'], standard_version=standard['version'], **{k: v for k, v in binding().items() if k != 'mode'})
+    except Exception as e:
+        result['errors']['config'] = str(e) if isinstance(e, ValueError) else 'config_unavailable'; return result
+    for lane in LANES: result['lanes'][lane] = {'status': 'missing', 'latest_run': None, 'consecutive_failures': 0}
+    runs = []
+    for p in (Path(state) / 'out/qa-fleet/runs').glob('fleet-*.json'):
+        try:
+            doc = json.loads(p.read_text())
+            if doc.get('schema') == 'qa.fleet.run/v1' and doc.get('lane') in LANES: runs.append(doc)
+        except (OSError, ValueError): result['errors']['receipt'] = 'receipt_unreadable'
+    for lane in LANES:
+        rows = sorted((r for r in runs if r['lane'] == lane), key=lambda r: r.get('started_at', ''))
+        if not rows:
+            result['errors']['lane:' + lane] = 'missing_run'; continue
+        r = rows[-1]; tail = 0
+        for old in reversed(rows):
+            if old.get('status') != 'fail': break
+            tail += 1
+        result['lanes'][lane] = {'status': r.get('status'), 'latest_run': r.get('run_id'), 'consecutive_failures': tail,
+                                'source_sha': r.get('source_sha'), 'runtime_sha': r.get('runtime_sha'), 'standard_version': r.get('standard_version')}
+        if any(r.get(k) != result.get(k) for k in ('source_sha', 'standard_version', 'manifest_hash')) or r.get('runtime_sha') != r.get('source_sha'):
+            result['errors']['drift:' + lane] = 'source_runtime_policy_drift'
+        if result['mode'] == 'strict' and tail >= 2: result['errors']['fail:' + lane] = 'strict_lane_failed_twice'
+    try:
+        manifest = json.loads(manifest_path(state, qa).read_text())
+        result['qa_run'] = manifest.get('run_id')
+        for key in ('source_sha', 'standard_version', 'manifest_hash', 'mode'):
+            if manifest.get(key) != result.get(key): result['errors']['qa:' + key] = 'qa_run_drift'
+        if manifest.get('runtime_sha') != manifest.get('source_sha'): result['errors']['qa:runtime'] = 'runtime_sha_drift'
+        result['all_discovered_tested'] = manifest.get('all_discovered_tested')
+    except (OSError, ValueError): result['errors']['qa:manifest'] = 'missing_run_manifest'
+    # Outbound emits an audit summary; without it zero cannot be asserted.
+    audit = Path(state) / 'out/qa-fleet/outbound.json'
+    try:
+        a = json.loads(audit.read_text())
+        if any(a.get(k) != result.get(k) for k in ('source_sha', 'standard_version', 'manifest_hash')): raise ValueError('outbound_drift')
+        count = a.get('missing_evidence_outbound')
+        if type(count) is not int or count < 0: raise ValueError('outbound_count_missing')
+        result['missing_evidence_outbound'] = count
+        if count > 0: result['errors']['outbound'] = 'missing_evidence_outbound'
+    except (OSError, ValueError):
+        if result['mode'] in ('canary', 'strict'): result['errors']['outbound'] = 'outbound_audit_missing_or_drift'
+    if result['mode'] == 'strict' and result['all_discovered_tested'] is not True: result['errors']['strict-tested'] = 'all_discovered_tested_missing_or_false'
+    return result
+
+
+def main():
+    import argparse
+    ap = argparse.ArgumentParser(); ap.add_argument('action', choices=['start', 'finish', 'inspect']); ap.add_argument('--state', required=True)
+    ap.add_argument('--job', default='qa'); ap.add_argument('--trigger', default='scheduler'); ap.add_argument('--file'); ap.add_argument('--rc', type=int, default=0); ap.add_argument('--report'); ap.add_argument('--qa'); ap.add_argument('--result'); ap.add_argument('--manifest')
+    a = ap.parse_args()
+    if a.action == 'start': print(record_start(a.state, a.job, a.trigger))
+    elif a.action == 'finish':
+        report = a.report
+        if a.result:
+            text = Path(a.result).read_text(); decoder = json.JSONDecoder()
+            for i, ch in enumerate(text):
+                if ch != '{': continue
+                try:
+                    value, _ = decoder.raw_decode(text[i:])
+                    if isinstance(value, dict) and isinstance(value.get('report'), str): report = value['report']
+                except ValueError: pass
+        doc = record_finish(a.file, a.rc, report)
+        if a.manifest: write_json(a.manifest, doc)
+    else: print(json.dumps(inspect(a.state, a.qa)))
+
+
+def audit_outbound(state, rejected=False):
+    """The local executor is the sole writer; record a denial, never its payload."""
+    import jsonrec
+    meta = binding(); path = str(Path(state) / 'out/qa-fleet/outbound.json')
+    def update(doc):
+        if any(doc.get(k) != meta[k] for k in ('source_sha', 'standard_version', 'manifest_hash')):
+            doc.clear(); doc.update(meta, missing_evidence_outbound=0, rejected_without_evidence=0)
+        if rejected: doc['rejected_without_evidence'] += 1
+        doc['checked_at'] = dt.datetime.now(dt.timezone.utc).isoformat()
+        return True
+    jsonrec.update(path, update, default={})
+
+
+def require_product_evidence(action):
+    """Enforce at the outbound boundary, including actions queued under an older policy."""
+    _, policy, _ = configs()
+    if policy['mode'] in ('legacy', 'shadow'): return
+    if policy['mode'] == 'rollback': raise ValueError('rollback_product_outbound_disabled')
+    import lib
+    try:
+        n = int(action.get('qa') or action.get('pr') or 0)
+        report = json.loads((Path(lib.RPT) / f'PR-{n}.json').read_text())
+        source = next(p for p in report.get('prs', []) if p.get('number') == n)
+        fp = action.get('fingerprint') or action.get('key', '').split(':')[-1]
+        finding = next(f for f in source.get('findings', []) if f.get('fingerprint') == fp)
+        lib.read_finding_evidence(finding, source)
+    except (OSError, ValueError, KeyError, StopIteration, TypeError):
+        audit_outbound(lib.BASE, rejected=True)
+        raise ValueError('product_outbound_evidence_missing') from None
+
+
+if __name__ == '__main__': main()

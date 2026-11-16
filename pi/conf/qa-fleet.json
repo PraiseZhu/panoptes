@@ -1,0 +1,327 @@
+{
+  "schema": "qa.fleet/v1",
+  "standard_version": "qa-standard/v1",
+  "lanes": {
+    "qa": {
+      "entry": "run-nightly.sh",
+      "permissions": [
+        "read-source",
+        "write-evidence"
+      ],
+      "health_signals": [
+        "scheduler",
+        "report",
+        "fleet_status",
+        "stdcheck"
+      ],
+      "jobs": [
+        "qa",
+        "nightly",
+        "catch-up",
+        "mergewatch"
+      ],
+      "entries": [
+        {
+          "job": "qa",
+          "path": "run-nightly.sh",
+          "scheduler": "qa-cron"
+        },
+        {
+          "job": "nightly",
+          "path": "run-nightly.sh",
+          "scheduler": "qa-cron"
+        },
+        {
+          "job": "catch-up",
+          "path": "run-nightly.sh",
+          "scheduler": "qa-cron"
+        },
+        {
+          "job": "mergewatch",
+          "path": "pi/bin/mergewatch.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        }
+      ]
+    },
+    "repair": {
+      "entry": "pi/bin/prfix.py",
+      "permissions": [
+        "read-evidence",
+        "write-fix-branch"
+      ],
+      "health_signals": [
+        "scheduler",
+        "draft-pr",
+        "ci"
+      ],
+      "jobs": [
+        "prfix",
+        "prwatch",
+        "grokline"
+      ],
+      "entries": [
+        {
+          "job": "prfix",
+          "path": "pi/bin/prfix.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "prwatch",
+          "path": "pi/bin/prwatch.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "grokline",
+          "path": "pi/bin/grokline.py",
+          "scheduler": "cloud"
+        }
+      ]
+    },
+    "retest": {
+      "entry": "pi/bin/opsfix_retest.py",
+      "permissions": [
+        "read-evidence",
+        "write-retest-receipt"
+      ],
+      "health_signals": [
+        "scheduler",
+        "retest-receipt",
+        "ledger"
+      ],
+      "jobs": [
+        "opsfix_retest"
+      ],
+      "entries": [
+        {
+          "job": "opsfix_retest",
+          "path": "pi/bin/opsfix_retest.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        }
+      ]
+    },
+    "ops": {
+      "entry": "pi/bin/opsfix.py",
+      "permissions": [
+        "read-only",
+        "write-ops-receipt"
+      ],
+      "health_signals": [
+        "scheduler",
+        "fleet_status",
+        "stdcheck"
+      ],
+      "jobs": [
+        "opsfix",
+        "opsenv",
+        "opsdeploy",
+        "opsreview",
+        "infrafix",
+        "watchdog",
+        "stdcheck",
+        "fleet_status",
+        "boxhealth",
+        "boxcheck",
+        "cindy",
+        "janitor",
+        "credcheck",
+        "memguard",
+        "roster",
+        "pm",
+        "p2",
+        "compare",
+        "prretro",
+        "dailyretro",
+        "jasper",
+        "pi_dispatch"
+      ],
+      "entries": [
+        {
+          "job": "opsfix",
+          "path": "pi/bin/opsfix.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "opsenv",
+          "path": "pi/bin/opsenv.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "opsdeploy",
+          "path": "pi/bin/opsdeploy.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "opsreview",
+          "path": "pi/bin/opsreview.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "infrafix",
+          "path": "pi/bin/infrafix.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "watchdog",
+          "path": "pi/bin/watchdog.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "stdcheck",
+          "path": "pi/bin/stdcheck.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "fleet_status",
+          "path": "pi/bin/fleet_status.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "boxhealth",
+          "path": "pi/bin/boxhealth.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "boxcheck",
+          "path": "pi/bin/boxcheck.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "cindy",
+          "path": "pi/bin/cindy.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "janitor",
+          "path": "pi/bin/janitor.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "credcheck",
+          "path": "pi/bin/credcheck.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "memguard",
+          "path": "pi/bin/memguard.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "roster",
+          "path": "pi/bin/roster.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "pm",
+          "path": "pi/bin/pm.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "p2",
+          "path": "pi/bin/p2.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "compare",
+          "path": "pi/bin/compare.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "prretro",
+          "path": "pi/bin/prretro.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "dailyretro",
+          "path": "pi/bin/dailyretro.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "jasper",
+          "path": "pi/bin/jasper.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "pi_dispatch",
+          "path": "pi/bin/pi_dispatch.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        }
+      ]
+    },
+    "outbound": {
+      "entry": "pi/bin/outbound.py",
+      "permissions": [
+        "read-confirmed-finding",
+        "write-external-action"
+      ],
+      "health_signals": [
+        "scheduler",
+        "outbound-receipt",
+        "watchdog"
+      ],
+      "jobs": [
+        "outbound",
+        "merger",
+        "panoptes_merge",
+        "daily",
+        "handoff",
+        "followup",
+        "pmnudge",
+        "ledger"
+      ],
+      "entries": [
+        {
+          "job": "outbound",
+          "path": "pi/bin/outbound.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "merger",
+          "path": "pi/bin/merger.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "panoptes_merge",
+          "path": "pi/bin/panoptes_merge.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "daily",
+          "path": "pi/bin/daily.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "handoff",
+          "path": "pi/bin/handoff.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "followup",
+          "path": "pi/bin/followup.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "pmnudge",
+          "path": "pi/bin/pmnudge.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        },
+        {
+          "job": "ledger",
+          "path": "pi/bin/ledger.py",
+          "scheduler": "pi/cron/pi-line.cron"
+        }
+      ]
+    }
+  },
+  "required_health_signals": [
+    "scheduler",
+    "report",
+    "fleet_status",
+    "stdcheck",
+    "outbound-receipt"
+  ],
+  "old_entry_patterns": [
+    "/workspace/pi-fallback",
+    "legacy-runner",
+    "qa-standard/v0"
+  ]
+}
