@@ -248,6 +248,18 @@ def audit_outbound(state, rejected=False):
     jsonrec.update(path, update, default={})
 
 
+def ready_fingerprint(body):
+    """Read existing Pi/Grok origin fields; never infer a fingerprint from prose."""
+    fp = r'mq1-[0-9a-f]{20}'
+    patterns = (
+        rf'^[ \t]*Fingerprint[:：][ \t]*({fp})[ \t]*$',  # Grok body / commit trailer
+        rf'^- 关联 Issue / 需求：QA 报告 PR-\d+ P[012]，指纹 ({fp})(?=；|[ \t]*$)',  # prfix.pr_body
+        rf'^[ \t]*({fp})(?: r[1-9]\d*)?[ \t]*$',  # h_fixpr's body_must_contain line
+    )
+    found = {value for pattern in patterns for value in re.findall(pattern, body or '', re.M)}
+    return next(iter(found)) if len(found) == 1 else None  # conflicting origins stay unknown
+
+
 def require_product_evidence(action):
     """Enforce at the outbound boundary, including actions queued under an older policy."""
     _, policy, _ = configs()

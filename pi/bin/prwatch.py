@@ -711,9 +711,10 @@ def check_drafts(st):
             if why:
                 if "converted back to draft" in why: nr[str(n)] = {"why": why, "at": now_cst().isoformat(timespec="seconds")}
                 qlog(f"#{n} not readied: {why}"); continue
+            from qa_standard import ready_fingerprint
             act("praise-pr", {"key": f"ready:{n}:{head[:12]}", "type": "gh.pr.ready", "pr": n, "head": head,
                               "qa": int(qa) if qa.isdigit() else None,
-                              "fingerprint": (re.search(r"^Fingerprint[:：][ \t]*(\S+)", p.get("body") or "", re.M) or [None, None])[1],
+                              "fingerprint": ready_fingerprint(p.get("body")),
                               "cmd": f"gh pr ready {n} --repo {REPO}", "dedupe": "outbound re-checks isDraft, head and checks"})
             done[tag] = "ready"; qlog(f"#{n} all checks but review-pr green -> ready"); continue
         if not red: continue

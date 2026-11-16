@@ -7,7 +7,7 @@ import prretro
 class TurnReady(unittest.TestCase):
     def test_green_draft_reads_ledger_and_reaches_block_reason(self):
         seen = {}
-        prs = [{"number": 1444, "title": "fix", "state": "OPEN", "isDraft": True, "body": "QA: #1420\nFingerprint: mq1-aaaaaaaaaaaaaaaaaaaa", "headRefName": "qa-fix/x", "headRefOid": "a" * 40, "mergedAt": None}]
+        prs = [{"number": 1444, "title": "fix", "state": "OPEN", "isDraft": True, "body": "QA: #1420", "headRefName": "qa-fix/x", "headRefOid": "a" * 40, "mergedAt": None}]
         def gh(args, js=True):
             if args[:2] == ["pr", "list"]: return prs
             if args[:2] == ["pr", "checks"]: return [{"name": "verify", "bucket": "pass"}, {"name": "review-pr", "bucket": "pending"}]

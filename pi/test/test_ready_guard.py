@@ -84,6 +84,14 @@ class Prwatch(unittest.TestCase):
         action = self.run_once({}, [p], [])[0]
         self.assertEqual(action['qa'], 1385)
         self.assertEqual(action['fingerprint'], 'mq1-' + 'b' * 20)
+    def test_ready_action_reads_real_prfix_scope_field(self):
+        import prfix
+        fp = 'mq1-' + 'b' * 20
+        p = pr(); p['body'] = prfix.pr_body({'qa': 1385, 'sev': 'P1', 'fp': fp, 'title': 'fixture', 'finding': {}},
+                                           {}, ['case.test.ts'], ['src/case.ts'], {}, True, None, [])
+        p['body'] += f'\n\n{fp}\n<!-- pi-line fixpr:1385:{fp} -->'  # h_fixpr's actual appended footer
+        action = self.run_once({}, [p], [])[0]
+        self.assertEqual((action['qa'], action['fingerprint']), (1385, fp))
     def test_b_review_pr_failed_same_head_no_ready(self):
         self.assertEqual(self.run_once({}, [pr(checks=GREEN + [RP("FAILURE")])], []), [])
         self.assertTrue(any("review-pr failed" in l for l in self.logs))
@@ -178,7 +186,10 @@ class ReadyEvidence(unittest.TestCase):
         return recorder.call_args.args[2], writer.call_args.args[1]
 
     def test_prretro_generated_ready_obeys_evidence_gate_in_each_mode(self):
-        body = 'QA: #7\nFingerprint: ' + self.finding['fingerprint'] + '\n'
+        import prfix
+        body = prfix.pr_body({'qa': 7, 'sev': 'P1', 'fp': self.finding['fingerprint'], 'title': 'fixture',
+                              'finding': self.finding}, {}, ['case.test.ts'], ['src/case.ts'], {}, True, None, [])
+        self.assertNotIn('Fingerprint:', body)  # Pi's existing body carries the Chinese scope field.
         for mode in ('strict', 'canary', 'shadow', 'legacy'):
             with self.subTest(mode=mode):
                 policy = json.loads(self.Q.paths()[1].read_text()); policy['mode'] = mode
@@ -199,10 +210,40 @@ class ReadyEvidence(unittest.TestCase):
                 else:
                     self.assertEqual(outbound.h_ready(action)[3](), 'ready')
 
-    def test_prretro_missing_fingerprint_records_reason_without_ready_action(self):
-        actions, report = self.prretro_actions('QA: #7\n')
-        self.assertEqual(actions, [])
-        self.assertIn('缺少 QA/Fingerprint', report)
+    def test_prretro_accepts_existing_trailer_and_outbound_body_origin_formats(self):
+        fp = self.finding['fingerprint']
+        # Commit trailers use the real writer; h_fixpr appends body_must_contain
+        # as a whole line, with an optional revision round.
+        bodies = [outbound.pi_open_trailer('fixpr:7:' + fp),
+                  'QA: #7\n\n' + fp + '\n<!-- pi-line fixpr:7:' + fp + ' -->',
+                  'QA: #7\n\n' + fp + ' r2\n<!-- pi-line fixpr:7:' + fp + ' r2 -->']
+        self.calls.return_value = 'ready'
+        for body in bodies:
+            with self.subTest(body=body):
+                actions, _ = self.prretro_actions(body)
+                self.assertEqual(actions[0]['fingerprint'], fp)
+                self.assertEqual(outbound.h_ready(actions[0])[3](), 'ready')
+        # Arbitrary mentions and conflicting origin fields must not pick a finding.
+        self.assertIsNone(self.Q.ready_fingerprint('QA: #7\nexample mentions ' + fp))
+        self.assertIsNone(self.Q.ready_fingerprint(bodies[0] + '\n' + 'mq1-' + 'b' * 20))
+
+    def test_prretro_missing_fingerprint_preserves_legacy_and_enforces_strict(self):
+        for mode in ('legacy', 'shadow', 'strict', 'canary'):
+            with self.subTest(mode=mode):
+                policy = json.loads(self.Q.paths()[1].read_text()); policy['mode'] = mode
+                self.Q.write_json(self.Q.paths()[1], policy)
+                actions, report = self.prretro_actions('QA: #7\n')
+                self.assertEqual(len(actions), 1)
+                self.assertIsNone(actions[0].get('fingerprint'))
+                self.assertIn('指纹', report)
+                self.calls.return_value = 'ready'; self.calls.reset_mock()
+                if mode in ('strict', 'canary'):
+                    with self.assertRaisesRegex(ValueError, 'evidence_missing'): outbound.h_ready(actions[0])[3]()
+                    self.calls.assert_not_called()
+                    audit = json.loads((self.root / 'out/qa-fleet/outbound.json').read_text())
+                    self.assertGreater(audit['rejected_without_evidence'], 0)
+                else:
+                    self.assertEqual(outbound.h_ready(actions[0])[3](), 'ready')
 
 if __name__ == "__main__":
     try: unittest.main(verbosity=1)
