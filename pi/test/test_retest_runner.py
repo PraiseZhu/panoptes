@@ -30,6 +30,7 @@ class Cases(unittest.TestCase):
     def test_classify_verdict(self):
         self.assertEqual(RR.classify(0), "pass"); self.assertEqual(RR.classify(None), "error")
         self.assertEqual(RR.classify(1, " FAIL  src/a.test.ts"), "fail"); self.assertEqual(RR.classify(1, "No test files found"), "error")
+        self.assertEqual(RR.classify(1, "network connection reset"), "error")
         self.assertEqual(RR.verdict("fail", "pass"), "fail->pass"); self.assertEqual(RR.verdict("pass", "pass"), "not-reproduced")
         self.assertEqual(RR.verdict("pass", "fail"), "still-fails"); self.assertEqual(RR.verdict("error", "pass"), "inconclusive")
 
@@ -42,7 +43,7 @@ class Run(unittest.TestCase):
         self.assertEqual(dropped, ["wt-o", "wt-f"]); return ev
 
     def test_fail_to_pass_with_related_green(self):
-        ev = self.go({("wt-o", "run"): (1, " FAIL  src/a.test.ts"), ("wt-f", "run"): (0, ""), ("wt-o", "related"): (1, "x"), ("wt-f", "related"): (0, "")})
+        ev = self.go({("wt-o", "run"): (1, " FAIL  src/a.test.ts"), ("wt-f", "run"): (0, ""), ("wt-o", "related"): (1, " FAIL related"), ("wt-f", "related"): (0, "")})
         self.assertEqual(ev["result"], "pass"); self.assertEqual(ev["rows"][0]["verdict"], "fail->pass")
         self.assertEqual(ev["rows"][1], {"check": "related", "original": "fail", "fix": "pass", "verdict": "pass"})
         md = RR.summary(ev); self.assertIn("fail->pass", md); self.assertIn("| related |", md)
@@ -50,6 +51,12 @@ class Run(unittest.TestCase):
     def test_still_fails_and_related_regression(self):
         ev = self.go({("wt-o", "run"): (1, " FAIL "), ("wt-f", "run"): (1, " FAIL "), ("wt-o", "related"): (0, ""), ("wt-f", "related"): (0, "")})
         self.assertEqual(ev["result"], "fail")
+
+    def test_related_failure_on_both_shas_is_existing_not_regression(self):
+        ev = self.go({("wt-o", "run"): (1, " FAIL "), ("wt-f", "run"): (0, ""),
+                      ("wt-o", "related"): (1, " FAIL "), ("wt-f", "related"): (1, " FAIL ")})
+        self.assertEqual(ev["result"], "pass")
+        self.assertEqual(ev["rows"][1]["verdict"], "existing-failure")
         ev = self.go({("wt-o", "run"): (1, " FAIL "), ("wt-f", "run"): (0, ""), ("wt-o", "related"): (0, ""), ("wt-f", "related"): (1, " FAIL ")})
         self.assertEqual(ev["result"], "fail")
 
@@ -64,6 +71,15 @@ class Run(unittest.TestCase):
                       ("wt-o", "related"): (0, ""), ("wt-f", "related"): (0, "")})
         self.assertEqual(ev["status"], "blocked")
         self.assertTrue(ev["exact_replay"])
+
+    def test_default_sh_filters_service_secrets(self):
+        os.environ["PI_REPLAY_FAKE_TOKEN"] = "secret-value"
+        try:
+            rc, output = RR.default_sh([os.sys.executable, "-c", "import os; print(os.getenv('PI_REPLAY_FAKE_TOKEN', ''))"], os.getcwd())
+        finally:
+            os.environ.pop("PI_REPLAY_FAKE_TOKEN", None)
+        self.assertEqual(rc, 0)
+        self.assertEqual(output.strip(), "")
 
 
 def R(start, completed=None, updated=None): return {"run_started_at": start, "completed_at": completed, "updated_at": updated}

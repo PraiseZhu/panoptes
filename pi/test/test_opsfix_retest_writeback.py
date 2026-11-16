@@ -70,6 +70,14 @@ class Entries(unittest.TestCase):
         r = [dict(fix_pr=5, original_pr=4, fingerprint="mq1-x", source="code-review", result="blocked", reason="本轮模型调用已达上限 12", evidence="e", at="t")]
         self.assertEqual(R.report_entries(r, 5, {})[0]["outcome"], "blocked")
 
+    def test_report_entries_preserve_related_regression_detail(self):
+        r = [dict(fix_pr=8, original_pr=7, fingerprint="mq1-regression", source="check", result="fail",
+                  reason="related regression", evidence="e", at="t", detail={"exact_replay": True, "rows": [
+                      {"check": "related", "original": "pass", "fix": "fail", "verdict": "fail"}]})]
+        entry = R.report_entries(r, 8, {})[0]
+        self.assertTrue(entry["detail"]["regression"])
+        self.assertEqual(entry["detail"]["rows"][0]["check"], "related")
+
     def test_inconclusive_is_written_and_retried(self):
         r = [dict(fix_pr=6, original_pr=4, fingerprint="mq1-x", source="check", result="inconclusive",
                   reason="原失败未复现", evidence="e", at="t")]
@@ -98,6 +106,19 @@ class Alert(unittest.TestCase):
         self.assertEqual(list(probs), ["retest:no-target"]); self.assertIn("1742", json.dumps(probs, ensure_ascii=False))
         R.write_no_target_alert([], STAMP + dt.timedelta(hours=80), path=p); self.assertFalse(os.path.exists(p))
         probs = {}; watchdog.retest_no_target_check(None, probs, path=p); self.assertEqual(probs, {})
+
+    def test_exact_replay_alert_has_own_notice_and_clears_on_pass(self):
+        p = os.path.join(self.d, "a.json")
+        fp = "mq1-alert"
+        fail = [dict(fix_pr=8, original_pr=7, fingerprint=fp, source="check", result="fail",
+                     reason="still fails", detail={"exact_replay": True})]
+        R.write_retest_alert(fail, STAMP, path=p)
+        probs = {}; watchdog.retest_no_target_check(None, probs, path=p)
+        self.assertIn("retest:exact-replay", probs)
+        self.assertEqual(probs["retest:exact-replay"]["title"], "修复 PR exact replay 未通过")
+        passed = [dict(fail[0], result="pass")]
+        R.write_retest_alert(passed, STAMP + dt.timedelta(minutes=1), path=p)
+        self.assertFalse(os.path.exists(p))
 
 
 class RunWriteBack(unittest.TestCase):
@@ -178,7 +199,7 @@ class RunWriteBack(unittest.TestCase):
         self.assertFalse(any(a["type"] == "gh.issue.close" for a in R.handoff_actions(led)))
         probs = {}
         watchdog.retest_no_target_check(None, probs, path=R.NO_TARGET_ALERT)
-        self.assertIn("retest:no-target", probs)  # existing watchdog reader sees the shared alert record
+        self.assertIn("retest:exact-replay", probs)
 
 
 class PmExtraCount(unittest.TestCase):

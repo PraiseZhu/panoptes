@@ -194,10 +194,18 @@ def replay_alert(results, stamp, path=None, prev=None):
     st = no_target_alert(results, stamp, prev=prev) or {"items": {}}
     items = st.setdefault("items", {})
     for r in results:
-        if r.get("source") != "check" or r.get("result") not in ("fail", "blocked", "inconclusive"):
+        if r.get("source") != "check":
             continue
         fp = r.get("fingerprint") or "unknown"
         key = f"{r['fix_pr']}<-{r['original_pr']}:{fp}"
+        if r.get("result") == "pass":
+            items.pop(key, None)
+            continue
+        if r.get("result") not in ("fail", "blocked", "inconclusive"):
+            continue
+        detail = r.get("detail") or {}
+        if not (detail.get("exact_replay") or detail.get("status") in ("fail", "blocked", "inconclusive")):
+            continue
         old = items.get(key) or {}
         items[key] = {"fix_pr": r["fix_pr"], "original_pr": r["original_pr"], "fingerprint": r.get("fingerprint"),
                       "kind": "exact-replay", "result": r["result"], "why": r.get("reason"),
@@ -233,6 +241,14 @@ def report_entries(results, n, done=None):
         e = {"fingerprint": r.get("fingerprint"), "original_pr": r["original_pr"], "result": r["result"], "method": r.get("source"),
              "reason": r["reason"], "evidence": r.get("evidence"), "at": r["at"], "by": BY,
              **({"target_source": r["target_source"]} if r.get("target_source") == "pending_verification" else {})}
+        detail = r.get("detail") or {}
+        if detail.get("exact_replay") or detail.get("rows"):
+            related = [
+                {k: row.get(k) for k in ("check", "original", "fix", "verdict")}
+                for row in detail.get("rows") or [] if row.get("check") == "related"
+            ]
+            e["detail"] = {"exact_replay": True, "regression": any(row.get("verdict") == "fail" for row in related),
+                            **({"rows": related} if related else {})}
         if r["result"] == "blocked":
             e["outcome"] = "gave_up" if d.get("gave_up_after") else ("blocked_permanent" if any(m in str(r.get("reason")) for m in PERMANENT) else "blocked")
             if d.get("gave_up_after"): e["attempts"] = d["gave_up_after"]
@@ -480,8 +496,9 @@ def run_exact_replay(fix, orig_pr, f, ev_base):
     if isinstance(changed, dict): changed = [x.get("path") or x.get("filename") for x in changed.values()]
     changed = [x for x in changed if isinstance(x, str)]
     def invoke(argv, cwd):
-        rc, out, err = sh(argv, cwd=cwd, timeout=1800)
-        return rc, (out or "") + ("\n" + err if err else "")
+        # Exact replay executes untrusted report commands. Reuse the restricted
+        # runner environment so Pi service credentials never reach the case.
+        return RR.default_sh(argv, cwd, timeout=1800)
     try:
         evidence = RR.run(original_sha, fix_sha, cases, changed, worktree, sh=invoke, drop=drop_worktree)
     except Exception as exc:

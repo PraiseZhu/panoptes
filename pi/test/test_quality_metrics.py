@@ -9,6 +9,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.environ.get("PI_BIN") or os.path.join(os.path.dirname(HERE), "bin"))
 import quality_metrics as qm  # noqa: E402
+import opsfix_retest as OR  # noqa: E402
 
 
 SHA_A = "a" * 40
@@ -80,6 +81,15 @@ class Metrics(unittest.TestCase):
             loaded = qm.load_reports([d])
             self.assertEqual(len(loaded), 1)
             self.assertEqual(qm.compute_metrics(loaded)["counts"]["exact_replays"], 1)
+
+    def test_regression_escape_reads_real_opsfix_writeback_detail(self):
+        fp = "mq1-regression-e2e"
+        entry = OR.report_entries([dict(fix_pr=20, original_pr=19, fingerprint=fp, source="check", result="fail",
+                                        reason="related regression", evidence="e.json", at="2026-11-03T00:00:00Z",
+                                        detail={"exact_replay": True, "rows": [
+                                            {"check": "related", "original": "pass", "fix": "fail", "verdict": "fail"}]})], 20)[0]
+        out = qm.compute_metrics([{"prs": [{"number": 19, "findings": [finding(fp, 19)], "retest": [entry]}]}])
+        self.assertEqual(out["metrics"]["regression_escape"], 1.0)
 
 
 if __name__ == "__main__":

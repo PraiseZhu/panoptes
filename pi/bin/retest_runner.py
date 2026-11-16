@@ -58,7 +58,7 @@ def classify(rc, out=""):
     if rc == 0: return "pass"
     if re.search(r"(^| )FAIL |Tests?\s+\d+\s+failed|✗|AssertionError", out or "", re.M): return "fail"
     if re.search(r"No test files found|Cannot find module|ENOENT", out or ""): return "error"
-    return "fail"
+    return "error"
 
 def verdict(orig, fix):
     if fix == "pass" and orig == "fail": return "fail->pass"
@@ -81,11 +81,11 @@ def status_for(rows):
         return "blocked"
     if any(r["original"] == "error" for r in cases):
         return "blocked"
-    if any(r["fix"] == "error" for r in cases) or (related and related["fix"] == "error"):
+    if any(r["fix"] == "error" for r in cases) or (related and (related["original"] == "error" or related["fix"] == "error")):
         return "blocked"
-    if any(r["verdict"] == "still-fails" for r in cases) or (related and related["fix"] == "fail"):
+    if any(r["verdict"] == "still-fails" for r in cases) or (related and related["verdict"] == "fail"):
         return "fail"
-    if all(r["verdict"] == "fail->pass" for r in cases) and (not related or related["fix"] == "pass"):
+    if all(r["verdict"] == "fail->pass" for r in cases) and (not related or related["verdict"] != "fail"):
         return "pass"
     return "inconclusive"
 
@@ -115,7 +115,11 @@ def run(orig_sha, fix_sha, cases, changed, worktree, sh=default_sh, drop=None):
     rows = []
     for label, _ in cmds + ([rel] if rel else []):
         o, f = runs["original"][label]["result"], runs["fix"][label]["result"]
-        rows.append({"check": label, "original": o, "fix": f, "verdict": verdict(o, f) if label != "related" else ("pass" if f == "pass" else "fail")})
+        if label == "related":
+            related_verdict = "fail" if o == "pass" and f == "fail" else ("existing-failure" if o == "fail" and f == "fail" else "pass")
+            rows.append({"check": label, "original": o, "fix": f, "verdict": related_verdict})
+        else:
+            rows.append({"check": label, "original": o, "fix": f, "verdict": verdict(o, f)})
     case_rows = [r for r in rows if r["check"] != "related"]
     rel_row = next((r for r in rows if r["check"] == "related"), None)
     overall = status_for(rows)
