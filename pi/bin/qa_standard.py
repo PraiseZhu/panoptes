@@ -172,10 +172,45 @@ def inspect(state, qa=None, now=None):
     return result
 
 
+def capture_receipt(state, run_file, fleet_status_file, stdcheck_file, qa=None):
+    """Bind a completed scheduler run to real observer files; never synthesize a pass."""
+    run = json.loads(Path(run_file).read_text())
+    status = inspect(state, qa)
+    fleet = json.loads(Path(fleet_status_file).read_text())
+    check = json.loads(Path(stdcheck_file).read_text())
+    if status['errors'] or run.get('status') != 'pass' or run.get('exit_code') != 0 or not run.get('finished_at'):
+        raise ValueError('canary_run_incomplete')
+    if status.get('mode') != 'canary' or status['lanes'].get(run.get('lane'), {}).get('latest_run') != run.get('run_id'):
+        raise ValueError('canary_scheduler_drift')
+    keys = ('source_sha', 'standard_version', 'manifest_hash', 'mode')
+    if any(run.get(k) != status.get(k) for k in keys) or run.get('runtime_sha') != status.get('source_sha'):
+        raise ValueError('canary_binding_drift')
+    for observed in (fleet.get('qa_standard'), check.get('qa_standard')):
+        if not isinstance(observed, dict) or observed.get('errors') or any(observed.get(k) != run.get(k) for k in keys):
+            raise ValueError('canary_observer_drift')
+        if observed.get('lanes', {}).get(run['lane'], {}).get('latest_run') != run['run_id']:
+            raise ValueError('canary_observer_run_missing')
+    if (check.get('results') or {}).get('fleet_standard') != {} or check.get('errors'):
+        raise ValueError('canary_stdcheck_incomplete')
+    manifest_file = manifest_path(state, qa)
+    manifest = json.loads(manifest_file.read_text())
+    if status['all_discovered_tested'] is not True or status['missing_evidence_outbound'] != 0:
+        raise ValueError('canary_report_or_outbound_incomplete')
+    meta = {k: run[k] for k in ('run_id', 'source_sha', 'runtime_sha', 'standard_version', 'manifest_hash', 'mode')}
+    def observed(file):
+        raw = Path(file).read_bytes()
+        return dict(meta, ok=True, artifact={'path': str(Path(file).resolve()), 'sha256': hashlib.sha256(raw).hexdigest()})
+    return {'scheduler': dict(run, ok=True),
+            'report': dict(observed(manifest['report']['path']), all_discovered_tested=True, report_run_id=manifest.get('report_run_id')),
+            'fleet_status': observed(fleet_status_file), 'stdcheck': observed(stdcheck_file),
+            'outbound': dict(observed(Path(state) / 'out/qa-fleet/outbound.json'), missing_evidence_outbound=0)}
+
+
 def main():
     import argparse
-    ap = argparse.ArgumentParser(); ap.add_argument('action', choices=['start', 'finish', 'inspect']); ap.add_argument('--state', required=True)
+    ap = argparse.ArgumentParser(); ap.add_argument('action', choices=['start', 'finish', 'inspect', 'capture']); ap.add_argument('--state', required=True)
     ap.add_argument('--job', default='qa'); ap.add_argument('--trigger', default='scheduler'); ap.add_argument('--file'); ap.add_argument('--rc', type=int, default=0); ap.add_argument('--report'); ap.add_argument('--qa'); ap.add_argument('--result'); ap.add_argument('--manifest')
+    ap.add_argument('--fleet-status'); ap.add_argument('--stdcheck')
     a = ap.parse_args()
     if a.action == 'start': print(record_start(a.state, a.job, a.trigger))
     elif a.action == 'finish':
@@ -190,6 +225,7 @@ def main():
                 except ValueError: pass
         doc = record_finish(a.file, a.rc, report)
         if a.manifest: write_json(a.manifest, doc)
+    elif a.action == 'capture': print(json.dumps(capture_receipt(a.state, a.file, a.fleet_status, a.stdcheck, a.qa)))
     else: print(json.dumps(inspect(a.state, a.qa)))
 
 
@@ -197,6 +233,7 @@ def audit_outbound(state, rejected=False):
     """The local executor is the sole writer; record a denial, never its payload."""
     import jsonrec
     meta = binding(); path = str(Path(state) / 'out/qa-fleet/outbound.json')
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     def update(doc):
         if any(doc.get(k) != meta[k] for k in ('source_sha', 'standard_version', 'manifest_hash', 'mode')):
             doc.clear(); doc.update(meta, missing_evidence_outbound=0, rejected_without_evidence=0)

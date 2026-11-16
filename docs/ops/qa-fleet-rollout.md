@@ -11,3 +11,21 @@ Run the rollout in this order:
 5. Only the operator with the current deployment authorization may write a cutover artifact and change mode. `qa-fleet-preflight.mjs` then validates the complete evidence bundle before `strict` is considered.
 
 After the first strict run, the operator records who checked `fleet_status`, `stdcheck`, the outbound audit and the report, with timestamps and links to the receipts. Seven days of shadow and the canary/rollback receipts are operational evidence; GitHub Actions status alone cannot satisfy those checks.
+
+## Operator commands and retained artifacts
+
+Use full 40 character SHAs. `host-inventory.json` contains `dependencies` booleans (`git`, `node24`, `python3`, `bubblewrap`), `permissions` keyed by lane and permission, and `tasks: [{job, path}]` from the installed scheduler inventory. Do not include credentials or raw environment values.
+
+```sh
+node scripts/ops/qa-fleet-preflight.mjs --source-sha <source> --runtime-sha <runtime> --inventory host-inventory.json
+node scripts/ops/qa-fleet-verify.mjs --source-sha <source> --runtime-sha <runtime> --manifest <qa-fleet-run-manifest.json>
+node scripts/ops/qa-fleet-shadow-compare.mjs --legacy legacy-days.json --current new-days.json --explanations explanations.json
+python3 pi/bin/qa_standard.py capture --state <pi-state> --file <completed-lane-run.json> --fleet-status <fleet-status.json> --stdcheck <pi-state/out/stdcheck/state.json>
+node scripts/ops/qa-fleet-preflight.mjs --source-sha <source> --runtime-sha <runtime> --inventory host-inventory.json --transition strict --evidence cutover-evidence.json
+```
+
+The last command returns `proposed_standard`; it does not write the config. Preserve its output as the cutover record, obtain the current deployment authorization and use the repository deployment path. A captured bundle is an observation of the selected scheduler run: each observer must already contain that run id. Capture each lane after `fleet_status` and enabled `stdcheck` have observed it. A missing or failed observer refuses capture.
+
+Shadow input arrays contain `{date, run_id, source_sha, standard_version, mode: "shadow", decisions: [{fingerprint, severity, decision: {status}}]}`. Explanations contain `{date, fingerprint, reason}`. Cutover evidence contains the paired arrays under `shadow`, the five captured bundles under `canary.<lane>`, and `source_sha`, `standard_version`, `manifest_hash` from canary. Its `rollback` receipt includes `ok`, `source_sha`, `previous_source_sha`, `preserved_evidence` and a real `receipt_id`. This is an operator evidence contract, not an attestation or proof that JSON supplied by an operator is authentic.
+
+Pi model calls prepend the lane brief in `lib.pi`. `grokline` returns `qa_standard_brief` with its job metadata; the Grokbot operator must prepend that returned section to the cloud task prompt. Verify the cloud prompt on the authorized host before canary acceptance; the repository cannot change an external cloud task configuration.

@@ -101,6 +101,27 @@ class Contracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'rollback'): Q.require_product_evidence(action)
         self.assertTrue((self.root / 'evidence/manifest.json').exists())
 
+    def test_outbound_audit_creates_directory_before_locking(self):
+        state = self.root / 'fresh-state'
+        Q.audit_outbound(state)
+        audit = json.loads((state / 'out/qa-fleet/outbound.json').read_text())
+        self.assertEqual(audit['missing_evidence_outbound'], 0)
+        Q.audit_outbound(state, rejected=True)
+        self.assertEqual(json.loads((state / 'out/qa-fleet/outbound.json').read_text())['rejected_without_evidence'], 1)
+
+    def test_capture_binds_real_observer_files_and_refuses_missing_check(self):
+        self.env.update(fleet_fixture(self.root, mode='canary')); os.environ.update(self.env)
+        snapshot = Q.inspect(self.root)
+        fleet = self.root / 'fleet-status.json'; check = self.root / 'stdcheck.json'
+        Q.write_json(fleet, {'qa_standard': snapshot})
+        Q.write_json(check, {'qa_standard': snapshot, 'results': {'fleet_standard': {}}, 'errors': {}})
+        run = self.root / 'out/qa-fleet/runs/fleet-repair.json'
+        captured = Q.capture_receipt(self.root, run, fleet, check)
+        self.assertEqual(captured['scheduler']['run_id'], captured['report']['run_id'])
+        self.assertTrue(captured['report']['artifact']['sha256'])
+        check.unlink()
+        with self.assertRaises(OSError): Q.capture_receipt(self.root, run, fleet, check)
+
     def test_watchdog_surfaces_drift_without_two_extra_polls(self):
         import watchdog
         Q.paths()[2].unlink(); probs = {}

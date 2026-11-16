@@ -457,7 +457,8 @@ def run(now=None):
     escalate(sync_gaps(results, now), now)
     update_alerts(st, results, errors, now)
     record_passrate(results, now, {"first_run_fail": frf})
-    st.update(last_run=iso(now), errors=errors, crash_streak=0, metrics={"first_run_fail": frf})
+    import qa_standard
+    st.update(last_run=iso(now), errors=errors, results=results, qa_standard=qa_standard.inspect(BASE, QA, now=now), crash_streak=0, metrics={"first_run_fail": frf})
     if os.path.exists(f"{OUT}/alerts/stdcheck.json") and not DRY: os.unlink(f"{OUT}/alerts/stdcheck.json"); log("stdcheck: crash alert recovered")
     save_json(f"{OUT}/state.json", st)
     return results

@@ -117,6 +117,12 @@ export function main(argv = process.argv.slice(2)) {
   const root = resolve(arg('--root', ROOT))
   const result = preflight({ fleet: readJson(arg('--fleet', resolve(root, 'pi/conf/qa-fleet.json'))), standard: readJson(arg('--standard', resolve(root, 'pi/conf/qa-standard.json'))), root,
     sourceSha: arg('--source-sha'), runtimeSha: arg('--runtime-sha'), inventory: readJson(arg('--inventory', '')) })
+  if (argv.includes('--transition')) {
+    try {
+      if (!result.ok) throw Error('preflight failed')
+      result.proposed_standard = transitionStandard(readJson(arg('--standard', resolve(root, 'pi/conf/qa-standard.json'))), arg('--transition'), readJson(arg('--evidence', '')) ?? {})
+    } catch (e) { result.ok = false; result.errors.push(issue('transition_rejected', e.message)) }
+  }
   process.stdout.write(JSON.stringify(result, null, 2) + '\n'); return result.ok ? 0 : 1
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) process.exitCode = main()
