@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -119,6 +120,75 @@ class Contracts(unittest.TestCase):
         with mock.patch.object(grokline, 'claim') as claim, contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(grokline.main(['--claim', '--pct', '1']), 1)
             claim.assert_not_called()
+
+    def test_missing_cloud_brief_does_not_block_bookkeeping(self):
+        import contextlib
+        import io
+        import grokline
+        import prfix
+        Q.paths()[2].unlink()
+        # Use real usage/ticket writers in isolated state, including actual release.
+        with mock.patch.object(prfix, 'OUT', str(self.root / 'grok')), mock.patch.object(grokline, 'on', return_value=True):
+            Path(prfix.OUT).mkdir()
+            def invoke(args):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out): self.assertEqual(grokline.main(args), 0)
+                result = json.loads(out.getvalue())
+                self.assertNotIn('qa_standard_brief', result)
+                return result
+            self.assertEqual(invoke(['--record', '--pct', '1'])['status'], 'ok')
+            for command in ('--progress', '--finish', '--release'):
+                key = '7:mq1-' + 'a' * 20
+                with prfix.tickets_locked() as tickets:
+                    tickets['tickets'][key] = {'owner': 'grok', 'status': 'running', 'history': []}
+                args = [command, key]
+                if command != '--progress': args += ['--pct', '1']
+                if command == '--finish': args += ['--pr', '99']
+                self.assertEqual(invoke(args)['status'], 'ok')
+                ticket = prfix.load_tickets()['tickets'][key]
+                if command == '--finish': self.assertEqual(ticket['pr'], 99)
+                if command != '--progress': self.assertNotIn('owner', ticket)
+            usage = json.loads(Path(grokline.usage_path()).read_text())
+            self.assertTrue(usage['days'])
+        # Conflicting flags must not bypass the brief on a reachable claim path.
+        with mock.patch.object(grokline, 'claim') as claim, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(grokline.main(['--claim', '--progress', '7:fp', '--pct', '1']), 1)
+            claim.assert_not_called()
+
+    def test_catchup_without_report_keeps_latest_qa_manifest(self):
+        # Run the real shell entrypoint/receipt writers; stub only host dependencies
+        # and the catch-up process returning no report (empty gap list / busy lock).
+        host = self.root / 'host'
+        for sub in ('pi/bin', 'scripts', 'argus/src', 'nvm', 'tools'):
+            (host / sub).mkdir(parents=True, exist_ok=True)
+        (host / 'pi/bin/qa_standard.py').symlink_to(Q.CODE / 'bin/qa_standard.py')
+        (host / 'argus/src/cli.mjs').write_text('')
+        (host / 'nvm/nvm.sh').write_text('nvm() { :; }\n')
+        def executable(path, text):
+            path.write_text('#!/bin/bash\n' + text + '\n'); path.chmod(0o755)
+        executable(host / 'scripts/bootstrap-box.sh', 'exit 0')
+        (host / 'scripts/gh-app-env.sh').write_text('gh_app_env() { :; }\n')
+        executable(host / 'tools/node', '[[ "$1" == "-e" ]] && exit 0\nexit "${CATCHUP_RC:-0}"')
+        executable(host / 'tools/flock', 'exit "${CATCHUP_LOCK_RC:-0}"')
+        secrets = host / 'fixture.env'
+        secrets.write_text('GITHUB_TOKEN=fixture\nQA_LLM_BASE_URL=http://127.0.0.1:9\nQA_LLM_API_KEY=fixture\n')
+        manifest = self.root / 'argus-root/qa-fleet-run-manifest.json'
+        manifest.parent.mkdir(); manifest.write_bytes((self.root / 'manifest.json').read_bytes())
+        original = manifest.read_bytes()
+        env = dict(os.environ, PANOPTES_DIR=str(host), QA_HOME=str(self.root), PI_STATE=str(self.root),
+                   PI_QA_FLEET_MANIFEST=str(manifest), QA_SECRETS_FILE=str(secrets),
+                   PANOPTES_NVM_DIR=str(host / 'nvm'), PANOPTES_TMP_SWEEP='0', PANOPTES_SEVERITY_PIN_CHECK='0',
+                   PATH=str(host / 'tools') + os.pathsep + os.environ['PATH'])
+        for rc, locked in ((0, 0), (0, 1), (3, 0)):
+            result = subprocess.run(['bash', str(Q.CODE.parent / 'run-nightly.sh'), '--catch-up', '--trigger', 'manual'],
+                                    env=dict(env, CATCHUP_RC=str(rc), CATCHUP_LOCK_RC=str(locked)), capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, rc, result.stdout + result.stderr)
+            self.assertEqual(manifest.read_bytes(), original)
+            with mock.patch.dict(os.environ, {'PI_QA_FLEET_MANIFEST': str(manifest)}):
+                self.assertEqual(Q.inspect(self.root)['errors'], {})
+        receipts = [json.loads(p.read_text()) for p in (self.root / 'out/qa-fleet/runs').glob('fleet-*.json')]
+        self.assertTrue(any(r.get('status') == 'fail' and r.get('exit_code') == 3 for r in receipts))
+        self.assertFalse(any(r.get('status') == 'running' for r in receipts))
 
     def test_outbound_audit_creates_directory_before_locking(self):
         state = self.root / 'fresh-state'

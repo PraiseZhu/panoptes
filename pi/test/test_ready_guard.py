@@ -5,6 +5,8 @@
  正常：review-pr 没跑 / 在跑，其余全绿 → 照常转。覆盖 prwatch.check_drafts、outbound.h_ready、prretro 用到的 block_reason。
 Local only: no network, no gh. Run: python3 test/test_ready_guard.py"""
 import json, os, shutil, sys, tempfile, types, unittest
+from pathlib import Path
+from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 TMP = tempfile.mkdtemp(prefix="ready-guard-test-"); os.environ["PI_STATE"] = TMP
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bin"))
@@ -77,6 +79,11 @@ class Prwatch(unittest.TestCase):
         self.assertEqual(len(self.run_once({}, [pr()], [])), 1)
         self.acts.clear()
         self.assertEqual(len(self.run_once({}, [pr(checks=GREEN + [RP("", "IN_PROGRESS")])], [])), 1)
+    def test_ready_action_carries_original_qa_and_fingerprint(self):
+        p = pr(); p['body'] += '\nFingerprint: mq1-' + 'b' * 20 + '\n'
+        action = self.run_once({}, [p], [])[0]
+        self.assertEqual(action['qa'], 1385)
+        self.assertEqual(action['fingerprint'], 'mq1-' + 'b' * 20)
     def test_b_review_pr_failed_same_head_no_ready(self):
         self.assertEqual(self.run_once({}, [pr(checks=GREEN + [RP("FAILURE")])], []), [])
         self.assertTrue(any("review-pr failed" in l for l in self.logs))
@@ -99,6 +106,61 @@ class Outbound(unittest.TestCase):
         self.assertEqual(self.state(GREEN + [RP("", "QUEUED")], []), "pending")
         self.assertTrue(self.state(GREEN + [RP("FAILURE")], []).startswith("stale:review-pr failed"))
         self.assertTrue(self.state(GREEN, DRAFTED).startswith("stale:converted back to draft"))
+
+class ReadyEvidence(unittest.TestCase):
+    def setUp(self):
+        import qa_standard as Q
+        import lib
+        from test_qa_standard_brief import fleet_fixture
+        from test_prfix_evidence_gate import evidence_finding
+        self.root = Path(tempfile.mkdtemp(dir=TMP)); self.Q = Q
+        self.env = mock.patch.dict(os.environ, fleet_fixture(self.root, mode='strict'))
+        self.env.start(); self.addCleanup(self.env.stop)
+        for obj, name, value in [(lib, 'BASE', str(self.root)), (lib, 'RPT', str(self.root))]:
+            patch = mock.patch.object(obj, name, value); patch.start(); self.addCleanup(patch.stop)
+        self.finding = evidence_finding(self.root / 'evidence')
+        self.source = dict(number=7, tested_sha=self.finding['tested_sha'], base_sha=self.finding['base_sha'], findings=[self.finding])
+        Q.write_json(self.root / 'PR-7.json', {'prs': [self.source]})
+        self.action = {'key': 'ready:99:' + 'a' * 12, 'type': 'gh.pr.ready', 'pr': 99, 'qa': 7, 'fingerprint': self.finding['fingerprint']}
+        self.gh = mock.patch.object(outbound, 'gh', return_value={'isDraft': True})
+        self.calls = self.gh.start(); self.addCleanup(self.gh.stop)
+
+    def test_strict_ready_denies_missing_origin_or_v2_evidence_and_audits(self):
+        for mode in ('strict', 'canary'):
+            policy = json.loads(self.Q.paths()[1].read_text()); policy['mode'] = mode
+            self.Q.write_json(self.Q.paths()[1], policy)
+            for action in (dict(self.action, qa=None), dict(self.action, fingerprint=None), dict(self.action, fingerprint='missing')):
+                for method in outbound.h_ready(action)[2:]:
+                    with self.assertRaisesRegex(ValueError, 'product_outbound_evidence_missing'): method()
+            self.assertGreater(json.loads((self.root / 'out/qa-fleet/outbound.json').read_text())['rejected_without_evidence'], 0)
+        self.calls.assert_not_called()
+
+    def test_strict_ready_rechecks_artifacts_after_validation(self):
+        handler = outbound.h_ready(self.action)
+        handler[2]()
+        (self.root / 'evidence/head-result.json').write_text('{}')
+        self.calls.reset_mock()
+        with self.assertRaisesRegex(ValueError, 'evidence_missing'): handler[3]()
+        self.calls.assert_not_called()
+
+    def test_strict_confirmed_ready_and_shadow_legacy_compatibility(self):
+        self.calls.return_value = 'ready'
+        self.assertEqual(outbound.h_ready(self.action)[3](), 'ready')
+        self.assertEqual(self.calls.call_args.args[0][:3], ['pr', 'ready', '99'])
+        for mode in ('shadow', 'legacy'):
+            policy = json.loads(self.Q.paths()[1].read_text()); policy['mode'] = mode
+            self.Q.write_json(self.Q.paths()[1], policy)
+            self.assertEqual(outbound.h_ready({'pr': 99})[3](), 'ready')
+
+    def test_shadow_validation_does_not_authorize_ready_after_strict_cutover(self):
+        policy = json.loads(self.Q.paths()[1].read_text()); policy['mode'] = 'shadow'
+        self.Q.write_json(self.Q.paths()[1], policy)
+        handler = outbound.h_ready({'pr': 99})
+        handler[2]()
+        policy['mode'] = 'strict'; self.Q.write_json(self.Q.paths()[1], policy)
+        self.calls.reset_mock()
+        with self.assertRaisesRegex(ValueError, 'evidence_missing'): handler[3]()
+        self.calls.assert_not_called()
 
 if __name__ == "__main__":
     try: unittest.main(verbosity=1)

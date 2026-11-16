@@ -429,8 +429,16 @@ def h_ready(a):
         # 10-29 ready_guard：同一 head 上 review-pr 已失败，或有人转回过草稿（不在 Pi 台账里）→ 不转（执行时再查一次）
         why = RG.block_reason(gh, REPO, n, p.get("statusCheckRollup") or [], jload(LEDGER, {}))
         return f"stale:{why}" if why else "pending"
-    def validate(): return f"#{n} " + json.dumps(gh(["pr", "view", str(n), "-R", REPO, "--json", "isDraft,state,statusCheckRollup"])["isDraft"] and "draft" or "ready")
-    def do(): return gh(["pr", "ready", str(n), "-R", REPO], js=False).strip()
+    def evidence():
+        from qa_standard import require_product_evidence
+        # Older queued Ready actions may lack the original QA/fingerprint.
+        require_product_evidence(dict(a, type="gh.pr.ready"))
+    def validate():
+        evidence()
+        return f"#{n} " + json.dumps(gh(["pr", "view", str(n), "-R", REPO, "--json", "isDraft,state,statusCheckRollup"])["isDraft"] and "draft" or "ready")
+    def do():
+        evidence()  # Re-read policy/artifacts immediately before changing Draft state.
+        return gh(["pr", "ready", str(n), "-R", REPO], js=False).strip()
     return f"gh pr ready #{n}", state, validate, do
 def h_fixpr(a):
     patch, must = a.get("patch"), a.get("body_must_contain", "")

@@ -255,6 +255,8 @@ def require_product_evidence(action):
     if policy['mode'] == 'rollback': raise ValueError('rollback_product_outbound_disabled')
     import lib
     try:
+        if action.get('type') == 'gh.pr.ready' and (not action.get('qa') or not action.get('fingerprint')):
+            raise ValueError('ready_origin_missing')
         n = int(action.get('qa') or action.get('pr') or 0)
         report = json.loads((Path(lib.RPT) / f'PR-{n}.json').read_text())
         source = next(p for p in report.get('prs', []) if p.get('number') == n)

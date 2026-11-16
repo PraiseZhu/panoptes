@@ -193,8 +193,11 @@ mkdir -p "$ARGUS_ROOT/logs"
 # Freeze source/policy at scheduler start; an in-flight deployment cannot relabel this run.
 FLEET_RUN="$(python3 "$PANOPTES_DIR/pi/bin/qa_standard.py" start --state "${PI_STATE:-$QA_HOME/pi}" --job qa --trigger "$TRIGGER")"
 export PANOPTES_FLEET_MANIFEST="$FLEET_RUN"
-# Every attempt keeps its own metadata. This latest-run pointer is metadata only.
-cp "$FLEET_RUN" "$ARGUS_ROOT/qa-fleet-run-manifest.json"
+# Catch-up is an orchestrator with no report of its own. Only its QA children
+# may replace the latest report pointer; an empty/locked tick keeps it intact.
+if [[ -z "$CATCH_UP" ]]; then
+  cp "$FLEET_RUN" "$ARGUS_ROOT/qa-fleet-run-manifest.json"
+fi
 
 
 # /tmp sweep: leftover argus-* dirs older than 24 h, owned by us, not held by a live process (scripts/sweep-tmp.sh).

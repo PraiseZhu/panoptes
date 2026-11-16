@@ -64,7 +64,15 @@ export function canTransition(from, to, evidence = {}) {
   const fail = reason => ({ ok: false, reason })
   if (!MODES.includes(from) || !MODES.includes(to)) return fail('unknown mode')
   if (to === 'rollback') return { ok: true, reason: 'stop product actions immediately; deploy rollback separately' }
-  if (from === 'rollback' && to === 'legacy') return SHA.test(evidence.restored_source_sha) ? { ok: true } : fail('restored source SHA required')
+  if (from === 'rollback' && to === 'legacy') {
+    const restored = evidence.restored_source_sha, planned = evidence.rollback_plan?.previous_source_sha
+    if (!SHA.test(restored) || !SHA.test(planned)) return fail('restored and planned source SHA required')
+    if (restored !== planned) return fail('restored source SHA differs from rollback plan')
+    const verified = evidence.runtime_verification
+    if (verified?.ok !== true || !Array.isArray(verified.errors) || verified.errors.length || !verified.run_id ||
+        verified.source_sha !== restored || verified.runtime_sha !== restored) return fail('verified runtime SHA differs from rollback plan')
+    return { ok: true, reason: 'planned source restored and runtime verified' }
+  }
   if ({ legacy: 'shadow', shadow: 'canary', canary: 'strict' }[from] !== to) return fail('invalid transition')
   if (to === 'canary' || to === 'strict') {
     const shadow = compareShadow(evidence.shadow)
@@ -92,11 +100,13 @@ export function canTransition(from, to, evidence = {}) {
 export function transitionStandard(standard, to, evidence = {}) {
   const check = canTransition(standard?.mode, to, evidence)
   if (!check.ok) throw Error(check.reason)
-  return { ...standard, mode: to, cutover: { from: standard.mode, to, evidence } }
+  return { ...standard, mode: to,
+    cutover_history: [...(standard.cutover_history ?? []), ...(standard.cutover ? [standard.cutover] : [])],
+    cutover: { from: standard.mode, to, evidence } }
 }
 export function rollbackPlan(previousSourceSha) {
   if (!SHA.test(previousSourceSha)) throw Error('full previous source SHA required')
-  return { source_sha: previousSourceSha, mode: 'rollback', deploy_via: 'authorized operator restoration' , preserve: ['v2 manifests', 'shadow receipts', 'cutover records'], delete: [] }
+  return { source_sha: previousSourceSha, previous_source_sha: previousSourceSha, mode: 'rollback', deploy_via: 'authorized operator restoration' , preserve: ['v2 manifests', 'shadow receipts', 'cutover records'], delete: [] }
 }
 export function preflight({ fleet, standard, root = ROOT, sourceSha, runtimeSha, inventory } = {}) {
   const errors = [...validateFleet(fleet, { root }), ...validateStandard(standard)]
@@ -114,13 +124,21 @@ export function preflight({ fleet, standard, root = ROOT, sourceSha, runtimeSha,
 }
 export function main(argv = process.argv.slice(2)) {
   const arg = (k, fallback) => argv.includes(k) ? argv[argv.indexOf(k) + 1] : fallback
+  if (argv.includes('--rollback-plan')) {
+    try { process.stdout.write(JSON.stringify(rollbackPlan(arg('--rollback-plan')), null, 2) + '\n'); return 0 }
+    catch (e) { process.stdout.write(JSON.stringify({ ok: false, errors: [issue('rollback_plan_invalid', e.message)] }) + '\n'); return 1 }
+  }
   const root = resolve(arg('--root', ROOT))
   const result = preflight({ fleet: readJson(arg('--fleet', resolve(root, 'pi/conf/qa-fleet.json'))), standard: readJson(arg('--standard', resolve(root, 'pi/conf/qa-standard.json'))), root,
     sourceSha: arg('--source-sha'), runtimeSha: arg('--runtime-sha'), inventory: readJson(arg('--inventory', '')) })
   if (argv.includes('--transition')) {
     try {
       if (!result.ok) throw Error('preflight failed')
-      result.proposed_standard = transitionStandard(readJson(arg('--standard', resolve(root, 'pi/conf/qa-standard.json'))), arg('--transition'), readJson(arg('--evidence', '')) ?? {})
+      const standard = readJson(arg('--standard', resolve(root, 'pi/conf/qa-standard.json')))
+      const evidence = readJson(arg('--evidence', '')) ?? {}
+      if (standard?.mode === 'rollback' && arg('--transition') === 'legacy' &&
+          (evidence.runtime_verification?.runtime_sha !== arg('--runtime-sha') || evidence.restored_source_sha !== arg('--source-sha'))) throw Error('restoration evidence differs from preflight SHA')
+      result.proposed_standard = transitionStandard(standard, arg('--transition'), evidence)
     } catch (e) { result.ok = false; result.errors.push(issue('transition_rejected', e.message)) }
   }
   process.stdout.write(JSON.stringify(result, null, 2) + '\n'); return result.ok ? 0 : 1
