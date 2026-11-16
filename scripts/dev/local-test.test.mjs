@@ -119,11 +119,13 @@ test('SC4: a file over --timeout is stopped, recorded as 超时, and the next fi
   assert.match(r.stdout, /超时 1 个/)
 })
 
-test('SC4: a listed timeout does not fail the run, and its case entries are "not run" rather than stale', needPy, () => {
+test('SC4: a timeout is always unexpected, even with a file-level entry for that file; its entries are "not run", not stale', needPy, () => {
   const r = run(fixture({ pi: { 'test_a_hang.py': 'import time\ntime.sleep(60)\n' }, entries: [entry('pi/test_a_hang.py'), entry('pi/test_a_hang.py::T.x')] }),
     ['--only', 'pi', '--timeout', '1'])
-  assert.equal(r.status, 0, r.all)
-  assert.deepEqual(r.summary.expected, ['pi/test_a_hang.py']); assert.deepEqual(r.summary.stale, [])
+  assert.equal(r.status, 1, r.all)
+  assert.deepEqual(r.summary.expected, []); assert.deepEqual(r.summary.unexpectedTimeout, ['pi/test_a_hang.py'])
+  assert.deepEqual(r.summary.stale, []); assert.deepEqual(r.summary.notRun.sort(), ['pi/test_a_hang.py', 'pi/test_a_hang.py::T.x'])
+  assert.match(r.stdout, /意外超时 1/)
 })
 
 test('Argus: node:test failures are matched by test name; platform-specific entries only apply on their platform', () => {

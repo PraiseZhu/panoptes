@@ -10,7 +10,7 @@
 #
 # usage: scripts/dev/local-test.sh [--only pi|argus] [--jobs N] [--timeout SEC] [--no-install] [--keep] [FILTER...]
 #   FILTER  only run test files whose path contains one of the strings (e.g. boxhealth, sandbox)
-# exit: 0 no unexpected failure or timeout / 1 unexpected failure or timeout / 2 setup error
+# exit: 0 no unexpected failure and no timeout / 1 an unexpected failure or any timeout (no list entry covers a timeout) / 2 setup error
 # Test hooks (scripts/dev/local-test.test.mjs): LOCAL_TEST_KNOWN, LOCAL_TEST_PI_TESTS, LOCAL_TEST_PI_CWD,
 # LOCAL_TEST_ARGUS_ROOT, LOCAL_TEST_PYTHON, LOCAL_TEST_PLATFORM.
 set -uo pipefail
@@ -187,9 +187,9 @@ await Promise.all(Array.from({ length: Math.min(jobs, files.length) }, async (_,
 // match: a failing file yields its failing cases, or the file itself when no case could be read
 const failures = results.flatMap((r) => r.status === 'timeout' ? [{ id: r.id, file: r.id, kind: 'timeout', log: r.log }]
   : r.status === 'fail' ? (r.cases.length ? r.cases : [null]).map((c) => ({ id: c ? `${r.id}::${c}` : r.id, file: r.id, kind: 'fail', log: r.log })) : [])
-// exact match only: a file-level entry matches a file-level failure (timeout, or no case / traceback could be read), never
-// a case of that file -- otherwise a new failure in a listed file would be hidden
-const covers = (k, f) => k.id === f.id
+// exact match only: a file-level entry matches a file-level failure (no case / traceback could be read), never a case of
+// that file -- otherwise a new failure in a listed file would be hidden. A timeout is always unexpected: no entry covers it.
+const covers = (k, f) => f.kind === 'fail' && k.id === f.id
 const used = new Set()
 for (const f of failures) { f.entry = entries.find((k) => covers(k, f)); if (f.entry) used.add(f.entry) }
 const ran = new Map(results.map((r) => [r.id, r]))
@@ -210,9 +210,9 @@ const out = []
 out.push('', `== 本地测试汇总（${platform}） ==`)
 out.push(`测试文件 ${results.length} 个：通过 ${count('pass')}，失败 ${count('fail')}，超时 ${count('timeout')}`)
 out.push(`已知环境失败 ${expected.length} 条（在清单里，不算失败）`)
-for (const f of expected) out.push(`  - ${f.id}${f.kind === 'timeout' ? '（超时）' : ''}：${f.entry.reason}［${f.entry.tracking}］`)
-out.push(`超时 ${count('timeout')} 个（单文件超过 ${E.LT_TIMEOUT}s，已停掉并接着跑下一个）`)
-for (const f of failures.filter((x) => x.kind === 'timeout')) out.push(`  - ${f.id}${f.entry ? '（清单内）' : ''}  日志 ${f.log}`)
+for (const f of expected) out.push(`  - ${f.id}：${f.entry.reason}［${f.entry.tracking}］`)
+out.push(`超时 ${count('timeout')} 个（单文件超过 ${E.LT_TIMEOUT}s，已停掉并接着跑下一个；超时一律算意外，清单不覆盖）`)
+for (const f of failures.filter((x) => x.kind === 'timeout')) out.push(`  - ${f.id}  日志 ${f.log}`)
 out.push(`清单过期 ${stale.length} 条（已不再失败；提醒，不算失败，请从清单删掉）`)
 for (const k of stale) out.push(`  - ${k.id}${k.gone ? '（测试文件已不存在）' : ''}［${k.tracking}］`)
 if (notRun.length) out.push(`清单条目本轮没跑到 ${notRun.length} 条（被筛掉、或所在文件超时）`)

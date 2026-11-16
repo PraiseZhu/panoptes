@@ -31,7 +31,7 @@ scripts/dev/local-test.sh --jobs 1 --timeout 120 --keep
 | `--no-install` | | 缺 `argus/node_modules` 也不跑 `npm ci` |
 | `--keep` | | 成功时也保留日志目录 |
 
-退出码：`0` 没有意外失败和意外超时；`1` 有意外失败或意外超时；`2` 准备阶段出错（缺 python3.13、清单格式错、选项错）。
+退出码：`0` 没有意外失败，也没有超时；`1` 有意外失败或任何超时（超时一律算意外，清单条目不覆盖超时）；`2` 准备阶段出错（缺 python3.13、清单格式错、选项错）。
 
 脚本固定了这些环境，结果不随调用它的 shell 变化：
 
@@ -40,13 +40,15 @@ scripts/dev/local-test.sh --jobs 1 --timeout 120 --keep
 - `TMPDIR` 是 `/private/tmp/panoptes-localtest.XXXXXX` 下的物理路径，没有空格，也不经过 `/tmp` 软链接。每个测试文件有自己的临时目录和 Pi 状态目录。
 - 没有可用的 bubblewrap 时，Argus 测试按 CI 的退路跑：`ARGUS_SANDBOX=none ARGUS_ALLOW_UNSANDBOXED=1`。
 
+脚本会写两处检出外或未入库的位置：`/private/tmp/panoptes-localtest.*`（跑完没有意外失败就删掉，否则留着看日志），以及缺依赖时 `npm ci` 写的 `argus/node_modules`（已在 `.gitignore`）。
+
 ## 看输出
 
 ```
 == 本地测试汇总（darwin） ==
 测试文件 249 个：通过 227，失败 22，超时 0
 已知环境失败 98 条（在清单里，不算失败）
-超时 0 个（单文件超过 300s，已停掉并接着跑下一个）
+超时 0 个（单文件超过 300s，已停掉并接着跑下一个；超时一律算意外，清单不覆盖）
 清单过期 0 条（已不再失败；提醒，不算失败，请从清单删掉）
 意外失败 0
 ```
@@ -69,7 +71,7 @@ scripts/dev/local-test.sh --jobs 1 --timeout 120 --keep
 ```
 
 - `id`：`pi/<文件>::<类>.<方法>`，或 `argus/tests/<文件>::<测试名>`。脚本式 Pi 测试（没有 unittest 用例，或 unittest 跑起来之前就崩了）按 traceback 里这个文件的最后一帧记成 `pi/<文件>::<函数>:<行号>`，例如 `pi/test_boxhealth_catchup.py::<module>:53`；同一文件里另一处断言失败行号不同，算意外失败。
-- 只写文件（不带 `::`）的条目只对上「整个文件」级的失败：超时，或既没有用例名也没有 traceback 的失败。它不会盖住这个文件里任何用例或断言的失败；只要读得出用例名或行号，每条失败都要对上同样精确的条目，对不上就是意外失败。
+- 只写文件（不带 `::`）的条目只对上「整个文件」级的失败：既没有用例名也没有 traceback 的失败。超时不归它管，超时一律算意外。它不会盖住这个文件里任何用例或断言的失败；只要读得出用例名或行号，每条失败都要对上同样精确的条目，对不上就是意外失败。
 - `platforms`：只在这些平台生效（`darwin` 是 macOS）。
 - `reason`：查清的原因，写到别人能复核的程度（缺什么命令、读哪个文件、哪一行）。
 - `tracking`：上游 issue（`PraiseZhu/panoptes#<号>`），或 `环境限制`。
