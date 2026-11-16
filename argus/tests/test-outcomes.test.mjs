@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { normalizeTestOutcomes, findTestOutcome } from '../src/test-outcomes.mjs'
+import { normalizeTestOutcomes, findTestOutcome, findingStatus } from '../src/test-outcomes.mjs'
 
 const root = mkdtempSync(join(tmpdir(), 'argus-outcomes-'))
 process.env.ARGUS_ROOT = root
@@ -95,4 +95,13 @@ test('金丝雀实际npm命令可接收两个reporter并输出执行证据', asy
   assert.equal(r.ok, true, r.tail)
   assert.equal(r.testOutcomeStatus, 'complete', JSON.stringify(r))
   assert.equal(findTestOutcome(r, 'sum works').status, 'passed')
+})
+
+
+test('finding display aliases preserve non-product and pending states', () => {
+  for (const [input, expected] of [['introduced', 'confirmed'], ['unverified', 'pending_verification'],
+    ['timeout', 'pending_verification'], ['setup-failed', 'pending_verification'], ['pre-existing', 'pre-existing'],
+    ['flaky', 'flaky'], ['fixed-later', 'fixed-later'], ['pending_verification', 'pending_verification']]) {
+    assert.equal(findingStatus(input), expected)
+  }
 })

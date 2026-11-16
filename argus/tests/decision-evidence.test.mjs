@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { decideOutcome, compareKey } from '../src/decide.mjs'
+import { decideOutcome, compareKey, decideFinding, findingEligibility } from '../src/decide.mjs'
 import { toCoverage } from '../src/matrix.mjs'
 
 const step = (statuses, extra = {}) => {
@@ -74,4 +74,58 @@ test('退出0但配置的报告缺失时不能当成功或贡献覆盖', () => {
   assert.equal(decideOutcome({ first, rerun: first }).outcome, 'needs_review')
   const coverage = toCoverage({ profile: { steps: [{ id: 'unit', covers: ['unit'] }] }, triage: { rows: [{ key: 'unit', verdict: 'applicable' }] }, results: first })
   assert.deepEqual(coverage.missed, ['unit'])
+})
+
+test('unified per-check decision fails closed on all missing or non-product phases', () => {
+  const fail = step({ A: 'failed' }), pass = step({ A: 'passed' })
+  const args = { key: 'unit::A', first: fail, rerun: fail, base: pass, latestIsSame: true }
+  assert.equal(decideFinding(args).status, 'confirmed')
+  assert.equal(decideFinding({ ...args, base: fail }).status, 'pre-existing')
+  assert.equal(decideFinding({ ...args, rerun: pass }).status, 'flaky')
+  assert.equal(decideFinding({ ...args, latestIsSame: false, latest: pass }).status, 'fixed-later')
+  assert.equal(decideFinding({ ...args, latestIsSame: false }).status, 'pending_verification')
+  for (const phase of ['first', 'rerun', 'base']) {
+    assert.equal(decideFinding({ ...args, [phase]: null }).status, 'pending_verification')
+    for (const status of ['timeout', 'environment_unavailable', 'runner_error', 'invalid']) {
+      const bad = args[phase].map((r) => ({ ...r, status }))
+      assert.equal(decideFinding({ ...args, [phase]: bad }).status, 'pending_verification')
+    }
+  }
+  assert.equal(decideFinding({ ...args, trialOnly: true }).status, 'pending_verification')
+  assert.equal(findingEligibility({ source: 'code-review', status: 'confirmed', decision: { status: 'confirmed' } }).fix_eligible, false)
+})
+
+
+test('finding/issue/fix eligibility shares SHA and replay admission across severities', async () => {
+  const { selectIssueCandidates } = await import('../src/nightly.mjs')
+  const f = { source: 'check', status: 'introduced', check_id: 'unit', severity: 'P1',
+    decision: { status: 'confirmed' }, tested_sha: 'a'.repeat(40), base_sha: 'b'.repeat(40),
+    run_id: 'run', artifact_refs: ['result'], evidence: { tested_sha: 'a'.repeat(40), base_sha: 'b'.repeat(40), first_run: 'fail', rerun: 'fail', base_run: 'pass' } }
+  assert.deepEqual(findingEligibility(f), { finding_eligible: true, issue_eligible: true, fix_eligible: true })
+  for (const severity of ['P0', 'P1', 'P2', 'P3']) {
+    const result = findingEligibility({ ...f, severity })
+    assert.equal(result.finding_eligible, true)
+    assert.equal(result.issue_eligible, ['P0', 'P1'].includes(severity))
+    assert.equal(result.fix_eligible, severity !== 'P3')
+  }
+  const bad = [{ ...f, decision: null }, { ...f, base_sha: null }, { ...f, validation: { status: 'invalid' } },
+    { ...f, failure_type: 'test_timeout' }, { ...f, evidence: { ...f.evidence, pr_runs: ['fail'], base_runs: ['pass'] } },
+    { ...f, evidence: { ...f.evidence, latest_required: true } }]
+  for (const value of bad) assert.equal(findingEligibility(value).finding_eligible, false)
+  const report = { prs: [{ number: 1, author: 'PraiseZhu', findings: [f, ...bad] }] }
+  assert.equal(selectIssueCandidates(report).candidates.length, 1)
+})
+
+
+test('completed wrapper with an internal case timeout retains independent known assertions', () => {
+  const first = step({ old: 'failed', timeout: 'failed' }, { status: 'timeout',
+    failureDetails: [{ name: 'old', type: 'assertion' }, { name: 'timeout', type: 'test_timeout' }] })
+  const base = step({ old: 'failed', timeout: 'passed' })
+  const d = decideOutcome({ first, rerun: first, base, latestIsSame: true })
+  assert.equal(d.outcome, 'needs_review')
+  assert.equal(d.knownFailureCount, 1)
+  assert.deepEqual(d.knownOnlyStepIds, [])
+  assert.equal(decideFinding({ key: 'unit::timeout', first, rerun: first, base, latestIsSame: true }).status, 'pending_verification')
+  const killed = first.map((r) => ({ ...r, timedOut: true }))
+  assert.equal(compareKey('unit::old', killed, first), 'unknown')
 })

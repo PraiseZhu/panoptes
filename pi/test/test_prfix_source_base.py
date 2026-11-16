@@ -5,6 +5,7 @@ PR's baseRefName, the action carries base_ref, outbound passes --base, and a mis
 Scratch state only, no network. Run: python3 -m pytest -q test/test_prfix_source_base.py"""
 import argparse, contextlib, os, sys, tempfile, types, unittest
 from unittest import mock
+from test_prfix_evidence_gate import evidence_finding
 HERE = os.path.dirname(os.path.abspath(__file__)); BIN = os.path.join(os.path.dirname(HERE), "bin"); sys.path.insert(0, BIN)
 sys.path.insert(0, HERE); import isolation  # noqa: E402
 isolation.sandbox_state()
@@ -18,6 +19,7 @@ def gh_base(b): return lambda args, t=None: {"baseRefName": b} if args[:2] == ["
 
 class FixOneBase(unittest.TestCase):
     def test_fix_branches_from_source_base_not_main(self):
+        self.evidence = tempfile.TemporaryDirectory(); self.addCleanup(self.evidence.cleanup)
         calls = []
         def git(*a, cwd=None, t=600):
             calls.append(a)
@@ -28,7 +30,7 @@ class FixOneBase(unittest.TestCase):
         with mock.patch.object(P, "_gh_json", side_effect=gh_base(S2)), mock.patch.object(P, "git", side_effect=git), \
              mock.patch.object(P, "worktrees", return_value=[]), mock.patch.object(P, "repo_lock", contextlib.nullcontext), \
              mock.patch.object(P, "_TMPROOT", return_value=tempfile.mkdtemp()):
-            out, res = P.fix_one({"qa": 1597, "sev": "P1", "fp": FP, "title": "t"}, A, "2026-11-04")
+            out, res = P.fix_one({"qa": 1597, "sev": "P1", "fp": FP, "title": "t", "finding": evidence_finding(self.evidence.name, FP)}, A, "2026-11-04")
         self.assertIn(("rev-parse", f"origin/{S2}"), calls, out)
         self.assertNotIn(("rev-parse", "origin/main"), calls)
         self.assertEqual(res.get("base_ref"), S2)

@@ -17,7 +17,7 @@ const REPO = 'PraiseZhu/pr-qa-agent-deploy'
 const health = { status: 'ok', qa_tool_failures: [], env_problems: [], llm_errors: [] }
 const reportFor = (runId, fp) => ({ date: '2026-10-11', repo: 'xindong/mivo-canvas-plugin', run: { id: runId }, system_health: health,
   prs: [{ number: 7, author: 'PraiseZhu', title: 't', url: 'https://github.com/xindong/mivo-canvas-plugin/pull/7', state: 'merged', tested_sha: 'a'.repeat(40), base_sha: 'b'.repeat(40), merge_sha: 'a'.repeat(40),
-    findings: [{ source: 'check', test_backed: true, check_id: 'unit', check_name: 'unit', severity: 'P0', status: 'introduced', attribution: 'x', fingerprint: fp, pr_fingerprint: `${fp}-pr7`, dimension: 'white-box', evidence: { rerun: 'fail', base_run: 'pass', log_tail: 'AssertionError: boom' } }] }] })
+    findings: [{ source: 'check', test_backed: true, check_id: 'unit', check_name: 'unit', severity: 'P0', status: 'introduced', attribution: 'x', fingerprint: fp, pr_fingerprint: `${fp}-pr7`, dimension: 'white-box', decision: { status: 'confirmed' }, tested_sha: 'a'.repeat(40), base_sha: 'b'.repeat(40), run_id: runId, artifact_refs: ['result'], evidence: { tested_sha: 'a'.repeat(40), base_sha: 'b'.repeat(40), first_run: 'fail', rerun: 'fail', base_run: 'pass', log_tail: 'AssertionError: boom' } }] }] })
 const setState = (issues, comments = {}) => writeFileSync(statePath, JSON.stringify({ issues, comments, log: [] }))
 const state = () => JSON.parse(readFileSync(statePath, 'utf8'))
 const issue = (n, fp, extra = {}) => ({ number: n, html_url: `https://github.com/x/y/issues/${n}`, state: 'open', state_reason: null, title: 'i', body: nightly.fingerprintMarker(fp), labels: ['qa-auto', 'cindy-dispatch'], ...extra })
@@ -60,6 +60,24 @@ test('不修（not_planned 或 wontfix 标签）→ 沉默：不评论、不重�
   const s = state()
   assert.equal(s.issues.length, 2); assert.deepEqual(s.comments, {})
   assert.ok(!s.log.some((l) => /^(PATCH|POST)/.test(l)))
+})
+
+test('同样的 issue 复发场景缺准入证据时不查询、创建、评论或重开', async () => {
+  const scenarios = [[], [issue(3, 'mq1-denied')],
+    [issue(4, 'mq1-denied', { state: 'closed', state_reason: 'completed' })],
+    [issue(5, 'mq1-denied', { state: 'closed', state_reason: 'not_planned' })]]
+  const missing = ['decision', 'run_id', 'tested_sha', 'base_sha', 'artifact_refs', 'first_run', 'rerun', 'base_run']
+  for (const issues of scenarios) for (const field of missing) {
+    setState(issues)
+    const before = state()
+    const report = reportFor('denied-run', 'mq1-denied')
+    const finding = report.prs[0].findings[0]
+    if (['first_run', 'rerun', 'base_run'].includes(field)) delete finding.evidence[field]
+    else delete finding[field]
+    const r = await nightly.createIssues(report, { repo: REPO })
+    assert.equal(r[0].action, 'not-eligible', `missing ${field}`)
+    assert.deepEqual(state(), before, `missing ${field}: no GitHub calls or issue changes`)
+  }
 })
 
 // ── system_health：一次运行一个 issue（清单），只收自修复后仍存在的问题；已有开放的 system_health issue 时只评论 ──

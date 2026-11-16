@@ -24,7 +24,9 @@ const WHOLE = '*'
 export const failedIds = (results) => (results ?? []).filter((r) => r.kind !== 'setup' && (!r.ok || r.testOutcomeStatus === 'incomplete') && !r.unavailable).map((r) => r.id)
 export const setupFailed = (results) => (results ?? []).some((r) => r.kind === 'setup' && !r.ok)
 
-const completeRun = (r) => r && !r.unavailable && !r.timedOut && r.exitCode != null && r.testOutcomeStatus !== 'incomplete' && r.failureParseStatus !== 'incomplete' && (r.ok || ['complete', 'not_detected'].includes(r.failureParseStatus))
+// An internal case timeout does not erase completed sibling assertion evidence.
+// compareKey still refuses to confirm the timed-out case; outer timeouts remain incomplete.
+export const completeRun = (r) => r && !['runner_error', 'environment_unavailable', 'invalid', 'skipped', 'pending', 'running'].includes(r.status) && (r.status !== 'timeout' || r.failureDetails?.some((f) => f.type === 'test_timeout')) && !r.runnerError && !r.invalid && r.validation?.status !== 'invalid' && r.validation?.status !== 'blocked' && !r.unavailable && !r.timedOut && r.exitCode != null && r.testOutcomeStatus !== 'incomplete' && r.failureParseStatus !== 'incomplete' && (r.ok || ['complete', 'not_detected'].includes(r.failureParseStatus))
 const hasFailures = (r) => (r?.failures?.length ?? 0) > 0
 const typeOf = (key, r) => r?.failureDetails?.find((f) => f.name === key.slice(key.indexOf('::') + 2))?.type ?? 'unknown'
 const confirmable = (type) => ['assertion', 'test_error'].includes(type)
@@ -201,4 +203,49 @@ export function decideOutcome({ first, rerun, base, latest, baseKnown = true, la
     ...transient,
     attributed: true,
   }
+}
+
+// One per-check decision, shared by nightly and outbound eligibility. Legacy display
+// statuses are translated at the report boundary, never used as an admission proof.
+export function decideFinding({ key, first, rerun, base, latest, latestIsSame = false, skipLatest = false, trialOnly = false, prRuns, baseRuns }) {
+  const pending = (reason) => ({ status: 'pending_verification', reason })
+  if (compareKey(key, first, first) !== 'same') return pending('head_evidence_incomplete')
+  const repeat = compareKey(key, rerun, first)
+  if (repeat === 'absent') return { status: 'flaky', reason: 'rerun_passed' }
+  if (repeat !== 'same') return pending('rerun_evidence_incomplete')
+  const baseline = compareKey(key, base, first)
+  if (baseline === 'same') return trialOnly ? pending('trial_base_failed') : { status: 'pre-existing', reason: 'base_failed' }
+  if (baseline !== 'absent') return pending('base_evidence_incomplete')
+  if (trialOnly) {
+    const heads = prRuns ?? [first, rerun], bases = baseRuns ?? [base]
+    if (heads.length < 3 || bases.length < 3 || !heads.every((r) => compareKey(key, r, first) === 'same')
+      || !bases.every((r) => compareKey(key, r, first) === 'absent')) return pending('trial_requires_three_head_and_base_runs')
+  }
+  if (!skipLatest && !latestIsSame) {
+    const current = compareKey(key, latest, first)
+    if (current === 'absent') return { status: 'fixed-later', reason: 'latest_passed' }
+    if (current !== 'same') return pending('latest_evidence_incomplete')
+  }
+  return { status: 'confirmed', reason: 'head_rerun_failed_base_passed' }
+}
+
+export function findingEligibility(f) {
+  const status = f?.decision?.status ?? f?.decision_status
+  const evidence = f?.evidence
+  const bound = [f?.tested_sha, f?.base_sha].every((s) => /^[a-f0-9]{40}$/.test(s ?? ''))
+    && typeof f?.run_id === 'string' && f.run_id.length > 0
+    && typeof f?.check_id === 'string' && f.check_id.length > 0
+    && Array.isArray(f?.artifact_refs) && f.artifact_refs.length > 0
+    && evidence?.tested_sha === f.tested_sha && evidence?.base_sha === f.base_sha && evidence?.first_run === 'fail'
+    && evidence?.rerun === 'fail' && evidence?.base_run === 'pass'
+  const trial = evidence?.pr_runs != null || evidence?.base_runs != null
+  const replayed = !trial || (evidence.pr_runs?.length >= 3 && evidence.base_runs?.length >= 3
+    && evidence.pr_runs.every((s) => s === 'fail') && evidence.base_runs.every((s) => s === 'pass'))
+  const eligible = status === 'confirmed' && bound && replayed
+    && (!evidence?.latest_required || evidence.latest_main_run === 'fail')
+    && !['invalid', 'blocked'].includes(f.validation?.status)
+    && !['test_timeout', 'runner_error'].includes(f.failure_type) && f?.source === 'check' && !f.invalid && !f.pending && !f.low_memory
+    && !f.flaky && !f.not_a_pr_finding && !f.pre_existing
+    && ['introduced', 'confirmed'].includes(f.status)
+  return { finding_eligible: eligible, issue_eligible: eligible && ['P0', 'P1'].includes(f.severity), fix_eligible: eligible && ['P0', 'P1', 'P2'].includes(f.severity) }
 }

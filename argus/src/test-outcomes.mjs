@@ -94,3 +94,5 @@ export function findTestOutcome(result, failureName) {
     || result.testOutcomes.filter((r) => r.caseId === matches[0].caseId).length !== 1) return { status: 'unknown' }
   return matches[0]
 }
+
+export const findingStatus = (status) => ({ introduced: 'confirmed', unverified: 'pending_verification', timeout: 'pending_verification', 'setup-failed': 'pending_verification' }[status] ?? status)

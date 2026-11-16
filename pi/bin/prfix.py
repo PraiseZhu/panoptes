@@ -644,7 +644,7 @@ def collect(reps, ledger, fix2, nofix=frozenset()):
         fp = x.get("fingerprint")
         out[(n, fp)] = {"qa": n, "fp": fp, "sev": x.get("severity") or (row or {}).get("level"), "source": source, "author": author,
                         "title": x.get("title") or x.get("check_name") or x.get("check_id") or (row or {}).get("summary") or "",
-                        "finding": x, "row": row}
+                        "finding": x, "row": row, "source_report": ((reps.get(n) or {}).get("cur") or (None, None))[1]}
     for n, r in reps.items():
         if not r["cur"]: continue
         _, p, _ = r["cur"]; fs = (p.get("findings") or []) + (p.get("pending_verification") or [])
@@ -820,6 +820,7 @@ def evaluate(c, ctx, now=None):
     return {"key": f"{n}:{fp}", "c": c, "state": state, "reason": (claims or skips or [None])[0], "manual": manual if not claims else None, "claims": claims, "skips": skips,
             "rounds": rounds, "round": rounds + 1, "needs_human": nh if not claims else None, "hard_stop": limit if not claims else None,
             "first_seen": fs, "deadline": dl,
+            "replaces_action": tk.get("action_key") if reopened or (ctx.get("outbound") or {}).get(tk.get("action_key")) == "gave_up" else None,
             "gated": bool(gate)}
 
 def prio(v):
@@ -831,13 +832,17 @@ def evaluate_all(ctx, now=None):
     for c in cands.values(): c["first_seen"] = times(c, ctx["reports"])[0]
     return sorted((evaluate(c, ctx, now) for c in cands.values()), key=prio)
 
-def next_ticket(vs): return next((v for v in vs if v["state"] == "todo"), None)
+def next_ticket(vs):
+    dispatched = _E("PRFIX_CLAIM_TICKET")
+    return next((v for v in vs if v["state"] == "todo" and (not dispatched or v["key"] == dispatched)
+                 and not lib.finding_evidence_error(v["c"].get("finding"), v["c"].get("source_report"))), None)
 
 def pending(vs):
     """--pending-json rows: every candidate nobody has claimed; reason_if_skipped null = there is work for --next."""
     return [{"qa": v["c"]["qa"], "fp": v["c"]["fp"], "sev": v["c"]["sev"], "first_seen": iso(v["first_seen"]), "deadline": iso(v["deadline"]),
-             "reason_if_skipped": None if v["state"] == "todo" else v["reason"], "title": v["c"]["title"][:80], "source": v["c"]["source"],
-             **({"manual_order": "待派单"} if v["state"] == "manual" else {})}
+             "reason_if_skipped": (lib.finding_evidence_error(v["c"].get("finding"), v["c"].get("source_report")) if v["state"] == "todo" else v["reason"]), "title": v["c"]["title"][:80], "source": v["c"]["source"],
+             **({"manual_order": "待派单"} if v["state"] == "manual" else {}),
+             **({"replaces_action": v["replaces_action"]} if v.get("replaces_action") else {})}
             for v in vs if v["state"] != "claimed"]
 
 def manual_orders_path(): return f"{OUT}/manual-orders.json"
@@ -1544,6 +1549,8 @@ def fix_one(c, A, d):
     def step(k, ok, text=""): res["steps"].append((k, ok, text)); log(k, "OK" if ok else "FAIL")
     log("pick", tag, sev, c.get("title"), f"round {res['round']}", "dry-run" if A.dry_run else "real")
     try:
+        try: lib.read_finding_evidence(c.get("finding"), c.get("source_report"))
+        except (ValueError, OSError, TypeError, KeyError) as error: raise Deterministic("finding evidence rejected: " + str(error))
         os.makedirs(_TMPROOT(), exist_ok=True)
         with repo_lock():   # 10-24: parallel prfix processes share one clone; its refs / worktree list change one at a time
             if not A.dry_run:   # a legacy prfix worktree (pi-wt-<N>) may still hold this branch
@@ -1959,7 +1966,7 @@ def pick_qa(A, ctx, vs, now):
                           "error": f"p2-rulings.md 已按指纹裁了不修（{ruled[0]['fingerprint']}），--qa 不强修；要修先改裁决"}
         if x:
             c = {"qa": A.qa, "fp": x["fingerprint"], "sev": x["severity"], "source": "report", "author": author_of(rep[1]), "finding": x,
-                 "title": x.get("title") or "", "row": ctx["ledger"].get((A.qa, x["fingerprint"]))}
+                 "title": x.get("title") or "", "row": ctx["ledger"].get((A.qa, x["fingerprint"])), "source_report": rep[1]}
             c["first_seen"] = times(c, ctx["reports"])[0]; mine = [evaluate(c, ctx, now)]
             log(f"warn: --qa {A.qa} {x['severity']} 不在自动范围（P2 未判「修」），按人工指定处理")
     if not mine: return None, {"status": "error", "qa": A.qa, "fp": A.fp, "error": "找不到这条 finding（P0–P2；--fp 按前缀匹配）"}
@@ -2001,10 +2008,13 @@ def run_ticket(A, ctx, vs):
             return finish({"status": "idle", "reason": "prwatch 在派单（兜底 cron 不另起修复）", "pending_after": None}, 0, A)
         if not A.dry_run: ctx = bookkeeping(ctx, vs, now, d); vs = sorted((evaluate(w["c"], ctx, now) for w in vs), key=prio)
         v = next_ticket(vs)
-        if not v: return finish({"status": "idle", "pending_after": 0}, 0, A)
+        if not v:
+            rejected = [lib.finding_evidence_error(w["c"].get("finding"), w["c"].get("source_report")) for w in vs if w["state"] == "todo"]
+            if rejected: return finish({"status": "failed", "kind": "deterministic", "error": "finding evidence rejected: " + str(rejected[0])}, 1, A)
+            return finish({"status": "idle", "pending_after": 0}, 0, A)
     if mem_gb() < MIN_MEM_GB:
         return finish({"status": "busy", "reason": f"MemAvailable {mem_gb():.1f}G < {MIN_MEM_GB}G", "ticket": v["key"]}, BUSY, A)
-    qa_lk = None; tk_lk = None; tk = {}
+    qa_lk = None; tk_lk = None; fp_claim = None; tk = {}; out = {}
     try:
         gates, _ = load_gates()   # fresh read right before acting (defence in depth; --qa included)
         qa_lk = None if SHARE_WITH_PANOPTES else try_lock(_QA_LOCK())
@@ -2018,7 +2028,7 @@ def run_ticket(A, ctx, vs):
             ctx["tickets"] = dict(T["tickets"])
             fixed_pick = bool(A.qa or A.dry_run)
             if not fixed_pick: vs = sorted((evaluate(w["c"], ctx, now) for w in vs), key=prio)
-            cands = [v] if fixed_pick else [w for w in vs if w["state"] == "todo"]
+            cands = [v] if fixed_pick else [w for w in vs if w["state"] == "todo" and not lib.finding_evidence_error(w["c"].get("finding"), w["c"].get("source_report")) and (not _E("PRFIX_CLAIM_TICKET") or w["key"] == _E("PRFIX_CLAIM_TICKET"))]
             v = gated = None
             for w in cands:
                 if w["c"]["qa"] in gates:   # gated since gather(): never fixed, and it does not hold up the rest of the queue
@@ -2027,7 +2037,13 @@ def run_ticket(A, ctx, vs):
                 if cur.get("status") == "running" and pid_alive(cur.get("pid")): continue      # another process is on it
                 if cur.get("owner") == "grok": continue                                         # the Grok line has it (--qa too)
                 lk = try_lock(f"{OUT}/locks/{w['c']['qa']}-{fp8(w['c']['fp'])}.lock")
-                if lk: v, tk_lk = w, lk; break
+                if lk:
+                    try:
+                        retry = cur.get("action_key") if ((ctx.get("outbound") or {}).get(cur.get("action_key")) == "gave_up" or (w["c"].get("row") or {}).get("retest_reopened")) else None
+                        fp_claim = lib.claim_fingerprint(f"{OUT}/fingerprints", REPO, w['c']['fp'], w['key'], handoff_nonce=_E("PRFIX_CLAIM_NONCE"), replaces=retry)
+                    except lib.FingerprintBusy:
+                        unlock(lk); continue
+                    v, tk_lk = w, lk; break
             if not v:
                 stop = gated or (({"status": "busy", "reason": "这一单正由另一个 prfix 在修", "ticket": cands[0]["key"]}, BUSY) if fixed_pick and cands
                                  else ({"status": "idle", "pending_after": 0}, 0))
@@ -2052,6 +2068,7 @@ def run_ticket(A, ctx, vs):
             if notify == "needs_praise": acts.append(dm_action("needs_praise", c, f"{tk.get('last_error')}；证据 {res['evidence']}"))
             if acts: record_actions("praise-pr", d, acts)
     finally:
+        if fp_claim: lib.release_fingerprint(fp_claim, reserve=out.get("action_key") if out.get("status") == "pr_action_written" else False)
         _QA_HOLD.pop("f", None); unlock(qa_lk); unlock(tk_lk)
     left = [w for w in vs if w["state"] == "todo" and w["key"] != v["key"]]
     r = {"ticket": v["key"], "qa": c["qa"], "fp": c["fp"], "sev": c["sev"], "round": c["round"],
