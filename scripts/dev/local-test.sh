@@ -40,7 +40,7 @@ PY=${LOCAL_TEST_PYTHON:-$(command -v python3.13 || true)}
 
 # no spaces: an inherited TMPDIR like ".../Application Support/..." breaks fixtures that split paths on whitespace
 # physical path: on macOS /tmp is a link to /private/tmp, and tests compare realpath() results with $TMPDIR
-RUN=$(mktemp -d /tmp/panoptes-localtest.XXXXXX) && RUN=$(cd "$RUN" && pwd -P) || die "cannot create a scratch dir under /tmp"
+if ! RUN=$(mktemp -d /tmp/panoptes-localtest.XXXXXX) || ! RUN=$(cd "$RUN" && pwd -P); then die "cannot create a scratch dir under /tmp"; fi
 case "$RUN" in *" "*) die "scratch dir has a space: $RUN" ;; esac
 mkdir -p "$RUN/bin" "$RUN/logs" "$RUN/files"
 ln -s "$PY" "$RUN/bin/python3"; ln -s "$PY" "$RUN/bin/python"
@@ -120,7 +120,15 @@ function piCases(out, file) {
     const where = own ? m[2].slice(own.length) : m[2]
     cases.add(where === m[1] || where.endsWith(`.${m[1]}`) ? where : `${where}.${m[1]}`)
   }
-  return [...cases]
+  if (cases.size) return [...cases]
+  // script-style file (plain asserts) or a crash before unittest runs: the failure is where the last traceback leaves this
+  // file, "<function>:<line>" (e.g. "<module>:53"). A different broken assert gets a different id, so it is never covered
+  // by the entry of a known one; only a failure without any traceback stays file-level.
+  const tb = out.lastIndexOf('Traceback (most recent call last):')
+  if (tb < 0) return []
+  const frames = [...out.slice(tb).matchAll(/^ {2}File "([^"]+)", line (\d+), in (.+)$/gm)].filter((m) => basename(m[1]) === basename(file.id))
+  const last = frames.at(-1)
+  return last ? [`${last[3].trim()}:${last[2]}`] : []
 }
 // node:test spec reporter: "✖ name (12.3ms)"; the "failing tests:" header is not a test
 function argusCases(out) {
@@ -179,7 +187,9 @@ await Promise.all(Array.from({ length: Math.min(jobs, files.length) }, async (_,
 // match: a failing file yields its failing cases, or the file itself when no case could be read
 const failures = results.flatMap((r) => r.status === 'timeout' ? [{ id: r.id, file: r.id, kind: 'timeout', log: r.log }]
   : r.status === 'fail' ? (r.cases.length ? r.cases : [null]).map((c) => ({ id: c ? `${r.id}::${c}` : r.id, file: r.id, kind: 'fail', log: r.log })) : [])
-const covers = (k, f) => k.id === f.id || k.id === f.file   // a file-level entry covers every case of that file
+// exact match only: a file-level entry matches a file-level failure (timeout, or no case / traceback could be read), never
+// a case of that file -- otherwise a new failure in a listed file would be hidden
+const covers = (k, f) => k.id === f.id
 const used = new Set()
 for (const f of failures) { f.entry = entries.find((k) => covers(k, f)); if (f.entry) used.add(f.entry) }
 const ran = new Map(results.map((r) => [r.id, r]))

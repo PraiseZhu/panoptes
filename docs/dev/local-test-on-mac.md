@@ -68,7 +68,8 @@ scripts/dev/local-test.sh --jobs 1 --timeout 120 --keep
  "reason": "macOS 没有 /proc（janitor 用 os.listdir(\"/proc\") 判断进程是否还在）", "tracking": "环境限制"}
 ```
 
-- `id`：`pi/<文件>::<类>.<方法>`，或 `argus/tests/<文件>::<测试名>`。只写文件（不带 `::`）表示整个文件的失败都算，只在文件没有用例级输出时用（如脚本式测试）。用例级条目不会盖住同一文件里新出现的失败。
+- `id`：`pi/<文件>::<类>.<方法>`，或 `argus/tests/<文件>::<测试名>`。脚本式 Pi 测试（没有 unittest 用例，或 unittest 跑起来之前就崩了）按 traceback 里这个文件的最后一帧记成 `pi/<文件>::<函数>:<行号>`，例如 `pi/test_boxhealth_catchup.py::<module>:53`；同一文件里另一处断言失败行号不同，算意外失败。
+- 只写文件（不带 `::`）的条目只对上「整个文件」级的失败：超时，或既没有用例名也没有 traceback 的失败。它不会盖住这个文件里任何用例或断言的失败；只要读得出用例名或行号，每条失败都要对上同样精确的条目，对不上就是意外失败。
 - `platforms`：只在这些平台生效（`darwin` 是 macOS）。
 - `reason`：查清的原因，写到别人能复核的程度（缺什么命令、读哪个文件、哪一行）。
 - `tracking`：上游 issue（`PraiseZhu/panoptes#<号>`），或 `环境限制`。

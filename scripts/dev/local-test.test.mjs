@@ -55,18 +55,39 @@ test('SC2: a failure that is not on the list is an unexpected failure, exit 1', 
   assert.match(r.stdout, /意外失败 1\n  - pi\/test_x\.py::T\.test_b/)
 })
 
-test('SC1 shape: every failure on the list -> "意外失败 0", exit 0; a file-level entry covers all cases of that file', needPy, () => {
-  const r = run(fixture({ pi: { 'test_x.py': FAIL2, 'test_y.py': PASS }, entries: [entry('pi/test_x.py')] }), ['--only', 'pi'])
+test('SC1 shape: every failure on the list -> "意外失败 0", exit 0', needPy, () => {
+  const r = run(fixture({ pi: { 'test_x.py': FAIL2, 'test_y.py': PASS }, entries: [entry('pi/test_x.py::T.test_a'), entry('pi/test_x.py::T.test_b')] }), ['--only', 'pi'])
   assert.equal(r.status, 0, r.all)
   assert.deepEqual(r.summary.expected.sort(), ['pi/test_x.py::T.test_a', 'pi/test_x.py::T.test_b'])
   assert.match(r.stdout, /意外失败 0$/m)
   assert.match(r.stdout, /已知环境失败 2 条/)
 })
 
-test('a file that fails without unittest case lines is matched as the whole file', needPy, () => {
-  const script = { 'test_s.py': 'assert 1 == 2, "script-style test"\n' }
-  assert.deepEqual(run(fixture({ pi: script }), ['--only', 'pi']).summary.unexpected, ['pi/test_s.py'])
-  assert.equal(run(fixture({ pi: script, entries: [entry('pi/test_s.py')] }), ['--only', 'pi']).status, 0)
+test('SC2: a file-level entry never hides a case failure of that file (unittest cases)', needPy, () => {
+  const r = run(fixture({ pi: { 'test_x.py': FAIL2 }, entries: [entry('pi/test_x.py'), entry('pi/test_x.py::T.test_a')] }), ['--only', 'pi'])
+  assert.equal(r.status, 1, r.all)
+  assert.deepEqual(r.summary.unexpected, ['pi/test_x.py::T.test_b'])
+  assert.deepEqual(r.summary.stale, ['pi/test_x.py'])   // the file-level entry matched nothing: reported, not used as a cover
+})
+
+// script-style file (no unittest): plain asserts at module level, stops at the first failing one
+const SCRIPT_PY = (broken) => `import os\nx = 1\nassert x == ${broken === 'early' ? 2 : 1}, "unrelated check"\nassert os.path.exists("/no/such/proc"), "needs /proc"\n`
+test('script-style file: the failure is "<module>:<line>" from the traceback; listed -> exit 0', needPy, () => {
+  const r = run(fixture({ pi: { 'test_s.py': SCRIPT_PY() }, entries: [entry('pi/test_s.py::<module>:4')] }), ['--only', 'pi'])
+  assert.equal(r.status, 0, r.all); assert.deepEqual(r.summary.expected, ['pi/test_s.py::<module>:4'])
+})
+
+test('SC2: script-style file -- another broken assert in a listed file is an unexpected failure, even with a file-level entry', needPy, () => {
+  const r = run(fixture({ pi: { 'test_s.py': SCRIPT_PY('early') }, entries: [entry('pi/test_s.py'), entry('pi/test_s.py::<module>:4')] }), ['--only', 'pi'])
+  assert.equal(r.status, 1, r.all)
+  assert.deepEqual(r.summary.unexpected, ['pi/test_s.py::<module>:3'])
+  assert.match(r.stdout, /意外失败 1\n  - pi\/test_s\.py::<module>:3/)
+})
+
+test('a file that fails without case lines or traceback is matched as the whole file', needPy, () => {
+  const quiet = { 'test_q.py': 'import sys\nsys.exit(3)\n' }
+  assert.deepEqual(run(fixture({ pi: quiet }), ['--only', 'pi']).summary.unexpected, ['pi/test_q.py'])
+  assert.equal(run(fixture({ pi: quiet, entries: [entry('pi/test_q.py')] }), ['--only', 'pi']).status, 0)
 })
 
 test('SC3: a list entry that no longer fails is reported as stale and does not fail the run', needPy, () => {
