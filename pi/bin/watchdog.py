@@ -718,7 +718,7 @@ def outbound_health_check(now, probs):
 
 def qa_standard_check(now, probs):
     import qa_standard
-    status = qa_standard.inspect(BASE, QA)
+    status = qa_standard.inspect(BASE, QA, now=now)
     for key, reason in status["errors"].items():
         probs["qa-standard:" + key] = PN.item("action", "QA 舰队标准检查未通过", reason,
             "新标准的运行证据不完整或已漂移。", todo="查看 fleet_status 与 stdcheck；保留当前 mode，补齐证据后再切换")

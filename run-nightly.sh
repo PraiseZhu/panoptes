@@ -89,7 +89,12 @@ ctl() { printf '{"t":"%s","level":"%s","msg":"%s","pid":%d,%s}\n' "$(date -u +%Y
 LAUNCH_ARGS="$(printf '%s ' "$@" | sed 's/[\\"]/\\&/g')"
 ctl "run-nightly launch" "\"args\":\"${LAUNCH_ARGS% }\""
 EXTRA_EXIT_CLEANUP=":"
-trap 'rc=$?; eval "$EXTRA_EXIT_CLEANUP"; ctl "run-nightly exit" "\"exitCode\":$rc"' EXIT
+fleet_finish() {
+  if [[ -n "${FLEET_RUN:-}" && "${FLEET_FINISHED:-0}" != 1 ]]; then
+    python3 "$PANOPTES_DIR/pi/bin/qa_standard.py" finish --state "${PI_STATE:-$QA_HOME/pi}" --file "$FLEET_RUN" --rc "$1" || true
+  fi
+}
+trap 'rc=$?; fleet_finish "$rc"; eval "$EXTRA_EXIT_CLEANUP"; ctl "run-nightly exit" "\"exitCode\":$rc"' EXIT
 
 # --out PATH is resolved here, before the cd into argus/ (10-19: a rerun's relative --out landed in argus/reports/merged/):
 # absolute stays as is; a relative path starting with reports/ is under $QA_HOME (reports/merged/PR-N.json,
@@ -334,7 +339,9 @@ if [[ -n "$CATCH_UP" ]]; then
   cd "$PANOPTES_DIR/argus"
   export PANOPTES_RUN_NIGHTLY="$PANOPTES_DIR/run-nightly.sh"
   ctl "run-nightly exec catch-up (exec replaces the shell: no exit line follows)" "\"exitCode\":null"
-  exec node --disable-warning=ExperimentalWarning src/cli.mjs catch-up --wait-lock "${WAIT_LOCK:-14400}" --trigger "$TRIGGER" ${CU_ARGS[@]+"${CU_ARGS[@]}"}
+  rc=0
+  node --disable-warning=ExperimentalWarning src/cli.mjs catch-up --wait-lock "${WAIT_LOCK:-14400}" --trigger "$TRIGGER" ${CU_ARGS[@]+"${CU_ARGS[@]}"} || rc=$?
+  exit "$rc"
 fi
 
 # One QA slot (scripts/qa-slot.sh): nightly.lock; --priority (fresh merge, from mergewatch) jumps the queue.
@@ -443,4 +450,5 @@ echo "[panoptes] code: $PANOPTES_DIR ($(git -C "$PANOPTES_DIR" rev-parse --short
 rc=0
 nice -n 10 node --disable-warning=ExperimentalWarning src/cli.mjs nightly "$@" 2> >(tee -a "$LOG" >&2) | tee -a "$LOG" "$RUN_TMP/nightly-result.json" || rc=$?
 python3 "$PANOPTES_DIR/pi/bin/qa_standard.py" finish --state "${PI_STATE:-$QA_HOME/pi}" --file "$FLEET_RUN" --rc "$rc" --result "$RUN_TMP/nightly-result.json" --manifest "$ARGUS_ROOT/qa-fleet-run-manifest.json" || rc=3
+FLEET_FINISHED=1
 exit "$rc"

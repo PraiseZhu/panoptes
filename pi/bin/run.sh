@@ -80,7 +80,8 @@ for f in "$CODE/bin/lib.py" "$CODE/bin/$JOB.py" $(for m in $deps; do [ -f "$CODE
   fi
 done
 export PI_QA_JOB="$JOB"
-FLEET_RUN="$(python3 "$CODE/bin/qa_standard.py" start --state "$BASE" --job "$JOB")" || exit 3
+if [ "$JOB" = opsfix ] && [ "${1:-}" = retest ]; then export PI_QA_JOB=opsfix_retest; fi
+FLEET_RUN="$(python3 "$CODE/bin/qa_standard.py" start --state "$BASE" --job "$PI_QA_JOB")" || exit 3
 python3 "$CODE/bin/$JOB.py" "$@"; rc=$?
 python3 "$CODE/bin/qa_standard.py" finish --state "$BASE" --file "$FLEET_RUN" --rc "$rc" || rc=3
 echo "=== $(date '+%F %T %Z') end $JOB rc=$rc"

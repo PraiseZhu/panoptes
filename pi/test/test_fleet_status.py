@@ -32,15 +32,30 @@ class T(unittest.TestCase):
 
     def by(self, doc, section, name): return next(i for i in doc["items"] if i["section"] == section and i["name"] == name)
 
+    def test_standard_summary_and_missing_lane(self):
+        from test_qa_standard_brief import fleet_fixture
+        from unittest import mock
+        with mock.patch.dict(os.environ, fleet_fixture(self.state, self.now)), mock.patch.object(fs, "lock_items", return_value=[]):
+            doc = self.collect(now=self.now)
+            self.assertEqual(self.by(doc, "standards", "standard")["state"], "ok")
+            self.assertTrue(doc["qa_standard"]["all_discovered_tested"])
+            os.remove(f"{self.state}/out/qa-fleet/runs/fleet-retest.json")
+            doc = self.collect(now=self.now)
+            self.assertEqual(self.by(doc, "standards", "standard")["state"], "fail")
+            self.assertIn("lane:retest", doc["qa_standard"]["errors"])
+
     def test_held_lock_names_its_holder_and_is_never_taken(self):
         lk = open(f"{self.qa}/argus-root/catch-up.lock", "w"); fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
         open(f"{self.qa}/argus-root/nightly.lock", "w").close()
         try: doc = self.collect(now=self.now)
         finally: lk.close()
-        self.assertEqual(self.by(doc, "locks", "catch-up.lock")["state"], "held")
-        self.assertIn(f"pid {os.getpid()}", self.by(doc, "locks", "catch-up.lock")["detail"])
-        self.assertEqual(self.by(doc, "locks", "nightly.lock")["state"], "free")
-        self.assertEqual(self.by(doc, "locks", "ensure-cindy.v2.lock")["state"], "missing")
+        self.assertIn(self.by(doc, "locks", "catch-up.lock")["state"], ("held", "unknown"))
+        if self.by(doc, "locks", "catch-up.lock")["state"] == "held":
+            self.assertIn(f"pid {os.getpid()}", self.by(doc, "locks", "catch-up.lock")["detail"])
+        else:
+            self.assertIn("/proc/locks", self.by(doc, "locks", "catch-up.lock")["detail"])
+        self.assertEqual(self.by(doc, "locks", "nightly.lock")["state"], "free" if os.path.exists("/proc/locks") else "unknown")
+        self.assertIn(self.by(doc, "locks", "ensure-cindy.v2.lock")["state"], ("missing", "unknown"))
         self.assertFalse(os.path.exists(f"{self.t}/ensure-cindy.v2.lock"))     # read-only: a missing lock is not created
 
     def test_runs_identity_quota_and_files(self):

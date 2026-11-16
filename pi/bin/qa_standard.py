@@ -83,7 +83,7 @@ def record_start(state, job, trigger):
 
 
 def record_finish(file, rc, report=None):
-    path = Path(file); doc = json.loads(path.read_text()); doc.update(exit_code=rc, status='pass' if rc == 0 else 'fail',
+    path = Path(file); doc = json.loads(path.read_text()); doc.update(exit_code=rc, ok=rc == 0, status='pass' if rc == 0 else 'fail',
                  finished_at=dt.datetime.now(dt.timezone.utc).isoformat())
     # A successful scheduler exit is not a complete QA report. Missing evidence stays unknown.
     if report and Path(report).is_file():
@@ -99,12 +99,13 @@ def manifest_path(state=None, qa=None):
     return Path(os.environ.get('PI_QA_FLEET_MANIFEST') or Path(qa or os.environ.get('QA_HOME', '/workspace/mivo-qa')) / 'argus-root/qa-fleet-run-manifest.json')
 
 
-def inspect(state, qa=None):
+def inspect(state, qa=None, now=None):
     """Fail-visible status; neither an absent run nor a missing count is treated as success."""
+    now = now or dt.datetime.now(dt.timezone.utc)
     result = {'mode': None, 'standard_version': None, 'lanes': {}, 'errors': {}, 'all_discovered_tested': None,
               'missing_evidence_outbound': None}
     try:
-        fleet, standard, _ = configs(); result.update(mode=standard['mode'], standard_version=standard['version'], **{k: v for k, v in binding().items() if k != 'mode'})
+        fleet, standard, _ = configs(); result.update(binding())
     except Exception as e:
         result['errors']['config'] = str(e) if isinstance(e, ValueError) else 'config_unavailable'; return result
     for lane in LANES: result['lanes'][lane] = {'status': 'missing', 'latest_run': None, 'consecutive_failures': 0}
@@ -118,14 +119,21 @@ def inspect(state, qa=None):
         rows = sorted((r for r in runs if r['lane'] == lane), key=lambda r: r.get('started_at', ''))
         if not rows:
             result['errors']['lane:' + lane] = 'missing_run'; continue
+        # An in-progress run must not hide the last two completed failures.
+        completed = [r for r in rows if r.get('status') in ('pass', 'fail')]
         r = rows[-1]; tail = 0
-        for old in reversed(rows):
+        for old in reversed(completed):
             if old.get('status') != 'fail': break
             tail += 1
         result['lanes'][lane] = {'status': r.get('status'), 'latest_run': r.get('run_id'), 'consecutive_failures': tail,
                                 'source_sha': r.get('source_sha'), 'runtime_sha': r.get('runtime_sha'), 'standard_version': r.get('standard_version')}
-        if any(r.get(k) != result.get(k) for k in ('source_sha', 'standard_version', 'manifest_hash')) or r.get('runtime_sha') != r.get('source_sha'):
+        if any(r.get(k) != result.get(k) for k in ('source_sha', 'standard_version', 'manifest_hash', 'mode')) or r.get('runtime_sha') != r.get('source_sha'):
             result['errors']['drift:' + lane] = 'source_runtime_policy_drift'
+        try:
+            started = dt.datetime.fromisoformat(r['started_at'])
+            if not started.tzinfo or not 0 <= (now - started).total_seconds() <= 48 * 3600: raise ValueError()
+            if r.get('status') not in ('pass', 'fail', 'running'): raise ValueError()
+        except (KeyError, ValueError, TypeError): result['errors']['stale:' + lane] = 'run_stale_or_invalid'
         if result['mode'] == 'strict' and tail >= 2: result['errors']['fail:' + lane] = 'strict_lane_failed_twice'
     try:
         manifest = json.loads(manifest_path(state, qa).read_text())
@@ -134,17 +142,31 @@ def inspect(state, qa=None):
             if manifest.get(key) != result.get(key): result['errors']['qa:' + key] = 'qa_run_drift'
         if manifest.get('runtime_sha') != manifest.get('source_sha'): result['errors']['qa:runtime'] = 'runtime_sha_drift'
         result['all_discovered_tested'] = manifest.get('all_discovered_tested')
+        report = manifest.get('report') or {}
+        try:
+            raw = Path(report['path']).read_bytes()
+            if hashlib.sha256(raw).hexdigest() != report.get('sha256'): raise ValueError()
+            rpt = json.loads(raw)
+            if (rpt.get('system_health') or {}).get('all_discovered_tested') != result['all_discovered_tested']: raise ValueError()
+        except (OSError, KeyError, ValueError, TypeError):
+            result['all_discovered_tested'] = None
+            result['errors']['qa:report'] = 'report_missing_or_hash_drift'
     except (OSError, ValueError): result['errors']['qa:manifest'] = 'missing_run_manifest'
     # Outbound emits an audit summary; without it zero cannot be asserted.
     audit = Path(state) / 'out/qa-fleet/outbound.json'
     try:
         a = json.loads(audit.read_text())
-        if any(a.get(k) != result.get(k) for k in ('source_sha', 'standard_version', 'manifest_hash')): raise ValueError('outbound_drift')
+        if any(a.get(k) != result.get(k) for k in ('source_sha', 'standard_version', 'manifest_hash', 'mode')): raise ValueError('outbound_drift')
         count = a.get('missing_evidence_outbound')
         if type(count) is not int or count < 0: raise ValueError('outbound_count_missing')
         result['missing_evidence_outbound'] = count
+        checked = dt.datetime.fromisoformat(a['checked_at'])
+        if not checked.tzinfo or not 0 <= (now - checked).total_seconds() <= 48 * 3600: raise ValueError('outbound_stale')
         if count > 0: result['errors']['outbound'] = 'missing_evidence_outbound'
-    except (OSError, ValueError):
+        rejected = a.get('rejected_without_evidence')
+        if type(rejected) is not int or rejected < 0: raise ValueError('outbound_rejected_count_missing')
+        if rejected: result['errors']['outbound-rejected'] = 'product_outbound_rejected_without_evidence'
+    except (OSError, ValueError, KeyError, TypeError):
         if result['mode'] in ('canary', 'strict'): result['errors']['outbound'] = 'outbound_audit_missing_or_drift'
     if result['mode'] == 'strict' and result['all_discovered_tested'] is not True: result['errors']['strict-tested'] = 'all_discovered_tested_missing_or_false'
     return result
@@ -176,7 +198,7 @@ def audit_outbound(state, rejected=False):
     import jsonrec
     meta = binding(); path = str(Path(state) / 'out/qa-fleet/outbound.json')
     def update(doc):
-        if any(doc.get(k) != meta[k] for k in ('source_sha', 'standard_version', 'manifest_hash')):
+        if any(doc.get(k) != meta[k] for k in ('source_sha', 'standard_version', 'manifest_hash', 'mode')):
             doc.clear(); doc.update(meta, missing_evidence_outbound=0, rejected_without_evidence=0)
         if rejected: doc['rejected_without_evidence'] += 1
         doc['checked_at'] = dt.datetime.now(dt.timezone.utc).isoformat()

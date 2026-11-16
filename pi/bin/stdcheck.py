@@ -330,7 +330,7 @@ def check_review_pr(now):
 def check_fleet_standard(now):
     """Check policy/brief/run metadata. This is read-only and intentionally fails closed."""
     import qa_standard
-    return qa_standard.inspect(BASE, QA)["errors"]
+    return qa_standard.inspect(BASE, QA, now=now)["errors"]
 
 
 # ---------------- retries, gaps, alerts, escalations, pass rate ----------------
@@ -408,7 +408,7 @@ def update_alerts(st, results, errors, now):
         failed = results[c] is None or bool(results[c])
         streak[c] = streak.get(c, 0) + 1 if failed else 0
         f = f"{OUT}/alerts/{c}.json"
-        if streak[c] >= ALERT_STREAK:
+        if streak[c] >= (1 if c == "fleet_standard" else ALERT_STREAK):
             prev = jload(f, {})
             save_json(f, {"check": c, "consecutive_failures": streak[c], "since": prev.get("since") or iso(now), "last": iso(now),
                           "error": errors.get(c), "breaches": results[c] or {}, "owner": OWNER.get(c, "Pi 线运维"), "for_brief": brief_day(now)})

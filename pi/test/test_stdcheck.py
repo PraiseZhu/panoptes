@@ -24,6 +24,10 @@ class Base(unittest.TestCase):
               mock.patch.object(S.subprocess, "Popen", self.popen), mock.patch.object(S, "write_atomic", self.write)]
         for p in ps: p.start(); self.addCleanup(p.stop)
         os.makedirs(f"{t}/reports"); os.makedirs(f"{t}/out/logs"); os.makedirs(f"{t}/out/ledger")
+        self.fleet_env = mock.patch.dict(os.environ, {}); self.fleet_env.start(); self.addCleanup(self.fleet_env.stop)
+        import qa_standard
+        source_patch = mock.patch.object(qa_standard, "source_sha", return_value="a" * 40)
+        source_patch.start(); self.addCleanup(source_patch.stop)
         self.healthy()
 
     def write(self, path, text):
@@ -51,6 +55,8 @@ class Base(unittest.TestCase):
 
     def healthy(self, NOW=NOW):
         """every check passes at NOW"""
+        from test_qa_standard_brief import fleet_fixture
+        os.environ.update(fleet_fixture(self.tmp, NOW))
         for j, (slots, judge) in S.TASKS.items():
             s = S.last_slot(slots, judge, NOW); self.runs[j] = [(s, s + dt.timedelta(minutes=1), 0, None)]
         day = (S.last_slot(*S.TASKS["daily"], NOW).date() - dt.timedelta(days=1)).isoformat()
@@ -335,6 +341,18 @@ class Alerts(Base):
         a = json.load(open(f"{S.OUT}/alerts/stdcheck.json")); self.assertEqual((a["consecutive_failures"], a["error"]), (2, "ValueError: boom"))
 
 
+class FleetStandard(Base):
+    def test_missing_receipt_and_policy_drift_alert_immediately(self):
+        os.unlink(f"{self.tmp}/out/qa-fleet/runs/fleet-repair.json")
+        r = S.run(NOW)
+        self.assertIn("lane:repair", r["fleet_standard"])
+        self.assertTrue(os.path.exists(f"{S.OUT}/alerts/fleet_standard.json"))
+        self.healthy()
+        p = os.environ["PI_QA_STANDARD_BRIEF"]
+        open(p, "w").write("missing brief sections")
+        self.assertIn("config", S.check_fleet_standard(NOW))
+
+
 class Gate(Base):
     def test_no_flag_is_noop(self):
         self.assertEqual(S.main(), 0); self.assertEqual(self.gh_calls, []); self.assertFalse(os.path.exists(S.OUT))
@@ -344,7 +362,7 @@ class Gate(Base):
         S.run(NOW); self.prs["PraiseZhu/panoptes"] = []; self.at(NOW + dt.timedelta(hours=1))
         p = json.load(open(f"{S.OUT}/passrate-2026-11-05.json"))
         self.assertEqual(p["runs"], 2); self.assertEqual(p["checks"]["panoptes_prs"], {"pass": 1, "fail": 1, "error": 0, "rate": 0.5})
-        self.assertEqual(p["checks"]["review_pr"]["rate"], 1.0); self.assertEqual(p["overall"], 0.917)   # 6 checks x 2 runs, 1 fail
+        self.assertEqual(p["checks"]["review_pr"]["rate"], 1.0); self.assertEqual(p["overall"], 0.929)   # 7 checks x 2 runs, 1 fail
 
 
 if __name__ == "__main__":

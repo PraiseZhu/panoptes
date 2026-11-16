@@ -57,6 +57,11 @@ jobs:
           node -e 'JSON.parse(require("fs").readFileSync("report/allowed-chats.example.json","utf8"))'
           python -m py_compile scripts/*.py
 
+      - name: Fleet schema, sandbox and wiring contracts
+        run: |
+          node --test scripts/ops/qa-fleet-*.test.mjs
+          node --test argus/tests/fleet-rollback.test.mjs argus/tests/sandbox*.test.mjs
+
       # Pi line (pi/, merged in 10-24): every script compiles, every shell script parses, every pi/test/test_*.py passes
       # (no network, no model; tests that need the box's own data skip themselves)
       - name: Pi line selftest

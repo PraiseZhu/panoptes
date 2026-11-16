@@ -120,7 +120,9 @@ def lock_state(path, proc_locks):
 def procs(needle):
     """[(pid, cmdline)] of processes whose argv[0] or argv[1] ends with needle (the script itself, not a command naming it)"""
     out = []
-    for p in (x for x in os.listdir("/proc") if x.isdigit()):
+    try: proc_entries = (x for x in os.listdir("/proc") if x.isdigit())
+    except OSError: return out
+    for p in proc_entries:
         try: argv = open(f"/proc/{p}/cmdline", "rb").read().decode(errors="replace").split("\0")
         except OSError: continue
         if any(a.endswith(needle) for a in argv[:2]): out.append((int(p), " ".join(argv).strip()[:160]))
@@ -142,21 +144,14 @@ def lock_items(argus, cindy_lock):
     return out
 
 
-def standard_items(state, fleet_file=None, standard_file=None, manifest_file=None):
-    """Summarise the immutable fleet handoff metadata without reading logs or secrets."""
-    import qa_standard
-    status = qa_standard.inspect(state)
-    return [item("standards", "standard", "fail" if status["errors"] else "ok", detail=json.dumps(status, ensure_ascii=False))]
-
-
-def collect(now=None, state=BASE, qa=QA, fleet=FLEET, argus=None, gh=GH, cindy_lock=CINDY_LOCK, cron_file=None,
-            fleet_file=None, standard_file=None, manifest_file=None):
+def collect(now=None, state=BASE, qa=QA, fleet=FLEET, argus=None, gh=GH, cindy_lock=CINDY_LOCK, cron_file=None):
     now = now or now_cst()
+    import qa_standard
+    status = qa_standard.inspect(state, qa, now=now)
     items = (run_items(now, cron_file or f"{PI_CODE}/cron/pi-line.cron", state, qa) + identity_items(gh, state) + quota_items(state)
              + file_items(now, state, qa, fleet) + lock_items(argus or os.environ.get("PI_ARGUS_ROOT") or f"{qa}/argus-root", cindy_lock)
-             + standard_items(state, fleet_file, standard_file, manifest_file))
-    import qa_standard
-    return {"generated_at": iso(now), "generator": "pi/bin/fleet_status.py", "items": items, "qa_standard": qa_standard.inspect(state, qa)}
+             + [item("standards", "standard", "fail" if status["errors"] else "ok", detail=json.dumps(status, ensure_ascii=False))])
+    return {"generated_at": iso(now), "generator": "pi/bin/fleet_status.py", "items": items, "qa_standard": status}
 
 
 def render(doc):
