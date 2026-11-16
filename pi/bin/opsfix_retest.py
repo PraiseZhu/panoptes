@@ -258,7 +258,9 @@ def settle(state, results_by_fix, heads, stamp_iso):
     done, retry = state.setdefault("done", {}), state.setdefault("retry", {})
     done_now, retry_now = [], []
     for n, rs in results_by_fix.items():
-        k = str(n); counts = {x: sum(r["result"] == x for r in rs) for x in ("pass", "fail", "blocked", "inconclusive")}
+        k = str(n); counts = {x: sum(r["result"] == x for r in rs) for x in ("pass", "fail", "blocked")}
+        inconclusive_count = sum(r["result"] == "inconclusive" for r in rs)
+        if inconclusive_count: counts["inconclusive"] = inconclusive_count
         blocked = [r for r in rs if r["result"] in ("blocked", "inconclusive")]
         transient = [r for r in blocked if not any(m in str(r.get("reason")) for m in PERMANENT)]
         budget_only = transient and all(any(m in str(r.get("reason")) for m in TRANSIENT) for r in transient)
