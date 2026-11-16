@@ -51,8 +51,9 @@ The existing `opsdeploy` fast-forwards main; it does not check out an earlier SH
    until flock -n /workspace/mivo-qa/argus-root/catch-up.lock true && flock -n /workspace/mivo-qa/argus-root/nightly.lock true; do sleep 60; done
    ```
 
-4. **运行 opsdeploy**：`/workspace/panoptes/pi/bin/run.sh opsdeploy`（排空开关不拦它；不手动跑也会在 10 分钟内自己跑）。成功时 `/workspace/mivo-qa/pi/out/ops/env-<日>.md` 多出「- 部署: <旧> → <新>」和「- 部署状态已发布：panoptes/deployed @ <新>」两行。
-5. **关闭排空开关**：`rm -f /workspace/mivo-qa/pi/panoptes-drain`。开关开着超过 2 小时，看门狗会告警。
+   这条命令只确认那一刻锁是空的，不替部署占着锁。开关打开前就在排队等锁的测试仍可能先拿到锁（拿到后会因为开关开着马上退出）。
+4. **运行 opsdeploy 并确认真的部署了**：`/workspace/panoptes/pi/bin/run.sh opsdeploy`（排空开关不拦它；不手动跑也会在 10 分钟内自己跑）。退出码 0 不代表已部署：要看 `/workspace/mivo-qa/pi/out/ops/env-<日>.md` 是否多出「- 部署: <旧> → <新>」和「- 部署状态已发布：panoptes/deployed @ <新>」（或「部署状态未发布：<原因码>」）。没有「- 部署:」这一行（`out/logs/opsdeploy-<日>.log` 里是「等 panoptes 空闲」或「等 <sha> 的 CI」），说明锁又被占了或条件没满足：回到第 3 步，开关保持打开，不要进入第 5 步。
+5. **关闭排空开关**（只在第 4 步看到「- 部署:」行之后）：`rm -f /workspace/mivo-qa/pi/panoptes-drain`。开关开着超过 2 小时，看门狗会告警。
 6. **核对部署状态**：再跑一次第 1 步的命令，确认当前部署就是目标版本。
 
 排空期间被跳过的东西：合并即测（mergewatch）启动的测试直接退出，mergewatch 会按原有退避重试，最多 3 次；没测上的已合并 PR 在关掉开关后由每小时的补测（catch-up）补上。按北京时间定点跑的作业（日报、交接等）错过的那一轮不会补跑，所以开关要尽快关。

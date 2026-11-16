@@ -152,7 +152,10 @@ class RunNightly(unittest.TestCase):
 
     def test_run_queued_before_the_switch_stops_after_the_slot(self):
         lk = self.hold("nightly.lock")
-        err = open(f"{self.d}/stderr", "w")
+        ptr = f"{self.d}/argus-root/qa-fleet-run-manifest.json"
+        prev = '{"schema": "qa.fleet.run/v1", "run_id": "last-real-run"}'
+        with open(ptr, "w") as f: f.write(prev + "\n")   # the pointer of the last run that really tested
+        err = open(f"{self.d}/stderr", "w"); self.addCleanup(err.close)
         p = subprocess.Popen([f"{R}/run-nightly.sh", "--trigger", "manual", "--pr", "7", "--wait-lock", "90"], env=self.env,
                              stdout=subprocess.PIPE, stderr=err, text=True)
         self.addCleanup(lambda: p.poll() is None and p.kill())
@@ -160,10 +163,12 @@ class RunNightly(unittest.TestCase):
             if "waiting up to" in read(f"{self.d}/stderr") or p.poll() is not None: break
             time.sleep(0.5)
         self.assertIsNone(p.poll(), read(f"{self.d}/stderr")[-2000:])
+        self.assertNotIn("last-real-run", read(ptr))   # while it waits the pointer names the queued run (as on main)
         open(self.drain, "w").close(); lk.close()   # the switch opens while it waits; then the running job ends
         out, _ = p.communicate(timeout=100)
         self.assertEqual(p.returncode, 0, read(f"{self.d}/stderr")[-2000:])
         self.assertEqual(len([l for l in out.splitlines() if l.startswith("[drain]")]), 1, out)
+        self.assertEqual(read(ptr).strip(), prev)   # nothing was tested: the pointer is back on the last real run
 
 
 if __name__ == "__main__":
