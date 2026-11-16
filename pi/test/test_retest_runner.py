@@ -59,6 +59,12 @@ class Run(unittest.TestCase):
         ev = self.go({("wt-o", "related"): (0, ""), ("wt-f", "related"): (0, "")}, cases=[{"id": "x"}])
         self.assertEqual(ev["result"], "blocked"); self.assertIn("没有可执行的原用例", RR.summary(ev))
 
+    def test_exact_status_marks_execution_error_blocked(self):
+        ev = self.go({("wt-o", "run"): (None, "timeout"), ("wt-f", "run"): (0, ""),
+                      ("wt-o", "related"): (0, ""), ("wt-f", "related"): (0, "")})
+        self.assertEqual(ev["status"], "blocked")
+        self.assertTrue(ev["exact_replay"])
+
 
 def R(start, completed=None, updated=None): return {"run_started_at": start, "completed_at": completed, "updated_at": updated}
 

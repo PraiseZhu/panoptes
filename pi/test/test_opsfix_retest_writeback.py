@@ -70,6 +70,14 @@ class Entries(unittest.TestCase):
         r = [dict(fix_pr=5, original_pr=4, fingerprint="mq1-x", source="code-review", result="blocked", reason="本轮模型调用已达上限 12", evidence="e", at="t")]
         self.assertEqual(R.report_entries(r, 5, {})[0]["outcome"], "blocked")
 
+    def test_inconclusive_is_written_and_retried(self):
+        r = [dict(fix_pr=6, original_pr=4, fingerprint="mq1-x", source="check", result="inconclusive",
+                  reason="原失败未复现", evidence="e", at="t")]
+        entry = R.report_entries(r, 6, {})[0]
+        self.assertEqual((entry["result"], entry["outcome"]), ("inconclusive", "inconclusive"))
+        st, done, retry = R.settle({}, {6: r}, {6: "h"}, "t")
+        self.assertEqual((done, retry), ([], [6]))
+
     def test_later_pass_replaces_blocked(self):
         doc = {"prs": [{"number": 7, "retest": [{"fingerprint": "mq1-x", "original_pr": 6, "result": "blocked"}]}]}
         R.apply_report(doc, 7, [{"fingerprint": "mq1-x", "original_pr": 6, "result": "pass"}])

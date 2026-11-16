@@ -8,6 +8,7 @@ import json, os, re, glob, shutil, subprocess, fcntl, hashlib, time, datetime as
 from lib import QA, RPT, BASE, REPO, CST, now_cst, write_atomic, merged_prs, pi, log, gh, record_actions, model_env
 
 import workroot as W
+import retest_runner as RR
 # 10-24 (plan §4.1): the bot's own mivo clone (shared with prfix, same repo lock) as object store; worktrees marked under
 # PI_WORK/wt/opsfix, node_modules by lock hash in PI_WORK/cache/nm (janitor keeps the newest two and every linked one)
 MIVO = W.clone_dir("mivo")
@@ -188,7 +189,7 @@ def report_entries(results, n, done=None):
     d = (done or {}).get(str(n)) or {}
     out = []
     for r in results:
-        if r["fix_pr"] != n or r["result"] not in ("pass", "fail", "blocked"): continue
+        if r["fix_pr"] != n or r["result"] not in ("pass", "fail", "blocked", "inconclusive"): continue
         if not r.get("fingerprint") and r.get("source") != "no-target": continue
         e = {"fingerprint": r.get("fingerprint"), "original_pr": r["original_pr"], "result": r["result"], "method": r.get("source"),
              "reason": r["reason"], "evidence": r.get("evidence"), "at": r["at"], "by": BY,
@@ -196,6 +197,8 @@ def report_entries(results, n, done=None):
         if r["result"] == "blocked":
             e["outcome"] = "gave_up" if d.get("gave_up_after") else ("blocked_permanent" if any(m in str(r.get("reason")) for m in PERMANENT) else "blocked")
             if d.get("gave_up_after"): e["attempts"] = d["gave_up_after"]
+        elif r["result"] == "inconclusive":
+            e["outcome"] = "inconclusive"
         out.append(e)
     return out
 
@@ -255,8 +258,8 @@ def settle(state, results_by_fix, heads, stamp_iso):
     done, retry = state.setdefault("done", {}), state.setdefault("retry", {})
     done_now, retry_now = [], []
     for n, rs in results_by_fix.items():
-        k = str(n); counts = {x: sum(r["result"] == x for r in rs) for x in ("pass", "fail", "blocked")}
-        blocked = [r for r in rs if r["result"] == "blocked"]
+        k = str(n); counts = {x: sum(r["result"] == x for r in rs) for x in ("pass", "fail", "blocked", "inconclusive")}
+        blocked = [r for r in rs if r["result"] in ("blocked", "inconclusive")]
         transient = [r for r in blocked if not any(m in str(r.get("reason")) for m in PERMANENT)]
         budget_only = transient and all(any(m in str(r.get("reason")) for m in TRANSIENT) for r in transient)
         att = (retry.get(k) or {}).get("attempts", 0) + (0 if budget_only else 1)
@@ -414,6 +417,41 @@ def run_review(fix, orig_pr, f, ev_base):
     res = {"pass": "pass", "fail": "fail"}.get(m["result"], "blocked")
     return res, (m.get("evidence") or "")[:400] + ("" if res != "blocked" else "（模型判 unsure）"), {"task": task, "model": m}
 
+def run_exact_replay(fix, orig_pr, f, ev_base):
+    """Replay the source report's exact failing case on the original and fix SHAs.
+
+    The source report is the authority for the original tested SHA and case
+    identity.  A replay without both full SHAs or without a named failing case
+    is blocked; an original case that no longer reproduces is inconclusive.
+    No report or ledger is changed here; the caller writes the normal retest
+    entry after ``settle`` has decided whether it is done or retryable.
+    """
+    orep = load_pr(orig_pr) or {}
+    ev = f.get("evidence") or {}
+    original_sha = ev.get("tested_sha") or orep.get("tested_sha") or orep.get("merge_sha")
+    fix_sha = fix.get("headRefOid") or fix.get("head_sha")
+    cases = RR.cases_from_report(orep, {f.get("fingerprint")} if f.get("fingerprint") else None)
+    if not cases and f.get("test"):
+        cases = [RR.parse_case(f"{f.get('test')}")]
+    if not cases:
+        return "blocked", "原报告没有可执行的 failing check（缺测试文件、名称或 command）", {"status": "blocked", "original_sha": original_sha, "fix_sha": fix_sha}
+    changed = fix.get("changed_files") or f.get("changed_files") or []
+    if isinstance(changed, dict): changed = [x.get("path") or x.get("filename") for x in changed.values()]
+    changed = [x for x in changed if isinstance(x, str)]
+    def invoke(argv, cwd):
+        rc, out, err = sh(argv, cwd=cwd, timeout=1800)
+        return rc, (out or "") + ("\n" + err if err else "")
+    try:
+        evidence = RR.run(original_sha, fix_sha, cases, changed, worktree, sh=invoke, drop=drop_worktree)
+    except Exception as exc:
+        return "blocked", f"exact replay 无法启动：{exc.__class__.__name__}: {str(exc)[:260]}", {"status": "blocked", "original_sha": original_sha, "fix_sha": fix_sha}
+    status = evidence.get("status") or evidence.get("result") or "blocked"
+    why = {"pass": "exact replay：原失败用例在 fix SHA 已通过（fail->pass）",
+           "fail": "exact replay：原失败用例在 fix SHA 仍失败或相关测试回归",
+           "inconclusive": "exact replay：原失败用例在原 SHA 未能稳定复现，不能结案",
+           "blocked": evidence.get("reason") or "exact replay 没有可比较的执行证据"}.get(status, "exact replay 状态未知")
+    return status, why, evidence
+
 def precheck(fix_n, fp, source=None):
     # coverage-gate fingerprints are generic (same fp for every PR's own coverage gap) → no fp precheck for them
     if source == "coverage-gate": return None
@@ -474,7 +512,7 @@ def apply_ledger(led, results, unmatched=None):
     Returns touched row keys. Results with no ledger row are appended to `unmatched` (if given) — never silently dropped."""
     touched = []
     for r in results:
-        if r["result"] not in ("pass", "fail", "blocked"): continue
+        if r["result"] not in ("pass", "fail", "blocked", "inconclusive"): continue
         row = next((x for x in led["rows"] if x.get("pr") == r["original_pr"] and x.get("fingerprint") == r["fingerprint"]), None) if r.get("fingerprint") else None
         if not row:
             if unmatched is not None:
@@ -622,6 +660,8 @@ def run(a):
                     elif f.get("source") == "code-review":
                         if model_calls >= a.max_model: res, why = "blocked", f"本轮模型调用已达上限 {a.max_model}"
                         else: model_calls += 1; res, why, det = run_review(p, o, f, ev_base)
+                    elif f.get("source") == "check":
+                        res, why, det = run_exact_replay(p, o, f, ev_base)
                     else: res, why = "blocked", f"{f.get('source')} 类问题没有轻量复跑（要整步重跑：opsfix backfill --rerun --pr {n}）"
                 except Exception as e: res, why = "blocked", f"复测执行出错：{str(e)[:300]}"
                 rec = dict(fix_pr=n, original_pr=o, fingerprint=fp, source=f.get("source"), target_source=f.get("target_source", "findings"), title=f.get("title"), result=res,
@@ -650,7 +690,7 @@ def run(a):
             log(f"ERROR {ledger_err} -> {len(results)} result(s) NOT written to any ledger; recorded in {UNMATCHED_LOG}; replay later: opsfix.py retest-replay --pr N")
             unmatched = [{"fix_pr": r["fix_pr"], "original_pr": r["original_pr"], "fingerprint": r.get("fingerprint"), "result": r["result"],
                           "at": r.get("at"), "evidence": r.get("evidence"), "kind": "ledger_rejected", "why": f"台账不可信，未回写：{ledger_err}"}
-                         for r in results if r["result"] in ("pass", "fail", "blocked")]
+                         for r in results if r["result"] in ("pass", "fail", "blocked", "inconclusive")]
             record_unmatched(unmatched, None, stamp=stamp)
         if lp:
             bak = f"{lp}.bak-{stamp:%Y%m%d}-retest"
@@ -704,7 +744,7 @@ def replay_results(fix_prs, rpt=None):
         try:
             d = json.load(open(f"{rpt}/PR-{n}.json")); pr = next(p for p in d["prs"] if p.get("number") == n)
         except Exception as e: missing.append((n, f"{type(e).__name__}: {str(e)[:120]}")); continue
-        es = [e for e in pr.get("retest") or [] if e.get("by") == BY and e.get("result") in ("pass", "fail") and e.get("fingerprint")]
+        es = [e for e in pr.get("retest") or [] if e.get("by") == BY and e.get("result") in ("pass", "fail", "inconclusive") and e.get("fingerprint")]
         if not es: missing.append((n, "报告里没有 opsfix retest 的 pass/fail 记录"))
         out += [dict(fix_pr=n, original_pr=e["original_pr"], fingerprint=e["fingerprint"], result=e["result"], reason=e.get("reason"),
                      evidence=e.get("evidence"), at=e.get("at"), source=e.get("method")) for e in es]
