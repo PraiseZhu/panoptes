@@ -168,7 +168,7 @@ export async function processJob({ db, reg, secrets, job }) {
   const profile = { ...baseProfile, steps: [...baseProfile.steps, ...aiSteps] }
   plan.stepIds.push(...aiSteps.map((s) => s.id))
   const { baseSha, baseKnown, how } = await resolveBase(job.repo, job, pr)
-  const common = { repo: job.repo, jobId: job.id, profile }
+  const common = { repo: job.repo, jobId: job.id, profile, baseRef: job.base_ref }
   let first = await execOrStop({ ...common, label: 'm1', sha: job.merge_sha, stepIds: plan.stepIds })
   if (setupFailed(first)) {
     log('info', 'setup failed, retrying once', { job: job.id })
