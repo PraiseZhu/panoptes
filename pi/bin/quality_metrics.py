@@ -204,7 +204,11 @@ def compute_metrics(reports):
         history = sorted(replay_by.get(finding["fingerprint"], []), key=lambda x: _at(x.get("at")))
         if history and history[0]["result"] == "pass":
             first_pass += 1
-        if any(x.get("regression") or (x.get("detail") or {}).get("rows") and any(y.get("check") == "related" and y.get("fix") == "fail" for y in (x.get("detail") or {}).get("rows", [])) for x in history):
+        if any(x.get("regression") or any(
+            y.get("check") == "related" and y.get("original") == "pass" and y.get("fix") == "fail"
+            and y.get("verdict") == "fail"
+            for y in (x.get("detail") or {}).get("rows", [])
+        ) for x in history):
             regression += 1
     duplicate_records = max(0, len(findings) - len(unique))
     duplicate_fingerprints = sum(1 for rows in by_fp.values() if len(rows) > 1)

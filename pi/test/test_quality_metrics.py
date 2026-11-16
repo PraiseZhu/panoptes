@@ -91,6 +91,15 @@ class Metrics(unittest.TestCase):
         out = qm.compute_metrics([{"prs": [{"number": 19, "findings": [finding(fp, 19)], "retest": [entry]}]}])
         self.assertEqual(out["metrics"]["regression_escape"], 1.0)
 
+    def test_related_failure_on_both_shas_is_not_regression_escape(self):
+        fp = "mq1-existing-related"
+        entry = OR.report_entries([dict(fix_pr=21, original_pr=19, fingerprint=fp, source="check", result="pass",
+                                        reason="existing related failure", evidence="e.json", at="2026-11-04T00:00:00Z",
+                                        detail={"exact_replay": True, "rows": [
+                                            {"check": "related", "original": "fail", "fix": "fail", "verdict": "existing-failure"}]})], 21)[0]
+        out = qm.compute_metrics([{"prs": [{"number": 19, "findings": [finding(fp, 19)], "retest": [entry]}]}])
+        self.assertEqual(out["metrics"]["regression_escape"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

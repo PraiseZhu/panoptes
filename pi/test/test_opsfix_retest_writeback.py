@@ -201,6 +201,31 @@ class RunWriteBack(unittest.TestCase):
         watchdog.retest_no_target_check(None, probs, path=R.NO_TARGET_ALERT)
         self.assertIn("retest:exact-replay", probs)
 
+    def test_run_exact_replay_uses_secret_filtered_runner(self):
+        fp = "mq1-secret-filter"
+        secret = "should-not-appear"
+        json.dump({"prs": [{"number": 1650, "tested_sha": "a" * 40,
+                             "failed_checks": [{"fingerprint": fp, "check_id": "unit", "test": None,
+                                                 "evidence": {"command": "printf '%s\\n' \"$PI_EXACT_REPLAY_API_KEY\"; exit 1"}}]}]},
+                  open(f"{R.RPT}/PR-1650.json", "w"))
+        old_worktree, old_drop = R.worktree, R.drop_worktree
+        R.worktree = lambda sha: self.d
+        R.drop_worktree = lambda path: None
+        os.environ["PI_EXACT_REPLAY_API_KEY"] = secret
+        try:
+            status, _, evidence = R.run_exact_replay(
+                {"number": 1651, "headRefOid": "b" * 40}, 1650,
+                {"fingerprint": fp, "source": "check", "evidence": {"tested_sha": "a" * 40}},
+                f"{self.d}/evidence",
+            )
+        finally:
+            os.environ.pop("PI_EXACT_REPLAY_API_KEY", None)
+            R.worktree, R.drop_worktree = old_worktree, old_drop
+        self.assertEqual(status, "blocked")
+        tails = [run["tail"] for side in evidence["runs"].values() for run in side.values()]
+        self.assertTrue(tails)
+        self.assertTrue(all(secret not in tail for tail in tails))
+
 
 class PmExtraCount(unittest.TestCase):
     def test_blocked_only_retest_is_not_counted_as_retested(self):
