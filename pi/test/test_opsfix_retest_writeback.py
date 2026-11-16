@@ -147,6 +147,12 @@ class RunWriteBack(unittest.TestCase):
             json.dump({"prs": [{"number": fix_n}]}, open(f"{R.RPT}/PR-{fix_n}.json", "w"))
             sources.append({"number": fix_n, "body": f"QA: #{orig_n}", "title": "fix",
                             "mergedAt": f"2026-11-04T{13 + i:02d}:00:00Z", "headRefOid": str(7 + i) * 40})
+        ledger = f"{self.d}/ledger.json"
+        json.dump({"rows": [{"key": f"row-{orig_n}", "pr": orig_n, "fingerprint": f"mq1-exact-{status}",
+                              "status": "fix_merged_pending_retest", "fix_pr": fix_n,
+                              "handoff_issue": {"repo": "owner/repo", "issue": orig_n}}
+                             for status, fix_n, orig_n in cases]}, open(ledger, "w"))
+        R.ledger_path = lambda rejected=None: ledger
         old_merged = R.merged_since
         try:
             R.merged_since = lambda lo: sources
@@ -158,6 +164,7 @@ class RunWriteBack(unittest.TestCase):
         finally:
             R.merged_since = old_merged
         alert = json.load(open(R.NO_TARGET_ALERT))
+        led = json.load(open(ledger))
         for status, fix_n, orig_n in cases:
             fp = f"mq1-exact-{status}"
             report = json.load(open(f"{R.RPT}/PR-{fix_n}.json"))["prs"][0]
@@ -165,6 +172,10 @@ class RunWriteBack(unittest.TestCase):
             self.assertNotEqual(report["retest"][0].get("outcome"), "fixed")
             item = alert["items"][f"{fix_n}<-{orig_n}:{fp}"]
             self.assertEqual((item["kind"], item["result"]), ("exact-replay", status))
+            row = next(row for row in led["rows"] if row["pr"] == orig_n)
+            self.assertNotEqual(row["status"], "fixed")
+            self.assertFalse(row.get("retest_confirmed"))
+        self.assertFalse(any(a["type"] == "gh.issue.close" for a in R.handoff_actions(led)))
         probs = {}
         watchdog.retest_no_target_check(None, probs, path=R.NO_TARGET_ALERT)
         self.assertIn("retest:no-target", probs)  # existing watchdog reader sees the shared alert record
