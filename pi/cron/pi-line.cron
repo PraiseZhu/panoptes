@@ -20,6 +20,10 @@ R=/workspace/panoptes/pi/bin/run.sh
 # memguard phase 1 (observe only, never signals): starts its 10 s daemon unless one holds the pidfile lock. Logs:
 # /workspace/mivo-qa/memguard/obs-YYYYMMDD.jsonl. Rollback: python3 /workspace/panoptes/pi/bin/memguard.py --rollback
 * * * * * box /usr/bin/python3 /workspace/panoptes/pi/bin/memguard.py >>/workspace/mivo-qa/pi/out/logs/memguard-cron.log 2>&1
+# --- every 30 min (zero-model) ---
+# fleet_status (11-11, ORG.md rule 7): read-only fleet summary -> /workspace/fleet-standards/fleet-status.{json,md}; bots read
+# that file instead of asking each other. Zero-model, in run.sh LIGHT (runs under low memory). Rollback: remove this line.
+*/30 * * * * box $R fleet_status
 # --- every hour (zero-model) ---
 13,43 * * * * box $R merger
 25 * * * * box $R opsenv
