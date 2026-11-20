@@ -33,7 +33,8 @@ def report(number=2500, **pr_extra):
           "code_review": {"status": "passed", "ran": True}, "ai_summary": {"status": "ok"},
           "triage": {"status": "ok"}}
     pr.update(pr_extra)
-    return {"schema_version": "1.0", "repo": "xindong/mivo-canvas-plugin", "prs": [pr]}
+    return {"schema_version": "1.0", "repo": "xindong/mivo-canvas-plugin", "system_health": {"status": "ok"},
+            "prs": [pr]}
 
 
 def with_unit_failures(rep, tests, status="pre-existing", **kw):
@@ -135,11 +136,93 @@ class ParityDiffTest(unittest.TestCase):
         devin = report()
         devin["prs"][0]["checks"] += [check("ai-test-2", "discarded", source="ai-test"),
                                       check("ai-test-3", "fail", source="ai-test")]
-        devin["prs"][0]["code_review"] = {"status": "failed", "ran": True}
         r = self.run_diff(report(), devin)
         self.assertEqual(r.returncode, 0, r.stdout)
-        for cid in ("ai-test-1", "ai-test-2", "ai-test-3", "code_review", "ai_summary", "triage"):
+        for cid in ("ai-test-1", "ai-test-2", "ai-test-3"):
             self.assertEqual(self.row(r.stdout, cid), "allowed:model")
+
+    def test_box_bench_devin_missing_is_diff_exit_1(self):
+        devin = report()
+        devin["prs"][0]["checks"] = [c for c in devin["prs"][0]["checks"] if c["id"] != "bench"]
+        for mode in ("full-steps", "production"):
+            r = self.run_diff(report(), devin, mode)
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertEqual(self.row(r.stdout, "bench"), "DIFF（Devin 缺 bench）")
+        r = self.run_diff(devin, report())
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(self.row(r.stdout, "bench"), "DIFF（box 无 bench）")
+
+    def test_production_model_content_difference_is_allowed_model(self):
+        devin = report()
+        pr = devin["prs"][0]
+        pr["code_review"] = {"status": "passed", "ran": True, "summary": "另一段结论", "findings_count": 3}
+        pr["ai_summary"] = {"summary": "不同的摘要", "risks": ["r"]}
+        pr["triage"] = {"status": "ok", "dimensions": {"ui": "applicable"}}
+        for mode in ("production", "full-steps"):
+            r = self.run_diff(report(), devin, mode)
+            self.assertEqual(r.returncode, 0, r.stdout)
+            for cid in ("code_review", "ai_summary", "triage"):
+                self.assertEqual(self.row(r.stdout, cid), "allowed:model")
+
+    def test_production_missing_model_step_is_diff_exit_1(self):
+        for field in ("code_review", "ai_summary", "triage"):
+            for value in (None, {"status": "not-run"}, {"status": "capped", "reason": "quota"}):
+                devin = report()
+                devin["prs"][0][field] = value
+                r = self.run_diff(report(), devin, "production")
+                self.assertEqual(r.returncode, 1, f"{field}={value}\n{r.stdout}")
+                self.assertTrue(self.row(r.stdout, field).startswith(f"DIFF（Devin 缺 {field}"), r.stdout)
+
+    def test_production_failed_or_error_model_step_is_diff_exit_1(self):
+        for field in ("code_review", "ai_summary", "triage"):
+            for status in ("failed", "error"):
+                devin = report()
+                devin["prs"][0][field] = {"status": status}
+                for mode in ("production", "full-steps"):
+                    r = self.run_diff(report(), devin, mode)
+                    self.assertEqual(r.returncode, 1, f"{mode} {field}={status}\n{r.stdout}")
+                    self.assertTrue(self.row(r.stdout, field).startswith("DIFF"), r.stdout)
+
+    def test_code_review_failed_on_both_sides_is_allowed_model(self):
+        rep = report(code_review={"status": "failed", "ran": True})
+        r = self.run_diff(rep, report(code_review={"status": "failed", "ran": True, "summary": "x"}), "production")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.row(r.stdout, "code_review"), "allowed:model")
+        devin = report(code_review={"status": "error"})
+        r = self.run_diff(report(code_review={"status": "error"}), devin, "production")
+        self.assertEqual(r.returncode, 1, r.stdout)
+
+    def test_full_steps_disabled_model_steps_are_allowed(self):
+        devin = report()
+        for field in ("code_review", "ai_summary", "triage"):
+            del devin["prs"][0][field]
+        r = self.run_diff(report(), devin, "full-steps")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        for cid in ("code_review", "ai_summary", "triage"):
+            self.assertEqual(self.row(r.stdout, cid), "allowed:full-steps-disabled")
+        devin["prs"][0]["triage"] = {"status": "not-run"}
+        r = self.run_diff(report(), devin, "full-steps")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.row(r.stdout, "triage"), "allowed:full-steps-disabled")
+        r = self.run_diff(report(), devin, "production")
+        self.assertEqual(r.returncode, 1, r.stdout)
+
+    def test_devin_system_health_not_ok_is_diff_exit_1(self):
+        for health in ({"status": "failed"}, {"status": "degraded"}, {}, None):
+            devin = report()
+            if health is None:
+                del devin["system_health"]
+            else:
+                devin["system_health"] = health
+            for mode in ("full-steps", "production"):
+                r = self.run_diff(report(), devin, mode)
+                self.assertEqual(r.returncode, 1, f"{health}\n{r.stdout}")
+                self.assertTrue(self.row(r.stdout, "system_health").startswith("DIFF"), r.stdout)
+        box = report()
+        box["system_health"] = {"status": "degraded"}
+        r = self.run_diff(box, report())
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.row(r.stdout, "system_health"), "same")
 
     def test_timing_metadata_is_not_compared(self):
         devin = report()
@@ -191,6 +274,13 @@ class ParityDiffTest(unittest.TestCase):
 
     def test_different_tested_sha_is_diff(self):
         r = self.run_diff(report(), report(tested_sha="def"))
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertTrue(self.row(r.stdout, "tested_sha").startswith("DIFF"))
+
+    def test_devin_missing_tested_sha_is_diff(self):
+        devin = report()
+        del devin["prs"][0]["tested_sha"]
+        r = self.run_diff(report(), devin)
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertTrue(self.row(r.stdout, "tested_sha").startswith("DIFF"))
 

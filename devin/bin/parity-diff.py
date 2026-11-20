@@ -4,13 +4,17 @@
 Usage: parity-diff.py --box BOX.json --devin DEVIN.json --mode full-steps|production
 
 Prints a Markdown table (检查 ID | box 结果 | Devin 结果 | 判定). Verdicts: same, allowed:<reason>, DIFF.
+Checked first: the Devin report's system_health.status must be "ok", and a PR's tested_sha must be the same on both sides.
 Allowed differences (closed list):
-  model         ai-test-* checks, code_review, ai_summary, triage (model output)
-  bench         bench performance numbers and non-comparable bench status
+  model         ai-test-* checks (count and content); code_review, ai_summary, triage text and conclusion, only when
+                both sides have the step and Devin's status is not error / failed (failed is allowed only if box also failed)
+  full-steps-disabled  full-steps mode only: model review / triage switched off on Devin (missing, not-run, capped, ...)
+  bench         bench performance numbers and non-comparable bench status, only when both sides have bench
   box-flaky     box marked the check / test flaky or it did not finish there, Devin ran it and it passed
   latest-main   production mode only: attribution that depends on latest main (fixed-later, latest_main_run)
   metadata      machine and timing fields (duration_ms, ended_at, shards, reused, machine_load, ...) are never compared
-Any deterministic check missing on either side or with a different result (incl. a different failing-test set) is DIFF.
+Any deterministic check or bench missing on either side or with a different result (incl. a different failing-test
+set) is DIFF. In production mode a model step box has but Devin lacks (or has with status error / failed) is DIFF.
 Exit: 0 no DIFF, 1 at least one DIFF, 2 usage or file error.
 """
 import argparse
@@ -19,6 +23,8 @@ import sys
 
 MODES = ("full-steps", "production")
 MODEL_FIELDS = ("code_review", "ai_summary", "triage")
+MODEL_FAILED = {"error", "failed"}
+MODEL_NOT_RUN = {"not-run", "disabled", "skipped", "capped"}
 BENCH_IDS = {"bench"}
 NOT_FINISHED_STATUSES = {"timeout", "unavailable"}
 NOT_FINISHED_FAILURES = {"flaky", "timeout", "setup-failed"}
@@ -48,7 +54,7 @@ def load_report(path, label):
         prs[entry["number"]] = entry
     if not prs:
         raise InputError(f"--{label}: {path} has an empty prs[] array")
-    return prs
+    return data, prs
 
 
 def is_model_check(check_id, check):
@@ -115,7 +121,12 @@ def judge_check(check_id, box_check, devin_check, box_fail, devin_fail, mode):
     if is_model_check(check_id, box_check or devin_check):
         return "allowed:model"
     if check_id in BENCH_IDS:
-        if box_check is not None and box_check == devin_check and box_fail == devin_fail:
+        box_has, devin_has = box_check is not None or bool(box_fail), devin_check is not None or bool(devin_fail)
+        if not devin_has:
+            return "DIFF（Devin 缺 bench）"
+        if not box_has:
+            return "DIFF（box 无 bench）"
+        if box_check == devin_check and box_fail == devin_fail:
             return "same"
         return "allowed:bench"
     if devin_check is None:
@@ -132,13 +143,40 @@ def judge_check(check_id, box_check, devin_check, box_fail, devin_fail, mode):
     return judge_failed_tests(box_fail, devin_fail, mode)
 
 
-def model_field_result(pr, field):
+def select_model_status(pr, field):
+    """None = step missing; otherwise its status ("ok" when the step has no status field, e.g. ai_summary)."""
     value = pr.get(field)
     if value is None:
-        return "缺失"
+        return None
     if isinstance(value, dict):
-        return str(value.get("status") or "有")
-    return "有"
+        return str(value.get("status") or "ok")
+    return "ok"
+
+
+def to_model_result(status):
+    return "缺失" if status is None else status
+
+
+def judge_model_field(field, box_status, devin_status, mode):
+    devin_ran = devin_status is not None and devin_status not in MODEL_NOT_RUN
+    box_ran = box_status is not None and box_status not in MODEL_NOT_RUN
+    if mode == "full-steps" and not devin_ran:
+        return "allowed:full-steps-disabled"
+    if devin_status == "error":
+        return f"DIFF（Devin {field} 出错：status=error）"
+    if devin_status == "failed" and box_status != "failed":
+        return f"DIFF（Devin {field} 失败：box={to_model_result(box_status)} Devin=failed）"
+    if box_ran and not devin_ran:
+        return f"DIFF（Devin 缺 {field}：box={box_status} Devin={to_model_result(devin_status)}）"
+    return "allowed:model"
+
+
+def compare_health(devin_data):
+    health = devin_data.get("system_health")
+    status = health.get("status") if isinstance(health, dict) else None
+    if status == "ok":
+        return ("system_health", "—", "ok", "same")
+    return ("system_health", "—", to_model_result(status), f"DIFF（Devin system_health.status={status!r}，应为 'ok'）")
 
 
 def compare_pr(number, box_pr, devin_pr, mode):
@@ -148,8 +186,8 @@ def compare_pr(number, box_pr, devin_pr, mode):
     if box_pr is None:
         return [(f"(PR #{number})", "缺失", "有", "DIFF（box 报告缺此 PR）")]
     box_sha, devin_sha = box_pr.get("tested_sha"), devin_pr.get("tested_sha")
-    if box_sha and devin_sha and box_sha != devin_sha:
-        rows.append(("tested_sha", box_sha, devin_sha, "DIFF（测的不是同一提交）"))
+    if box_sha != devin_sha:
+        rows.append(("tested_sha", box_sha or "缺失", devin_sha or "缺失", "DIFF（测的不是同一提交）"))
     box_checks, devin_checks = select_checks(box_pr), select_checks(devin_pr)
     box_fails, devin_fails = select_failures(box_pr), select_failures(devin_pr)
     ids = list(box_checks)
@@ -161,16 +199,17 @@ def compare_pr(number, box_pr, devin_pr, mode):
         verdict = judge_check(check_id, b, d, bf, df, mode)
         rows.append((check_id, to_result(b, bf), to_result(d, df), verdict))
     for field in MODEL_FIELDS:
-        if box_pr.get(field) is None and devin_pr.get(field) is None:
+        b, d = select_model_status(box_pr, field), select_model_status(devin_pr, field)
+        if b is None and d is None:
             continue
-        rows.append((field, model_field_result(box_pr, field), model_field_result(devin_pr, field), "allowed:model"))
+        rows.append((field, to_model_result(b), to_model_result(d), judge_model_field(field, b, d, mode)))
     return rows
 
 
 def to_markdown(sections, mode):
     lines = [f"# parity-diff（mode={mode}）", ""]
-    for number, rows in sections:
-        lines += [f"## PR #{number}", "", "| 检查 ID | box 结果 | Devin 结果 | 判定 |", "|---|---|---|---|"]
+    for title, rows in sections:
+        lines += [f"## {title}", "", "| 检查 ID | box 结果 | Devin 结果 | 判定 |", "|---|---|---|---|"]
         for row in rows:
             lines.append("| " + " | ".join(str(c).replace("|", "\\|").replace("\n", " ") for c in row) + " |")
         lines.append("")
@@ -189,13 +228,14 @@ def main(argv=None):
     ap.add_argument("--mode", required=True, choices=MODES)
     args = ap.parse_args(argv)
     try:
-        box_prs = load_report(args.box, "box")
-        devin_prs = load_report(args.devin, "devin")
+        _, box_prs = load_report(args.box, "box")
+        devin_data, devin_prs = load_report(args.devin, "devin")
     except InputError as e:
         print(f"parity-diff: {e}", file=sys.stderr)
         return 2
     numbers = list(box_prs) + [n for n in devin_prs if n not in box_prs]
-    sections = [(n, compare_pr(n, box_prs.get(n), devin_prs.get(n), args.mode)) for n in numbers]
+    sections = [("报告", [compare_health(devin_data)])]
+    sections += [(f"PR #{n}", compare_pr(n, box_prs.get(n), devin_prs.get(n), args.mode)) for n in numbers]
     text, diff = to_markdown(sections, args.mode)
     print(text)
     return 1 if diff else 0
