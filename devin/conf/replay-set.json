@@ -1,0 +1,16 @@
+{
+  "schema": "devin-replay-set/v1",
+  "note": "迁移验收 R1 固定回放集：box 与 Devin 对同一合并提交各跑一遍，用 devin/bin/parity-diff.py 对比 reports/merged/PR-<pr>.json；date 为 merged_at 的上海日期，category 为覆盖类别，reason 为选它的原因与验收说明",
+  "prs": [
+    { "pr": 2509, "date": "2026-11-18", "category": "docs-only", "reason": "只改文档，box 判 docs_only 不跑检查；Devin 也必须判 docs_only 且 checks 为空" },
+    { "pr": 2464, "date": "2026-11-18", "category": "full-pass", "reason": "M0 实测用过的 PR，23 项确定性检查全过且跑了 bench；box 最后一份逐 PR 报告，逐项必须 same" },
+    { "pr": 2505, "date": "2026-11-18", "category": "full-pass-no-bench", "reason": "全过但不跑 bench（可选步骤未触发）；Devin 不得多跑或少跑确定性检查" },
+    { "pr": 2500, "date": "2026-11-18", "category": "pre-existing-unit", "reason": "unit 有 1 个合并前就有的失败（real-timer-guard）；失败用例名与 pre-existing 归因必须一致" },
+    { "pr": 2474, "date": "2026-11-17", "category": "unverified-unit-ai-kept", "reason": "unit 5 个 unverified 失败且有保留的 AI 补测；失败用例集必须一致，AI 补测条数差异只算 allowed:model" },
+    { "pr": 2299, "date": "2026-11-13", "category": "multi-check-pre-existing", "reason": "api-inproc 与 unit 两项都有合并前就有的失败；跨检查的失败用例集与归因必须一致" },
+    { "pr": 2368, "date": "2026-11-14", "category": "flaky-and-unverified", "reason": "unit 有 flaky、e2e-legacy-migration 有 unverified；验证 box flaky 而 Devin 跑通只算 allowed:box-flaky，unverified 不放宽" },
+    { "pr": 2486, "date": "2026-11-17", "category": "bench-fail", "reason": "bench 在 box 上失败（unverified）；bench 数值与状态差异只算 allowed:bench，其余检查必须 same" },
+    { "pr": 2458, "date": "2026-11-17", "category": "review-suggested", "reason": "检查全过但审查给了建议；code_review 只算 allowed:model，确定性检查必须 same" },
+    { "pr": 2463, "date": "2026-11-17", "category": "pre-existing-unit-production", "reason": "与 2500 同一个合并前失败、不跑 bench；production 模式下验证依赖最新 main 的归因差异只放宽 fixed-later / latest_main_run" }
+  ]
+}
