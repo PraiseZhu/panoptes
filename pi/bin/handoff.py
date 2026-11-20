@@ -13,7 +13,7 @@ a failed author case with confirmed!=true is 待确认: listed, NO issue. Dedupe
 report/sent/*/created.tsv ∪ open/closed issues' "mivo-qa-handoff: key=" marker (gh read).
 Receipts (one format since 2026-10-23, same as panoptes report/handoff-receipts.mjs): first meaningful line
 结论：已修 #N / 结论：不修，原因… / 结论：误报，原因…  (「结论」may be bold, : or ：; synonyms such as 不用改 / 不成立 fold in);
-QA's own comments (PraiseZhu) never count. Answered too: a merged fix PR whose title/body says "QA #<原PR号>"
+QA's own comments (PraiseZhu) never count, and on a handoff issue only its speakers do (PR author, route cc, owner). Answered too: a merged fix PR whose title/body says "QA #<原PR号>"
 (已修), and from 2026-10-24 a receipt on the original PR by its author or the route owner / cc. Overdue (15:20, 3 days
 without an answer) only for QA handoff issues: the mivo-qa-handoff marker and the handoff label."""
 import sys, glob
@@ -26,14 +26,15 @@ ROUTES = "/workspace/panoptes/report/handoff-routes.json"
 # meaningful line: HTML comments and a BOM are dropped; blank lines, code blocks, quote lines (>) and @mention-only lines are
 # skipped. 「结论」 may be bold, : or ：; the conclusion word (synonyms folded) must end at a line end, a space, *, # or
 # punctuation, so 「结论：不修改…」 / 「结论：误报率…」 are not receipts. Without a 「结论：」 line, a watcher-bot post (mivo-watcher-receipt
-# marker) counts by its fixed wording; bot status posts (task=blocked-notice / auto-close, vigil-handoff) never count.
+# marker) counts by its fixed wording; bot status posts (task=blocked-notice / auto-close, vigil-handoff, the new acceptance
+# bot's devin-acceptance-handoff check comment) never count.
 RECEIPT_KINDS = {"已修复": "已修", "已修": "已修", "已改": "已修", "误报": "误报", "不成立": "误报",
                  "不需要改": "不修", "不用改": "不修", "无需修改": "不修", "不修": "不修", "不改": "不修"}
 RECEIPT_LINE = re.compile(r"^(?:\*\*)?结论(?:\*\*)?[ \t]*[:：][ \t]*(?:\*\*)?[ \t]*("
                           + "|".join(sorted(RECEIPT_KINDS, key=len, reverse=True)) + r")(?=$|[\s*#，,、:：;；。.!！(（])(.*)$")
 FIX_REF = re.compile(r"^[\s*（(，,、:：]*(?:(?:见|PR)[\s*（(，,、:：]*)*(?:[\w.-]+/[\w.-]+)?#([0-9]+)[）)]?", re.I)
 REASON_LEAD = re.compile(r"^[\s*，,、:：;；。.!！（()）]*(?:原因[ \t]*[:：])?[\s*]*")
-BOT_STATUS = re.compile(r"<!--\s*(?:vigil-handoff\b|mivo-watcher-receipt\b[^>]*\btask=(?:blocked-notice|auto-close)\b)")
+BOT_STATUS = re.compile(r"<!--\s*(?:vigil-handoff\b|devin-acceptance-handoff\b|mivo-watcher-receipt\b[^>]*\btask=(?:blocked-notice|auto-close)\b)")
 WATCHER_RECEIPT = re.compile(r"<!--\s*mivo-watcher-receipt\b")
 LINE_SPLIT = re.compile(r"\r\n|\r|\n|\u2028|\u2029")
 
@@ -93,11 +94,30 @@ QA_LOGINS = {x.strip() for x in os.environ.get("MIVO_QA_HANDOFF_QA_LOGINS", "Pra
 _QA_ONE = r"(?:xindong/mivo-canvas-plugin)?#"
 def qa_ref(n): return re.compile(rf"(?<![A-Za-z])QA[^#/\n]{{0,8}}?(?:{_QA_ONE}[0-9]+(?![0-9])\s*[/,，、&和]\s*)*{_QA_ONE}{int(n)}(?![0-9])", re.I)
 
-def author_receipts(issue):
-    """Receipt texts (RECEIPT group 1) of an issue's comments, oldest first; QA's own comments never count."""
+def receipt_speakers(rt, pr_author):
+    """Who may answer one handoff issue (panoptes#316, same as report/handoff-receipts.mjs receiptSpeakers):
+    ({pr_author} | rt.cc[pr_author] | {rt.owner}) - QA_LOGINS, so aj0928 may answer for lubinyu-lab but not the other way round,
+    and anyone else is ignored. Unknown author: the route's only author if it has one, else the owner only. No route: nobody."""
+    if not rt: return set()
+    au = pr_author or (rt["authors"][0] if len(rt.get("authors") or []) == 1 else None)
+    out = {rt.get("owner")} | ({au, *(rt.get("cc") or {}).get(au, [])} if au else set())
+    return {x for x in out if x} - QA_LOGINS
+
+def routed_speakers():
+    """Everyone on any route (owner, authors, cc) minus QA_LOGINS; None when the route file can't be read."""
+    try: rs = routes()
+    except (OSError, ValueError): return None
+    return {x for r in rs for x in [r.get("owner"), *(r.get("authors") or []), *(y for v in (r.get("cc") or {}).values() for y in v)] if x} - QA_LOGINS
+
+def author_receipts(issue, allowed=None):
+    """Receipt texts (RECEIPT group 1) of an issue's comments, oldest first; QA's own comments never count.
+    allowed (receipt_speakers): only these logins count -- scan() always passes it. None (pm_extra: no route / PR author at hand):
+    anyone on a route (routed_speakers), so outsiders never count; QA-only filter if the route file can't be read."""
+    if allowed is None: allowed = routed_speakers()
     out = []
     for c in issue.get("comments") or []:
-        if ((c.get("author") or {}).get("login") or (c.get("user") or {}).get("login")) in QA_LOGINS: continue
+        who = (c.get("author") or {}).get("login") or (c.get("user") or {}).get("login")
+        if who in QA_LOGINS or (allowed is not None and who not in allowed): continue
         m = RECEIPT.match(c.get("body") or "")
         if m: out.append(m.group(1))
     return out
@@ -303,13 +323,15 @@ def scan(ro, pr_receipts=pr_comment_receipts):
         if iss is None: L.append(f"- {rt['repo']}: 未核实（gh 读取失败）"); continue
         rc, due = 0, []
         for i in iss:
-            rec = author_receipts(i)
             mk = MARK.search(i.get("body") or "")
             # only QA handoff issues (marker + handoff label) are tracked; other issues in the repo never go overdue
             if not (mk and "handoff" in {(x.get("name") if isinstance(x, dict) else x) for x in i.get("labels") or []}):
                 if i["state"] == "OPEN": L.append(f"- 跳过 {i['url']}（不是 QA 交接 issue：没有 mivo-qa-handoff 标记或 handoff 标签）")
                 continue
             n = int(mk.group(2)); f, r = load_report(n)
+            au = (((r or {}).get("pr") or {}).get("author") or {})
+            au = au.get("login") if isinstance(au, dict) else au
+            rec = author_receipts(i, receipt_speakers(rt, au))   # only this issue's speakers (panoptes#316)
             fp = mk.group(1)[:-len(f"-pr{n}")] if mk.group(1).endswith(f"-pr{n}") else mk.group(1)
             files = [x.get("file") for x in (((r or {}).get("pr") or {}).get("findings") or []) if x.get("fingerprint") == fp and x.get("file")]
             if not rec and i["state"] == "OPEN":   # 统一格式：写了「QA #原PR号」的修复 PR 合并了 → 已修，issue 收起（不计逾期）
@@ -318,15 +340,13 @@ def scan(ro, pr_receipts=pr_comment_receipts):
             if rec: rc += 1; L.append(f"- {rt['repo']}#{i['number']} {i['state']} 回执「{rec[-1]}」")
             if i["url"] not in local: L.append(f"  - 注意：{i['url']} 不在本地 issues.json（Grok 未回写）")
             if i["state"] == "OPEN" and not rec and (now_cst() - parse_ts(i["createdAt"])).days >= 3:
-                au = (((r or {}).get("pr") or {}).get("author") or {})
-                au = au.get("login") if isinstance(au, dict) else au
                 due.append({"issue": i, "n": n, "url": i["url"], "files": files, "author": au, "since": parse_ts(i["createdAt"]),
                             "title": re.sub(r"^\[P\d\]\s*#\d+\s*", "", i.get("title") or "").strip()})
         # a 「结论：…」 receipt on the original PR by its author or the route owner / cc also answers the issue (convention 10-24)
         by_pr = {}
         for x in due: by_pr.setdefault(x["n"], []).append(x)
         for n, xs in by_pr.items():
-            logins = {rt["owner"]} | {a for x in xs if x["author"] for a in [x["author"], *rt.get("cc", {}).get(x["author"], [])]}
+            logins = set().union(*(receipt_speakers(rt, x["author"]) for x in xs))
             try: prs = pr_receipts(n, logins, min(x["since"] for x in xs))
             except Exception as e: log("gh pr receipts fail", n, e); prs = []
             for x in xs:

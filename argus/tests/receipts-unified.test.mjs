@@ -28,7 +28,7 @@ test('回执解析：首行「结论：…」，可加粗，半角 / 全角冒�
 
 test('交接 issue 回执带上修复 PR 号与原因（台账据此认「已修 #N」）', () => {
   const issue = { number: 1, state: 'open', labels: [], title: '[P1] #1023 x', body: '<!-- mivo-qa-handoff: key=mq1-aaa-pr1023 pr=1023 v=1 -->', html_url: 'u' }
-  const r = resolutionFor('r', issue, [{ user: { login: 'aj0928' }, body: '结论：已修 #1130\n改了 cindyplugin/main.js', created_at: 't', html_url: 'c' }])
+  const r = resolutionFor('aj0928/aj0928-handoff', issue, [{ user: { login: 'aj0928' }, body: '结论：已修 #1130\n改了 cindyplugin/main.js', created_at: 't', html_url: 'c' }], { prAuthor: 'aj0928' })
   assert.deepEqual([r.kind, r.fix_pr], ['已修', 1130])
 })
 
@@ -194,6 +194,17 @@ test('回执解析：共用用例（argus/tests/fixtures/receipt-cases.json，Pi
   for (const c of cases) {
     const r = parseReceiptDetail(c.in, { pr: c.pr ?? null })
     assert.deepEqual(r && { kind: r.kind, fix_pr: r.fix_pr, reason: r.reason }, c.out && { kind: c.out.kind, fix_pr: c.out.fix_pr ?? null, reason: c.out.reason ?? null }, JSON.stringify(c.in))
+  }
+})
+
+test('按单授权发言人：共用用例里带 speaker 的逐条一致（Pi 线 test_pm_handoff_s14.py 跑同一份，路由用 report/handoff-routes.json）', () => {
+  const cases = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'fixtures/receipt-cases.json'), 'utf8')).filter((c) => c.speaker)
+  assert.ok(cases.length >= 10)
+  const issue = { number: 1, state: 'open', labels: [{ name: 'handoff' }], title: '[P1] #1023 x', body: '<!-- mivo-qa-handoff: key=mq1-aaa-pr1023 pr=1023 v=1 -->', html_url: 'u' }
+  for (const c of cases) {
+    const { repo, pr_author, login, accepted } = c.speaker
+    const r = resolutionFor(repo, issue, [{ user: { login }, body: c.in, created_at: 't', html_url: 'c' }], { prAuthor: pr_author })
+    assert.equal(r?.kind ?? null, accepted ? c.out.kind : null, JSON.stringify(c.speaker))
   }
 })
 

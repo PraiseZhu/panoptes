@@ -3,10 +3,14 @@
    路由本来就不同；旧代码只放过 ≤40 字的差异段 → 报「AGENTS.md(replace@91) 不一致」。人名以外的真差异仍要报。
 2. 逾期未提醒：aj0928-handoff #2 #5 #6 #7、handover-mivo #1 #3 在 72h 内（或之后）都有作者「结论：…」回执，按 AGENTS.md
    「72 小时后还没有任何回执的」才通告；旧代码只看有没有「逾期」字样 → 全报「❌未提醒」。没有回执的、只有 QA 自己留言的仍要报。
+3. 按单授权发言人（panoptes#316）：路由外账号的「结论：误报」、lubinyu-lab 代 aj0928、验收 Bot（devin-acceptance-handoff）的评论
+   都不算回执，不消除 72h 逾期；aj0928 代 lubinyu-lab 算。和 report/handoff-receipts.mjs 跑同一份 receipt-cases.json。
 只用临时目录和假 gh，不读写真实数据。"""
 import sys, os, json, base64, tempfile, unittest, datetime as dt
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from isolation import isolated, assert_inside, BIN  # noqa: E402
+HERE = os.path.dirname(os.path.abspath(__file__))
+REAL_ROUTES = os.path.join(HERE, "../../report/handoff-routes.json")
 
 A, B = "aj0928/aj0928-handoff", "zhongxingtian-ai/handover-mivo"
 ROUTES = {"routes": [{"repo": A, "owner": "aj0928", "authors": ["aj0928", "lubinyu-lab"], "cc": {"lubinyu-lab": ["aj0928"]}},
@@ -43,8 +47,9 @@ class T(unittest.TestCase):
         with isolated(PI_STATE=self.tmp):
             sys.path.insert(0, BIN)
             import pm_extra as X
-            X.ROUTES = self.routes; X.QA = f"{self.tmp}/qa"; X.RPT = f"{self.tmp}/qa/reports/merged"
-            assert_inside(self.tmp, X.ROUTES, X.QA, X.RPT)
+            import handoff as H
+            X.ROUTES = H.ROUTES = self.routes; X.QA = f"{self.tmp}/qa"; X.RPT = f"{self.tmp}/qa/reports/merged"
+            assert_inside(self.tmp, X.ROUTES, H.ROUTES, X.QA, X.RPT)
             X.gh = gh; X.now_cst = lambda: NOW
             miss, unv = [], []
             L = X.handoff("2026-11-02", [], {}, [], miss, unv)
@@ -66,16 +71,63 @@ class T(unittest.TestCase):
         issues = {A: [iss(7, [c("aj0928", "结论：误报，生产路径里不会出现重复\n依据：…")]),
                       iss(6, [c("aj0928", "结论：已修 #1236\n根因：…", "2026-10-26T07:33:33Z")]),   # 72h 之后才回执，也算已响应
                       iss(9, [c("PraiseZhu", "回执：已修 #1123（见 receipts.md），关闭。")]),          # 只有 QA 自己的留言 → 不算回执
-                      iss(8, [])],                                                                  # 真逾期、无回执
+                      iss(8, []),                                                                   # 真逾期、无回执
+                      iss(4, [c("someone-else", "结论：误报，原因：生产路径到不了")])],               # 路由外账号 → 不算回执（#316）
                   B: [iss(1, [c("zhongxingtian-ai", "结论：已修 #1196\n\n修复 PR：…（已合并）")]),
                       iss(3, [c("zhongxingtian-ai", "结论：误报，Nightly 分组调用 report 时已传入 head_sha")])]}
         L, miss = self.run_handoff(issues)
         od = [m for m in miss if "逾期" in m]
-        self.assertEqual(sorted(od), sorted([f"交接 {A}#9 超 72h 未见逾期提醒", f"交接 {A}#8 超 72h 未见逾期提醒"]), od)
+        self.assertEqual(sorted(od), sorted([f"交接 {A}#9 超 72h 未见逾期提醒", f"交接 {A}#8 超 72h 未见逾期提醒", f"交接 {A}#4 超 72h 未见逾期提醒"]), od)
         line = next(x for x in L if x.startswith("4. "))
         for s in (f"{A}#7已回执「误报」", f"{A}#6已回执「已修 #1236」", f"{B}#1已回执「已修 #1196」", f"{B}#3已回执「误报」",
-                  f"{A}#9❌未提醒", f"{A}#8❌未提醒"):
+                  f"{A}#9❌未提醒", f"{A}#8❌未提醒", f"{A}#4❌未提醒"):
             self.assertIn(s, line)
+
+class Speakers(unittest.TestCase):
+    """panoptes#316：handoff.py 的按单授权发言人和 report/handoff-receipts.mjs 同一口径"""
+    def setUp(self): self.tmp = tempfile.mkdtemp()
+
+    def test_shared_speaker_cases_match_node(self):
+        cases = [x for x in json.load(open(os.path.join(HERE, "receipt-cases.json"))) if x.get("speaker")]
+        self.assertGreaterEqual(len(cases), 10)
+        routes = json.load(open(REAL_ROUTES))["routes"]
+        with isolated(PI_STATE=self.tmp):
+            sys.path.insert(0, BIN)
+            import handoff as H
+            for x in cases:
+                sp = x["speaker"]
+                rt = next((r for r in routes if r["repo"] == sp["repo"]), None)
+                got = H.author_receipts({"comments": [c(sp["login"], x["in"])]}, H.receipt_speakers(rt, sp["pr_author"]))
+                self.assertEqual(bool(got), sp["accepted"], json.dumps(sp))
+
+    def test_outsider_reverse_proxy_and_bot_comments_keep_72h_overdue(self):
+        mk = lambda n: f"<!-- mivo-qa-handoff: key=mq1-{n}-pr{n} pr={n} -->"
+        lab = [{"name": "handoff"}, {"name": "P1"}]
+        def it(n, pr, login, body): return {**iss(n, [c(login, body)], created="2026-10-28T00:00:00Z"), "url": f"https://x/{n}", "labels": lab, "body": mk(pr)}
+        fp = "结论：误报，原因：生产路径到不了"
+        issues = [it(1, 901, "someone-else", fp),                                                                  # 外人
+                  it(2, 901, "lubinyu-lab", fp),                                                                   # lubinyu-lab 代 aj0928 ✗
+                  it(3, 900, "aj0928", fp),                                                                        # aj0928 代 lubinyu-lab ✓
+                  it(4, 901, "aj0928", fp + "\n<!-- devin-acceptance-handoff: issue=x#4 verdict=pass -->"),       # 验收 Bot 标记
+                  it(5, 901, "aj0928", fp),                                                                        # 作者本人 ✓
+                  it(6, 902, "someone-else", fp)]                                                                  # 外人，但 QA #902 修复 PR 已合并 ✓
+        reports = {900: {"pr": {"author": {"login": "lubinyu-lab"}, "findings": []}}, 901: {"pr": {"author": "aj0928", "findings": []}},
+                   902: {"pr": {"author": "aj0928", "findings": []}}}
+        acts, seen = [], {}
+        with isolated(PI_STATE=self.tmp):
+            sys.path.insert(0, BIN)
+            import handoff as H
+            rt = next(r for r in ROUTES["routes"] if r["repo"] == A)
+            H.known_keys = lambda gh_ok=True: ({}, {}, {A: issues}); H.routes = lambda: [rt]
+            H.load_report = lambda n: (None, reports.get(n))
+            H.merged_fix_prs = lambda n, files=(), lister=None: [{"number": 1300}] if n == 902 else []
+            H.now_cst = lambda: NOW.replace(hour=15); H.BASE = H.QA = self.tmp
+            assert_inside(self.tmp, H.BASE, H.QA)
+            H.record_actions = lambda job, day, a: acts.extend(a)
+            def pr_receipts(n, logins, since): seen[n] = logins; return []
+            H.scan(False, pr_receipts=pr_receipts)
+        self.assertEqual(sorted(a["key"] for a in acts), [f"overdue:{A}#{n}" for n in (1, 2, 4)])
+        self.assertEqual(seen, {901: {"aj0928"}}, "原 PR 下的回执也只认 aj0928 PR 的授权发言人")
 
 if __name__ == "__main__":
     unittest.main()
