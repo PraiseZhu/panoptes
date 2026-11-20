@@ -5,12 +5,15 @@ import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { parseReceipt, parseMarker, resolutionFor, resolvedBy, loadResolutions } from '../../report/handoff-receipts.mjs'
+import { parseReceipt, parseMarker, resolutionFor, resolvedBy, loadResolutions, receiptSpeakers, reportAuthor, fixPrResolutions } from '../../report/handoff-receipts.mjs'
 
 const TRACK = join(dirname(fileURLToPath(import.meta.url)), '../../report/track-followups.mjs')
 const MARK = '<!-- mivo-qa-handoff: key=mq1-d67c944fa2c60236330b-pr1023 pr=1023 v=1 -->'
 const issue = (extra = {}) => ({ number: 1, state: 'open', labels: [{ name: 'handoff' }], title: '[P1] #1023 无 Key 时配方参考图可绕过 4 张提交上限', body: `正文\n${MARK}\n`, html_url: 'https://github.com/aj0928/aj0928-handoff/issues/1', comments: 1, ...extra })
 const cmt = (body, login = 'aj0928') => ({ user: { login }, body, created_at: '2026-10-20T02:19:00Z', html_url: 'https://github.com/aj0928/aj0928-handoff/issues/1#c1' })
+const A = 'aj0928/aj0928-handoff'
+// 交接单按 aj0928-handoff 路由、原 PR 作者给定（默认 aj0928），不读 $QA_HOME 报告
+const rf = (i, cs, prAuthor = 'aj0928') => resolutionFor(A, i, cs, { prAuthor })
 
 test('parseReceipt: 三种结论格式，其他不算', () => {
   assert.equal(parseReceipt('结论：误报，无 Key 时配方请求到不了 mivoTryImage'), '误报')
@@ -26,15 +29,47 @@ test('parseMarker 取 PR 和指纹', () => {
   assert.equal(parseMarker('no marker'), null)
 })
 test('resolutionFor: 作者回执 / QA 自己评论不算 / 关闭 / 误报标签', () => {
-  assert.equal(resolutionFor('r', issue(), [cmt('结论：误报，xx')]).kind, '误报')
-  assert.equal(resolutionFor('r', issue(), [cmt('结论：误报，xx', 'PraiseZhu')]), null)
-  assert.equal(resolutionFor('r', issue(), [cmt('先看看')]), null)
-  assert.equal(resolutionFor('r', issue({ state: 'closed' }), []).kind, 'closed')
-  assert.equal(resolutionFor('r', issue({ labels: ['status:false-positive'] }), []).kind, '误报')
-  assert.equal(resolutionFor('r', issue({ body: 'x' }), [cmt('结论：已修 #2')]), null)
+  assert.equal(rf(issue(), [cmt('结论：误报，xx')]).kind, '误报')
+  assert.equal(rf(issue(), [cmt('结论：误报，xx', 'PraiseZhu')]), null)
+  assert.equal(rf(issue(), [cmt('先看看')]), null)
+  assert.equal(rf(issue({ state: 'closed' }), []).kind, 'closed')
+  assert.equal(rf(issue({ labels: ['status:false-positive'] }), []).kind, '误报')
+  assert.equal(rf(issue({ body: 'x' }), [cmt('结论：已修 #2')]), null)
+})
+test('按单授权发言人（panoptes#316）：外人拒收、lubinyu-lab 不能代 aj0928、aj0928 可代 lubinyu-lab、验收 Bot 标记不算', () => {
+  const fp = '结论：误报，原因：生产路径到不了'
+  assert.equal(rf(issue(), [cmt(fp, 'someone-else')]), null, '无关账号的误报不收起交接单')
+  assert.equal(rf(issue(), [cmt(fp, 'lubinyu-lab')], 'aj0928'), null, 'lubinyu-lab 代 aj0928 拒收')
+  assert.equal(rf(issue(), [cmt(fp, 'aj0928')], 'lubinyu-lab').by, 'aj0928', 'aj0928 代 lubinyu-lab 放行')
+  assert.equal(rf(issue(), [cmt(fp, 'lubinyu-lab')], 'lubinyu-lab').kind, '误报', '作者本人')
+  assert.equal(rf(issue(), [cmt(`${fp}\n<!-- devin-acceptance-handoff: issue=${A}#1 verdict=pass -->`, 'aj0928')]), null, '验收 Bot 标记评论忽略')
+  const r = rf(issue(), [cmt('结论：已修 #1130', 'aj0928'), cmt(fp, 'someone-else')])
+  assert.deepEqual([r.kind, r.fix_pr, r.by], ['已修', 1130, 'aj0928'], '外人后发的回执不覆盖授权发言人的回执')
+  assert.equal(resolutionFor('other/repo', issue(), [cmt(fp, 'aj0928')], { prAuthor: 'aj0928' }), null, '没有路由的仓谁都不认')
+  assert.equal(rf(issue(), [cmt(fp, 'lubinyu-lab')], null), null, '原 PR 作者不明、路由多作者：只认 owner')
+  assert.equal(rf(issue(), [cmt(fp, 'aj0928')], null).kind, '误报')
+  const routes = { routes: [{ repo: A, owner: 'aj0928', authors: ['aj0928', 'lubinyu-lab'], cc: { 'lubinyu-lab': ['aj0928'] } }] }
+  assert.deepEqual([...receiptSpeakers(routes.routes[0], 'lubinyu-lab')].sort(), ['aj0928', 'lubinyu-lab'])
+  assert.deepEqual([...receiptSpeakers(routes.routes[0], 'aj0928')], ['aj0928'])
+  assert.deepEqual([...receiptSpeakers({ repo: A, owner: 'PraiseZhu', authors: ['x'] }, 'x')], ['x'], 'QA 自己不算发言人')
+})
+test('reportAuthor 读 $QA_HOME/reports/merged/PR-N.json；loadResolutions 默认按它取原 PR 作者', () => {
+  const qa = mkdtempSync(join(tmpdir(), 'argus-ra-')); mkdirSync(join(qa, 'reports/merged'), { recursive: true })
+  writeFileSync(join(qa, 'reports/merged/PR-1023.json'), JSON.stringify({ prs: [{ number: 1023, author: { login: 'lubinyu-lab' } }] }))
+  assert.equal(reportAuthor(1023, qa), 'lubinyu-lab')
+  assert.equal(reportAuthor(1024, qa), null)
+  const gh = (p) => p.includes('/comments') ? [cmt('结论：误报，x', 'lubinyu-lab')] : [issue()]
+  const old = process.env.QA_HOME; process.env.QA_HOME = qa
+  try { assert.equal(loadResolutions([A], gh).length, 1, 'lubinyu-lab 自己的 PR') } finally { if (old === undefined) delete process.env.QA_HOME; else process.env.QA_HOME = old }
+  writeFileSync(join(qa, 'reports/merged/PR-1023.json'), JSON.stringify({ prs: [{ number: 1023, author: 'aj0928' }] }))
+  assert.equal(loadResolutions([A], gh, { prAuthorOf: (n) => reportAuthor(n, qa) }).length, 0, 'aj0928 的 PR：lubinyu-lab 的回执不认')
+})
+test('「QA #原PR号」已合并修复 PR 不限提交者（panoptes#316 不回退）', () => {
+  const prs = [{ number: 2100, title: 'fix: 串号 (QA #2000)', body: '', mergedAt: '2026-10-23T01:00:00Z', files: ['src/cache.ts'], author: 'someone-else' }]
+  assert.deepEqual(fixPrResolutions(prs, { pr: 2000, files: ['src/cache.ts'] }).map((r) => [r.fix_pr, r.kind]), [[2100, '已修']])
 })
 test('resolvedBy: 按主指纹（mq1- 前缀可有可无）或标题，覆盖率那条不受影响', () => {
-  const rs = [resolutionFor('r', issue(), [cmt('结论：误报，x')])]
+  const rs = [rf(issue(), [cmt('结论：误报，x')])]
   assert.ok(resolvedBy(rs, { pr: 1023, fingerprints: ['mq1-d67c944fa2c60236330b'] }))
   assert.ok(resolvedBy(rs, { pr: 1023, fingerprints: ['d67c944fa2c60236330b'] }))
   assert.ok(resolvedBy(rs, { pr: 1023, fingerprints: [], title: '无 Key 时配方参考图可绕过 4 张提交上限' }))
@@ -44,7 +79,7 @@ test('resolvedBy: 按主指纹（mq1- 前缀可有可无）或标题，覆盖率
 test('loadResolutions 只对有评论的 issue 拉评论，跳过 PR 和无标记 issue', () => {
   const calls = []
   const gh = (p) => { calls.push(p); if (p.includes('/comments')) return [cmt('结论：误报，x')]; return [issue(), issue({ number: 3, body: 'x' }), issue({ number: 4, pull_request: {} })] }
-  const rs = loadResolutions(['aj0928/aj0928-handoff'], gh)
+  const rs = loadResolutions(['aj0928/aj0928-handoff'], gh, { prAuthorOf: () => 'aj0928' })
   assert.equal(rs.length, 1); assert.equal(rs[0].issue, 1)
   assert.deepEqual(calls, ['repos/aj0928/aj0928-handoff/issues?state=all&per_page=100', 'repos/aj0928/aj0928-handoff/issues/1/comments?per_page=100'])
 })

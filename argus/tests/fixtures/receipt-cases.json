@@ -133,5 +133,22 @@
 {"in": "结论：已修 #12", "out": {"kind": "已修", "fix_pr": null, "reason": null}, "pr": 12},
 {"in": "结论：已修 xindong/mivo-canvas-plugin#1098", "out": {"kind": "已修", "fix_pr": null, "reason": null}, "pr": 1098},
 {"in": "结论：已修 #1098", "out": {"kind": "已修", "fix_pr": 1098, "reason": null}, "pr": 943},
-{"in": "结论：已修（#943），原因：同一个 PR 里改的", "out": {"kind": "已修", "fix_pr": null, "reason": "同一个 PR 里改的"}, "pr": 943}
+{"in": "结论：已修（#943），原因：同一个 PR 里改的", "out": {"kind": "已修", "fix_pr": null, "reason": "同一个 PR 里改的"}, "pr": 943},
+{"in": "结论：误报，原因：已验真\n<!-- devin-acceptance-handoff: issue=aj0928/aj0928-handoff#3 verdict=pass -->", "out": null},
+{"in": "<!-- devin-acceptance-handoff: v=1 run=r1 -->\n结论：已修 #12", "out": null},
+{"in": "<!--devin-acceptance-handoff run=abc-->\n**结论**：不修，原因：设计如此", "out": null},
+{"in": "结论：误报，原因：生产路径到不了", "out": {"kind": "误报", "fix_pr": null, "reason": "生产路径到不了"}, "speaker": {"repo": "aj0928/aj0928-handoff", "pr_author": "aj0928", "login": "someone-else", "accepted": false}},
+{"in": "结论：误报，原因：生产路径到不了", "out": {"kind": "误报", "fix_pr": null, "reason": "生产路径到不了"}, "speaker": {"repo": "aj0928/aj0928-handoff", "pr_author": "lubinyu-lab", "login": "aj0928", "accepted": true}},
+{"in": "结论：误报，原因：生产路径到不了", "out": {"kind": "误报", "fix_pr": null, "reason": "生产路径到不了"}, "speaker": {"repo": "aj0928/aj0928-handoff", "pr_author": "aj0928", "login": "lubinyu-lab", "accepted": false}},
+{"in": "结论：误报，原因：生产路径到不了", "out": {"kind": "误报", "fix_pr": null, "reason": "生产路径到不了"}, "speaker": {"repo": "aj0928/aj0928-handoff", "pr_author": "lubinyu-lab", "login": "lubinyu-lab", "accepted": true}},
+{"in": "结论：误报，原因：生产路径到不了", "out": {"kind": "误报", "fix_pr": null, "reason": "生产路径到不了"}, "speaker": {"repo": "aj0928/aj0928-handoff", "pr_author": "aj0928", "login": "aj0928", "accepted": true}},
+{"in": "结论：误报，原因：生产路径到不了", "out": {"kind": "误报", "fix_pr": null, "reason": "生产路径到不了"}, "speaker": {"repo": "aj0928/aj0928-handoff", "pr_author": "aj0928", "login": "PraiseZhu", "accepted": false}},
+{"in": "结论：误报，原因：生产路径到不了", "out": {"kind": "误报", "fix_pr": null, "reason": "生产路径到不了"}, "speaker": {"repo": "aj0928/aj0928-handoff", "pr_author": null, "login": "aj0928", "accepted": true}},
+{"in": "结论：误报，原因：生产路径到不了", "out": {"kind": "误报", "fix_pr": null, "reason": "生产路径到不了"}, "speaker": {"repo": "aj0928/aj0928-handoff", "pr_author": null, "login": "lubinyu-lab", "accepted": false}},
+{"in": "结论：误报，原因：生产路径到不了", "out": {"kind": "误报", "fix_pr": null, "reason": "生产路径到不了"}, "speaker": {"repo": "zhongxingtian-ai/handover-mivo", "pr_author": "zhongxingtian-ai", "login": "zhongxingtian-ai", "accepted": true}},
+{"in": "结论：误报，原因：生产路径到不了", "out": {"kind": "误报", "fix_pr": null, "reason": "生产路径到不了"}, "speaker": {"repo": "zhongxingtian-ai/handover-mivo", "pr_author": "zhongxingtian-ai", "login": "aj0928", "accepted": false}},
+{"in": "结论：误报，原因：生产路径到不了", "out": {"kind": "误报", "fix_pr": null, "reason": "生产路径到不了"}, "speaker": {"repo": "zhongxingtian-ai/handover-mivo", "pr_author": null, "login": "zhongxingtian-ai", "accepted": true}},
+{"in": "结论：误报，原因：生产路径到不了", "out": {"kind": "误报", "fix_pr": null, "reason": "生产路径到不了"}, "speaker": {"repo": "zhongxingtian-ai/handover-mivo", "pr_author": null, "login": "someone-else", "accepted": false}},
+{"in": "结论：误报，原因：生产路径到不了", "out": {"kind": "误报", "fix_pr": null, "reason": "生产路径到不了"}, "speaker": {"repo": "other/repo", "pr_author": "aj0928", "login": "aj0928", "accepted": false}},
+{"in": "结论：误报，原因：已验真\n<!-- devin-acceptance-handoff: issue=aj0928/aj0928-handoff#3 -->", "out": null, "speaker": {"repo": "aj0928/aj0928-handoff", "pr_author": "aj0928", "login": "aj0928", "accepted": false}}
 ]

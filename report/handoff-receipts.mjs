@@ -2,12 +2,14 @@
 //   结论：已修 #<修复PR号>   /   结论：不修，<原因>   /   结论：误报，<原因>
 // （「结论」可加粗，半角、全角冒号都认，下面可以接人话正文）。私信之后在原 PR 下的评论、交接仓 issue 下的评论都认这一种；
 // 修复 PR 标题或正文写了「QA #原PR号」并合并（改到问题所在的文件）后，自动当「已修」（fixPrResolutions，不限作者）。
+// 交接 issue 下的回执只认这张单的授权发言人（receiptSpeakers，2026-11-20 PraiseZhu/panoptes#316）：原 PR 作者、路由 cc 里替他回的人、路由 owner，
+// 去掉 QA 自己；严健（aj0928）可代路滨宇（lubinyu-lab），反过来不行，无关账号一律不认。
 // issue 已关闭 / 打了 status:false-positive 等标签，也算这条问题有了结论，私信提醒和逾期通报都不再列它。
 // issue 正文里的标记 <!-- mivo-qa-handoff: key=mq1-<fingerprint>-pr<N> pr=<N> --> 把 issue 对回原 PR 的那条问题。
 // 同一口径的 Python 副本：pi-fallback bin/handoff.py（RECEIPT / parse_receipt / QA_REF）。
 import { readFileSync, existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { routedRepos } from './handoff-routes.mjs'
+import { routedRepos, loadRoutes } from './handoff-routes.mjs'
 
 // 一行回执的写法（2026-10-24 定稿，和 pi-fallback bin/handoff.py parse_receipt 同一口径；共用用例 argus/tests/fixtures/receipt-cases.json）：
 // 看评论的第一行有意义的话 —— 先去掉 HTML 注释和 BOM，跳过空行、代码块（含内容）、引用行（>）、只有 @ 的行；不再在后面的行里兜底找。
@@ -16,14 +18,14 @@ import { routedRepos } from './handoff-routes.mjs'
 // 允许夹「（」「PR」「见」「，」；等于原 PR 号的不算修复 PR。原因去掉开头的标点和「原因：」、去掉 **，最多 300 字。
 // 盯梢 bot 的回帖（带 <!-- mivo-watcher-receipt 标记、没有「结论：」行）按它的固定话术认：「确认此意见成立并已修复」/「要不要改代码：已改」→ 已修，
 // 「在当前 head 上不成立」→ 误报，「要不要改代码：（本轮）不改 / 不用 / 不需要」→ 不修。bot 的状态贴（task=blocked-notice / auto-close、
-// <!-- vigil-handoff ）任何时候都不算回执
+// <!-- vigil-handoff 、新验收机的验真评论 <!-- devin-acceptance-handoff ）任何时候都不算回执
 const RECEIPT_KINDS = { 已修复: '已修', 已修: '已修', 已改: '已修', 误报: '误报', 不成立: '误报', 不需要改: '不修', 不用改: '不修', 无需修改: '不修', 不修: '不修', 不改: '不修' }
 const KIND_ALT = Object.keys(RECEIPT_KINDS).sort((x, y) => y.length - x.length).join('|')
 const RECEIPT_LINE = new RegExp(`^(?:\\*\\*)?结论(?:\\*\\*)?[ \\t]*[:：][ \\t]*(?:\\*\\*)?[ \\t]*(${KIND_ALT})(?=$|[\\s*#，,、:：;；。.!！(（])(.*)$`)
 const FIX_REF = /^[\s*（(，,、:：]*(?:(?:见|PR)[\s*（(，,、:：]*)*(?:[\w.-]+\/[\w.-]+)?#([0-9]+)[）)]?/i
 const REASON_LEAD = /^[\s*，,、:：;；。.!！（()）]*(?:原因[ \t]*[:：])?[\s*]*/
 const LINE_SPLIT = /\r\n|\r|\n|\u2028|\u2029/
-export const BOT_STATUS_RE = /<!--\s*(?:vigil-handoff\b|mivo-watcher-receipt\b[^>]*\btask=(?:blocked-notice|auto-close)\b)/
+export const BOT_STATUS_RE = /<!--\s*(?:vigil-handoff\b|devin-acceptance-handoff\b|mivo-watcher-receipt\b[^>]*\btask=(?:blocked-notice|auto-close)\b)/
 const WATCHER_RECEIPT_RE = /<!--\s*mivo-watcher-receipt\b/
 // 修复 PR 引用原 PR：QA #N / QA: #N / QA：#N / QA: xindong/mivo-canvas-plugin#N
 // 「QA」后面可以夹最多 8 个非 #、非 / 的字（「QA 回访 」「QA: 」），然后是一串原 PR 号（/ , ， 、 和 & 隔开，只认裸 #N 或 xindong/mivo-canvas-plugin#N，别的仓不算），
@@ -43,7 +45,7 @@ export function qaRefs(text) {
 export const QA_REF_ALL = /(?<![A-Za-z])QA[^#/\n]{0,8}?(?:xindong\/mivo-canvas-plugin)?#(\d+)(?!\d)/gi
 const MARKER_RE = /<!--\s*mivo-qa-handoff:\s*key=(\S+)\s+pr=(\d+)/
 const RESOLVED_LABELS = new Set(['status:false-positive', 'status:closed', 'status:fixed', 'status:wontfix', 'status:resolved'])
-// QA 自己（PraiseZhu）的评论不算作者回执
+// QA 自己（PraiseZhu）的评论不算作者回执（receiptSpeakers 里去掉）
 export const QA_LOGINS = new Set((process.env.MIVO_QA_HANDOFF_QA_LOGINS || 'PraiseZhu').split(',').map(s => s.trim()).filter(Boolean))
 // 兼容旧接口：只回结论种类
 export const RECEIPT_RE = new RegExp(`^(?:\\*\\*)?结论(?:\\*\\*)?[ \\t]*[:：][ \\t]*(?:\\*\\*)?[ \\t]*(${KIND_ALT})`)
@@ -113,12 +115,32 @@ export function handoffRepos(QA) {
   return [...repos]
 }
 
+// 一张交接单的授权发言人：({ 原 PR 作者 } ∪ route.cc[原 PR 作者] ∪ { route.owner }) \ QA_LOGINS（Pi 线 handoff.py receipt_speakers 同一口径）。
+// 原 PR 作者不知道时：路由只有一个作者就是他，否则只认 owner（宁可多催一次，也不让反向代签收起逾期）。没有路由 → 谁都不认
+export function receiptSpeakers(route, prAuthor) {
+  if (!route) return new Set()
+  const author = prAuthor || (route.authors?.length === 1 ? route.authors[0] : null)
+  const out = new Set([route.owner, ...(author ? [author, ...(route.cc?.[author] || [])] : [])].filter(Boolean))
+  for (const q of QA_LOGINS) out.delete(q)
+  return out
+}
+// 原 PR 作者：日报报告 $QA_HOME/reports/merged/PR-<N>.json 里这个 PR 的 author（Pi 线 lib.load_report 读同一份）；读不到 → null
+export function reportAuthor(pr, qa = process.env.QA_HOME || '/workspace/mivo-qa') {
+  let doc
+  try { doc = JSON.parse(readFileSync(join(qa, 'reports/merged', `PR-${Number(pr)}.json`), 'utf8')) } catch { return null }
+  const a = (doc?.prs || []).find(p => Number(p.number) === Number(pr))?.author
+  return (typeof a === 'string' ? a : a?.login) || null
+}
+
 // issue: { number, state, labels:[{name}|string], body, html_url, closed_at }；comments: [{ user:{login}, body, created_at, html_url }]
-export function resolutionFor(repo, issue, comments) {
+// opts.routes：handoff-routes.json 内容（默认读文件）；opts.prAuthor：原 PR 作者（默认 reportAuthor）
+export function resolutionFor(repo, issue, comments, { routes, prAuthor } = {}) {
   const mk = parseMarker(issue.body); if (!mk) return null
   const labels = (issue.labels || []).map(l => typeof l === 'string' ? l : l.name)
   const base = { repo, issue: issue.number, url: issue.html_url, pr: mk.pr, key: mk.key, fingerprint: mk.fingerprint, title: String(issue.title || '').replace(/^\[P\d\]\s*#\d+\s*/, '') }
-  const receipt = [...(comments || [])].reverse().find(c => !QA_LOGINS.has(c.user?.login) && parseReceiptDetail(c.body, { pr: mk.pr }))
+  const route = (routes ?? loadRoutes()).routes.find(r => r.repo === repo) ?? null
+  const allowed = receiptSpeakers(route, prAuthor !== undefined ? prAuthor : reportAuthor(mk.pr))
+  const receipt = [...(comments || [])].reverse().find(c => allowed.has(c.user?.login) && parseReceiptDetail(c.body, { pr: mk.pr }))
   if (receipt) { const d = parseReceiptDetail(receipt.body, { pr: mk.pr }); return { ...base, kind: d.kind, fix_pr: d.fix_pr, reason: d.reason, by: receipt.user?.login, at: receipt.created_at, receipt_url: receipt.html_url } }
   const fp = labels.find(l => RESOLVED_LABELS.has(l))
   if (fp) return { ...base, kind: fp === 'status:false-positive' ? '误报' : fp.replace('status:', ''), by: 'label', at: issue.closed_at || null }
@@ -134,13 +156,13 @@ export function resolvedBy(resolutions, { pr, fingerprints = [], title }) {
 }
 
 // ghPaged(path) -> array；读失败抛出，由调用方记 errors
-export function loadResolutions(repos, ghPaged) {
+export function loadResolutions(repos, ghPaged, { routes = loadRoutes(), prAuthorOf = reportAuthor } = {}) {
   const out = []
   for (const repo of repos) {
     for (const issue of ghPaged(`repos/${repo}/issues?state=all&per_page=100`)) {
       if (issue.pull_request || !parseMarker(issue.body)) continue
       const comments = issue.comments > 0 ? ghPaged(`repos/${repo}/issues/${issue.number}/comments?per_page=100`) : []
-      const r = resolutionFor(repo, issue, comments); if (r) out.push(r)
+      const r = resolutionFor(repo, issue, comments, { routes, prAuthor: prAuthorOf(parseMarker(issue.body).pr) }); if (r) out.push(r)
     }
   }
   return out
