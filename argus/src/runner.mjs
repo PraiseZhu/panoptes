@@ -456,6 +456,10 @@ function readProbeReport(specPath) {
 export async function runSteps(profile, src, runDir, { stepIds = null, execution = null, beforeStep = null, timeoutMs = 60 * 60_000 } = {}) {
   const suiteEnd = Math.min(Date.now() + timeoutMs, budgetEndMs() ?? Infinity)
   const env = stepEnv(runDir, profile)
+  // 产品步骤要看到 PR 的目标分支：mivo 的 scripts/ci/guard-target.mjs 按 GitHub Actions 的 GITHUB_BASE_REF 选对照分支，
+  // 缺了它一律退回 refs/remotes/origin/main —— 目标分支是 integration/* 时，同一份代码会被判「基线不得新增…目标分支的
+  // 代码与基线都解释不了」，PR 版本和基线版本一起红，报告记成 pre-existing（#2151 #2430 #2438）
+  if (execution?.baseRef) env.GITHUB_BASE_REF = execution.baseRef
   const needsBase = profile.steps.some((s) => /\$\{(?:BASE_SHA|DIFF_BASE_SHA)\}/.test(JSON.stringify(s)))
   const parent = needsBase ? await toParentSha(src, Math.max(1, Math.min(60_000, suiteEnd - Date.now()))) : ''
   // BASE_SHA：被测提交的第一个父提交；DIFF_BASE_SHA：本 PR 改动的起点（nightly 传入的 base_sha：merged → 第一个父提交，
@@ -757,7 +761,7 @@ export async function cleanupRun(mirror, runDir) {
 }
 
 // 一次完整执行：检出 → 跑步骤 → 清理；清理失败只记日志，由 janitor 兜底
-export async function executeOnSha({ repo, jobId, label, sha, profile, stepIds, extraRefspecs = [], keepTo = null, diffBase = null, beforeStep = null, onEvidenceError = null }) {
+export async function executeOnSha({ repo, jobId, label, sha, profile, stepIds, extraRefspecs = [], keepTo = null, diffBase = null, baseRef = null, beforeStep = null, onEvidenceError = null }) {
   const mirror = await ensureMirror(repo, sha, { extraRefspecs })
   const runDir = newRunDir(jobId, label)
   try {
@@ -780,7 +784,7 @@ export async function executeOnSha({ repo, jobId, label, sha, profile, stepIds, 
         unavailableReasonZh: SANDBOX_SELFCHECK_ZH, exitCode: null, signal: null, timedOut: false, durationMs: 0, tail: '', failures: [], failureDetails: [], failureParseStatus: 'incomplete',
       }))
     }
-    return await runSteps(profile, src, runDir, { stepIds, beforeStep, execution: { jobId, runLabel: label, requestedSha: sha, checkedOutSha, diffBase } })
+    return await runSteps(profile, src, runDir, { stepIds, beforeStep, execution: { jobId, runLabel: label, requestedSha: sha, checkedOutSha, diffBase, baseRef } })
   }
 }
 
