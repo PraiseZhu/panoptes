@@ -174,7 +174,7 @@ step_mirror() {
   local dir="${SESSION_INIT_MERGER_DIR:-/workspace/mivo-merger}" policy
   policy="$dir/app/scripts/loops/automerge/policy.json"
   as_root "$dir" mkdir -p "$(dirname "$policy")" || return 1
-  if [[ ! -f "$policy" ]]; then
+  if [[ ! -s "$policy" ]]; then
     git --git-dir="$m" show HEAD:scripts/loops/automerge/policy.json | as_root "$policy" tee "$policy" >/dev/null || return 1
   fi
   if [[ ! -f "$dir/config.json" ]]; then
