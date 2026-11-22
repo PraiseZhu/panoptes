@@ -190,11 +190,7 @@ release_lock() {
   log "could not release the lock after $PUSH_ROUNDS rounds (it expires after $((STALE_S / 60)) min)"; LOCK_HELD=0; return 1
 }
 
-on_exit() {
-  release_lock "" || true
-  ((DRY)) || bash "$PANOPTES_DIR/devin/bin/session-init.sh" --cleanup || true
-}
-trap on_exit EXIT
+trap 'release_lock "" || true; ((DRY)) || bash "$PANOPTES_DIR/devin/bin/session-init.sh" --cleanup || true' EXIT
 trap 'exit 130' INT TERM
 
 # ---------- result ----------
