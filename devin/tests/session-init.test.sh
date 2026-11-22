@@ -26,6 +26,7 @@ export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$T/gitconfig" STATE_SYNC_BACKOFF
 export SESSION_INIT_SKIP_TOKEN=1 SESSION_INIT_SKIP_FF=1 SESSION_INIT_BIN_DIR="$T/usr-local-bin" SESSION_INIT_WORKSPACE="$T/ws"
 export GH_RESTORE_REAL="$T/native-gh" GH_RESTORE_SUDO="" SESSION_INIT_MEMINFO="$T/meminfo" SESSION_INIT_MIRROR_URL="file://$T/mivo.git"
 export SESSION_INIT_SELFCHECK="$T/selfcheck.sh" SESSION_INIT_PINS="$T/pins.json"
+export SESSION_INIT_MERGER_DIR="$T/mivo-merger"
 export QA_SECRETS_FILE="$T/box/.config/mivo-qa/secrets.env" PRAISE_QA_KEY="$T/box/.secrets/praise-qa/app.pem"
 export QA_LLM_BASE_URL=https://llm.example.invalid/v1 QA_LLM_API_KEY=$SENT_LLM ARGUS_TYPESAFE_API_KEY=$SENT_JEV
 PRAISE_QA_APP_KEY_B64=$(printf -- '-----BEGIN KEY-----\n%s\n-----END KEY-----\n' "$SENT_PEM" | base64 -w0)
@@ -38,7 +39,11 @@ printf 'MemTotal: 16000000 kB\nSwapTotal: 8388608 kB\nSwapFree: 8388608 kB\n' >"
 printf '#!/bin/bash\necho "timer=${PANOPTES_CATCHUP_TIMER-unset}" >>"%s"\n' "$T/selfcheck.log" >"$SESSION_INIT_SELFCHECK"
 chmod +x "$SESSION_INIT_SELFCHECK"
 git init -q --bare -b main "$T/mivo.git"
-git init -q -b main "$T/mivo-src" && git -C "$T/mivo-src" -c user.name=m -c user.email=m@x commit -q --allow-empty -m init
+git init -q -b main "$T/mivo-src"
+mkdir -p "$T/mivo-src/scripts/loops/automerge"
+echo '{"testPolicy":true}' >"$T/mivo-src/scripts/loops/automerge/policy.json"
+git -C "$T/mivo-src" add scripts/loops/automerge/policy.json
+git -C "$T/mivo-src" -c user.name=m -c user.email=m@x commit -q -m init
 git -C "$T/mivo-src" push -q "$T/mivo.git" main
 
 SCRIPTS=(report/slack/send-slack-report.mjs report/send-dm-recorded.mjs report/open-handoff-issue.mjs report/lib/jsonlog.mjs
@@ -145,6 +150,15 @@ eq "slots: exit 0 when all 7 match" 0 "$RC"
 eq "slots: json tier" slots "$(jget "$LAST" tier)"
 eq "slots: steps include pins" '["token", "secrets", "swap", "ff", "links", "pull", "mirror", "pins", "check"]' "$(jget "$LAST" steps)"
 for f in "${SCRIPTS[@]}"; do check "slots: $f pulled" test -f "$T/slots1/mivo-qa/$f"; done
+for attempt in 1 2; do
+  if ((attempt == 2)); then init slots1 slots; fi
+  eq "slots merger: attempt $attempt exit 0" 0 "$RC"
+  check "slots merger: policy matches mirror ($attempt)" cmp "$T/mivo-src/scripts/loops/automerge/policy.json" \
+    "$SESSION_INIT_MERGER_DIR/app/scripts/loops/automerge/policy.json"
+  check "slots merger: config ($attempt)" python3 -c \
+    'import json,sys; assert json.load(open(sys.argv[1]+"/config.json")) == {"pausedPath": sys.argv[1]+"/PAUSED"}' "$SESSION_INIT_MERGER_DIR"
+  check "slots merger: paused ($attempt)" test -f "$SESSION_INIT_MERGER_DIR/PAUSED"
+done
 
 remote_commit "echo tampered >>ledger/build-ledger.mjs"
 rm -f "$T/ws/mivo-qa"
@@ -186,6 +200,7 @@ cat >"$T/stub-nightly.sh" <<'SH'
 #!/bin/bash
 printf '%s\n' "$@" >"$STUB_DIR/nightly.args"
 { echo "timer=${PANOPTES_CATCHUP_TIMER-unset}"; echo "home=$HOME"; echo "path=$PATH"; echo "qa_home=$QA_HOME"
+  echo "real_gh=${PRAISE_QA_REAL_GH-unset}"
   echo "jev_env=${ARGUS_TYPESAFE_API_KEY-unset}"; grep -c '^ARGUS_TYPESAFE_API_KEY=' "$QA_SECRETS_FILE" | sed 's/^/jev_file=/'
   echo "secrets_mode=$(stat -c %a "$QA_SECRETS_FILE")"; } >"$STUB_DIR/nightly.env"
 exit "${STUB_RC:-0}"
@@ -215,6 +230,7 @@ eq "event: run-nightly args" "$common --write-merged --wait-lock 14400 --no-issu
 eq "event: PANOPTES_CATCHUP_TIMER=0" timer=0 "$(grep timer "$STUB_DIR/nightly.env")"
 eq "event: box HOME" home=/home/box "$(grep home= "$STUB_DIR/nightly.env" | head -1)"
 eq "event: box PATH" path=/usr/local/bin:/usr/bin:/bin "$(grep path= "$STUB_DIR/nightly.env")"
+eq "event: real gh" real_gh=/usr/bin/gh "$(grep real_gh= "$STUB_DIR/nightly.env")"
 eq "event: QA_HOME" "qa_home=$Q" "$(grep qa_home= "$STUB_DIR/nightly.env")"
 eq "event: secrets 600 during the run" secrets_mode=600 "$(grep secrets_mode= "$STUB_DIR/nightly.env")"
 eq "event: init args" "qa --pr 2464 --qa-home $Q" "$(cat "$STUB_DIR/init.args")"

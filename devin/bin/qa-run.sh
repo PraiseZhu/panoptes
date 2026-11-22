@@ -88,7 +88,7 @@ init_failed() { echo "qa-run: $1 failed" >&2; result 91 "" false false; exit 91;
 QA_HOME="$QA_DIR" node "$QUOTA" seed --day "$DAY" --qa-home "$QA_DIR" >&2 || init_failed "quota seed"
 
 CMD=("$NIGHTLY" --pr "$PR" --date "$DAY")
-ENV=(HOME="$BOX_HOME" PATH="$BOX_PATH" PANOPTES_CATCHUP_TIMER=0 QA_HOME="$QA_DIR" QA_SECRETS_FILE="$SECRETS")
+ENV=(HOME="$BOX_HOME" PATH="$BOX_PATH" PRAISE_QA_REAL_GH=/usr/bin/gh PANOPTES_CATCHUP_TIMER=0 QA_HOME="$QA_DIR" QA_SECRETS_FILE="$SECRETS")
 UNSET=()
 case "$MODE" in
   event|catch-up) CMD+=(--write-merged --wait-lock 14400 --no-issues --trigger "$MODE") ;;

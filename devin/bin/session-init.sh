@@ -164,11 +164,24 @@ step_pull() {
 
 step_mirror() {
   local m="$QA_DIR/argus-root/cache/mirrors/xindong__mivo-canvas-plugin.git" tmp
-  git --git-dir="$m" rev-parse -q --verify HEAD >/dev/null 2>&1 && return 0
-  # a directory without HEAD is a half-finished clone (the first-run race): start over
-  rm -rf -- "$m" && mkdir -p "$(dirname "$m")" || return 1
-  tmp="$m.init-$$"
-  if ! { git clone -q --bare "$MIRROR_URL" "$tmp" >&2 && mv "$tmp" "$m"; }; then rm -rf -- "$tmp"; return 1; fi
+  if ! git --git-dir="$m" rev-parse -q --verify HEAD >/dev/null 2>&1; then
+    # a directory without HEAD is a half-finished clone (the first-run race): start over
+    rm -rf -- "$m" && mkdir -p "$(dirname "$m")" || return 1
+    tmp="$m.init-$$"
+    if ! { git clone -q --bare "$MIRROR_URL" "$tmp" >&2 && mv "$tmp" "$m"; }; then rm -rf -- "$tmp"; return 1; fi
+  fi
+  [[ "$TIER" == slots ]] || return 0
+  local dir="${SESSION_INIT_MERGER_DIR:-/workspace/mivo-merger}" policy
+  policy="$dir/app/scripts/loops/automerge/policy.json"
+  as_root "$dir" mkdir -p "$(dirname "$policy")" || return 1
+  if [[ ! -f "$policy" ]]; then
+    git --git-dir="$m" show HEAD:scripts/loops/automerge/policy.json | as_root "$policy" tee "$policy" >/dev/null || return 1
+  fi
+  if [[ ! -f "$dir/config.json" ]]; then
+    python3 -c 'import json,sys; print(json.dumps({"pausedPath": sys.argv[1] + "/PAUSED"}))' "$dir" \
+      | as_root "$dir" tee "$dir/config.json" >/dev/null || return 1
+  fi
+  as_root "$dir" touch "$dir/PAUSED"
 }
 
 step_pins() {
