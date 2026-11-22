@@ -1,0 +1,24 @@
+{
+  "schema": "panoptes-devin-routing/v1",
+  "_doc": "Model tier routing for Devin automations and sessions (PraiseZhu/panoptes#312). devin/bin/resolve-mode.py turns one task kind plus the org's available_devin_modes (GET /v3/organizations/{org_id}/automations/schemas) into legal AutomationSessionSettings: a preview tier (preview_mode_prefix) only when the org lists it, then always with its stable fallback_devin_mode; otherwise the stable fallback alone, without fallback_devin_mode. platform is set on the automation itself (all linux in this phase).",
+  "preview_mode_prefix": "swe-2-",
+  "stable_modes": ["lite", "normal", "fusion", "ultra"],
+  "internal_llm": {
+    "_doc": "panoptes' own model steps stay on the company gateway and use no Devin ACU",
+    "provider": "openai",
+    "model": "gpt-6-luna",
+    "route": "company gateway (QA_LLM_BASE_URL)",
+    "used_by": ["code_review", "ai_tests", "summary"],
+    "consumes_devin_acu": false
+  },
+  "tasks": {
+    "merge_qa": {"aliases": ["A1"], "platform": "linux", "preferred_devin_mode": "swe-2-medium", "fallback_devin_mode": "lite", "_doc": "A1 merge -> test (devin/preflight/mergewatch.py items)"},
+    "catchup_qa": {"aliases": ["A2"], "platform": "linux", "preferred_devin_mode": "swe-2-medium", "fallback_devin_mode": "lite", "_doc": "A2 hourly catch-up (devin/preflight/catchup.py item)"},
+    "slot_job": {"aliases": ["A3"], "platform": "linux", "preferred_devin_mode": "swe-2-medium", "fallback_devin_mode": "lite", "_doc": "A3 the 14 scheduled slot jobs"},
+    "watchdog_triage": {"aliases": ["A4"], "platform": "linux", "preferred_devin_mode": "swe-2-high", "fallback_devin_mode": "normal", "_doc": "A4 watchdog anomaly triage"},
+    "bot1_chat": {"aliases": ["bot1"], "platform": "linux", "preferred_devin_mode": "swe-2-high", "fallback_devin_mode": "normal", "_doc": "Bot 1 conversation"},
+    "bot2_fix": {"aliases": ["bot2"], "platform": "linux", "preferred_devin_mode": "swe-2-high", "fallback_devin_mode": "fusion", "_doc": "Bot 2 routine fix (phase 3)"},
+    "bot3_eval": {"aliases": ["bot3"], "platform": "linux", "preferred_devin_mode": "swe-2-high", "fallback_devin_mode": "fusion", "_doc": "Bot 3 routine evaluation (phase 3)"},
+    "deep_fix_or_review": {"aliases": [], "platform": "linux", "preferred_devin_mode": "swe-2-max", "fallback_devin_mode": "ultra", "_doc": "hard cross-module fix or deep acceptance review"}
+  }
+}
