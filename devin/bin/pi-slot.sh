@@ -263,10 +263,12 @@ for line in "${JOBS[@]}"; do
   IFS=$'\t' read -r -a F <<<"$line"; mapfile -t A < <(job_args "${F[0]}" "${F[@]:2}")
   if [[ "${F[1]}" != - && -e "$QA_DIR/${F[1]}" ]]; then log "skip ${F[0]}: $QA_DIR/${F[1]} exists"; RESULTS+=("${F[0]}"$'\t'"${A[*]}"$'\t'); continue; fi
   log "run ${F[0]} ${A[*]}"
-  "$RUNNER" "${F[0]}" "${A[@]}"; rc=$?
+  HOME="${PI_SLOT_BOX_HOME:-/home/box}" PATH="${PI_SLOT_BOX_PATH:-/usr/local/bin:/usr/bin:/bin}" \
+    PRAISE_QA_REAL_GH="${PRAISE_QA_REAL_GH:-/usr/bin/gh}" "$RUNNER" "${F[0]}" "${A[@]}"; rc=$?
   RESULTS+=("${F[0]}"$'\t'"${A[*]}"$'\t'"$rc"); bump "$rc"
 done
-"$RUNNER" outbound "${OUT_ARGS[@]}"; rc=$?
+HOME="${PI_SLOT_BOX_HOME:-/home/box}" PATH="${PI_SLOT_BOX_PATH:-/usr/local/bin:/usr/bin:/bin}" \
+  PRAISE_QA_REAL_GH="${PRAISE_QA_REAL_GH:-/usr/bin/gh}" "$RUNNER" outbound "${OUT_ARGS[@]}"; rc=$?
 OUT_RESULT="${OUT_ARGS[*]}"$'\t'"$rc"; bump "$rc"
 
 # ---------- push ----------

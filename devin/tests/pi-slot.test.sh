@@ -12,6 +12,7 @@ trap '[[ -n "${KEEP:-}" ]] || rm -rf "$T"' EXIT
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$T/gitconfig" STATE_SYNC_BACKOFF_MIN=0 STATE_SYNC_BACKOFF_MAX=1
 : >"$GIT_CONFIG_GLOBAL"
 export QA_SECRETS_FILE="$T/secrets.env" PRAISE_QA_KEY="$T/app.pem" PI_SLOT_LOCK_POLL=1 PI_SLOT_SLEEP="$T/fake-sleep"
+unset PRAISE_QA_REAL_GH PI_SLOT_BOX_HOME PI_SLOT_BOX_PATH
 D=box/workspace/mivo-qa
 DAY=$(TZ=Asia/Shanghai date +%F)
 PASS=0 FAIL=0
@@ -32,6 +33,7 @@ cat >"$T/fake-run.sh" <<'FAKE'
 #!/usr/bin/env bash
 job=$1; shift
 echo "$job $*" >>"$CALLS"
+printf '%s|%s|%s|%s\n' "$job" "$HOME" "$PATH" "${PRAISE_QA_REAL_GH-unset}" >>"$CALLS.env"
 gate=0; [[ -e "$QA_HOME/pi/outbound-enabled" ]] && gate=1
 case "$job" in
   daily)
@@ -124,6 +126,11 @@ seed
 run_slot --slot 06:20
 eq "normal run rc" 0 "$RC"
 eq "normal run job order" $'handoff \nfollowup \noutbound ' "$(cat "$T/calls.log")"
+eq "runner: controlled environment for every job" \
+  $'handoff|/home/box|/usr/local/bin:/usr/bin:/bin|/usr/bin/gh\nfollowup|/home/box|/usr/local/bin:/usr/bin:/bin|/usr/bin/gh\noutbound|/home/box|/usr/local/bin:/usr/bin:/bin|/usr/bin/gh' \
+  "$(cat "$CALLS.env")"
+# shellcheck disable=SC2016 # positional args of the inner bash
+check "runner: no host .local/bin" bash -c '! grep -qF .local/bin "$1"' _ "$CALLS.env"
 eq "result json jobs" "handoff,followup" "$(jget jobs <"$T/out" | python3 -c 'import json,sys; print(",".join(j["job"] for j in json.load(sys.stdin)))')"
 eq "lock taken fresh" acquired "$(jget lock <"$T/out")"
 check "run marker on devin-lock" bash -c "git -C '$T/remote.git' show 'devin-lock:runs/$DAY/0620.json' | grep -q '\"rc\": 0'"
