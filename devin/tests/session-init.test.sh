@@ -18,6 +18,9 @@ jget() { python3 -c 'import json,sys; v=json.loads(sys.argv[1]); [v := v[k] for 
 mode_of() { stat -c %a "$1" 2>/dev/null; }
 
 SENT_LLM=SENTINEL_LLM_9f3a1c SENT_JEV=SENTINEL_JEV_77c1e0 SENT_PEM=SENTINEL_PEM_c0de42
+SENT_SLACK=SENTINEL_SLACK_5b8d21 SENT_DEEPSEEK=SENTINEL_DEEPSEEK_e4a907
+# shellcheck disable=SC2016 # literal $x: must survive bash source and lib.py unquoted
+SENT_URL='https://llm.example.invalid/v1?a=1&b=$x c!d"e\f#g;h|i*SENTINEL_URL_31f0aa'
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$T/gitconfig" STATE_SYNC_BACKOFF_MIN=0 STATE_SYNC_BACKOFF_MAX=1
 : >"$GIT_CONFIG_GLOBAL"
 export SESSION_INIT_SKIP_TOKEN=1 SESSION_INIT_SKIP_FF=1 SESSION_INIT_BIN_DIR="$T/usr-local-bin" SESSION_INIT_WORKSPACE="$T/ws"
@@ -83,7 +86,10 @@ check "qa: other PR not pulled" test ! -e "$T/qa1/mivo-qa/reports/merged/PR-1000
 for f in "${SCRIPTS[@]}"; do check "qa: $f not pulled" test ! -e "$T/qa1/mivo-qa/$f"; done
 eq "qa: secrets file 600" 600 "$(mode_of "$QA_SECRETS_FILE")"
 eq "qa: app key 600" 600 "$(mode_of "$PRAISE_QA_KEY")"
-check "qa: GITHUB_TOKEN placeholder" grep -qx 'GITHUB_TOKEN=ghs_devin_no_pat' "$QA_SECRETS_FILE"
+check "qa: GITHUB_TOKEN placeholder" grep -qx "GITHUB_TOKEN='ghs_devin_no_pat'" "$QA_SECRETS_FILE"
+no_key() { ! grep -q "^$1=" "$QA_SECRETS_FILE"; }
+check "qa: no Slack token configured -> not written" no_key MIVO_SLACK_BOT_TOKEN
+check "qa: no DeepSeek key configured -> not written" no_key DEEPSEEK_API_KEY
 eq "qa: secrets file is sourceable" "$SENT_LLM" "$(unset QA_LLM_API_KEY; set -a; # shellcheck disable=SC1090
   . "$QA_SECRETS_FILE"; echo "$QA_LLM_API_KEY")"
 check "qa: app key decoded" grep -q "$SENT_PEM" "$PRAISE_QA_KEY"
@@ -98,6 +104,34 @@ rm -f "$T/ws/mivo-qa"
 init half qa --pr 2464
 eq "qa: half-finished mirror re-cloned (exit 0)" 0 "$RC"
 check "qa: half-finished mirror now valid" git --git-dir="$T/half/mivo-qa/argus-root/cache/mirrors/xindong__mivo-canvas-plugin.git" rev-parse -q --verify HEAD >/dev/null
+
+# secrets.env reads back byte-identical through bash `source` and pi/bin/lib.py secret_env_dict() (Slack/DeepSeek optional keys)
+same_both() { # same_both KEY WANT: prints "bash=same py=same" without ever printing a value
+  local b p
+  # shellcheck disable=SC2016 # positional args of the inner bash
+  b=$(env -i bash -c 'set -a; . "$1"; printf %s "${!2}"' _ "$QA_SECRETS_FILE" "$1")
+  p=$(HOME="$T/box" PI_STATE="$T/pistate" PI_WORK="$T/piwork" python3 -c \
+    'import sys; sys.path.insert(0, sys.argv[1]); import lib; sys.stdout.write(lib.secret_env_dict().get(sys.argv[2], "<missing>"))' \
+    "$HERE/../../pi/bin" "$1")
+  printf 'bash=%s py=%s' "$([[ "$b" == "$2" ]] && echo same || echo diff)" "$([[ "$p" == "$2" ]] && echo same || echo diff)"
+}
+rm -f "$T/ws/mivo-qa"
+MIVO_SLACK_BOT_TOKEN=$SENT_SLACK DEEPSEEK_API_KEY=$SENT_DEEPSEEK QA_LLM_BASE_URL=$SENT_URL init quote qa --pr 2464
+eq "quote: exit 0" 0 "$RC"
+eq "quote: secrets file 600" 600 "$(mode_of "$QA_SECRETS_FILE")"
+eq "quote: MIVO_SLACK_BOT_TOKEN bash/lib.py identical" "bash=same py=same" "$(same_both MIVO_SLACK_BOT_TOKEN "$SENT_SLACK")"
+eq "quote: DEEPSEEK_API_KEY bash/lib.py identical" "bash=same py=same" "$(same_both DEEPSEEK_API_KEY "$SENT_DEEPSEEK")"
+eq "quote: ?a=1&b=\$x value bash/lib.py identical" "bash=same py=same" "$(same_both QA_LLM_BASE_URL "$SENT_URL")"
+eq "quote: QA_LLM_API_KEY bash/lib.py identical" "bash=same py=same" "$(same_both QA_LLM_API_KEY "$SENT_LLM")"
+eq "quote: GITHUB_TOKEN placeholder bash/lib.py identical" "bash=same py=same" "$(same_both GITHUB_TOKEN ghs_devin_no_pat)"
+for bad_value in "it's-SENTINEL_QUOTE_6d2c" $'line1\nSENTINEL_NL_8a4e'; do
+  rm -f "$T/ws/mivo-qa" "$QA_SECRETS_FILE"
+  MIVO_SLACK_BOT_TOKEN=$bad_value init badq qa --pr 2464
+  eq "quote: unsafe value rejected (exit 91)" 91 "$RC"
+  check "quote: unsafe value names the key" grep -q MIVO_SLACK_BOT_TOKEN "$T/badq.err"
+  check "quote: no secrets file left" test ! -e "$QA_SECRETS_FILE"
+done
+rm -f "$T/ws/mivo-qa"
 
 RC=0; "$INIT" --cleanup >>"$ALL" 2>&1 || RC=$?
 eq "cleanup: exit 0" 0 "$RC"
@@ -267,7 +301,8 @@ check "real init + failing run: secrets gone" test ! -e "$QA_SECRETS_FILE"
 check "real init + failing run: app key gone" test ! -e "$PRAISE_QA_KEY"
 
 # SC1: no sentinel secret value anywhere in stdout/stderr of every run above
-for v in "$SENT_LLM" "$SENT_JEV" "$SENT_PEM" "$PRAISE_QA_APP_KEY_B64"; do
+for v in "$SENT_LLM" "$SENT_JEV" "$SENT_PEM" "$PRAISE_QA_APP_KEY_B64" "$SENT_SLACK" "$SENT_DEEPSEEK" "$SENT_URL" \
+  SENTINEL_URL_31f0aa SENTINEL_QUOTE_6d2c SENTINEL_NL_8a4e; do
   # shellcheck disable=SC2016 # positional args of the inner bash
   check "no secret value in output (${v:0:12}…)" bash -c '! grep -qF -- "$1" "$2"' _ "$v" "$ALL"
 done

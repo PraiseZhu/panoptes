@@ -88,10 +88,18 @@ step_secrets() {
   done
   mkdir -p "$(dirname "$SECRETS")" "$(dirname "$APP_KEY")" || return 1
   tmp=$(umask 077 && mktemp "$SECRETS.XXXXXX") || return 1
+  # KEY='VALUE' reads back identically via bash `source` and pi/bin/lib.py secret_env_dict() (strips quotes, no unescaping)
+  local -a keys=(QA_LLM_BASE_URL QA_LLM_API_KEY ARGUS_TYPESAFE_API_KEY MIVO_FEISHU_APP_ID MIVO_FEISHU_APP_SECRET
+    MIVO_SLACK_BOT_TOKEN DEEPSEEK_API_KEY)
+  for v in "${keys[@]}"; do
+    if [[ "${!v:-}" == *[$'\n\r'\']* ]]; then
+      rm -f "$tmp"; echo "session-init: $v contains a newline or single quote" >&2; return 1
+    fi
+  done
   {
-    printf 'GITHUB_TOKEN=%q\n' ghs_devin_no_pat
-    for v in QA_LLM_BASE_URL QA_LLM_API_KEY ARGUS_TYPESAFE_API_KEY MIVO_FEISHU_APP_ID MIVO_FEISHU_APP_SECRET; do
-      [[ -n "${!v:-}" ]] && printf '%s=%q\n' "$v" "${!v}"
+    printf "GITHUB_TOKEN='%s'\n" ghs_devin_no_pat
+    for v in "${keys[@]}"; do
+      [[ -n "${!v:-}" ]] && printf "%s='%s'\n" "$v" "${!v}"
     done
   } >"$tmp"
   if ! { chmod 600 "$tmp" && mv -f "$tmp" "$SECRETS"; }; then rm -f "$tmp"; return 1; fi
