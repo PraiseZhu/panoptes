@@ -1,0 +1,13 @@
+{
+  "source": "PraiseZhu/grokbot-box@3c930f8ad2da269d99647038b6ba49af87cb4915:box/workspace/mivo-qa/",
+  "tier": "slots",
+  "sha256": {
+    "report/slack/send-slack-report.mjs": "ee9fc6c089ac35d040b975b63d6fbf916719f8f132810c0b76ed83009298365a",
+    "report/send-dm-recorded.mjs": "5e87ec4eb2cdb1dfd48aecad3a6ffc0bf201fc650014ecc50282e7b3fcbc1fa3",
+    "report/open-handoff-issue.mjs": "3addfc1ef675632fb696f45a0773d84e16627d77f8e4d0f57ee22d3640b1d2c8",
+    "report/lib/jsonlog.mjs": "ba00d7229d53fdc630df74ec63e24b9b44fe083522a2891398f9adb9562ee2a3",
+    "ledger/build-ledger.mjs": "742883e90fa58896ee1e84ae4cb1e472a2f31a70483aa3650e04e85ed707bb66",
+    "ledger/apply-fix-retests.mjs": "912fd9a2465e858183cea5e681c311fbad52bde0b586da2fb2b3bd30de2ff713",
+    "handoff/gen/gen.py": "a1ebd5e6bb47ec308d77ea77e14336a531e32828358d22c415eea33dbe5e4a2d"
+  }
+}
