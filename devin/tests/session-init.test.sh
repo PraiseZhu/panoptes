@@ -110,6 +110,44 @@ init half qa --pr 2464
 eq "qa: half-finished mirror re-cloned (exit 0)" 0 "$RC"
 check "qa: half-finished mirror now valid" git --git-dir="$T/half/mivo-qa/argus-root/cache/mirrors/xindong__mivo-canvas-plugin.git" rev-parse -q --verify HEAD >/dev/null
 
+# Issue #325: only a clean panoptes checkout may be moved to make room for the workspace link.
+for fixture in clean dirty foreign; do
+  workspace="$T/ws-$fixture"
+  checkout="$workspace/panoptes"
+  git clone -q "$T/mivo-src" "$checkout"
+  origin=https://github.com/PraiseZhu/panoptes.git
+  [[ "$fixture" != foreign ]] || origin=https://github.com/PraiseZhu/other.git
+  git -C "$checkout" remote set-url origin "$origin"
+  policy=scripts/loops/automerge/policy.json
+  [[ "$fixture" != dirty ]] || echo 'local edit' >>"$checkout/$policy"
+
+  SESSION_INIT_WORKSPACE="$workspace" init "workspace-$fixture" ops
+  mapfile -t snapshots < <(find "$workspace" -maxdepth 1 -name 'panoptes.snapshot-*')
+  if [[ "$fixture" == clean ]]; then
+    eq "workspace clean: exit 0" 0 "$RC"
+    eq "workspace clean: reaches check after links" '["token", "secrets", "swap", "ff", "links", "check"]' "$(jget "$LAST" steps)"
+    check "workspace clean: panoptes is a symlink" test -L "$checkout"
+    eq "workspace clean: link points to this checkout" "$(cd "$HERE/../.." && pwd -P)" "$(readlink -f "$checkout")"
+    eq "workspace clean: one snapshot" 1 "${#snapshots[@]}"
+    snapshot="${snapshots[0]:-$workspace/no-snapshot}"
+    if [[ "${snapshot##*/}" =~ ^panoptes\.snapshot-[0-9]{8}T[0-9]{6}Z$ ]]; then
+      ok "workspace clean: UTC timestamp in snapshot name"
+    else
+      bad "workspace clean: UTC timestamp in snapshot name"
+    fi
+    check "workspace clean: clone saved in snapshot" cmp "$T/mivo-src/$policy" "$snapshot/$policy"
+  else
+    eq "workspace $fixture: exit 91" 91 "$RC"
+    eq "workspace $fixture: failed step" links "$(jget "$LAST" failed_step)"
+    check "workspace $fixture: original directory is not a symlink" test ! -L "$checkout"
+    eq "workspace $fixture: original origin" "$origin" "$(git -C "$checkout" remote get-url origin)"
+    eq "workspace $fixture: no snapshot" 0 "${#snapshots[@]}"
+    if [[ "$fixture" == dirty ]]; then
+      check "workspace dirty: local edit preserved" grep -qx 'local edit' "$checkout/$policy"
+    fi
+  fi
+done
+
 # secrets.env reads back byte-identical through bash `source` and pi/bin/lib.py secret_env_dict() (Slack/DeepSeek optional keys)
 same_both() { # same_both KEY WANT: prints "bash=same py=same" without ever printing a value
   local b p
