@@ -220,6 +220,48 @@ check "ops: missing variable named" grep -q 'QA_LLM_API_KEY is not set' "$T/ops.
 RC=0; "$INIT" qa >>"$ALL" 2>&1 || RC=$?
 eq "qa without --pr -> usage 2" 2 "$RC"
 
+# Issue #327: retry a failed self-check after one bootstrap.
+check_bootstrap() {
+  local fixture calls
+  local -x SESSION_INIT_SELFCHECK="$T/retry-selfcheck.sh" SESSION_INIT_BOOTSTRAP="$T/bootstrap.sh"
+  cat >"$SESSION_INIT_SELFCHECK" <<'SH'
+#!/bin/bash
+echo "check timer=$PANOPTES_CATCHUP_TIMER" >>"$QA_HOME/check.log"
+[[ "$CHECK_CASE" == ready || -f "$QA_HOME/installed" ]]
+SH
+  cat >"$SESSION_INIT_BOOTSTRAP" <<'SH'
+#!/bin/bash
+echo "bootstrap timer=$PANOPTES_CATCHUP_TIMER" >>"$QA_HOME/check.log"
+echo "bootstrap output"
+case "$CHECK_CASE" in
+  repaired) touch "$QA_HOME/installed" ;;
+  bootstrap-error) touch "$QA_HOME/installed"; exit 1 ;;
+esac
+SH
+  chmod +x "$SESSION_INIT_SELFCHECK" "$SESSION_INIT_BOOTSTRAP"
+  for fixture in ready repaired still-broken bootstrap-error; do
+    CHECK_CASE="$fixture" SESSION_INIT_WORKSPACE="$T/ws-$fixture" init "$fixture" ops
+    calls='check timer=0'
+    if [[ "$fixture" != ready ]]; then
+      calls+=$'\nbootstrap timer=0'
+      check "#327 $fixture: bootstrap output goes to stderr" grep -qx 'bootstrap output' "$T/$fixture.err"
+      eq "#327 $fixture: stdout is only the JSON summary" "$LAST" "$OUTPUT"
+    fi
+    if [[ "$fixture" == repaired || "$fixture" == still-broken ]]; then
+      calls+=$'\ncheck timer=0'
+    fi
+    eq "#327 $fixture: check and bootstrap order" "$calls" "$(cat "$T/$fixture/mivo-qa/check.log")"
+    if [[ "$fixture" == ready || "$fixture" == repaired ]]; then
+      eq "#327 $fixture: exit 0" 0 "$RC"
+      eq "#327 $fixture: steps include check" '["token", "secrets", "swap", "ff", "links", "check"]' "$(jget "$LAST" steps)"
+    else
+      eq "#327 $fixture: exit 91" 91 "$RC"
+      eq "#327 $fixture: failed_step" check "$(jget "$LAST" failed_step)"
+    fi
+  done
+}
+check_bootstrap
+
 # real pins.json: the 7 data-dir scripts, each a 64-hex SHA-256
 eq "pins.json: 7 scripts" "$(printf '%s\n' "${SCRIPTS[@]}" | sort)" \
   "$(python3 -c 'import json,sys; print("\n".join(sorted(json.load(open(sys.argv[1]))["sha256"])))' "$HERE/../conf/pins.json")"

@@ -25,6 +25,7 @@
 #              $QA_HOME/argus-root/cache/mirrors/xindong__mivo-canvas-plugin.git, once and before any QA starts (qa, slots)
 #   8 pins     slots only: the 7 outbound/ledger scripts in $QA_HOME match $SESSION_INIT_PINS (default devin/conf/pins.json)
 #   9 check    PANOPTES_CATCHUP_TIMER=0 $SESSION_INIT_SELFCHECK (default scripts/bootstrap-box.sh --check)
+#              retry after one $SESSION_INIT_BOOTSTRAP (default scripts/bootstrap-box.sh) if the check fails
 # Last stdout line: one JSON object {ok, tier, platform, pr, qa_home, panoptes_sha, steps, failed_step}.
 set -uo pipefail
 
@@ -213,6 +214,10 @@ PY
 }
 
 step_check() {
+  # shellcheck disable=SC2086 # SELFCHECK is a command line
+  PANOPTES_CATCHUP_TIMER=0 QA_HOME="$QA_DIR" $SELFCHECK >&2 && return 0
+  # shellcheck disable=SC2086 # SESSION_INIT_BOOTSTRAP is a command line
+  PANOPTES_CATCHUP_TIMER=0 QA_HOME="$QA_DIR" ${SESSION_INIT_BOOTSTRAP:-$PANOPTES_DIR/scripts/bootstrap-box.sh} >&2 || return 1
   # shellcheck disable=SC2086 # SELFCHECK is a command line
   PANOPTES_CATCHUP_TIMER=0 QA_HOME="$QA_DIR" $SELFCHECK >&2
 }
