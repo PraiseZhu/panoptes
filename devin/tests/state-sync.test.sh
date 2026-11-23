@@ -32,6 +32,7 @@ seed() { # fresh bare remote with a devin branch holding a small mivo-qa tree
   echo '{"pr":2464,"v":1}' >"$s/reports/merged/PR-2464.json"
   printf '%s\n' '{"pr":1}' '{"pr":2}' >"$s/reports/merged/manual-runs.jsonl"
   echo old >"$s/argus-root/cache/review-verdicts/aa.json"
+  for f in gh-app-enabled gh-app-nightly-enabled gh-app-wrapper-enabled; do echo on >"$s/pi/$f"; done
   echo log >"$s/pi/out/logs/x.log"; echo m >"$s/memguard/m.txt"; echo t >"$s/pi/out/tasks/t.json"
   echo out >"$s/run.out"; echo bak >"$s/ledger/SCHEMA.md.bak-1"; echo schema >"$s/ledger/SCHEMA.md"
   for i in $(seq 1 "${1:-0}"); do mkdir -p "$s/bulk"; echo "$i" >"$s/bulk/f$i"; done
@@ -68,6 +69,9 @@ H="$T/home-a/mivo-qa"
 eq "pull qa brings PR-2464 report" '{"pr":2464,"v":1}' "$(cat "$H/reports/merged/PR-2464.json")"
 check "pull qa skips other PR reports" test ! -e "$H/reports/merged/PR-1000.json"
 check "pull qa brings review cache" test -f "$H/argus-root/cache/review-verdicts/aa.json"
+for f in gh-app-enabled gh-app-nightly-enabled gh-app-wrapper-enabled; do
+  eq "pull qa brings switch pi/$f (#323)" on "$(cat "$H/pi/$f" 2>/dev/null)"
+done
 before=$(remote_head)
 mkdir -p "$H/reports/catch-up" "$H/argus-root/gate-wait" "$H/pi/out/devin/quota/$DAY" "$H/pi/out/devin/runs/PR-2464/r1" "$H/pi/out/qa-fleet/runs"
 echo '{"pr":2464,"v":2}' >"$H/reports/merged/PR-2464.json"
@@ -85,12 +89,16 @@ echo '{"pr":2465}' >"$H/reports/merged/PR-2465.json"
 echo 9 >"$H/argus-root/gate-wait/PR-2465"
 echo '{"pr":99}' >>"$H/reports/merged/manual-runs.jsonl"
 rm -f "$H/reports/merged/PR-1001.json"
+check "switch pi/gh-app-enabled is local before push (#323)" test -f "$H/pi/gh-app-enabled"
+echo off >"$H/pi/gh-app-enabled"; echo on >"$H/pi/gh-app-extra-enabled"
 sync a push qa --pr 2464 2>/dev/null
 changed=$(git -C "$T/remote.git" diff --name-status "$before" devin | sort | tr '\t' ' ' | tr '\n' ';')
 want="A $D/argus-root/cache/review-verdicts/bb.json;A $D/argus-root/gate-wait/PR-2464;A $D/pi/out/devin/quota/$DAY/PR-2464.json;A $D/pi/out/devin/runs/PR-2464/r1/run.json;A $D/pi/out/qa-fleet/runs/$RUN_ID.json;A $D/reports/catch-up/PR-2464.json;M $D/reports/merged/PR-2464.json;"
 eq "push qa changes exactly the PR-2464 whitelist" "$want" "$changed"
 eq "other PR report untouched" '{"pr":1000}' "$(remote_cat "$D/reports/merged/PR-1000.json")"
 check "locally deleted PR-1001 still on remote" remote_has "$D/reports/merged/PR-1001.json"
+eq "push qa leaves switch pi/gh-app-enabled as pulled (#323)" on "$(remote_cat "$D/pi/gh-app-enabled")"
+if remote_has "$D/pi/gh-app-extra-enabled"; then bad "push qa never adds switch files (#323)"; else ok "push qa never adds switch files (#323)"; fi
 eq "existing review cache entry not overwritten" old "$(remote_cat "$D/argus-root/cache/review-verdicts/aa.json")"
 eq "manual-runs.jsonl untouched outside backfill" 2 "$(remote_cat "$D/reports/merged/manual-runs.jsonl" | wc -l | tr -d ' ')"
 check "base marker removed after push" test ! -e "$T/wd-a/.git/state-sync.base"
