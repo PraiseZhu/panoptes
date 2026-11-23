@@ -136,12 +136,24 @@ step_ff() {
 }
 
 link() { # link TARGET PATH: PATH becomes a symlink to TARGET (an equal real directory is accepted as is)
-  local target=$1 path=$2
+  local target=$1 path=$2 parent prefix origin status stamp
   [[ -e "$path" && "$(readlink -f "$path")" == "$(readlink -f "$target")" ]] && return 0
+  parent=$(dirname "$path")
   if [[ -e "$path" && ! -L "$path" ]]; then
-    echo "session-init: $path exists and is not $target" >&2; return 1
+    if [[ "$path" != "$WORKSPACE/panoptes" || ! -d "$path" ]] \
+      || ! prefix=$(git -C "$path" rev-parse --show-prefix 2>/dev/null) || [[ -n "$prefix" ]] \
+      || ! origin=$(git -C "$path" config --get remote.origin.url) \
+      || [[ "$origin" != *PraiseZhu/panoptes && "$origin" != *PraiseZhu/panoptes.git ]] \
+      || ! status=$(git -C "$path" status --porcelain --untracked-files=all --ignore-submodules=none) || [[ -n "$status" ]]; then
+      echo "session-init: $path exists and is not $target" >&2; return 1
+    fi
+    stamp=$(date -u +%Y%m%dT%H%M%SZ) || return 1
+    as_root "$parent" mv -nT -- "$path" "$path.snapshot-$stamp" || return 1
+    if [[ -e "$path" ]]; then
+      echo "session-init: $path.snapshot-$stamp already exists" >&2; return 1
+    fi
   fi
-  as_root "$(dirname "$path")" mkdir -p "$(dirname "$path")" && as_root "$(dirname "$path")" ln -sfn "$target" "$path"
+  as_root "$parent" mkdir -p "$parent" && as_root "$parent" ln -sfn "$target" "$path"
 }
 
 step_links() {
