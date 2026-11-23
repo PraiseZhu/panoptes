@@ -25,6 +25,7 @@
 #   pi/out/devin/runs/PR-N/**  pi/out/qa-fleet/runs/<run_id of argus-root/qa-fleet-run-manifest.json>.json
 #   argus-root/cache/review-verdicts/** (new files only)  reports/merged/manual-runs.jsonl (backfill, lines appended
 #   after the pulled version only)
+# qa pull also brings the pi/gh-app-enabled and pi/gh-app-*-enabled switches (pull only: never on the push whitelist).
 # slots pull skips memguard/ logs/ tasks/ *.out *.bak*; slots push also leaves those alone and never sends cache/ .venv/
 # argus-root/app/ argus-root/logs/ *.lock. A slots push that would delete more than 200 files is refused (exit 90).
 # Pushing: commit as praisedevin[bot], then up to 5 rounds of git pull --rebase + git push with a random 2-10 s back-off
@@ -85,7 +86,7 @@ g() { git -C "$WORK_DIR" -c advice.detachedHead=false "$@"; }
 sparse_patterns() {
   if [[ "$TIER" == slots ]]; then printf '%s\n' "/$DATA_PATH/" "/$FLEET_MODE_PATH"; return; fi
   printf "/$DATA_PATH/%s\n" "reports/merged/PR-$PR.json" "reports/catch-up/PR-$PR.json" "argus-root/gate-wait/PR-$PR" \
-    "pi/out/devin/quota/$DAY/" "pi/out/devin/runs/PR-$PR/" "$REVIEW_CACHE/" "$MANUAL_RUNS"
+    "pi/out/devin/quota/$DAY/" "pi/out/devin/runs/PR-$PR/" "$REVIEW_CACHE/" "$MANUAL_RUNS" "pi/gh-app-enabled" "pi/gh-app-*-enabled"
 }
 
 # clone or refresh the work dir and check out the remote head of $BRANCH (sparse)
