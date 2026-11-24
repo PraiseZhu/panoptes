@@ -84,7 +84,7 @@ class MockGitHub:
     """GitHub REST stand-in: App token exchange, matching-refs, closed pulls, data branch tree and blobs."""
 
     def __init__(self):
-        self.fx = {"heads": {"main": "c" * 40}, "pulls": [], "reports": {}, "fail": False}
+        self.fx = {"heads": {"main": "c" * 40}, "pulls": [], "reports": {}, "runs": {}, "fail": False}
         self.requests = []
         mock = self
 
@@ -134,6 +134,14 @@ class MockGitHub:
                     doc = mock.fx["reports"].get(path.split("blob-", 1)[1])
                     raw = doc if isinstance(doc, str) else json.dumps(doc)
                     return self.reply(200, {"content": base64.b64encode(raw.encode()).decode(), "encoding": "base64"})
+                prefix = f"/repos/{DATA}/contents/box/workspace/mivo-qa/pi/out/devin/runs/"
+                if path.startswith(prefix) and query.get("ref") == ["devin"]:
+                    record = mock.fx["runs"].get(path[len(prefix):])
+                    if isinstance(record, int):
+                        return self.reply(record, {"message": "run record unavailable"})
+                    if record is not None:
+                        raw = json.dumps(record).encode()
+                        return self.reply(200, {"content": base64.b64encode(raw).decode(), "encoding": "base64"})
                 self.reply(404, {"message": "Not Found"})
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -381,6 +389,10 @@ class SC3MergeWatch(PreflightCase):
 
     def test_backoff_and_three_tries(self):
         self.gh.fx["pulls"] = [pull(7, 60)]
+        self.gh.fx["runs"] = {
+            "PR-7/2026-11-23-try1-event.json": {"exit_code": 3, "finished_at": iso(NOW + 5)},
+            "PR-7/2026-11-23-try2-event.json": {"exit_code": 3, "finished_at": iso(NOW + 130)},
+        }
         timeline = [(0, ["try-1"]), (60, []), (125, ["try-2"]), (125 + 300, []), (125 + 605, ["try-3"]),
                     (125 + 605 + 2000, [])]
         for offset, want in timeline:
@@ -400,7 +412,79 @@ class SC3MergeWatch(PreflightCase):
         p, out = self.run_script(MW, now=NOW + 300, last_run={"items": [{"key": key, "status": "running"}]})
         self.assertEqual(out, {"items": []})
         p, out = self.run_script(MW, now=NOW + 301, last_run={"items": [{"key": key, "status": "succeeded"}]})
-        self.assertEqual([i["try"] for i in out["items"]], [2])
+        self.assertEqual(out, {"items": []})
+
+    def test_sc1_missing_record_does_not_retry_at_two_or_ten_minutes(self):
+        self.gh.fx["pulls"] = [pull(41, 60)]
+        for elapsed in (120, 600):
+            p, out = self.run_script(MW)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual([i["version"] for i in out["items"]], ["try-1"])
+            with self.subTest(elapsed=elapsed):
+                p, out = self.run_script(MW, now=NOW + elapsed)
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertEqual(out, {"items": []})
+            os.unlink(self.files["STATE_FILE"])
+
+    def test_sc2_failed_record_backs_off_from_finish_and_successful_report_is_done(self):
+        self.gh.fx["pulls"] = [pull(43, 60), pull(44, 60), pull(45, 60)]
+        p, out = self.run_script(MW)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual([i["version"] for i in out["items"]], ["try-1"] * 3)
+        for pr, code in [(43, 3), (44, 0), (45, 0)]:
+            self.gh.fx["runs"][f"PR-{pr}/2026-11-23-try1-event.json"] = {
+                "exit_code": code, "finished_at": iso(NOW + 300),
+            }
+        self.gh.fx["reports"]["PR-44.json"] = report(44, sha(44))
+        p, out = self.run_script(MW, now=NOW + 419)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(out, {"items": []})
+        self.assertIn(f"PR-44@{sha(44)[:12]}", self.state()["done"])
+        self.assertEqual(self.gh.count("/PR-43/2026-11-23-try1-event.json"), 1)
+        p, out = self.run_script(MW, now=NOW + 420)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual([(i["pr"], i["version"]) for i in out["items"]], [(43, "try-2")])
+        p, out = self.run_script(MW, now=NOW + 5 * 3600)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(out, {"items": []})
+
+    def test_sc3_missing_record_retries_only_after_five_hours(self):
+        self.gh.fx["pulls"] = [pull(46, 60)]
+        p, out = self.run_script(MW)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual([i["version"] for i in out["items"]], ["try-1"])
+        results = []
+        for elapsed in (5 * 3600 - 1, 5 * 3600):
+            p, out = self.run_script(MW, now=NOW + elapsed)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            results.append([i["version"] for i in out["items"]])
+        self.assertEqual(results, [[], ["try-2"]])
+
+    def test_sc4_last_run_terminal_status_retries_only_matching_items_after_backoff(self):
+        self.gh.fx["pulls"] = [pull(n, 60) for n in (47, 48, 49)]
+        p, out = self.run_script(MW)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual([i["version"] for i in out["items"]], ["try-1"] * 3)
+        last_run = {"items": [{"key": f"PR-47@{sha(47)[:12]}", "status": "FAILED"},
+                              {"key": f"PR-48@{sha(48)[:12]}:try-1", "status": "skipped"},
+                              {"key": f"PR-49@{sha(49)[:12]}#try-2", "status": "failed"}]}
+        p, out = self.run_script(MW, now=NOW + 119, last_run=last_run)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(out, {"items": []})
+        p, out = self.run_script(MW, now=NOW + 120, last_run=last_run)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual([(i["pr"], i["version"]) for i in out["items"]], [(47, "try-2"), (48, "try-2")])
+
+    def test_run_record_github_error_exits_without_writing_state_or_output(self):
+        self.gh.fx["pulls"] = [pull(50, 60)]
+        self.run_script(MW)
+        before = self.state()
+        self.gh.fx["runs"]["PR-50/2026-11-23-try1-event.json"] = 502
+        p, out = self.run_script(MW, now=NOW + 120)
+        self.assertEqual(p.returncode, 1, p.stderr)
+        self.assertIn("HTTP 502", p.stderr)
+        self.assertIsNone(out)
+        self.assertEqual(self.state(), before)
 
     def test_at_most_ten_items_per_run_and_small_state(self):
         self.gh.fx["pulls"] = [pull(100 + i, 1000 + i * 60, base="main" if i % 3 else "integration/x") for i in range(15)]
