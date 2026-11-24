@@ -4,9 +4,9 @@ Devin port of the polling half of pi/bin/mergewatch.py. Each run (Devin calls it
 branch of Mivo (main, integration/*, release/*) over the GitHub REST API. Only when a head moved, at least 10 minutes passed
 since the last PR scan, or a retry is due, it lists the 100 most recently closed PRs and emits one work item per merged PR
 that still needs a test: base not skipped (probe-*; PANOPTES_MAIN_ONLY=1 -> main only), merged in the last 48 h, no report
-on the data branch whose tested_sha (docs-only: merged_sha) is the merge commit, fewer than 3 tries, backoff since the last
-try reached (2 min before try 2, 10 min before try 3) and its previous run not still running (LAST_RUN_FILE). Main first,
-then oldest first, at most 10 items per run.
+on the data branch whose tested_sha (docs-only: merged_sha) is the merge commit, and fewer than 3 tries. Retry after a failed
+run record or a failed/skipped LAST_RUN_FILE item clears backoff (2 min before try 2, 10 min before try 3), or after 5 h
+without a run record. Main first, then oldest first, at most 10 items per run.
 Item: {"id": "PR-N@<sha12>", "version": "try-K", "title", "pr", "sha", "day", "try", "base", "mode": "event"}; a Devin
 session runs `devin/bin/qa-run.sh --pr N --day D --try K --mode event` for it. Devin handles one (id, version) once, so the
 version makes retries of the same merge commit new work.
@@ -32,10 +32,12 @@ MIVO_REPO = os.environ.get("MIVO_REPO") or "xindong/mivo-canvas-plugin"
 DATA_REPO = os.environ.get("DATA_REPO") or "PraiseZhu/grokbot-box"
 DATA_BRANCH = os.environ.get("DATA_BRANCH") or "devin"
 REPORTS_PATH = "box/workspace/mivo-qa/reports/merged"
+RUNS_PATH = "box/workspace/mivo-qa/pi/out/devin/runs"
 WATCH_PREFIXES = ("heads/main", "heads/integration/", "heads/release/")
 SKIP_BASES = ("probe-*",)
 MAX_TRIES = 3
 BACKOFF_S = (120, 600)
+STUCK_S = 5 * 3600
 SCAN_EVERY_S = 600
 LOOKBACK_S = 48 * 3600
 MAX_ITEMS = 10
@@ -114,14 +116,18 @@ def should_test_base(ref):
     return not any(fnmatch.fnmatchcase(ref, g) for g in SKIP_BASES)
 
 
-def select_busy_keys(last_run):
-    """keys of LAST_RUN_FILE items whose run is still going"""
+def select_run_keys(last_run, statuses):
     items = last_run.get("items") if isinstance(last_run, dict) else last_run
     out = set()
     for it in items if isinstance(items, list) else []:
-        if isinstance(it, dict) and str(it.get("status", "")).lower() in BUSY_STATUSES and it.get("key"):
+        if isinstance(it, dict) and str(it.get("status", "")).lower() in statuses and it.get("key"):
             out.add(str(it["key"]))
     return out
+
+
+def select_busy_keys(last_run):
+    """keys of LAST_RUN_FILE items whose run is still going"""
+    return select_run_keys(last_run, BUSY_STATUSES)
 
 
 def is_busy(item_id, busy_keys):
@@ -228,9 +234,36 @@ def prune(state, t):
         del bucket[min(bucket, key=lambda k: bucket[k].get("merged_at", 0))]
 
 
-def is_retry_due(entry, t):
+def retry_scan_due(entry, t):
     n = entry.get("n", 0)
     return 0 < n < MAX_TRIES and t - entry.get("at", 0) >= BACKOFF_S[n - 1]
+
+
+def fetch_run_record(client, pr, n):
+    path = f"/contents/{RUNS_PATH}/PR-{pr['number']}/{pr['day']}-try{n}-event.json"
+    try:
+        blob = client.get(DATA_REPO, f"{path}?{urllib.parse.urlencode({'ref': DATA_BRANCH})}")
+    except gh_app_jwt.GitHubError as e:
+        if str(e).startswith(f"GET /repos/{DATA_REPO}{path}: HTTP 404"):
+            return None
+        raise
+    record = json.loads(base64.b64decode(blob["content"]))
+    if not isinstance(record, dict):
+        raise PreflightError(f"{path}: expected a run record object")
+    return record
+
+
+def is_retry_due(client, pr, entry, failed_keys, t):
+    n = entry["n"]
+    backoff = BACKOFF_S[n - 1]
+    elapsed = t - entry["at"]
+    record = fetch_run_record(client, pr, n)
+    if record is not None and record["exit_code"] != 0 and t - to_epoch(record["finished_at"]) >= backoff:
+        return True
+    key = item_id(pr)
+    if elapsed >= backoff and failed_keys.intersection((key, f"{key}:try-{n}", f"{key}#try-{n}")):
+        return True
+    return record is None and elapsed >= STUCK_S
 
 
 def to_state(raw):
@@ -239,11 +272,11 @@ def to_state(raw):
             "tries": dict(st.get("tries") or {}), "done": dict(st.get("done") or {})}
 
 
-def decide(client, state, busy_keys, t):
+def decide(client, state, last_run, t):
     """-> (new_state, decision, scanned) — the whole poll; raises on any GitHub error before anything is written"""
     heads = fetch_heads(client)
     moved = heads != state["heads"]
-    retry_due = any(is_retry_due(e, t) for e in state["tries"].values())
+    retry_due = any(retry_scan_due(e, t) for e in state["tries"].values())
     if not moved and not retry_due and t - state["last_scan"] < SCAN_EVERY_S:
         return state, {"items": []}, False
     candidates = []
@@ -255,15 +288,16 @@ def decide(client, state, busy_keys, t):
             continue
         candidates.append(pr)
     index = fetch_report_index(client) if candidates else {}
+    busy_keys = select_busy_keys(last_run)
+    failed_keys = select_run_keys(last_run, ("failed", "skipped"))
     items = []
     for pr in sorted(candidates, key=to_order):
         key = item_id(pr)
-        entry = state["tries"].get(key, {"n": 0, "at": 0})
-        if entry.get("n", 0) >= MAX_TRIES:
+        entry = state["tries"].get(key, {})
+        n = entry.get("n", 0)
+        if n >= MAX_TRIES:
             continue
-        if entry.get("n", 0) and not is_retry_due(entry, t):
-            continue
-        if is_busy(key, busy_keys):
+        if n == 0 and is_busy(key, busy_keys):
             continue
         if len(items) >= MAX_ITEMS:
             break
@@ -271,7 +305,9 @@ def decide(client, state, busy_keys, t):
             state["tries"].pop(key, None)
             state["done"][key] = {"merged_at": pr["merged_at"]}
             continue
-        n = entry.get("n", 0) + 1
+        if n and not is_retry_due(client, pr, entry, failed_keys, t):
+            continue
+        n += 1
         state["tries"][key] = {"n": n, "at": t, "merged_at": pr["merged_at"], "pr": pr["number"]}
         items.append({"id": key, "version": f"try-{n}", "title": f"合并即测 PR #{pr['number']}（{pr['base']} "
                       f"{pr['sha'][:12]}，第 {n}/{MAX_TRIES} 次）", "pr": pr["number"], "sha": pr["sha"],
@@ -286,10 +322,10 @@ def main(argv=None):
     stdout = "--stdout" in argv
     read_json_file(os.environ.get("EVENT_FILE"), {})
     state = to_state(read_json_file(os.environ.get("STATE_FILE"), {}))
-    busy = select_busy_keys(read_json_file(os.environ.get("LAST_RUN_FILE"), {}))
+    last_run = read_json_file(os.environ.get("LAST_RUN_FILE"), {})
     t = now_s()
     try:
-        state, decision, scanned = decide(gh_app_jwt.Client(), state, busy, t)
+        state, decision, scanned = decide(gh_app_jwt.Client(), state, last_run, t)
         write_outputs(state, decision, stdout)
     except (gh_app_jwt.AppAuthError, gh_app_jwt.GitHubError, PreflightError, OSError, ValueError, KeyError) as e:
         print(f"mergewatch: {type(e).__name__}: {e}", file=sys.stderr)
