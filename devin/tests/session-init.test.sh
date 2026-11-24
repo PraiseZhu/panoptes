@@ -19,6 +19,7 @@ mode_of() { stat -c %a "$1" 2>/dev/null; }
 
 SENT_LLM=SENTINEL_LLM_9f3a1c SENT_JEV=SENTINEL_JEV_77c1e0 SENT_PEM=SENTINEL_PEM_c0de42
 SENT_SLACK=SENTINEL_SLACK_5b8d21 SENT_DEEPSEEK=SENTINEL_DEEPSEEK_e4a907
+SENT_HANDOFF=SENTINEL_HANDOFF_6cb0c0_local_fixture
 # shellcheck disable=SC2016 # literal $x: must survive bash source and lib.py unquoted
 SENT_URL='https://llm.example.invalid/v1?a=1&b=$x c!d"e\f#g;h|i*SENTINEL_URL_31f0aa'
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$T/gitconfig" STATE_SYNC_BACKOFF_MIN=0 STATE_SYNC_BACKOFF_MAX=1
@@ -31,7 +32,7 @@ export QA_SECRETS_FILE="$T/box/.config/mivo-qa/secrets.env" PRAISE_QA_KEY="$T/bo
 export QA_LLM_BASE_URL=https://llm.example.invalid/v1 QA_LLM_API_KEY=$SENT_LLM ARGUS_TYPESAFE_API_KEY=$SENT_JEV
 PRAISE_QA_APP_KEY_B64=$(printf -- '-----BEGIN KEY-----\n%s\n-----END KEY-----\n' "$SENT_PEM" | base64 -w0)
 export PRAISE_QA_APP_KEY_B64
-unset DEVIN_SESSION_MODE QA_HOME
+unset DEVIN_SESSION_MODE QA_HOME MIVO_HANDOFF_FILES_KEY
 mkdir -p "$SESSION_INIT_BIN_DIR" "$T/ws"
 printf '#!/bin/sh\necho native\n' >"$GH_RESTORE_REAL"; chmod +x "$GH_RESTORE_REAL"
 printf 'MemTotal: 16000000 kB\nSwapTotal: 8388608 kB\nSwapFree: 8388608 kB\n' >"$SESSION_INIT_MEMINFO"
@@ -187,6 +188,8 @@ init slots1 slots
 eq "slots: exit 0 when all 7 match" 0 "$RC"
 eq "slots: json tier" slots "$(jget "$LAST" tier)"
 eq "slots: steps include pins" '["token", "secrets", "swap", "ff", "links", "pull", "mirror", "pins", "check"]' "$(jget "$LAST" steps)"
+eq "slots: absent handoff key reported" missing "$(jget "$LAST" handoff_key)"
+check "slots: absent handoff key not written" test ! -e "$T/slots1/mivo-qa/pi/outbound/handoff-files.key"
 for f in "${SCRIPTS[@]}"; do check "slots: $f pulled" test -f "$T/slots1/mivo-qa/$f"; done
 for attempt in 1 2; do
   if ((attempt == 2)); then init slots1 slots; fi
@@ -197,6 +200,16 @@ for attempt in 1 2; do
     'import json,sys; assert json.load(open(sys.argv[1]+"/config.json")) == {"pausedPath": sys.argv[1]+"/PAUSED"}' "$SESSION_INIT_MERGER_DIR"
   check "slots merger: paused ($attempt)" test -f "$SESSION_INIT_MERGER_DIR/PAUSED"
 done
+
+rm -f "$T/ws/mivo-qa"
+MIVO_HANDOFF_FILES_KEY=$SENT_HANDOFF init slotskey slots
+eq "slots: handoff key provisioned successfully" 0 "$RC"
+key_file="$T/slotskey/mivo-qa/pi/outbound/handoff-files.key"
+eq "slots: handoff key permissions" 600 "$(mode_of "$key_file")"
+check "slots: handoff key content is byte-identical" cmp -s "$key_file" <(printf '%s' "$SENT_HANDOFF")
+if grep -Fq "$SENT_HANDOFF" "$ALL"; then bad "slots: handoff key value leaked"; else ok "slots: handoff key value stays out of output"; fi
+"$INIT" --cleanup
+check "cleanup: keeps slots handoff key" test -f "$key_file"
 
 remote_commit "echo tampered >>ledger/build-ledger.mjs"
 rm -f "$T/ws/mivo-qa"

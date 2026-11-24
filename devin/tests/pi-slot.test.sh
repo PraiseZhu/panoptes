@@ -41,6 +41,9 @@ case "$job" in
     echo "# daily $yday" >"$QA_HOME/pi/out/daily/$yday.md"
     [[ " $* " == *" --no-send "* ]] || echo "REAL-SEND daily gate=$gate" >>"$SENDS" ;;
   outbound)
+    day=$(TZ=Asia/Shanghai date +%F)
+    receipt="$QA_HOME/handoff/staging/handover-mivo/daily/${day:0:4}/${day:5:2}/$day/receipts.md"
+    if [[ -f "$receipt" ]]; then grep -F -- '#11 OPEN 回执' "$receipt" >"$CALLS.staged" || :; fi
     mkdir -p "$QA_HOME/pi/out/outbound"
     if [[ " $* " == *" --dry-run "* ]]; then echo plan >"$QA_HOME/pi/out/outbound/$(TZ=Asia/Shanghai date +%F).dry-run.md"
     else echo "REAL-SEND outbound gate=$gate" >>"$SENDS"; echo sent >"$QA_HOME/pi/out/outbound-sent.txt"; fi ;;
@@ -189,10 +192,27 @@ check "shadow: devin changed only under pi/out/devin/shadow/<data day>/" bash -c
 check "shadow: daily draft and dry-run plan pushed" bash -c "grep -q '0735-$YDAY.md' <<<'$changed' && grep -q '0735-$DAY.dry-run.md' <<<'$changed'"
 check "shadow: remote gate file untouched" bash -c "git -C '$T/remote.git' show 'devin:$D/pi/outbound-enabled' | grep -q open"
 check "shadow marker separate from normal" bash -c "git -C '$T/remote.git' show 'devin-lock:runs/$DAY/0735.shadow.json' >/dev/null"
+check "shadow does not stage receipts" test ! -e "$T/qa/mivo-qa/handoff/staging"
 # guard check: the fake really sends when daily lacks --no-send and the gate is open (so the zero above means something)
 : >"$T/sends.log"; mkdir -p "$T/qa/mivo-qa/pi"; echo open >"$T/qa/mivo-qa/pi/outbound-enabled"
 QA_HOME="$T/qa/mivo-qa" "$T/fake-run.sh" daily
 eq "control: fake daily without --no-send sends" "REAL-SEND daily gate=1" "$(cat "$T/sends.log")"
+
+echo "# issue #331 SC4: stage runs only in normal mode, before outbound, and fails open"
+seed
+mkdir -p "$T/qa/mivo-qa/pi/out/handoff"
+printf '## 扫描 00:05 北京时间（Pi line，只读）\n- zhongxingtian-ai/handover-mivo#11 OPEN 回执「已修」\n' \
+  >"$T/qa/mivo-qa/pi/out/handoff/$DAY.md"
+run_slot --slot 07:00
+eq "stage before outbound: slot succeeds" 0 "$RC"
+check "outbound sees today's staged receipt" grep -Fq -- '#11 OPEN 回执' "$T/calls.log.staged"
+seed
+mkdir -p "$T/qa/mivo-qa/pi/out/outbound"
+printf 'invalid ledger\n' >"$T/qa/mivo-qa/pi/out/outbound/ledger.json"
+run_slot --slot 07:00
+eq "stage error leaves outbound successful" 0 "$RC"
+check "stage error logged" grep -Fq 'handoff-stage failed' "$T/err"
+check "outbound ran despite stage error" grep -q '^outbound ' "$T/calls.log"
 
 echo "pi-slot.test: $PASS passed, $FAIL failed"
 ((FAIL == 0))

@@ -267,6 +267,9 @@ for line in "${JOBS[@]}"; do
     PRAISE_QA_REAL_GH="${PRAISE_QA_REAL_GH:-/usr/bin/gh}" "$RUNNER" "${F[0]}" "${A[@]}"; rc=$?
   RESULTS+=("${F[0]}"$'\t'"${A[*]}"$'\t'"$rc"); bump "$rc"
 done
+if ((!SHADOW)); then
+  python3 "$HERE/handoff-stage.py" stage --day "$DAY" >&2 || log "handoff-stage failed for $DAY; continuing to outbound"
+fi
 HOME="${PI_SLOT_BOX_HOME:-/home/box}" PATH="${PI_SLOT_BOX_PATH:-/usr/local/bin:/usr/bin:/bin}" \
   PRAISE_QA_REAL_GH="${PRAISE_QA_REAL_GH:-/usr/bin/gh}" "$RUNNER" outbound "${OUT_ARGS[@]}"; rc=$?
 OUT_RESULT="${OUT_ARGS[*]}"$'\t'"$rc"; bump "$rc"

@@ -59,14 +59,19 @@ done
 if [[ "$TIER" == qa ]]; then [[ "$PR" =~ ^[1-9][0-9]*$ ]] || usage; else [[ -z "$PR" ]] || usage; fi
 QA_DIR=${QA_DIR%/}
 STEPS=()
+HANDOFF_KEY_STATUS=
+[[ "$TIER" != slots ]] || HANDOFF_KEY_STATUS=missing
 
 emit() { # emit OK FAILED_STEP
   python3 - "$1" "$TIER" "$(uname -s | tr '[:upper:]' '[:lower:]')" "$PR" "$QA_DIR" \
-    "$(git -C "$PANOPTES_DIR" rev-parse HEAD 2>/dev/null)" "$2" "${STEPS[@]}" <<'PY'
+    "$(git -C "$PANOPTES_DIR" rev-parse HEAD 2>/dev/null)" "$2" "$HANDOFF_KEY_STATUS" "${STEPS[@]}" <<'PY'
 import json, sys
-ok, tier, platform, pr, qa_home, sha, failed, *steps = sys.argv[1:]
-print(json.dumps({"ok": ok == "true", "tier": tier, "platform": platform, "pr": int(pr) if pr else None, "qa_home": qa_home,
-                  "panoptes_sha": sha or None, "steps": steps, "failed_step": failed or None}))
+ok, tier, platform, pr, qa_home, sha, failed, handoff_key, *steps = sys.argv[1:]
+result = {"ok": ok == "true", "tier": tier, "platform": platform, "pr": int(pr) if pr else None, "qa_home": qa_home,
+          "panoptes_sha": sha or None, "steps": steps, "failed_step": failed or None}
+if handoff_key:
+    result["handoff_key"] = handoff_key
+print(json.dumps(result))
 PY
 }
 fail() { echo "session-init: step $1 failed${2:+: $2}" >&2; cleanup; emit false "$1"; exit 91; }
@@ -108,7 +113,17 @@ step_secrets() {
   if ! { printf '%s' "$PRAISE_QA_APP_KEY_B64" | base64 -d >"$tmp" 2>/dev/null && [[ -s "$tmp" ]]; }; then
     rm -f "$tmp"; echo "session-init: PRAISE_QA_APP_KEY_B64 is not valid base64" >&2; return 1
   fi
-  chmod 600 "$tmp" && mv -f "$tmp" "$APP_KEY"
+  if ! { chmod 600 "$tmp" && mv -f "$tmp" "$APP_KEY"; }; then rm -f "$tmp"; return 1; fi
+  if [[ "$TIER" == slots && -n "${MIVO_HANDOFF_FILES_KEY:-}" ]]; then
+    local key_path="$QA_DIR/pi/outbound/handoff-files.key"
+    mkdir -p "$(dirname "$key_path")" || return 1
+    tmp=$(umask 077 && mktemp "$key_path.bak.XXXXXX") || return 1
+    if ! { printf '%s' "$MIVO_HANDOFF_FILES_KEY" >"$tmp" && chmod 600 "$tmp" && mv -fT "$tmp" "$key_path"; }; then
+      rm -f "$tmp"; return 1
+    fi
+    HANDOFF_KEY_STATUS=written
+    unset MIVO_HANDOFF_FILES_KEY
+  fi
 }
 
 step_swap() {
