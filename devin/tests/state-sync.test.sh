@@ -177,6 +177,32 @@ subj=$(git -C "$T/remote.git" log -1 --format=%s devin)
 check "slots subject 'devin sync slots 07:35 <UTC>' ($subj)" grep -Eq '^devin sync slots 07:35 [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' <<<"$subj"
 eq "slots author is praisedevin[bot]" "$BOT" "$(git -C "$T/remote.git" log -1 --format='%an <%ae>' devin)"
 
+echo "# issue #331 SC7: slots never sync the handoff key"
+seed
+key=pi/outbound/handoff-files.key
+H="$T/home-key/mivo-qa"
+mkdir -p "$H/pi/outbound"
+printf local-fixture >"$H/$key"
+printf neighbor >"$H/$key.example"
+sync key pull slots
+sync key push slots
+if remote_has "$D/$key"; then bad "slots push excludes the key"; else ok "slots push excludes the key"; fi
+check "slots push includes similarly named file" remote_has "$D/$key.example"
+other_commit "$D/$key" remote-fixture
+sync key pull slots
+check "slots pull keeps the local key" grep -qx local-fixture "$H/$key"
+printf 'changed\n' >"$H/ledger/SCHEMA.md"
+sync key push slots
+eq "slots push leaves the remote key untouched" remote-fixture "$(remote_cat "$D/$key")"
+sync key pull slots
+printf staged-fixture >"$T/wd-key/$D/$key"
+git -C "$T/wd-key" add -- "$D/$key"
+before=$(remote_head)
+set +e; sync key push slots >"$T/key.out" 2>"$T/key.err"; rc=$?; set -e
+eq "slots push refuses a staged key (94)" 94 "$rc"
+check "staged-key refusal names the path" grep -Fq "refused staged $key" "$T/key.err"
+eq "remote HEAD unchanged after staged-key refusal" "$before" "$(remote_head)"
+
 echo "# slots rebase conflict stops (91)"
 seed
 sync r pull slots 2>/dev/null

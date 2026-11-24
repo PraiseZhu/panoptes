@@ -26,20 +26,21 @@
 #   argus-root/cache/review-verdicts/** (new files only)  reports/merged/manual-runs.jsonl (backfill, lines appended
 #   after the pulled version only)
 # qa pull also brings the pi/gh-app-enabled and pi/gh-app-*-enabled switches (pull only: never on the push whitelist).
-# slots pull skips memguard/ logs/ tasks/ *.out *.bak*; slots push also leaves those alone and never sends cache/ .venv/
+# slots pull skips memguard/ logs/ tasks/ *.out *.bak* and the handoff HMAC key; slots push also leaves those alone and never sends cache/ .venv/
 # argus-root/app/ argus-root/logs/ *.lock. A slots push that would delete more than 200 files is refused (exit 90).
 # Pushing: commit as praisedevin[bot], then up to 5 rounds of git pull --rebase + git push with a random 2-10 s back-off
 # (STATE_SYNC_BACKOFF_MIN / STATE_SYNC_BACKOFF_MAX shorten it for tests). A qa rebase conflict re-applies the whitelist
 # onto the new remote head; a slots rebase conflict stops (exit 91).
 #
 # Exit: 0 ok · 2 usage · 3 precondition (no earlier pull, manual-runs.jsonl rewritten, bad manifest) · 90 too many
-#       deletions · 91 slots rebase conflict · 92 push still rejected after 5 rounds · 93 qa commit outside the whitelist
+#       deletions · 91 slots rebase conflict · 92 push still rejected after 5 rounds · 93 qa commit outside the whitelist · 94 staged handoff HMAC key
 set -euo pipefail
 
 readonly MAX_DELETES=200 PUSH_ROUNDS=5
 readonly BOT_NAME='praisedevin[bot]' BOT_EMAIL='358239493+praisedevin[bot]@users.noreply.github.com'
 readonly DATA_PATH='box/workspace/mivo-qa' FLEET_MODE_PATH='box/workspace/fleet-mode'
-readonly PULL_EXCLUDES=(--exclude=memguard/ --exclude=logs/ --exclude=tasks/ --exclude='*.out' --exclude='*.bak*')
+readonly HANDOFF_KEY='pi/outbound/handoff-files.key'
+readonly PULL_EXCLUDES=(--exclude=memguard/ --exclude=logs/ --exclude=tasks/ --exclude='*.out' --exclude='*.bak*' "--exclude=/$HANDOFF_KEY")
 readonly LOCAL_EXCLUDES=(--exclude=cache/ --exclude=.venv/ --exclude=/argus-root/app/ --exclude=/argus-root/logs/ --exclude='*.lock')
 readonly REVIEW_CACHE='argus-root/cache/review-verdicts' MANUAL_RUNS='reports/merged/manual-runs.jsonl'
 
@@ -177,10 +178,15 @@ check_qa_staged() {
   done < <(g diff --cached --name-only)
 }
 
+check_slots_staged() {
+  g diff --cached --quiet -- "$DATA_PATH/$HANDOFF_KEY" || die 94 "push slots: refused staged $HANDOFF_KEY"
+}
+
 apply_slots() {
   mkdir -p "$WORK_DIR/$DATA_PATH"
   rsync -a --delete "${LOCAL_EXCLUDES[@]}" "${PULL_EXCLUDES[@]}" "$QA_DIR/" "$WORK_DIR/$DATA_PATH/"
   g add -A --sparse -- "$DATA_PATH"
+  check_slots_staged
   local n; n=$(g diff --cached --name-only --diff-filter=D | wc -l)
   (( n <= MAX_DELETES )) || die 90 "push slots would delete $n files (> $MAX_DELETES): refused, $BRANCH left unchanged"
 }
@@ -224,6 +230,7 @@ cmd_push() {
     g checkout -q -f -B "$BRANCH" "origin/$BRANCH"
     apply_qa; check_qa_staged
   else
+    check_slots_staged
     g checkout -q -f -B "$BRANCH" "$base"
     apply_slots
   fi
