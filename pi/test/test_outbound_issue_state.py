@@ -1,9 +1,40 @@
-"""python3 test/test_outbound_issue_state.py — outbound.py gh.issue.close / gh.issue.reopen handler + feishu.dm guards, with a
+"""python3 test/test_outbound_issue_state.py — outbound.py gh.issue.create / close / reopen handlers + feishu.dm guards, with a
 FAKE gh (no GitHub call, no send). Temp files only. PI_BIN overrides the code dir (staging review)."""
 import sys, os, json, types, tempfile, importlib.util
+from unittest.mock import Mock, patch
 B = os.environ.get("PI_BIN") or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin"); sys.path.insert(0, B)
 sys.modules["merger"] = types.SimpleNamespace(FIELDS="number,title,headRefOid,state", blockers=lambda p: [])   # not under test
 spec = importlib.util.spec_from_file_location("ob", f"{B}/outbound.py"); O = importlib.util.module_from_spec(spec); spec.loader.exec_module(O)
+import handoff, qa_standard
+
+def test_issue_create_routing():
+    author_repo = "aj0928/aj0928-handoff"
+    explicit_repo = "zhongxingtian-ai/handover-mivo"
+    action = {"key": "handoff:1:mq1-a-pr1", "type": "gh.issue.create", "route_author": "lubinyu-lab"}
+    routes = os.path.join(os.path.dirname(__file__), "../../report/handoff-routes.json")
+    with patch.object(handoff, "ROUTES", routes), patch.object(qa_standard, "require_product_evidence"), \
+         patch.object(O, "check_repo", wraps=O.check_repo) as check_repo, patch.object(O, "gh", Mock()) as gh:
+        gh.side_effect = [
+            {"nameWithOwner": author_repo, "hasIssuesEnabled": True, "viewerPermission": "WRITE"},
+            [{"name": "handoff"}],
+            {"nameWithOwner": explicit_repo, "hasIssuesEnabled": True, "viewerPermission": "WRITE"},
+            [{"name": "handoff"}],
+        ]
+        for a, repo in ((action, author_repo), ({**action, "repo": explicit_repo}, explicit_repo)):
+            who, _, validate, _ = O.handler(a)
+            assert who == f"gh issue {repo}"
+            assert validate().startswith(f"{repo} issues=True")
+            check_repo.assert_called_once_with("handoff", repo)
+            assert gh.call_args_list[-2].args[0][:3] == ["repo", "view", repo]
+            check_repo.reset_mock()
+        gh.reset_mock()
+        _, _, validate, _ = O.handler({**action, "route_author": "unknown-author"})
+        try: validate(); raise AssertionError("unknown author should refuse")
+        except RuntimeError as e: assert str(e) == "no handoff repo for unknown-author"
+        gh.assert_not_called()
+
+test_issue_create_routing()
+
 calls = []; issue = {"state": "OPEN", "labels": [{"name": "P1"}, {"name": "status:open"}]}
 def fake_gh(args, js=True):
     calls.append(args)

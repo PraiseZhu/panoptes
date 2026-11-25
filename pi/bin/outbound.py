@@ -384,7 +384,15 @@ def h_feishu_group(a):
         write_atomic(f"{QA}/feishu-sent.json", json.dumps(s, ensure_ascii=False, indent=1)); return "sent"
     return f"飞书群 {chat}", state, validate, do
 def h_issue(a):
-    repo = a.get("repo") or HANDOFF_REPO.get(a.get("route_author", ""), "")
+    repo = a.get("repo")
+    if not repo:
+        from handoff import route_for
+        try:
+            route = route_for(a.get("route_author"))
+            repo = route["repo"] if route else ""
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            def refuse(err=e): raise err
+            return "gh issue", refuse, refuse, refuse
     fp = a["key"].split(":")[-1]
     labels = list(a.get("labels") or ["handoff"])   # 10-30: every QA handoff issue carries the handoff label
     def state():
