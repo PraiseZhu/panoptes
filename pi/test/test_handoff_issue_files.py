@@ -5,6 +5,7 @@ new outbound gh.handoff.files writes daily/<YYYY>/<MM>/<day>/{feedback,receipts}
 pushes them, fail-closed (handoff repos only, fixed paths, never overwrites a file it did not write). FAKE gh/git only."""
 for _k in [k for k in __import__("os").environ if k.startswith("GIT_")]: del __import__("os").environ[_k]
 import os, sys, json, types, base64, shutil, tempfile, unittest, importlib.util
+from unittest.mock import patch
 B = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin"); sys.path.insert(0, B)
 sys.modules.setdefault("merger", types.SimpleNamespace(FIELDS="number,title,headRefOid,state", blockers=lambda p: []))
 spec = importlib.util.spec_from_file_location("ob_b", f"{B}/outbound.py"); O = importlib.util.module_from_spec(spec); spec.loader.exec_module(O)
@@ -45,6 +46,10 @@ class Gh:
 
 class IssueLabel(unittest.TestCase):
     def setUp(self):
+        import handoff
+        routes = os.path.join(B, "..", "..", "report", "handoff-routes.json")
+        routes_patch = patch.object(handoff, "ROUTES", routes)
+        routes_patch.start(); self.addCleanup(routes_patch.stop)
         self.d = tempfile.mkdtemp(); O.QA = self.d; self.g = O.gh = Gh()
     def test_create_adds_handoff_label_and_keeps_body(self):
         a = {**D.handoff_issue_action("2026-10-29", IT, F), "route_author": "aj0928"}
